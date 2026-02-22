@@ -1183,7 +1183,7 @@ async fn test_write_full_zeros_triggers_zero_block() {
 
     // Load child and write a full block of zeros, then flush.
     let child = load_store(s3.clone(), &child_id).await;
-    fuse_write(&child, 0, &vec![0u8; 64]).await.unwrap();
+    fuse_write(&child, 0, &[0u8; 64]).await.unwrap();
     child.flush().await.unwrap();
 
     // The child should have a tombstone (0-byte object), not a 64-byte zero block.
@@ -1527,7 +1527,7 @@ async fn test_zero_block_then_immediate_write_survives_flush() {
     let obj = s3
         .get_object(&child_block_key)
         .expect("block should exist in S3");
-    assert!(obj.len() > 0, "block should not be a tombstone");
+    assert!(!obj.is_empty(), "block should not be a tombstone");
     assert_eq!(&obj[..16], b"new-real-data!!!");
 
     // Reload the child and verify data survives.
