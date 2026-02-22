@@ -4,7 +4,7 @@ use crate::s3::{BlockIndex, block_key, list_blocks, normalize_prefix, read_state
 pub use crate::s3::{S3Access, State};
 use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashSet;
 use metrics::{counter, gauge};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,28 +14,21 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
 use tracing::{debug, info, instrument, warn};
 
-/// Per-block lock map shared between the Store and the DiskCache.
-/// Implements `BlockLocker` so the cache can lock blocks during eviction.
-pub struct BlockLockMap(DashMap<u64, Arc<Mutex<()>>>);
+/// Per-block striped lock shared between the Store and the cache for eviction safety.
+/// Uses a fixed array of 1024 mutexes; block index is mapped via modulo.
+pub struct BlockLockMap {
+    stripes: Box<[Mutex<()>; 1024]>,
+}
 
 impl BlockLockMap {
     fn new() -> Self {
-        Self(DashMap::new())
+        Self {
+            stripes: Box::new(std::array::from_fn(|_| Mutex::new(()))),
+        }
     }
 
-    pub(crate) fn lock(&self, block_idx: u64) -> Arc<Mutex<()>> {
-        Arc::clone(
-            &*self
-                .0
-                .entry(block_idx)
-                .or_insert_with(|| Arc::new(Mutex::new(()))),
-        )
-    }
-}
-
-impl cache::BlockLocker for BlockLockMap {
-    fn block_lock(&self, block_idx: u64) -> Arc<Mutex<()>> {
-        self.lock(block_idx)
+    pub(crate) fn lock(&self, block_idx: u64) -> &Mutex<()> {
+        &self.stripes[(block_idx as usize) % self.stripes.len()]
     }
 }
 
@@ -115,7 +108,7 @@ pub struct Store<S: S3Access = Client> {
     /// Guards all writes to this store.
     /// Normal writes take read() (shared). Snapshot/clone takes write() (exclusive).
     write_lock: RwLock<()>,
-    /// Per-block lock; shared with cache via BlockLocker trait.
+    /// Per-block lock; shared with cache for eviction safety.
     pub(crate) block_locks: Arc<BlockLockMap>,
     /// Limits concurrent S3 uploads.
     pub(crate) upload_slots: Arc<Semaphore>,
@@ -228,7 +221,7 @@ impl<S: S3Access> Store<S> {
             .init_store(
                 &store_id,
                 state.parent_id.as_deref(),
-                Arc::clone(&block_locks) as Arc<dyn cache::BlockLocker>,
+                Arc::clone(&block_locks),
             )
             .await?;
         for (ancestor_id, _) in &ancestors {
@@ -236,7 +229,7 @@ impl<S: S3Access> Store<S> {
                 .init_store(
                     ancestor_id,
                     None,
-                    Arc::clone(&block_locks) as Arc<dyn cache::BlockLocker>,
+                    Arc::clone(&block_locks),
                 )
                 .await?;
         }
@@ -312,7 +305,7 @@ impl<S: S3Access> Store<S> {
         crate::uploader::spawn(Arc::clone(self), rx);
     }
 
-    fn block_lock(&self, block_idx: u64) -> Arc<Mutex<()>> {
+    fn block_lock(&self, block_idx: u64) -> &Mutex<()> {
         self.block_locks.lock(block_idx)
     }
 
@@ -503,13 +496,12 @@ impl<S: S3Access> Store<S> {
                 let bucket = self.bucket.clone();
                 let key_clone = key.clone();
                 let inflight = Arc::clone(&self.inflight_downloads);
-                let block_lock = self.block_lock(block_idx);
-                let locker = Arc::clone(&self.block_locks) as Arc<dyn cache::BlockLocker>;
+                let locker = Arc::clone(&self.block_locks);
                 let owner_id_owned = owner_id.to_string();
                 let block_size = self.state.block_size;
 
                 tokio::spawn(async move {
-                    let _guard = block_lock.lock().await;
+                    let _guard = locker.lock(block_idx).lock().await;
 
                     match s3.get_body(&bucket, &key_clone).await {
                         Ok(body) => match cache::get()
@@ -572,13 +564,21 @@ impl<S: S3Access> Store<S> {
                     &self.id,
                     block_idx,
                     block_size,
-                    Arc::clone(&self.block_locks) as Arc<dyn cache::BlockLocker>,
+                    Arc::clone(&self.block_locks),
                 )
                 .await?;
         }
 
         let dirty_is_new = cache::get().try_mark_dirty(&self.id, block_idx).await?;
-        cache::get().pwrite(&self.id, block_idx, 0, data).await?;
+        cache::get()
+            .pwrite(
+                &self.id,
+                block_idx,
+                0,
+                data,
+                Arc::clone(&self.block_locks),
+            )
+            .await?;
 
         self.pending_uploads.insert(block_idx);
         if dirty_is_new {
@@ -669,7 +669,7 @@ impl<S: S3Access> Store<S> {
                 .insert_from_stream(
                     &self.id,
                     block_idx,
-                    Arc::clone(&self.block_locks) as Arc<dyn cache::BlockLocker>,
+                    Arc::clone(&self.block_locks),
                     body.into_async_read().take(block_size),
                 )
                 .await?;
@@ -679,7 +679,7 @@ impl<S: S3Access> Store<S> {
                         &self.id,
                         block_idx,
                         block_size,
-                        Arc::clone(&self.block_locks) as Arc<dyn cache::BlockLocker>,
+                        Arc::clone(&self.block_locks),
                     )
                     .await?;
             }
@@ -690,22 +690,24 @@ impl<S: S3Access> Store<S> {
                     &self.id,
                     block_idx,
                     block_size,
-                    Arc::clone(&self.block_locks) as Arc<dyn cache::BlockLocker>,
+                    Arc::clone(&self.block_locks),
                 )
                 .await?;
         }
 
         let dirty_is_new = cache::get().try_mark_dirty(&self.id, block_idx).await?;
         cache::get()
-            .pwrite(&self.id, block_idx, offset_within_block, data)
+            .pwrite(
+                &self.id,
+                block_idx,
+                offset_within_block,
+                data,
+                Arc::clone(&self.block_locks),
+            )
             .await?;
 
-        drop(_block_guard);
-
-        // Mark as pending on every write, then enqueue only on the first write
-        // to this dirty cycle (dirty_is_new deduplicates queue traffic).
-        // write_lock.read() is held through the send so snapshot cannot complete
-        // before this block is queued.
+        // Mark as pending and enqueue BEFORE releasing the block lock so the
+        // uploader cannot complete and remove from pending_uploads in the gap.
         self.pending_uploads.insert(block_idx);
         gauge!("store.pending_uploads").set(self.pending_uploads.len() as f64);
         if dirty_is_new {
@@ -714,6 +716,8 @@ impl<S: S3Access> Store<S> {
                 .await
                 .context("upload_tx send failed")?;
         }
+
+        drop(_block_guard);
 
         // write_lock.read() released here.
         Ok(())
@@ -819,6 +823,11 @@ impl<S: S3Access> Store<S> {
         Self::validate_store_id(&continuation_id)?;
         Self::validate_store_id(&clone_id)?;
         let _write_guard = self.write_lock.write().await;
+
+        anyhow::ensure!(
+            !self.frozen.load(Ordering::Acquire),
+            "store is already frozen, cannot clone"
+        );
 
         self.flush().await.context("flush before clone failed")?;
 

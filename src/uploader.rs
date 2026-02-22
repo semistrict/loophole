@@ -92,7 +92,9 @@ async fn handle_zero_block<S: S3Access>(
                 retry_counts.remove(&block_idx);
                 let tx = store.upload_tx.clone();
                 tokio::spawn(async move {
-                    let _ = tx.send(block_idx).await;
+                    if tx.send(block_idx).await.is_err() {
+                        warn!(block = block_idx, "upload retry send failed (channel closed)");
+                    }
                 });
             }
         }
@@ -101,7 +103,9 @@ async fn handle_zero_block<S: S3Access>(
             let tx = store.upload_tx.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                let _ = tx.send(block_idx).await;
+                if tx.send(block_idx).await.is_err() {
+                        warn!(block = block_idx, "upload retry send failed (channel closed)");
+                    }
             });
         }
     }
@@ -132,7 +136,9 @@ async fn upload_one_block<S: S3Access>(
                 let tx = store.upload_tx.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    let _ = tx.send(block_idx).await;
+                    if tx.send(block_idx).await.is_err() {
+                        warn!(block = block_idx, "upload retry send failed (channel closed)");
+                    }
                 });
                 return;
             }
@@ -165,7 +171,9 @@ async fn upload_one_block<S: S3Access>(
                 store.pending_uploads.insert(block_idx);
                 let tx = store.upload_tx.clone();
                 tokio::spawn(async move {
-                    let _ = tx.send(block_idx).await;
+                    if tx.send(block_idx).await.is_err() {
+                        warn!(block = block_idx, "upload retry send failed (channel closed)");
+                    }
                 });
                 debug!(
                     block = block_idx,
@@ -194,27 +202,30 @@ async fn upload_one_block<S: S3Access>(
                     block = block_idx,
                     retries = count,
                     error = %e,
-                    "upload permanently failed, giving up"
+                    "upload exhausted retries, resetting retry counter"
                 );
+                counter!("upload.exhausted_retries").increment(1);
+                // Reset counter so retries start fresh, but do NOT
+                // remove from pending_uploads — flush() must keep
+                // waiting until the block actually lands in S3.
                 retry_counts.remove(&block_idx);
-                store.pending_uploads.remove(&block_idx);
-                store.upload_epoch.send_modify(|v| *v += 1);
-            } else {
-                counter!("upload.retry").increment(1);
-                let delay = Duration::from_secs(1 << (count - 1).min(5));
-                warn!(
-                    block = block_idx,
-                    retry = count,
-                    delay_secs = delay.as_secs(),
-                    error = %e,
-                    "upload failed, will retry"
-                );
-                let tx = store.upload_tx.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(delay).await;
-                    let _ = tx.send(block_idx).await;
-                });
             }
+            counter!("upload.retry").increment(1);
+            let delay = Duration::from_secs(1 << (count - 1).min(5));
+            warn!(
+                block = block_idx,
+                retry = count,
+                delay_secs = delay.as_secs(),
+                error = %e,
+                "upload failed, will retry"
+            );
+            let tx = store.upload_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(delay).await;
+                if tx.send(block_idx).await.is_err() {
+                        warn!(block = block_idx, "upload retry send failed (channel closed)");
+                    }
+            });
         }
     }
 }

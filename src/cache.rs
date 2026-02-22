@@ -8,16 +8,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex as AsyncMutex;
 use tracing::debug;
 
-pub trait BlockLocker: Send + Sync {
-    fn block_lock(&self, block_idx: u64) -> Arc<AsyncMutex<()>>;
-}
+use crate::store::BlockLockMap;
+
+static UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 struct LruEntry {
-    locker: Arc<dyn BlockLocker>,
+    locker: Arc<BlockLockMap>,
     size: u64,
 }
 
@@ -66,7 +65,7 @@ impl SqliteCache {
         &self,
         store_id: &str,
         parent_store_id: Option<&str>,
-        locker: Arc<dyn BlockLocker>,
+        locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.repo.init_store(store_id, parent_store_id).await?;
         self.volume_ids.insert(store_id.to_string(), volume_id);
@@ -150,6 +149,7 @@ impl SqliteCache {
         block_idx: u64,
         offset_within_block: u64,
         data: &[u8],
+        locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         counter!("cache.pwrite.total").increment(1);
         let volume_id = self.volume_id(store_id).await?;
@@ -190,7 +190,7 @@ impl SqliteCache {
             .set_block_size_and_downloaded(block_id, size, None)
             .await?;
 
-        self.lru_insert(volume_id, block_idx, Arc::new(NoopLocker), size);
+        self.lru_insert(volume_id, block_idx, locker, size);
         gauge!("cache.used_bytes").set(self.used_bytes.load(Ordering::Relaxed) as f64);
         Ok(())
     }
@@ -199,7 +199,7 @@ impl SqliteCache {
         &self,
         store_id: &str,
         block_idx: u64,
-        locker: Arc<dyn BlockLocker>,
+        locker: Arc<BlockLockMap>,
         mut reader: impl AsyncRead + Unpin,
     ) -> Result<u64> {
         let volume_id = self.volume_id(store_id).await?;
@@ -259,7 +259,7 @@ impl SqliteCache {
         store_id: &str,
         block_idx: u64,
         _block_size: u64,
-        locker: Arc<dyn BlockLocker>,
+        locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.volume_id(store_id).await?;
         let _ = self.repo.ensure_block_row(volume_id, block_idx).await?;
@@ -272,7 +272,7 @@ impl SqliteCache {
         store_id: &str,
         block_idx: u64,
         new_len: u64,
-        locker: Arc<dyn BlockLocker>,
+        locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.volume_id(store_id).await?;
         let Some(block) = self.repo.lookup_block(volume_id, block_idx).await? else {
@@ -330,7 +330,7 @@ impl SqliteCache {
 
         let path = self.dir.join(format!(
             "upload-{store_id}-{block_idx:016x}-{}.bin",
-            std::process::id()
+            UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
         let mut f = tokio::fs::File::create(&path)
             .await
@@ -447,7 +447,7 @@ impl SqliteCache {
             if self.used_bytes.load(Ordering::Relaxed) <= target {
                 break;
             }
-            let lock = entry.locker.block_lock(block_idx);
+            let lock = entry.locker.lock(block_idx);
             let Ok(_guard) = lock.try_lock() else {
                 continue;
             };
@@ -481,7 +481,7 @@ impl SqliteCache {
     async fn populate_lru_from_db(
         &self,
         volume_id: i64,
-        locker: Arc<dyn BlockLocker>,
+        locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         for (block_idx, size) in self.repo.list_blocks_for_lru(volume_id).await? {
             self.lru_insert(volume_id, block_idx, Arc::clone(&locker), size);
@@ -502,7 +502,7 @@ impl SqliteCache {
         self.lru.lock().unwrap().promote(&(volume_id, block_idx));
     }
 
-    fn lru_insert(&self, volume_id: i64, block_idx: u64, locker: Arc<dyn BlockLocker>, size: u64) {
+    fn lru_insert(&self, volume_id: i64, block_idx: u64, locker: Arc<BlockLockMap>, size: u64) {
         let mut lru = self.lru.lock().unwrap();
         match lru.put((volume_id, block_idx), LruEntry { locker, size }) {
             None => {
@@ -536,10 +536,4 @@ fn chunk_write_len(block_size: u64, chunk_idx: u64) -> u64 {
     (block_size - start).min(CHUNK_SIZE)
 }
 
-struct NoopLocker;
 
-impl BlockLocker for NoopLocker {
-    fn block_lock(&self, _block_idx: u64) -> Arc<AsyncMutex<()>> {
-        Arc::new(AsyncMutex::new(()))
-    }
-}

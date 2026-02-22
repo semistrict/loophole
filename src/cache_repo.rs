@@ -541,23 +541,6 @@ impl CacheRepo {
     }
 
     async fn create_schema(&self) -> Result<()> {
-        sqlx::query("PRAGMA page_size=65536")
-            .execute(&self.pool)
-            .await
-            .context("setting page_size")?;
-        sqlx::query("PRAGMA journal_mode=WAL")
-            .execute(&self.pool)
-            .await
-            .context("setting journal_mode")?;
-        sqlx::query("PRAGMA synchronous=NORMAL")
-            .execute(&self.pool)
-            .await
-            .context("setting synchronous")?;
-        sqlx::query("PRAGMA foreign_keys=ON")
-            .execute(&self.pool)
-            .await
-            .context("setting foreign_keys")?;
-
         sqlx::query!(
             "CREATE TABLE IF NOT EXISTS volumes (
                 volume_id        INTEGER PRIMARY KEY,
