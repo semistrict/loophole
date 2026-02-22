@@ -20,7 +20,10 @@ impl<S: S3Access> Lwext4Volume<S> {
 
         let mkfs_opts = MkfsOptions::default().with_block_size(EXT4_BLOCK_SIZE);
         ext4_lwext4::mkfs(device, &mkfs_opts).context("lwext4 mkfs failed")?;
-        store.close().await.context("close after lwext4 mkfs failed")?;
+        store
+            .close()
+            .await
+            .context("close after lwext4 mkfs failed")?;
         Ok(())
     }
 

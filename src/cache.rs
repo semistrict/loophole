@@ -479,11 +479,7 @@ impl SqliteCache {
         Ok(())
     }
 
-    async fn populate_lru_from_db(
-        &self,
-        volume_id: i64,
-        locker: Arc<BlockLockMap>,
-    ) -> Result<()> {
+    async fn populate_lru_from_db(&self, volume_id: i64, locker: Arc<BlockLockMap>) -> Result<()> {
         for (block_idx, size) in self.repo.list_blocks_for_lru(volume_id).await? {
             self.lru_insert(volume_id, block_idx, Arc::clone(&locker), size);
         }
@@ -536,5 +532,3 @@ fn chunk_write_len(block_size: u64, chunk_idx: u64) -> u64 {
     }
     (block_size - start).min(CHUNK_SIZE)
 }
-
-

@@ -29,7 +29,8 @@ async fn ensure_global_cache() {
     ASSERT_INIT.call_once(crate::assert::init);
     CACHE_INIT
         .get_or_init(|| async {
-            let dir = std::env::temp_dir().join(format!("loophole_lwext4_py_port_{}", std::process::id()));
+            let dir = std::env::temp_dir()
+                .join(format!("loophole_lwext4_py_port_{}", std::process::id()));
             crate::cache::init(dir, 8 * 1024 * 1024 * 1024)
                 .await
                 .expect("failed to init test cache");
@@ -183,7 +184,10 @@ fn write_standard_files(fs: &Ext4Fs) -> Vec<u8> {
             .unwrap();
         f.write_all(&random).unwrap();
         let mut deep = fs
-            .open("/subdir/nested/deep.txt", OpenFlags::CREATE | OpenFlags::WRITE)
+            .open(
+                "/subdir/nested/deep.txt",
+                OpenFlags::CREATE | OpenFlags::WRITE,
+            )
             .unwrap();
         deep.write_all(b"nested file\n").unwrap();
         let mut nums = fs
@@ -302,12 +306,12 @@ async fn py_port_ext4_binary_file_integrity() {
     store.flush().await.unwrap();
 
     {
-    {
-        let mut f = fs.open("/random.bin", OpenFlags::READ).unwrap();
-        let mut read_back = Vec::new();
-        f.read_to_end(&mut read_back).unwrap();
-        assert_eq!(read_back, data);
-    }
+        {
+            let mut f = fs.open("/random.bin", OpenFlags::READ).unwrap();
+            let mut read_back = Vec::new();
+            f.read_to_end(&mut read_back).unwrap();
+            assert_eq!(read_back, data);
+        }
     }
 
     drop(fs);
@@ -325,7 +329,10 @@ async fn py_port_ext4_nested_dirs_and_large_seq_file() {
     fs.mkdir("/subdir/nested", 0o755).unwrap();
     {
         let mut f = fs
-            .open("/subdir/nested/deep.txt", OpenFlags::CREATE | OpenFlags::WRITE)
+            .open(
+                "/subdir/nested/deep.txt",
+                OpenFlags::CREATE | OpenFlags::WRITE,
+            )
             .unwrap();
         f.write_all(b"nested file\n").unwrap();
     }
@@ -341,19 +348,19 @@ async fn py_port_ext4_nested_dirs_and_large_seq_file() {
     store.flush().await.unwrap();
 
     {
-    {
-        let mut deep = fs.open("/subdir/nested/deep.txt", OpenFlags::READ).unwrap();
-        let mut deep_buf = String::new();
-        deep.read_to_string(&mut deep_buf).unwrap();
-        assert_eq!(deep_buf, "nested file\n");
-    }
+        {
+            let mut deep = fs.open("/subdir/nested/deep.txt", OpenFlags::READ).unwrap();
+            let mut deep_buf = String::new();
+            deep.read_to_string(&mut deep_buf).unwrap();
+            assert_eq!(deep_buf, "nested file\n");
+        }
 
-    {
-        let mut numbers = fs.open("/numbers.txt", OpenFlags::READ).unwrap();
-        let mut numbers_text = String::new();
-        numbers.read_to_string(&mut numbers_text).unwrap();
-        assert_eq!(numbers_text.lines().count(), 1000);
-    }
+        {
+            let mut numbers = fs.open("/numbers.txt", OpenFlags::READ).unwrap();
+            let mut numbers_text = String::new();
+            numbers.read_to_string(&mut numbers_text).unwrap();
+            assert_eq!(numbers_text.lines().count(), 1000);
+        }
     }
 
     drop(fs);

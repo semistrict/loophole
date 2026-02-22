@@ -8,8 +8,8 @@
 //! Slowest tests are started first to minimize wall-clock time.
 
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -27,8 +27,15 @@ static NEXT_SHARD: AtomicU32 = AtomicU32::new(0);
 async fn collect_all_tests() -> Vec<String> {
     let output = Command::new("docker")
         .args([
-            "compose", "exec", "-T", "-w", "/tests", "e2e",
-            "pytest", "--collect-only", "-q",
+            "compose",
+            "exec",
+            "-T",
+            "-w",
+            "/tests",
+            "e2e",
+            "pytest",
+            "--collect-only",
+            "-q",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -64,12 +71,19 @@ async fn run_test(test_id: &str, shard: u32) -> (bool, String, Duration) {
 
     let result = Command::new("docker")
         .args([
-            "compose", "exec",
-            "-e", &format!("BUCKET={bucket}"),
-            "-e", &format!("SHARD={shard_suffix}"),
-            "-T", "-w", "/tests",
+            "compose",
+            "exec",
+            "-e",
+            &format!("BUCKET={bucket}"),
+            "-e",
+            &format!("SHARD={shard_suffix}"),
+            "-T",
+            "-w",
+            "/tests",
             "e2e",
-            "pytest", "-xvs", test_id,
+            "pytest",
+            "-xvs",
+            test_id,
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -8,8 +8,8 @@ use dashmap::DashSet;
 use metrics::{counter, gauge};
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
@@ -233,11 +233,7 @@ impl<S: S3Access> Store<S> {
             .await?;
         for (ancestor_id, _) in &ancestors {
             cache::get()
-                .init_store(
-                    ancestor_id,
-                    None,
-                    Arc::clone(&block_locks),
-                )
+                .init_store(ancestor_id, None, Arc::clone(&block_locks))
                 .await?;
         }
 
@@ -311,7 +307,11 @@ impl<S: S3Access> Store<S> {
         Ok(store)
     }
 
-    fn spawn_uploader(self: &Arc<Self>, rx: mpsc::Receiver<u64>, shutdown_rx: watch::Receiver<bool>) {
+    fn spawn_uploader(
+        self: &Arc<Self>,
+        rx: mpsc::Receiver<u64>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) {
         let task = crate::uploader::spawn(Arc::downgrade(self), rx, shutdown_rx);
         if let Ok(mut slot) = self.uploader_task.lock() {
             *slot = Some(task);
@@ -604,13 +604,7 @@ impl<S: S3Access> Store<S> {
 
         let dirty_is_new = cache::get().try_mark_dirty(&self.id, block_idx).await?;
         cache::get()
-            .pwrite(
-                &self.id,
-                block_idx,
-                0,
-                data,
-                Arc::clone(&self.block_locks),
-            )
+            .pwrite(&self.id, block_idx, 0, data, Arc::clone(&self.block_locks))
             .await?;
 
         self.pending_uploads.insert(block_idx);

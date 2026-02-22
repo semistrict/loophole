@@ -2,8 +2,8 @@ use crate::store::{BlockStorage, S3Access, Store};
 use anyhow::Context;
 use ext4_lwext4::{BlockDevice, Error as Ext4Error, Result as Ext4Result};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const DEFAULT_EXT4_BLOCK_SIZE: u32 = 4096;
 static READ_CALLS: AtomicU64 = AtomicU64::new(0);
@@ -39,7 +39,10 @@ impl<S: S3Access> StoreBlockDevice<S> {
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(ext4_block_size > 0, "ext4 block size must be > 0");
         anyhow::ensure!(
-            store.state.volume_size.is_multiple_of(ext4_block_size as u64),
+            store
+                .state
+                .volume_size
+                .is_multiple_of(ext4_block_size as u64),
             "volume size {} must be multiple of ext4 block size {}",
             store.state.volume_size,
             ext4_block_size
