@@ -992,9 +992,7 @@ dependencies = [
 
 [[package]]
 name = "ext4-lwext4"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9179b7121ddd37184afecbc523b7c094c9d3af5406c55e9d949d3d05cb2f07ff"
+version = "0.1.2"
 dependencies = [
  "bitflags",
  "ext4-lwext4-sys",
@@ -1004,9 +1002,7 @@ dependencies = [
 
 [[package]]
 name = "ext4-lwext4-sys"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a42be90894027151aca46dc08dfa2ca5fba02e604eaa22524ef2b472f0eba40f"
+version = "0.1.2"
 dependencies = [
  "cc",
 ]

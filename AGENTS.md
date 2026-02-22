@@ -13,9 +13,13 @@ Loophole is a FUSE filesystem that exposes a single large virtual file (`/volume
 cargo build
 cargo build --release
 
-# Run Rust unit tests (store_tests.rs, cache_tests.rs)
-cargo test
-cargo test <test_name>           # single test
+# Install nextest once (preferred Rust test runner)
+cargo install cargo-nextest --locked
+
+# Run Rust tests (default)
+cargo nextest run
+cargo nextest run <test_name>    # single test filter
+cargo nt                          # alias for `cargo nextest run`
 
 # E2E tests (Python/pytest, run inside Docker)
 ./test-e2e.sh                    # all e2e tests
@@ -27,6 +31,17 @@ docker compose build
 docker compose up -d
 docker compose exec -w /tests e2e pytest /tests/ -v
 ```
+
+## Dependency Notes
+
+- `ext4-lwext4` and `ext4-lwext4-sys` are vendored under `vendor/ext4-rs/` and overridden via `[patch.crates-io]` in `Cargo.toml`.
+- Reason: crates.io `ext4-lwext4` `0.1.1` has a `mkfs` NULL `ext4_fs` bug that can hang forever inside lwext4 assert loops.
+- Prefer keeping the vendored override until an upstream crates.io release includes commit `c4503df5c507748c6d037fbfc47f6f9171faa6f4` (or equivalent fix).
+- Prefer `cargo nextest run` over `cargo test` for Rust tests. lwext4 has low per-process mount/device limits; `nextest` isolates tests in separate processes and avoids `NoSpace` flakiness from shared in-process globals.
+
+## Shell Notes
+
+- In this environment, `rm -r` works but `rm -rf` does not. Prefer `rm -r`.
 
 ## Architecture
 

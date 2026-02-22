@@ -277,6 +277,7 @@ async fn write_and_readback_single_block() {
     fuse_write(&store, 0, b"hello world").await.unwrap();
     let got = fuse_read(&store, 0, 11).await.unwrap();
     assert_eq!(got, b"hello world");
+    store.close().await.unwrap();
 }
 
 /// Write data that straddles a block boundary and read it back.
@@ -298,6 +299,7 @@ async fn write_and_readback_spanning_block_boundary() {
     fuse_write(&store, 4090, data).await.unwrap();
     let got = fuse_read(&store, 4090, 10).await.unwrap();
     assert_eq!(got, data.as_slice());
+    store.close().await.unwrap();
 }
 
 /// A larger write spanning three full blocks and partial edges.
@@ -328,6 +330,7 @@ async fn write_and_readback_three_blocks() {
     // Read a sub-range that spans blocks 0 and 1.
     let got = fuse_read(&store, 50, 30).await.unwrap();
     assert_eq!(got, &data[40..70]); // offset 50 = data[40], len 30
+    store.close().await.unwrap();
 }
 
 /// Reading a block that doesn't exist anywhere returns zeros.
@@ -345,6 +348,7 @@ async fn read_absent_block_returns_zeros() {
 
     let got = fuse_read(&store, 0, 4096).await.unwrap();
     assert_eq!(got, vec![0u8; 4096]);
+    store.close().await.unwrap();
 }
 
 /// Read from S3: block exists in the mock S3 index but not in the cache.
@@ -366,6 +370,7 @@ async fn read_fetches_from_s3_on_cache_miss() {
     // MockS3 correctly handles range reads, so we get exactly 10 bytes.
     let got = fuse_read(&store, 100, 10).await.unwrap();
     assert_eq!(got, vec![0xAB; 10]);
+    store.close().await.unwrap();
 }
 
 /// Zero-length read returns empty without touching the store.
@@ -383,6 +388,7 @@ async fn zero_length_read_returns_empty() {
 
     let got = fuse_read(&store, 0, 0).await.unwrap();
     assert!(got.is_empty());
+    store.close().await.unwrap();
 }
 
 /// Zero-length write is a no-op.
@@ -400,6 +406,7 @@ async fn zero_length_write_is_noop() {
 
     let n = fuse_write(&store, 0, b"").await.unwrap();
     assert_eq!(n, 0);
+    store.close().await.unwrap();
 }
 
 /// Read past the end of the volume should clamp to volume_size.
@@ -424,6 +431,7 @@ async fn read_past_eof_clamps_to_volume_size() {
     // First 10 bytes are zeros (80..89), next 10 are our data.
     assert_eq!(&got[..10], &[0u8; 10]);
     assert_eq!(&got[10..], b"ABCDEFGHIJ");
+    store.close().await.unwrap();
 }
 
 /// Read starting at exactly volume_size returns empty.
@@ -441,6 +449,7 @@ async fn read_at_volume_size_returns_empty() {
 
     let got = fuse_read(&store, 100, 10).await.unwrap();
     assert!(got.is_empty());
+    store.close().await.unwrap();
 }
 
 /// Write that crosses EOF should be truncated to the remaining volume bytes.
@@ -461,6 +470,7 @@ async fn write_past_eof_is_truncated() {
 
     let got = fuse_read(&store, 95, 10).await.unwrap();
     assert_eq!(got, b"ABCDE");
+    store.close().await.unwrap();
 }
 
 /// Write starting exactly at EOF should fail.
@@ -478,6 +488,7 @@ async fn write_at_eof_fails() {
 
     let err = fuse_write(&store, 100, b"X").await.unwrap_err();
     assert!(err.to_string().contains("past end of volume"));
+    store.close().await.unwrap();
 }
 
 /// Writes to a frozen store fail.
@@ -498,6 +509,7 @@ async fn write_to_frozen_store_fails() {
         err.to_string().contains("frozen"),
         "expected frozen error, got: {err}"
     );
+    store.close().await.unwrap();
 }
 
 /// Overwriting within one block preserves surrounding zeros.
@@ -521,6 +533,7 @@ async fn partial_block_write_preserves_surrounding_data() {
     assert_eq!(&block[..10], &[0u8; 10]);
     assert_eq!(&block[10..12], b"AB");
     assert_eq!(&block[12..64], &[0u8; 52]);
+    store.close().await.unwrap();
 }
 
 /// Multiple small writes to different offsets in the same block.
@@ -547,6 +560,7 @@ async fn multiple_writes_same_block_different_offsets() {
     assert_eq!(&got[14..60], &[0u8; 46]);
     // "CCCC" at offset 60: block0 gets 60..63 = "CCC", block1 gets 64 = "C"
     assert_eq!(&got[60..64], &b"CCCC"[..4]);
+    store.close().await.unwrap();
 }
 
 /// Write exactly at a block boundary (offset is multiple of block_size).
@@ -569,6 +583,7 @@ async fn write_at_exact_block_boundary() {
     // Verify block 0 is still all zeros (untouched).
     let block0 = fuse_read(&store, 0, 64).await.unwrap();
     assert_eq!(block0, vec![0u8; 64]);
+    store.close().await.unwrap();
 }
 
 /// Concurrent cache misses for the same block should trigger only one
@@ -598,6 +613,7 @@ async fn concurrent_reads_dedupe_background_fetch() {
 
     wait_for(Duration::from_secs(2), || s3.get_body_calls() >= 1).await;
     assert_eq!(s3.get_body_calls(), 1);
+    store.close().await.unwrap();
 }
 
 /// Background full-block streaming read should never cache more than block_size.
@@ -632,6 +648,7 @@ async fn background_stream_read_caps_cached_block_size() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    store.close().await.unwrap();
 }
 
 /// Read with an S3 object smaller than block_size.
@@ -655,6 +672,7 @@ async fn read_s3_block_smaller_than_block_size() {
     // offset=0 len=100).
     let got = fuse_read(&store, 0, 100).await.unwrap();
     assert_eq!(got, vec![0xFE; 100]);
+    store.close().await.unwrap();
 }
 
 /// Upload path should stream from file (`put_file`) rather than materializing
@@ -682,6 +700,7 @@ async fn write_uses_streaming_put_file_upload() {
     let uploaded = s3.get_object(&key).expect("uploaded block missing");
     assert_eq!(uploaded.len(), block_size as usize);
     assert_eq!(&uploaded[..5], b"HELLO");
+    store.close().await.unwrap();
 }
 
 // =======================================================================
@@ -720,6 +739,7 @@ async fn snapshot_creates_child_and_freezes_parent() {
     let parent_bytes = s3.get_object(&parent_state_key).unwrap();
     let parent_state: State = serde_json::from_slice(&parent_bytes).unwrap();
     assert_eq!(parent_state.children, vec![child_id]);
+    store.close().await.unwrap();
 }
 
 /// Writes to a store fail after snapshot.
@@ -743,6 +763,7 @@ async fn writes_fail_after_snapshot() {
         err.to_string().contains("frozen"),
         "expected frozen error, got: {err}"
     );
+    store.close().await.unwrap();
 }
 
 /// Snapshot flushes dirty blocks to S3 before freezing.
@@ -766,6 +787,7 @@ async fn snapshot_flushes_dirty_blocks() {
     let block_key = format!("stores/{sid}/0000000000000000");
     let uploaded = s3.get_object(&block_key).expect("block not flushed to S3");
     assert_eq!(&uploaded[..10], b"dirty data");
+    store.close().await.unwrap();
 }
 
 // =======================================================================
@@ -806,6 +828,7 @@ async fn clone_creates_two_children_and_freezes() {
     let parent_bytes = s3.get_object(&parent_key).unwrap();
     let parent_state: State = serde_json::from_slice(&parent_bytes).unwrap();
     assert_eq!(parent_state.children, vec![cont_id, clone_id]);
+    store.close().await.unwrap();
 }
 
 /// Writes fail after clone.
@@ -831,6 +854,7 @@ async fn writes_fail_after_clone() {
         err.to_string().contains("frozen"),
         "expected frozen error, got: {err}"
     );
+    store.close().await.unwrap();
 }
 
 /// Clone flushes dirty blocks before freezing.
@@ -855,6 +879,7 @@ async fn clone_flushes_dirty_blocks() {
     let block_key = format!("stores/{sid}/0000000000000000");
     let uploaded = s3.get_object(&block_key).expect("block not flushed to S3");
     assert_eq!(&uploaded[..8], b"flush me");
+    store.close().await.unwrap();
 }
 
 /// A child store can read blocks from its parent's S3 prefix.
@@ -879,6 +904,8 @@ async fn child_reads_parent_blocks_after_snapshot() {
     let child = load_store(s3, &child_id).await;
     let got = fuse_read(&child, 0, 9).await.unwrap();
     assert_eq!(got, b"inherited");
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// A child store can write new data without affecting parent blocks.
@@ -909,6 +936,8 @@ async fn child_writes_do_not_affect_parent() {
     let parent_block_key = format!("stores/{parent_id}/0000000000000000");
     let parent_s3_data = s3.get_object(&parent_block_key).unwrap();
     assert_eq!(&parent_s3_data[..8], b"original");
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 // =======================================================================
@@ -942,6 +971,7 @@ async fn rpc_dispatch_snapshot() {
     // Verify child state was created.
     let child_key = format!("stores/{child_id}/state.json");
     assert!(s3.get_object(&child_key).is_some());
+    store.close().await.unwrap();
 }
 
 /// RPC dispatch: clone via JSON request bytes.
@@ -975,6 +1005,7 @@ async fn rpc_dispatch_clone() {
         let key = format!("stores/{id}/state.json");
         assert!(s3.get_object(&key).is_some(), "missing state for {id}");
     }
+    store.close().await.unwrap();
 }
 
 /// RPC dispatch: invalid JSON returns an error response.
@@ -994,6 +1025,7 @@ async fn rpc_dispatch_invalid_json() {
     let resp: crate::rpc::Response = serde_json::from_slice(&resp_bytes).unwrap();
     assert!(!resp.ok);
     assert!(resp.error.is_some());
+    store.close().await.unwrap();
 }
 
 /// RPC dispatch: second snapshot on an already-frozen store returns error.
@@ -1021,6 +1053,7 @@ async fn rpc_dispatch_snapshot_on_frozen_store_fails() {
     assert!(!resp.ok, "snapshot on frozen store should fail");
     assert!(resp.error.is_some());
     assert!(store.frozen.load(Ordering::Acquire));
+    store.close().await.unwrap();
 }
 
 // =======================================================================
@@ -1063,6 +1096,7 @@ async fn test_zero_block_no_ancestor() {
     // Read should return zeros.
     let got = fuse_read(&store, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    store.close().await.unwrap();
 }
 
 /// Zero a block when parent has the block — a 0-byte tombstone is written.
@@ -1104,6 +1138,8 @@ async fn test_zero_block_with_ancestor() {
     // Read should now return zeros.
     let got = fuse_read(&child, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// read after zero_block returns zeros.
@@ -1124,6 +1160,7 @@ async fn test_read_zero_block_returns_zeros() {
 
     let got = fuse_read(&store, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    store.close().await.unwrap();
 }
 
 /// Writing a full block of zeros triggers the zero_block path.
@@ -1159,6 +1196,8 @@ async fn test_write_full_zeros_triggers_zero_block() {
     // Read should return zeros.
     let got = fuse_read(&child, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// Zero a block, then write real data — data is readable and zero_blocks is cleared.
@@ -1189,6 +1228,7 @@ async fn test_zero_block_then_write_data() {
 
     // zero_blocks should no longer contain this block.
     assert!(!store.zero_blocks.contains(&0));
+    store.close().await.unwrap();
 }
 
 /// Tombstone survives a store reload — zero_blocks populated from S3 listing.
@@ -1224,6 +1264,9 @@ async fn test_tombstone_survives_reload() {
     // Reading should still return zeros.
     let got = fuse_read(&child2, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    child2.close().await.unwrap();
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// Write 7.5 blocks of zeros starting halfway through a block.
@@ -1316,6 +1359,7 @@ async fn test_write_zeros_spanning_partial_and_full_blocks() {
             "block {blk} should read as zeros"
         );
     }
+    store.close().await.unwrap();
 }
 
 // =======================================================================
@@ -1408,6 +1452,7 @@ async fn test_zero_range_partial_block() {
     assert_eq!(&got[..16], &(0..16u8).collect::<Vec<_>>());
     assert_eq!(&got[16..48], &[0u8; 32]);
     assert_eq!(&got[48..64], &(48..64u8).collect::<Vec<_>>());
+    store.close().await.unwrap();
 }
 
 /// zero_range covering a full block delegates to do_zero_block (tombstone path).
@@ -1438,6 +1483,8 @@ async fn test_zero_range_full_block_becomes_tombstone() {
     );
     let got = fuse_read(&child, 0, 64).await.unwrap();
     assert_eq!(got, vec![0u8; 64]);
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// Zero a block then immediately write real data. After flush, S3 must contain
@@ -1487,6 +1534,9 @@ async fn test_zero_block_then_immediate_write_survives_flush() {
     let child2 = load_store(s3.clone(), &child_id).await;
     let got = fuse_read(&child2, 0, 16).await.unwrap();
     assert_eq!(got, b"new-real-data!!!");
+    child2.close().await.unwrap();
+    child.close().await.unwrap();
+    store.close().await.unwrap();
 }
 
 /// Reproduce the fsx_heavy race: write a block, flush it to S3, evict
@@ -1542,4 +1592,5 @@ async fn test_zero_block_then_partial_write_no_cache() {
         .get_object(&block_key)
         .expect("block should exist after flush");
     assert_eq!(&obj[10..15], b"hello");
+    store.close().await.unwrap();
 }

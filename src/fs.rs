@@ -106,6 +106,12 @@ impl Fs {
 }
 
 impl Filesystem for Fs {
+    fn destroy(&mut self) {
+        if let Err(e) = self.rt.block_on(self.store.close()) {
+            warn!(error = %e, "store close failed during FUSE destroy");
+        }
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
         match (parent.0, name.to_str()) {
             (ROOT_INO, Some("volume")) => reply.entry(&TTL, &self.file_attr(), Generation(0)),

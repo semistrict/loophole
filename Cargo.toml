@@ -3,14 +3,26 @@ name = "loophole"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["kernel", "lwext4"]
+kernel = ["fuse"]
+lwext4 = ["dep:ext4-lwext4"]
+fuse = ["dep:fuser"]
+no-fuse = []
+
+[[bin]]
+name = "loophole"
+path = "src/main.rs"
+required-features = ["fuse"]
+
 [dependencies]
 anyhow = "1.0.102"
 aws-config = "1.8.13"
 aws-sdk-s3 = "1.122.0"
 clap = { version = "4.5.60", features = ["derive"] }
 dashmap = "6.1.0"
-ext4-lwext4 = "0.1.1"
-fuser = "0.17.0"
+ext4-lwext4 = { version = "0.1.1", optional = true }
+fuser = { version = "0.17.0", optional = true }
 libc = "0.2.182"
 lru = "0.16.3"
 metrics = "0.24.3"
@@ -28,3 +40,7 @@ name = "e2e"
 path = "src/bin/e2e.rs"
 
 [dev-dependencies]
+
+[patch.crates-io]
+ext4-lwext4 = { path = "vendor/ext4-rs/ext4-lwext4" }
+ext4-lwext4-sys = { path = "vendor/ext4-rs/ext4-lwext4-sys" }

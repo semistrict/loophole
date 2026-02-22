@@ -1,0 +1,15 @@
+[profile.default]
+retries = { backoff = "exponential", count = 1, delay = "1s", max-delay = "10s" }
+status-level = "pass"
+final-status-level = "slow"
+failure-output = "immediate-final"
+success-output = "never"
+fail-fast = false
+
+[profile.ci]
+retries = { backoff = "exponential", count = 2, delay = "1s", max-delay = "30s" }
+status-level = "skip"
+final-status-level = "flaky"
+failure-output = "immediate-final"
+success-output = "never"
+fail-fast = false

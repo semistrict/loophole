@@ -9,6 +9,7 @@ use metrics::{counter, gauge};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
@@ -122,6 +123,8 @@ pub struct Store<S: S3Access = Client> {
 
     /// True once snapshot/clone has frozen this store.
     frozen: AtomicBool,
+    /// True once `close()` has been called.
+    closed: AtomicBool,
 
     /// Send block indices here to trigger background upload.
     pub(crate) upload_tx: mpsc::Sender<u64>,
@@ -130,6 +133,10 @@ pub struct Store<S: S3Access = Client> {
     pub(crate) pending_uploads: DashSet<u64>,
     /// Incremented on each upload completion; flush() subscribes to wait.
     pub(crate) upload_epoch: watch::Sender<u64>,
+    /// Signals uploader shutdown.
+    uploader_shutdown_tx: watch::Sender<bool>,
+    /// Join handle for uploader supervisor task.
+    uploader_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl<S: S3Access> Store<S> {
@@ -254,7 +261,7 @@ impl<S: S3Access> Store<S> {
         let (upload_tx, upload_rx) = mpsc::channel::<u64>(1024);
         let pending_uploads: DashSet<u64> = DashSet::new();
         let (upload_epoch, _) = watch::channel(0u64);
-
+        let (uploader_shutdown_tx, uploader_shutdown_rx) = watch::channel(false);
         let frozen = AtomicBool::new(!state.children.is_empty());
 
         let store = Arc::new(Self {
@@ -272,15 +279,18 @@ impl<S: S3Access> Store<S> {
             download_slots,
             inflight_downloads,
             frozen,
+            closed: AtomicBool::new(false),
             upload_tx,
             pending_uploads,
             upload_epoch,
+            uploader_shutdown_tx,
+            uploader_task: StdMutex::new(None),
         });
 
         // Spawn the uploader BEFORE sending recovered blocks so the consumer
         // is ready; using .send().await avoids silently dropping blocks if
         // the channel would otherwise be full.
-        store.spawn_uploader(upload_rx);
+        store.spawn_uploader(upload_rx, uploader_shutdown_rx);
 
         let mut to_requeue: HashSet<u64> = HashSet::new();
         for idx in recovery.dirty_blocks {
@@ -301,8 +311,23 @@ impl<S: S3Access> Store<S> {
         Ok(store)
     }
 
-    fn spawn_uploader(self: &Arc<Self>, rx: mpsc::Receiver<u64>) {
-        crate::uploader::spawn(Arc::clone(self), rx);
+    fn spawn_uploader(self: &Arc<Self>, rx: mpsc::Receiver<u64>, shutdown_rx: watch::Receiver<bool>) {
+        let task = crate::uploader::spawn(Arc::downgrade(self), rx, shutdown_rx);
+        if let Ok(mut slot) = self.uploader_task.lock() {
+            *slot = Some(task);
+        }
+    }
+
+    async fn shutdown_uploader(&self) {
+        let _ = self.uploader_shutdown_tx.send(true);
+        let task = if let Ok(mut slot) = self.uploader_task.lock() {
+            slot.take()
+        } else {
+            None
+        };
+        if let Some(task) = task {
+            let _ = task.await;
+        }
     }
 
     fn block_lock(&self, block_idx: u64) -> &Mutex<()> {
@@ -330,6 +355,10 @@ impl<S: S3Access> Store<S> {
     async fn do_zero_block(&self, block_idx: u64) -> Result<()> {
         counter!("store.zero_block.total").increment(1);
         let _write_guard = self.write_lock.read().await;
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "store is closed, cannot write"
+        );
         anyhow::ensure!(
             !self.frozen.load(Ordering::Acquire),
             "store is frozen, cannot write"
@@ -387,6 +416,10 @@ impl<S: S3Access> Store<S> {
         // write another write could slip in. To prevent that, we hold the block
         // lock across both operations.
         let _write_guard = self.write_lock.read().await;
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "store is closed, cannot write"
+        );
         anyhow::ensure!(
             !self.frozen.load(Ordering::Acquire),
             "store is frozen, cannot write"
@@ -615,8 +648,12 @@ impl<S: S3Access> Store<S> {
             return self.do_zero_block(block_idx).await;
         }
 
-        // Shared write lock — blocks if snapshot/clone is in progress.
+        // Shared write lock — blocks if snapshot/clone or close is in progress.
         let _write_guard = self.write_lock.read().await;
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "store is closed, cannot write"
+        );
         anyhow::ensure!(
             !self.frozen.load(Ordering::Acquire),
             "store is frozen, cannot write"
@@ -863,6 +900,33 @@ impl<S: S3Access> Store<S> {
             "clone created"
         );
         Ok(())
+    }
+}
+
+impl<S: S3Access> Store<S> {
+    /// Gracefully shut down this store: drain in-flight writes, flush all
+    /// dirty blocks to S3, and stop the background uploader. Must be called
+    /// (and awaited) before the Store is dropped.
+    ///
+    /// After `close()` returns, all new writes are rejected with an error.
+    pub async fn close(&self) -> Result<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        // Exclusive write lock — drains all in-flight writes.
+        let _write_guard = self.write_lock.write().await;
+        self.closed.store(true, Ordering::SeqCst);
+        let result = self.flush().await;
+        self.shutdown_uploader().await;
+        result
+    }
+}
+
+impl<S: S3Access> Drop for Store<S> {
+    fn drop(&mut self) {
+        if !self.closed.load(Ordering::SeqCst) {
+            tracing::error!(store = %self.id, "Store dropped without calling close()");
+        }
     }
 }
 

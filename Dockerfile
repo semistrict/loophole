@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src ./src
+COPY vendor ./vendor
 COPY sqlx-macros.db ./sqlx-macros.db
 
 # sqlx::query! needs a compile-time DATABASE_URL in container builds.

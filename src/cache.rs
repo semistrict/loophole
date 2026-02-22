@@ -49,9 +49,8 @@ pub async fn init(dir: PathBuf, max_bytes: u64) -> Result<()> {
     };
     gauge!("cache.max_bytes").set(max_bytes as f64);
 
-    GLOBAL
-        .set(cache)
-        .map_err(|_| anyhow::anyhow!("SqliteCache already initialized"))
+    let _ = GLOBAL.set(cache);
+    Ok(())
 }
 
 pub fn get() -> &'static SqliteCache {
@@ -237,7 +236,9 @@ impl SqliteCache {
 
         if !pending.is_empty() {
             if pending.iter().any(|b| *b != 0) {
-                self.repo.upsert_chunk(block_id, chunk_idx, &pending).await?;
+                self.repo
+                    .upsert_chunk(block_id, chunk_idx, &pending)
+                    .await?;
                 cached_bytes += pending.len() as u64;
             }
             self.repo.set_downloaded_thru(block_id, chunk_idx).await?;

@@ -1,16 +1,14 @@
-#[macro_use]
-mod assert;
-mod cache;
-mod cache_repo;
-mod fs;
-mod metrics;
-mod rpc;
-mod s3;
-mod store;
-mod uploader;
-
 use clap::{Parser, Subcommand};
+#[cfg(all(feature = "kernel", feature = "fuse"))]
+use loophole::fs;
+#[cfg(all(feature = "lwext4", feature = "fuse"))]
+use loophole::fs_ext4;
+use loophole::{assert, cache, metrics, rpc, store};
+#[cfg(feature = "lwext4")]
+use loophole::{blockdev_adapter, lwext4_api};
 use std::path::PathBuf;
+#[cfg(all(feature = "lwext4", feature = "fuse"))]
+use std::sync::Arc;
 use tracing::info;
 
 #[derive(Parser, Debug)]
@@ -197,6 +195,53 @@ fn parse_size(s: &str) -> Result<u64, String> {
     let n: u64 = num.parse().map_err(|_| format!("invalid size: {s}"))?;
     n.checked_mul(mult)
         .ok_or_else(|| format!("size overflows u64: {s}"))
+}
+
+#[derive(Clone, Copy, Debug)]
+enum HighLevelMode {
+    Kernel,
+    Lwext4,
+}
+
+fn high_level_mode() -> anyhow::Result<HighLevelMode> {
+    const HAS_KERNEL: bool = cfg!(all(feature = "kernel", feature = "fuse"));
+    const HAS_LWEXT4_FUSE: bool = cfg!(all(feature = "lwext4", feature = "fuse"));
+
+    anyhow::ensure!(
+        HAS_KERNEL || HAS_LWEXT4_FUSE,
+        "no high-level mount mode compiled (enable kernel or lwext4 with fuse)"
+    );
+
+    let requested = std::env::var("LOOPHOLE_MODE").ok();
+    if let Some(mode) = requested.as_deref() {
+        return match mode {
+            "kernel" if HAS_KERNEL => Ok(HighLevelMode::Kernel),
+            "lwext4" | "lwext4-fuse" if HAS_LWEXT4_FUSE => Ok(HighLevelMode::Lwext4),
+            "kernel" => {
+                anyhow::bail!("LOOPHOLE_MODE=kernel requested but kernel mode is not compiled in")
+            }
+            "lwext4" | "lwext4-fuse" => {
+                anyhow::bail!(
+                    "LOOPHOLE_MODE={mode} requested but lwext4+fuse mode is not compiled in"
+                )
+            }
+            other => anyhow::bail!(
+                "unknown LOOPHOLE_MODE={other:?}; expected one of: kernel, lwext4, lwext4-fuse"
+            ),
+        };
+    }
+
+    if HAS_KERNEL && HAS_LWEXT4_FUSE {
+        if cfg!(target_os = "macos") {
+            Ok(HighLevelMode::Lwext4)
+        } else {
+            Ok(HighLevelMode::Kernel)
+        }
+    } else if HAS_LWEXT4_FUSE {
+        Ok(HighLevelMode::Lwext4)
+    } else {
+        Ok(HighLevelMode::Kernel)
+    }
 }
 
 async fn s3_client(endpoint_url: Option<&str>) -> aws_sdk_s3::Client {
@@ -418,37 +463,53 @@ async fn main() -> anyhow::Result<()> {
                 allow_other,
                 mountpoint,
             } => {
-                let client = s3_client(cli.endpoint_url.as_deref()).await;
-                cache::init(cache_dir.clone(), cache_size).await?;
+                #[cfg(all(feature = "kernel", feature = "fuse"))]
+                {
+                    let client = s3_client(cli.endpoint_url.as_deref()).await;
+                    cache::init(cache_dir.clone(), cache_size).await?;
 
-                let store = store::Store::load(
-                    client,
-                    cli.bucket.clone(),
-                    cli.prefix.clone(),
-                    store_id.clone(),
-                    max_uploads,
-                    max_downloads,
-                )
-                .await?;
+                    let store = store::Store::load(
+                        client,
+                        cli.bucket.clone(),
+                        cli.prefix.clone(),
+                        store_id.clone(),
+                        max_uploads,
+                        max_downloads,
+                    )
+                    .await?;
 
-                info!(
-                    store = %store_id,
-                    mountpoint = %mountpoint.display(),
-                    cache_dir = %cache_dir.display(),
-                    "mounting FUSE"
-                );
+                    info!(
+                        store = %store_id,
+                        mountpoint = %mountpoint.display(),
+                        cache_dir = %cache_dir.display(),
+                        "mounting FUSE"
+                    );
 
-                let filesystem = fs::Fs::new(store);
+                    let filesystem = fs::Fs::new(store);
 
-                let mut config = fuser::Config::default();
-                if allow_other {
-                    config.acl = fuser::SessionACL::All;
+                    let mut config = fuser::Config::default();
+                    if allow_other {
+                        config.acl = fuser::SessionACL::All;
+                    }
+
+                    tokio::task::spawn_blocking(move || {
+                        fuser::mount2(filesystem, &mountpoint, &config).expect("FUSE mount failed");
+                    })
+                    .await?;
                 }
-
-                tokio::task::spawn_blocking(move || {
-                    fuser::mount2(filesystem, &mountpoint, &config).expect("FUSE mount failed");
-                })
-                .await?;
+                #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                {
+                    let _ = (
+                        store_id,
+                        cache_dir,
+                        cache_size,
+                        max_uploads,
+                        max_downloads,
+                        allow_other,
+                        mountpoint,
+                    );
+                    anyhow::bail!("store mount requires the kernel+fuse feature set");
+                }
             }
         },
 
@@ -460,101 +521,148 @@ async fn main() -> anyhow::Result<()> {
             block_size,
             volume_size,
         } => {
-            let client = s3_client(cli.endpoint_url.as_deref()).await;
+            match high_level_mode()? {
+                HighLevelMode::Kernel => {
+                    #[cfg(all(feature = "kernel", feature = "fuse"))]
+                    {
+                        let client = s3_client(cli.endpoint_url.as_deref()).await;
 
-            // 1. Create the store in S3.
-            store::Store::format(
-                &client,
-                &cli.bucket,
-                &cli.prefix,
-                &store_id,
-                block_size,
-                volume_size,
-            )
-            .await?;
+                        // 1. Create the store in S3.
+                        store::Store::format(
+                            &client,
+                            &cli.bucket,
+                            &cli.prefix,
+                            &store_id,
+                            block_size,
+                            volume_size,
+                        )
+                        .await?;
 
-            info!(store = %store_id, "store created, formatting ext4 on volume");
+                        info!(store = %store_id, "store created, formatting ext4 on volume");
 
-            // 2. Mount FUSE in a temp directory, create loopback, mkfs.ext4.
-            let fuse_dir = tempfile::tempdir().context("creating temp FUSE mountpoint")?;
-            let cache_dir = tempfile::tempdir().context("creating temp cache dir")?;
-            cache::init(cache_dir.path().to_path_buf(), 0).await?;
+                        // 2. Mount FUSE in a temp directory, create loopback, mkfs.ext4.
+                        let fuse_dir =
+                            tempfile::tempdir().context("creating temp FUSE mountpoint")?;
+                        let cache_dir = tempfile::tempdir().context("creating temp cache dir")?;
+                        cache::init(cache_dir.path().to_path_buf(), 0).await?;
 
-            let store = store::Store::load(
-                client,
-                cli.bucket.clone(),
-                cli.prefix.clone(),
-                store_id.clone(),
-                20,
-                200,
-            )
-            .await?;
+                        let store = store::Store::load(
+                            client,
+                            cli.bucket.clone(),
+                            cli.prefix.clone(),
+                            store_id.clone(),
+                            20,
+                            200,
+                        )
+                        .await?;
 
-            let filesystem = fs::Fs::new(store);
-            let fuse_path = fuse_dir.path().to_path_buf();
-            let mut config = fuser::Config::default();
-            config.acl = fuser::SessionACL::All;
+                        let filesystem = fs::Fs::new(store);
+                        let fuse_path = fuse_dir.path().to_path_buf();
+                        let mut config = fuser::Config::default();
+                        config.acl = fuser::SessionACL::All;
 
-            let fuse_handle = tokio::task::spawn_blocking({
-                let fuse_path = fuse_path.clone();
-                move || {
-                    fuser::mount2(filesystem, &fuse_path, &config).expect("FUSE mount failed");
+                        let fuse_handle = tokio::task::spawn_blocking({
+                            let fuse_path = fuse_path.clone();
+                            move || {
+                                fuser::mount2(filesystem, &fuse_path, &config)
+                                    .expect("FUSE mount failed");
+                            }
+                        });
+
+                        // Wait for FUSE to appear.
+                        for _ in 0..30 {
+                            if std::process::Command::new("mountpoint")
+                                .arg("-q")
+                                .arg(&fuse_path)
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+
+                        let volume_path = fuse_path.join("volume");
+                        anyhow::ensure!(volume_path.exists(), "FUSE volume file not found");
+
+                        // Create loop device.
+                        let output = std::process::Command::new("losetup")
+                            .args(["--find", "--show"])
+                            .arg(&volume_path)
+                            .output()
+                            .context("running losetup")?;
+                        anyhow::ensure!(
+                            output.status.success(),
+                            "losetup failed: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        let loop_dev = String::from_utf8(output.stdout)
+                            .context("losetup output not UTF-8")?
+                            .trim()
+                            .to_string();
+                        info!(loop_device = %loop_dev, "created loop device");
+
+                        // mkfs.ext4
+                        let status = std::process::Command::new("mkfs.ext4")
+                            .args(["-q", &loop_dev])
+                            .status()
+                            .context("running mkfs.ext4")?;
+                        anyhow::ensure!(status.success(), "mkfs.ext4 failed");
+                        info!("ext4 filesystem created");
+
+                        // Sync and tear down.
+                        let _ = std::process::Command::new("sync").status();
+                        let _ = std::process::Command::new("losetup")
+                            .args(["-d", &loop_dev])
+                            .status();
+                        let _ = std::process::Command::new("umount")
+                            .arg(&fuse_path)
+                            .status();
+                        let _ = fuse_handle.await;
+
+                        info!(store = %store_id, "format complete — store has empty ext4 filesystem");
+                    }
+                    #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                    {
+                        anyhow::bail!("kernel mode is not compiled in");
+                    }
                 }
-            });
+                HighLevelMode::Lwext4 => {
+                    #[cfg(all(feature = "lwext4", feature = "fuse"))]
+                    {
+                        let client = s3_client(cli.endpoint_url.as_deref()).await;
+                        store::Store::format(
+                            &client,
+                            &cli.bucket,
+                            &cli.prefix,
+                            &store_id,
+                            block_size,
+                            volume_size,
+                        )
+                        .await?;
 
-            // Wait for FUSE to appear.
-            for _ in 0..30 {
-                if std::process::Command::new("mountpoint")
-                    .arg("-q")
-                    .arg(&fuse_path)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-                {
-                    break;
+                        // Formatting writes through Store, which requires a cache root.
+                        let cache_dir = tempfile::tempdir().context("creating temp cache dir")?;
+                        cache::init(cache_dir.path().to_path_buf(), 0).await?;
+                        let store = store::Store::load(
+                            client,
+                            cli.bucket.clone(),
+                            cli.prefix.clone(),
+                            store_id.clone(),
+                            20,
+                            200,
+                        )
+                        .await?;
+                        lwext4_api::Lwext4Volume::format(store).await?;
+                        info!(store = %store_id, "format complete — store has empty lwext4 filesystem");
+                    }
+                    #[cfg(not(all(feature = "lwext4", feature = "fuse")))]
+                    {
+                        anyhow::bail!("lwext4 mode is not compiled in");
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-
-            let volume_path = fuse_path.join("volume");
-            anyhow::ensure!(volume_path.exists(), "FUSE volume file not found");
-
-            // Create loop device.
-            let output = std::process::Command::new("losetup")
-                .args(["--find", "--show"])
-                .arg(&volume_path)
-                .output()
-                .context("running losetup")?;
-            anyhow::ensure!(
-                output.status.success(),
-                "losetup failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let loop_dev = String::from_utf8(output.stdout)
-                .context("losetup output not UTF-8")?
-                .trim()
-                .to_string();
-            info!(loop_device = %loop_dev, "created loop device");
-
-            // mkfs.ext4
-            let status = std::process::Command::new("mkfs.ext4")
-                .args(["-q", &loop_dev])
-                .status()
-                .context("running mkfs.ext4")?;
-            anyhow::ensure!(status.success(), "mkfs.ext4 failed");
-            info!("ext4 filesystem created");
-
-            // Sync and tear down.
-            let _ = std::process::Command::new("sync").status();
-            let _ = std::process::Command::new("losetup")
-                .args(["-d", &loop_dev])
-                .status();
-            let _ = std::process::Command::new("umount")
-                .arg(&fuse_path)
-                .status();
-            let _ = fuse_handle.await;
-
-            info!(store = %store_id, "format complete — store has empty ext4 filesystem");
         }
 
         Command::Mount {
@@ -565,137 +673,210 @@ async fn main() -> anyhow::Result<()> {
             max_downloads,
             mountpoint,
         } => {
-            let client = s3_client(cli.endpoint_url.as_deref()).await;
-            cache::init(cache_dir.clone(), cache_size).await?;
+            match high_level_mode()? {
+                HighLevelMode::Kernel => {
+                    #[cfg(all(feature = "kernel", feature = "fuse"))]
+                    {
+                        let client = s3_client(cli.endpoint_url.as_deref()).await;
+                        cache::init(cache_dir.clone(), cache_size).await?;
 
-            let store = store::Store::load(
-                client,
-                cli.bucket.clone(),
-                cli.prefix.clone(),
-                store_id.clone(),
-                max_uploads,
-                max_downloads,
-            )
-            .await?;
+                        let store = store::Store::load(
+                            client,
+                            cli.bucket.clone(),
+                            cli.prefix.clone(),
+                            store_id.clone(),
+                            max_uploads,
+                            max_downloads,
+                        )
+                        .await?;
 
-            // 1. Mount FUSE in a temporary directory (not under the ext4 mountpoint,
-            //    because ext4 would shadow it and make .loophole/rpc inaccessible).
-            let fuse_dir = tempfile::tempdir().context("creating temp FUSE mountpoint")?;
-            let fuse_path = fuse_dir.path().to_path_buf();
-            std::fs::create_dir_all(&mountpoint).context("creating mountpoint")?;
+                        // 1. Mount FUSE in a temporary directory (not under the ext4 mountpoint,
+                        //    because ext4 would shadow it and make .loophole/rpc inaccessible).
+                        let fuse_dir =
+                            tempfile::tempdir().context("creating temp FUSE mountpoint")?;
+                        let fuse_path = fuse_dir.path().to_path_buf();
+                        std::fs::create_dir_all(&mountpoint).context("creating mountpoint")?;
 
-            info!(
-                store = %store_id,
-                mountpoint = %mountpoint.display(),
-                fuse_dir = %fuse_path.display(),
-                "mounting full stack"
-            );
+                        info!(
+                            store = %store_id,
+                            mountpoint = %mountpoint.display(),
+                            fuse_dir = %fuse_path.display(),
+                            "mounting full stack"
+                        );
 
-            let filesystem = fs::Fs::new(store);
-            let mut config = fuser::Config::default();
-            config.acl = fuser::SessionACL::All;
+                        let filesystem = fs::Fs::new(store);
+                        let mut config = fuser::Config::default();
+                        config.acl = fuser::SessionACL::All;
 
-            let fuse_handle = tokio::task::spawn_blocking({
-                let fuse_path = fuse_path.clone();
-                move || {
-                    fuser::mount2(filesystem, &fuse_path, &config).expect("FUSE mount failed");
+                        let fuse_handle = tokio::task::spawn_blocking({
+                            let fuse_path = fuse_path.clone();
+                            move || {
+                                fuser::mount2(filesystem, &fuse_path, &config)
+                                    .expect("FUSE mount failed");
+                            }
+                        });
+
+                        // Wait for FUSE to appear.
+                        for _ in 0..30 {
+                            if std::process::Command::new("mountpoint")
+                                .arg("-q")
+                                .arg(&fuse_path)
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false)
+                            {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        anyhow::ensure!(
+                            std::process::Command::new("mountpoint")
+                                .arg("-q")
+                                .arg(&fuse_path)
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false),
+                            "FUSE mount did not appear at {}",
+                            fuse_path.display()
+                        );
+
+                        let volume_path = fuse_path.join("volume");
+
+                        // 2. Create loop device.
+                        let output = std::process::Command::new("losetup")
+                            .args(["--find", "--show"])
+                            .arg(&volume_path)
+                            .output()
+                            .context("running losetup")?;
+                        anyhow::ensure!(
+                            output.status.success(),
+                            "losetup failed: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        let loop_dev = String::from_utf8(output.stdout)
+                            .context("losetup output not UTF-8")?
+                            .trim()
+                            .to_string();
+                        info!(loop_device = %loop_dev, "created loop device");
+
+                        // 3. Mount ext4.
+                        let status = std::process::Command::new("mount")
+                            .args([&loop_dev, &mountpoint.to_string_lossy().to_string()])
+                            .status()
+                            .context("mounting ext4")?;
+                        anyhow::ensure!(status.success(), "ext4 mount failed");
+                        info!(mountpoint = %mountpoint.display(), "ext4 mounted");
+
+                        // 4. Wait for FUSE to exit (which happens when we unmount).
+                        //    On SIGTERM/SIGINT, clean up in reverse order.
+                        let mountpoint_clone = mountpoint.clone();
+                        let loop_dev_clone = loop_dev.clone();
+                        let fuse_path_clone = fuse_path.clone();
+                        tokio::spawn(async move {
+                            tokio::signal::ctrl_c().await.ok();
+                            info!("received signal, tearing down");
+                            let _ = std::process::Command::new("umount")
+                                .arg(&mountpoint_clone)
+                                .status();
+                            let _ = std::process::Command::new("losetup")
+                                .args(["-d", &loop_dev_clone])
+                                .status();
+                            let _ = std::process::Command::new("umount")
+                                .arg(&fuse_path_clone)
+                                .status();
+                        });
+
+                        fuse_handle.await?;
+                        // Keep fuse_dir alive until after FUSE exits so the tempdir isn't removed early.
+                        drop(fuse_dir);
+                    }
+                    #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                    {
+                        anyhow::bail!("kernel mode is not compiled in");
+                    }
                 }
-            });
+                HighLevelMode::Lwext4 => {
+                    #[cfg(all(feature = "lwext4", feature = "fuse"))]
+                    {
+                        let client = s3_client(cli.endpoint_url.as_deref()).await;
+                        cache::init(cache_dir.clone(), cache_size).await?;
+                        let store = store::Store::load(
+                            client,
+                            cli.bucket.clone(),
+                            cli.prefix.clone(),
+                            store_id.clone(),
+                            max_uploads,
+                            max_downloads,
+                        )
+                        .await?;
 
-            // Wait for FUSE to appear.
-            for _ in 0..30 {
-                if std::process::Command::new("mountpoint")
-                    .arg("-q")
-                    .arg(&fuse_path)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-                {
-                    break;
+                        std::fs::create_dir_all(&mountpoint).context("creating mountpoint")?;
+                        info!(
+                            store = %store_id,
+                            mountpoint = %mountpoint.display(),
+                            mode = "lwext4",
+                            "mounting lwext4 FUSE"
+                        );
+
+                        let device = blockdev_adapter::StoreBlockDevice::new(
+                            Arc::clone(&store),
+                            tokio::runtime::Handle::current(),
+                        )?;
+                        let ext4_fs = ext4_lwext4::Ext4Fs::mount(device, false)
+                            .context("mounting lwext4 in-process filesystem")?;
+                        let filesystem = fs_ext4::Ext4Fuse::new(store, ext4_fs);
+                        let config = fuser::Config::default();
+
+                        tokio::task::spawn_blocking(move || {
+                            fuser::mount2(filesystem, &mountpoint, &config)
+                                .expect("FUSE mount failed");
+                        })
+                        .await?;
+                    }
+                    #[cfg(not(all(feature = "lwext4", feature = "fuse")))]
+                    {
+                        anyhow::bail!("lwext4 mode is not compiled in");
+                    }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            anyhow::ensure!(
-                std::process::Command::new("mountpoint")
-                    .arg("-q")
-                    .arg(&fuse_path)
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false),
-                "FUSE mount did not appear at {}",
-                fuse_path.display()
-            );
-
-            let volume_path = fuse_path.join("volume");
-
-            // 2. Create loop device.
-            let output = std::process::Command::new("losetup")
-                .args(["--find", "--show"])
-                .arg(&volume_path)
-                .output()
-                .context("running losetup")?;
-            anyhow::ensure!(
-                output.status.success(),
-                "losetup failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let loop_dev = String::from_utf8(output.stdout)
-                .context("losetup output not UTF-8")?
-                .trim()
-                .to_string();
-            info!(loop_device = %loop_dev, "created loop device");
-
-            // 3. Mount ext4.
-            let status = std::process::Command::new("mount")
-                .args([&loop_dev, &mountpoint.to_string_lossy().to_string()])
-                .status()
-                .context("mounting ext4")?;
-            anyhow::ensure!(status.success(), "ext4 mount failed");
-            info!(mountpoint = %mountpoint.display(), "ext4 mounted");
-
-            // 4. Wait for FUSE to exit (which happens when we unmount).
-            //    On SIGTERM/SIGINT, clean up in reverse order.
-            let mountpoint_clone = mountpoint.clone();
-            let loop_dev_clone = loop_dev.clone();
-            let fuse_path_clone = fuse_path.clone();
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                info!("received signal, tearing down");
-                let _ = std::process::Command::new("umount")
-                    .arg(&mountpoint_clone)
-                    .status();
-                let _ = std::process::Command::new("losetup")
-                    .args(["-d", &loop_dev_clone])
-                    .status();
-                let _ = std::process::Command::new("umount")
-                    .arg(&fuse_path_clone)
-                    .status();
-            });
-
-            fuse_handle.await?;
-            // Keep fuse_dir alive until after FUSE exits so the tempdir isn't removed early.
-            drop(fuse_dir);
         }
 
         Command::Snapshot {
             mountpoint,
             new_store,
         } => {
-            // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
-            sync_stack(&mountpoint)?;
+            match high_level_mode()? {
+                HighLevelMode::Kernel => {
+                    // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
+                    sync_stack(&mountpoint)?;
 
-            // 2. Find the FUSE mount and call snapshot via RPC.
-            let fuse_mount = find_fuse_mount(&mountpoint)?;
-            info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
+                    // 2. Find the FUSE mount and call snapshot via RPC.
+                    let fuse_mount = find_fuse_mount(&mountpoint)?;
+                    info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
 
-            let req = rpc::Request::Snapshot {
-                new_store_id: new_store,
-            };
-            let resp = rpc::call(&fuse_mount, &req)?;
-            if resp.ok {
-                info!("snapshot created");
-            } else {
-                anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
+                    let req = rpc::Request::Snapshot {
+                        new_store_id: new_store,
+                    };
+                    let resp = rpc::call(&fuse_mount, &req)?;
+                    if resp.ok {
+                        info!("snapshot created");
+                    } else {
+                        anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
+                    }
+                }
+                HighLevelMode::Lwext4 => {
+                    // Drain kernel-side buffered writes for this FUSE mount.
+                    syncfs_mount(&mountpoint)?;
+                    let req = rpc::Request::Snapshot {
+                        new_store_id: new_store,
+                    };
+                    let resp = rpc::call(&mountpoint, &req)?;
+                    if resp.ok {
+                        info!("snapshot created");
+                    } else {
+                        anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
+                    }
+                }
             }
         }
 
@@ -704,22 +885,40 @@ async fn main() -> anyhow::Result<()> {
             continuation,
             clone,
         } => {
-            // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
-            sync_stack(&mountpoint)?;
+            match high_level_mode()? {
+                HighLevelMode::Kernel => {
+                    // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
+                    sync_stack(&mountpoint)?;
 
-            // 2. Find the FUSE mount and call clone via RPC.
-            let fuse_mount = find_fuse_mount(&mountpoint)?;
-            info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
+                    // 2. Find the FUSE mount and call clone via RPC.
+                    let fuse_mount = find_fuse_mount(&mountpoint)?;
+                    info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
 
-            let req = rpc::Request::Clone {
-                continuation_id: continuation,
-                clone_id: clone,
-            };
-            let resp = rpc::call(&fuse_mount, &req)?;
-            if resp.ok {
-                info!("clone created");
-            } else {
-                anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
+                    let req = rpc::Request::Clone {
+                        continuation_id: continuation,
+                        clone_id: clone,
+                    };
+                    let resp = rpc::call(&fuse_mount, &req)?;
+                    if resp.ok {
+                        info!("clone created");
+                    } else {
+                        anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
+                    }
+                }
+                HighLevelMode::Lwext4 => {
+                    // Drain kernel-side buffered writes for this FUSE mount.
+                    syncfs_mount(&mountpoint)?;
+                    let req = rpc::Request::Clone {
+                        continuation_id: continuation,
+                        clone_id: clone,
+                    };
+                    let resp = rpc::call(&mountpoint, &req)?;
+                    if resp.ok {
+                        info!("clone created");
+                    } else {
+                        anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
+                    }
+                }
             }
         }
     }
