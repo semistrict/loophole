@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo init:*)",
+      "Bash(cargo add:*)",
+      "Bash(cargo build:*)",
+      "Bash(docker build:*)",
+      "Bash(grep:*)",
+      "Bash(rg:*)",
+      "Bash(cargo test:*)",
+      "Bash(python3:*)",
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:hub.docker.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:docs.rustfs.com)",
+      "Bash(gh pr:*)",
+      "Bash(gh release:*)",
+      "Bash(gh api \"repos/cberner/fuser/contents/src/session.rs?ref=v0.17.0\" --jq '.content' 2>&1 | base64 -d | grep -n -i \"umount\\\\|Failed to\\\\|Unmount\" 2>&1)",
+      "Bash(base64:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo doc:*)",
+      "Bash(ls:*)",
+      "Bash(cargo clippy:*)",
+      "WebSearch",
+      "Bash(docker compose:*)",
+      "Bash(cargo info:*)",
+      "Bash(rustup show:*)",
+      "Bash(cargo llvm-cov:*)",
+      "Bash(cargo +nightly:*)",
+      "Bash(/Users/ramon/src/loophole/test-e2e.sh:*)",
+      "Bash(bash:*)",
+      "Bash(./test-e2e.sh:*)"
+    ]
+  }
+}
