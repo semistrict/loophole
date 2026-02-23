@@ -6,11 +6,11 @@ use crate::error::{check_errno, check_errno_with_path, Error, Result};
 use crate::file::File;
 use crate::types::{FileType, FsStats, Metadata, OpenFlags};
 use ext4_lwext4_sys::{
-    ext4_atime_get, ext4_cache_flush, ext4_ctime_get, ext4_device_register, ext4_device_unregister,
-    ext4_dir_mk, ext4_dir_rm, ext4_flink, ext4_fremove, ext4_frename, ext4_fsymlink,
-    ext4_inode_exist, ext4_journal_start, ext4_journal_stop, ext4_mode_get, ext4_mode_set,
-    ext4_mount, ext4_mount_point_stats, ext4_mount_stats, ext4_mtime_get, ext4_owner_get,
-    ext4_owner_set, ext4_readlink, ext4_recover, ext4_umount,
+    ext4_atime_get, ext4_cache_flush, ext4_cache_write_back, ext4_ctime_get, ext4_device_register,
+    ext4_device_unregister, ext4_dir_mk, ext4_dir_rm, ext4_flink, ext4_fremove, ext4_frename,
+    ext4_fsymlink, ext4_inode_exist, ext4_journal_start, ext4_journal_stop, ext4_mode_get,
+    ext4_mode_set, ext4_mount, ext4_mount_point_stats, ext4_mount_stats, ext4_mtime_get,
+    ext4_owner_get, ext4_owner_set, ext4_readlink, ext4_recover, ext4_umount,
 };
 use std::ffi::{c_char, CStr, CString};
 use std::pin::Pin;
@@ -103,6 +103,12 @@ impl Ext4Fs {
             false
         };
 
+        // Enable write-back cache mode for better performance.
+        // Batches block writes instead of flushing each one immediately.
+        if !read_only {
+            unsafe { ext4_cache_write_back(mount_point.as_ptr(), true) };
+        }
+
         Ok(Self {
             wrapper,
             device_name,
@@ -116,6 +122,11 @@ impl Ext4Fs {
     ///
     /// This flushes all pending writes and releases the block device.
     pub fn umount(self) -> Result<()> {
+        // Disable write-back cache before unmounting
+        if !self.read_only {
+            unsafe { ext4_cache_write_back(self.mount_point.as_ptr(), false) };
+        }
+
         // Stop journaling if active
         if self.journal_active {
             unsafe { ext4_journal_stop(self.mount_point.as_ptr()) };
@@ -418,6 +429,9 @@ impl Ext4Fs {
 impl Drop for Ext4Fs {
     fn drop(&mut self) {
         // Note: We can't return errors from drop, so we just try our best
+        if !self.read_only {
+            unsafe { ext4_cache_write_back(self.mount_point.as_ptr(), false) };
+        }
         if self.journal_active {
             unsafe { ext4_journal_stop(self.mount_point.as_ptr()) };
         }

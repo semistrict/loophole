@@ -146,35 +146,6 @@ class FuseMount:
         self.proc = None
 
 
-class LoopExt4:
-    """Manages a loopback + ext4 mount on top of a FUSE volume file. Linux only."""
-
-    def __init__(self, volume_path, ext4_mount=EXT4_MOUNT):
-        self.volume_path = volume_path
-        self.ext4_mount = ext4_mount
-        self.loop_dev = None
-
-    def setup(self, format_fs=True):
-        os.makedirs(self.ext4_mount, exist_ok=True)
-        result = subprocess.run(
-            ["losetup", "--find", "--show", self.volume_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        self.loop_dev = result.stdout.strip()
-        print(f"  loop device: {self.loop_dev}")
-        if format_fs:
-            run(f"mkfs.ext4 -q {self.loop_dev}")
-        run(f"mount {self.loop_dev} {self.ext4_mount}")
-
-    def teardown(self):
-        if self.loop_dev is None:
-            return
-        run_quiet(f"umount {self.ext4_mount}")
-        run_quiet(f"losetup -d {self.loop_dev}")
-        self.loop_dev = None
-
 
 class HighLevelMount:
     """Manages a high-level `loophole mount` (FUSE + loopback + ext4 on Linux,

@@ -3,7 +3,6 @@ from helpers import (
     IS_LINUX,
     FuseMount,
     HighLevelMount,
-    LoopExt4,
     setup_s3,
 )
 
@@ -36,23 +35,6 @@ def fuse():
         m.stop()
 
 
-@pytest.fixture
-def ext4():
-    """Factory: call ext4(volume_path) to get a mounted LoopExt4.
-    All loop mounts are torn down automatically."""
-    if not IS_LINUX:
-        pytest.skip("LoopExt4 requires Linux")
-    loops = []
-
-    def _make(volume_path, format_fs=True, **kwargs):
-        e = LoopExt4(volume_path, **kwargs)
-        e.setup(format_fs=format_fs)
-        loops.append(e)
-        return e
-
-    yield _make
-    for e in reversed(loops):
-        e.teardown()
 
 
 @pytest.fixture

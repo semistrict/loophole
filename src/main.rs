@@ -621,7 +621,12 @@ async fn main() -> anyhow::Result<()> {
 
                         // mkfs.ext4
                         let status = std::process::Command::new("mkfs.ext4")
-                            .args(["-q", &loop_dev])
+                            .args([
+                                "-q",
+                                "-m", "0",
+                                "-E", "lazy_itable_init=1,lazy_journal_init=1",
+                                &loop_dev,
+                            ])
                             .status()
                             .context("running mkfs.ext4")?;
                         anyhow::ensure!(status.success(), "mkfs.ext4 failed");
@@ -777,7 +782,11 @@ async fn main() -> anyhow::Result<()> {
 
                         // 3. Mount ext4.
                         let status = std::process::Command::new("mount")
-                            .args([&loop_dev, &mountpoint.to_string_lossy().to_string()])
+                            .args([
+                                "-o", "noatime,data=writeback,nobarrier",
+                                &loop_dev,
+                                &mountpoint.to_string_lossy().to_string(),
+                            ])
                             .status()
                             .context("mounting ext4")?;
                         anyhow::ensure!(status.success(), "ext4 mount failed");

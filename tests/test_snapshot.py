@@ -65,17 +65,14 @@ def test_child_can_write_independently():
 
 @pytest.mark.skipif(not IS_LINUX, reason="requires direct FUSE volume access")
 def test_writes_fail_on_frozen_parent():
-    from helpers import FuseMount, LoopExt4, store_format
+    from helpers import FuseMount
 
     parent_id = unique_store_id("snap-frozen")
     child_id = unique_store_id("snap-frozen-c")
-    store_format(parent_id)
+    high_level_format(parent_id)
 
     f1 = FuseMount(parent_id)
     f1.start()
-    e1 = LoopExt4(f"{FUSE_MOUNT}/volume")
-    e1.setup(format_fs=True)
-    e1.teardown()
 
     run(LOOPHOLE + ["store", "snapshot", FUSE_MOUNT, "--new-store", child_id])
 
