@@ -1,3 +1,4 @@
 [alias]
 nt = "nextest run"
 ntf = "nextest run --features lwext4,no-fuse"
+e2e = "run --bin e2e --"

@@ -1,13 +1,25 @@
-"""Tests for fallocate punch hole and getxattr support."""
+"""Tests for fallocate punch hole and getxattr support. Linux only."""
 
 import ctypes
 import ctypes.util
 import os
+import pytest
 
 from helpers import (
-    EXT4_MOUNT, FUSE_MOUNT, FuseMount, LOOPHOLE, LoopExt4,
-    run, store_format, unique_store_id,
-    s3_object_exists, s3_object_size,
+    EXT4_MOUNT,
+    FUSE_MOUNT,
+    FuseMount,
+    IS_LINUX,
+    LOOPHOLE,
+    run,
+    store_format,
+    unique_store_id,
+    s3_object_exists,
+    s3_object_size,
+)
+
+pytestmark = pytest.mark.skipif(
+    not IS_LINUX, reason="requires Linux (FUSE + fallocate)"
 )
 
 _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)

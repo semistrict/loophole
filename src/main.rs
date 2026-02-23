@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use loophole::fs;
 #[cfg(all(feature = "lwext4", feature = "fuse"))]
 use loophole::fs_ext4;
-use loophole::{assert, cache, metrics, rpc, store};
+use loophole::{assert, cache, metrics, store};
 #[cfg(feature = "lwext4")]
 use loophole::{blockdev_adapter, lwext4_api};
 use std::path::PathBuf;
@@ -98,10 +98,6 @@ enum Command {
         /// ext4 mount point
         mountpoint: PathBuf,
 
-        /// Store ID for the continuation (same lineage)
-        #[arg(long)]
-        continuation: String,
-
         /// Store ID for the clone (new branch)
         #[arg(long)]
         clone: String,
@@ -125,9 +121,9 @@ enum StoreCommand {
         volume_size: u64,
     },
 
-    /// Snapshot via RPC to a running FUSE mount
+    /// Snapshot via the running filesystem's control directory
     Snapshot {
-        /// Mount point of the running FUSE filesystem
+        /// Mount point of the running filesystem
         mountpoint: PathBuf,
 
         /// New store ID for the writable child
@@ -135,14 +131,10 @@ enum StoreCommand {
         new_store: String,
     },
 
-    /// Clone via RPC to a running FUSE mount
+    /// Clone via the running filesystem's control directory
     Clone {
-        /// Mount point of the running FUSE filesystem
+        /// Mount point of the running filesystem
         mountpoint: PathBuf,
-
-        /// Store ID for the continuation (same lineage)
-        #[arg(long)]
-        continuation: String,
 
         /// Store ID for the clone (new branch)
         #[arg(long)]
@@ -201,22 +193,20 @@ fn parse_size(s: &str) -> Result<u64, String> {
 enum HighLevelMode {
     Kernel,
     Lwext4,
+    Nfs,
 }
 
 fn high_level_mode() -> anyhow::Result<HighLevelMode> {
     const HAS_KERNEL: bool = cfg!(all(feature = "kernel", feature = "fuse"));
     const HAS_LWEXT4_FUSE: bool = cfg!(all(feature = "lwext4", feature = "fuse"));
-
-    anyhow::ensure!(
-        HAS_KERNEL || HAS_LWEXT4_FUSE,
-        "no high-level mount mode compiled (enable kernel or lwext4 with fuse)"
-    );
+    const HAS_NFS: bool = cfg!(feature = "nfs");
 
     let requested = std::env::var("LOOPHOLE_MODE").ok();
     if let Some(mode) = requested.as_deref() {
         return match mode {
             "kernel" if HAS_KERNEL => Ok(HighLevelMode::Kernel),
             "lwext4" | "lwext4-fuse" if HAS_LWEXT4_FUSE => Ok(HighLevelMode::Lwext4),
+            "nfs" if HAS_NFS => Ok(HighLevelMode::Nfs),
             "kernel" => {
                 anyhow::bail!("LOOPHOLE_MODE=kernel requested but kernel mode is not compiled in")
             }
@@ -225,11 +215,24 @@ fn high_level_mode() -> anyhow::Result<HighLevelMode> {
                     "LOOPHOLE_MODE={mode} requested but lwext4+fuse mode is not compiled in"
                 )
             }
+            "nfs" => {
+                anyhow::bail!("LOOPHOLE_MODE=nfs requested but nfs feature is not compiled in")
+            }
             other => anyhow::bail!(
-                "unknown LOOPHOLE_MODE={other:?}; expected one of: kernel, lwext4, lwext4-fuse"
+                "unknown LOOPHOLE_MODE={other:?}; expected one of: kernel, lwext4, lwext4-fuse, nfs"
             ),
         };
     }
+
+    // Auto-detect: on macOS prefer NFS (no FUSE needed), otherwise kernel > lwext4
+    if cfg!(target_os = "macos") && HAS_NFS {
+        return Ok(HighLevelMode::Nfs);
+    }
+
+    anyhow::ensure!(
+        HAS_KERNEL || HAS_LWEXT4_FUSE || HAS_NFS,
+        "no high-level mount mode compiled (enable kernel, lwext4+fuse, or nfs)"
+    );
 
     if HAS_KERNEL && HAS_LWEXT4_FUSE {
         if cfg!(target_os = "macos") {
@@ -239,6 +242,8 @@ fn high_level_mode() -> anyhow::Result<HighLevelMode> {
         }
     } else if HAS_LWEXT4_FUSE {
         Ok(HighLevelMode::Lwext4)
+    } else if HAS_NFS {
+        Ok(HighLevelMode::Nfs)
     } else {
         Ok(HighLevelMode::Kernel)
     }
@@ -253,9 +258,9 @@ async fn s3_client(endpoint_url: Option<&str>) -> aws_sdk_s3::Client {
     aws_sdk_s3::Client::from_conf(s3_config.build())
 }
 
-/// Given an ext4 mountpoint, find the FUSE mount and RPC path.
+/// Given an ext4 mountpoint, find the underlying FUSE mount.
 ///
-/// Walk: ext4 mountpoint → loop device → backing file (FUSE volume) → FUSE mount → .loophole/rpc
+/// Walk: ext4 mountpoint → loop device → backing file (FUSE volume) → FUSE mount
 fn find_fuse_mount(ext4_mountpoint: &std::path::Path) -> anyhow::Result<PathBuf> {
     use std::process::Command as Cmd;
 
@@ -305,15 +310,15 @@ fn find_fuse_mount(ext4_mountpoint: &std::path::Path) -> anyhow::Result<PathBuf>
             .trim(),
     );
 
-    // 3. The backing file should be <fuse_mount>/volume. Go up to find .loophole/rpc.
+    // 3. The backing file should be <fuse_mount>/volume.
     let fuse_mount = backing_file
         .parent()
         .ok_or_else(|| anyhow::anyhow!("backing file has no parent: {}", backing_file.display()))?;
-    let rpc_path = fuse_mount.join(".loophole").join("rpc");
+    let ctl_dir = fuse_mount.join(".loophole");
     anyhow::ensure!(
-        rpc_path.exists(),
-        "RPC endpoint not found at {} (backing file: {})",
-        rpc_path.display(),
+        ctl_dir.exists(),
+        ".loophole control dir not found at {} (backing file: {})",
+        ctl_dir.display(),
         backing_file.display()
     );
 
@@ -384,6 +389,42 @@ fn sync_stack(ext4_mountpoint: &std::path::Path) -> anyhow::Result<()> {
 
 use anyhow::Context;
 
+/// Trigger a snapshot by creating `.loophole/snapshots/<name>` and reading back status.
+fn trigger_snapshot(mount: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let ctl_path = mount.join(".loophole/snapshots").join(name);
+    std::fs::write(&ctl_path, b"").with_context(|| format!("creating {}", ctl_path.display()))?;
+    let status = std::fs::read_to_string(&ctl_path)
+        .with_context(|| format!("reading {}", ctl_path.display()))?;
+    info!(status = %status, "snapshot result");
+    check_ctl_status(&status, "snapshot")
+}
+
+/// Trigger a clone by creating `.loophole/clones/<name>` and reading back status.
+fn trigger_clone(mount: &std::path::Path, name: &str) -> anyhow::Result<()> {
+    let ctl_path = mount.join(".loophole/clones").join(name);
+    std::fs::write(&ctl_path, b"").with_context(|| format!("creating {}", ctl_path.display()))?;
+    let status = std::fs::read_to_string(&ctl_path)
+        .with_context(|| format!("reading {}", ctl_path.display()))?;
+    info!(status = %status, "clone result");
+    check_ctl_status(&status, "clone")
+}
+
+fn check_ctl_status(status_json: &str, op: &str) -> anyhow::Result<()> {
+    let parsed: serde_json::Value =
+        serde_json::from_str(status_json).with_context(|| format!("parsing {op} status JSON"))?;
+    match parsed.get("status").and_then(|v| v.as_str()) {
+        Some("complete") => Ok(()),
+        Some("error") => {
+            let err = parsed
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            anyhow::bail!("{op} failed: {err}");
+        }
+        other => anyhow::bail!("{op} returned unexpected status: {other:?}"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -420,38 +461,13 @@ async fn main() -> anyhow::Result<()> {
                 mountpoint,
                 new_store,
             } => {
-                // Drain kernel-side buffered writes for this FUSE mount before
-                // requesting an immutable metadata transition.
                 syncfs_mount(&mountpoint)?;
-                let req = rpc::Request::Snapshot {
-                    new_store_id: new_store,
-                };
-                let resp = rpc::call(&mountpoint, &req)?;
-                if resp.ok {
-                    info!("snapshot created");
-                } else {
-                    anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
-                }
+                trigger_snapshot(&mountpoint, &new_store)?;
             }
 
-            StoreCommand::Clone {
-                mountpoint,
-                continuation,
-                clone,
-            } => {
-                // Drain kernel-side buffered writes for this FUSE mount before
-                // requesting an immutable metadata transition.
+            StoreCommand::Clone { mountpoint, clone } => {
                 syncfs_mount(&mountpoint)?;
-                let req = rpc::Request::Clone {
-                    continuation_id: continuation,
-                    clone_id: clone,
-                };
-                let resp = rpc::call(&mountpoint, &req)?;
-                if resp.ok {
-                    info!("clone created");
-                } else {
-                    anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
-                }
+                trigger_clone(&mountpoint, &clone)?;
             }
 
             StoreCommand::Mount {
@@ -628,8 +644,8 @@ async fn main() -> anyhow::Result<()> {
                         anyhow::bail!("kernel mode is not compiled in");
                     }
                 }
-                HighLevelMode::Lwext4 => {
-                    #[cfg(all(feature = "lwext4", feature = "fuse"))]
+                HighLevelMode::Lwext4 | HighLevelMode::Nfs => {
+                    #[cfg(feature = "lwext4")]
                     {
                         let client = s3_client(cli.endpoint_url.as_deref()).await;
                         store::Store::format(
@@ -657,9 +673,9 @@ async fn main() -> anyhow::Result<()> {
                         lwext4_api::Lwext4Volume::format(store).await?;
                         info!(store = %store_id, "format complete — store has empty lwext4 filesystem");
                     }
-                    #[cfg(not(all(feature = "lwext4", feature = "fuse")))]
+                    #[cfg(not(feature = "lwext4"))]
                     {
-                        anyhow::bail!("lwext4 mode is not compiled in");
+                        anyhow::bail!("lwext4 feature is not compiled in");
                     }
                 }
             }
@@ -838,89 +854,142 @@ async fn main() -> anyhow::Result<()> {
                         anyhow::bail!("lwext4 mode is not compiled in");
                     }
                 }
+                HighLevelMode::Nfs => {
+                    #[cfg(feature = "nfs")]
+                    {
+                        use nfsserve::tcp::{NFSTcp, NFSTcpListener};
+
+                        let client = s3_client(cli.endpoint_url.as_deref()).await;
+                        cache::init(cache_dir.clone(), cache_size).await?;
+                        let store = store::Store::load(
+                            client,
+                            cli.bucket.clone(),
+                            cli.prefix.clone(),
+                            store_id.clone(),
+                            max_uploads,
+                            max_downloads,
+                        )
+                        .await?;
+
+                        std::fs::create_dir_all(&mountpoint).context("creating mountpoint")?;
+
+                        // The StoreBlockDevice gets the *main* runtime handle.
+                        // NFS handlers call block_in_place + handle.block_on()
+                        // to drive store futures. This must target a runtime
+                        // whose worker threads are NOT consumed by the NFS
+                        // server itself, otherwise all workers deadlock.
+                        let device = blockdev_adapter::StoreBlockDevice::new(
+                            Arc::clone(&store),
+                            tokio::runtime::Handle::current(),
+                        )?;
+                        let ext4_fs = ext4_lwext4::Ext4Fs::mount(device, false)
+                            .context("mounting lwext4 in-process filesystem")?;
+                        let nfs_fs = loophole::nfs::Ext4Nfs::new(store, ext4_fs);
+
+                        // Build the NFS listener on the main runtime (for the
+                        // TCP bind) then move it to a dedicated runtime.
+                        let listener = NFSTcpListener::bind("127.0.0.1:0", nfs_fs)
+                            .await
+                            .context("binding NFS listener")?;
+                        let port = listener.get_listen_port();
+
+                        info!(
+                            store = %store_id,
+                            mountpoint = %mountpoint.display(),
+                            port = port,
+                            mode = "nfs",
+                            "starting NFS server"
+                        );
+
+                        // Run handle_forever() on a *separate* tokio runtime.
+                        // NFS handlers call block_in_place which consumes tokio
+                        // worker threads. If they share the main runtime, all
+                        // workers deadlock because block_on() tries to drive
+                        // store futures on the same starved pool.
+                        let nfs_rt = tokio::runtime::Builder::new_multi_thread()
+                            .enable_all()
+                            .thread_name("nfs-server")
+                            .build()
+                            .context("building NFS runtime")?;
+
+                        let nfs_handle = std::thread::spawn(move || {
+                            nfs_rt.block_on(listener.handle_forever())
+                        });
+
+                        // Mount via mount_nfs on macOS, mount.nfs on Linux
+                        let nfs_opts = if cfg!(target_os = "macos") {
+                            format!("port={port},mountport={port},vers=3,tcp,resvport,nolocks")
+                        } else {
+                            format!("port={port},mountport={port},vers=3,tcp,nolock")
+                        };
+                        let mp = mountpoint.to_string_lossy().to_string();
+                        let mount_status = if cfg!(target_os = "macos") {
+                            tokio::process::Command::new("sudo")
+                                .args(["mount_nfs", "-o", &nfs_opts, "127.0.0.1:/", &mp])
+                                .status()
+                                .await
+                        } else {
+                            tokio::process::Command::new("mount")
+                                .args(["-t", "nfs", "-o", &nfs_opts, "127.0.0.1:/", &mp])
+                                .status()
+                                .await
+                        }
+                        .context("running NFS mount")?;
+                        anyhow::ensure!(mount_status.success(), "NFS mount failed");
+                        info!(mountpoint = %mountpoint.display(), "NFS mounted");
+
+                        // Handle ctrl-c: unmount then exit
+                        tokio::signal::ctrl_c().await.ok();
+                        info!("received signal, unmounting NFS");
+                        let _ = if cfg!(target_os = "macos") {
+                            std::process::Command::new("sudo")
+                                .args(["umount", &mountpoint.to_string_lossy()])
+                                .status()
+                        } else {
+                            std::process::Command::new("umount")
+                                .arg(&mountpoint)
+                                .status()
+                        };
+
+                        // Wait for the NFS server thread to finish
+                        let _ = nfs_handle.join();
+                    }
+                    #[cfg(not(feature = "nfs"))]
+                    {
+                        anyhow::bail!("nfs feature is not compiled in");
+                    }
+                }
             }
         }
 
         Command::Snapshot {
             mountpoint,
             new_store,
-        } => {
-            match high_level_mode()? {
-                HighLevelMode::Kernel => {
-                    // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
-                    sync_stack(&mountpoint)?;
-
-                    // 2. Find the FUSE mount and call snapshot via RPC.
-                    let fuse_mount = find_fuse_mount(&mountpoint)?;
-                    info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
-
-                    let req = rpc::Request::Snapshot {
-                        new_store_id: new_store,
-                    };
-                    let resp = rpc::call(&fuse_mount, &req)?;
-                    if resp.ok {
-                        info!("snapshot created");
-                    } else {
-                        anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
-                    }
-                }
-                HighLevelMode::Lwext4 => {
-                    // Drain kernel-side buffered writes for this FUSE mount.
-                    syncfs_mount(&mountpoint)?;
-                    let req = rpc::Request::Snapshot {
-                        new_store_id: new_store,
-                    };
-                    let resp = rpc::call(&mountpoint, &req)?;
-                    if resp.ok {
-                        info!("snapshot created");
-                    } else {
-                        anyhow::bail!("snapshot failed: {}", resp.error.unwrap_or_default());
-                    }
-                }
+        } => match high_level_mode()? {
+            HighLevelMode::Kernel => {
+                sync_stack(&mountpoint)?;
+                let fuse_mount = find_fuse_mount(&mountpoint)?;
+                info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
+                trigger_snapshot(&fuse_mount, &new_store)?;
             }
-        }
-
-        Command::Clone {
-            mountpoint,
-            continuation,
-            clone,
-        } => {
-            match high_level_mode()? {
-                HighLevelMode::Kernel => {
-                    // 1. Sync the full stack: ext4 → loop device → FUSE backing file.
-                    sync_stack(&mountpoint)?;
-
-                    // 2. Find the FUSE mount and call clone via RPC.
-                    let fuse_mount = find_fuse_mount(&mountpoint)?;
-                    info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
-
-                    let req = rpc::Request::Clone {
-                        continuation_id: continuation,
-                        clone_id: clone,
-                    };
-                    let resp = rpc::call(&fuse_mount, &req)?;
-                    if resp.ok {
-                        info!("clone created");
-                    } else {
-                        anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
-                    }
-                }
-                HighLevelMode::Lwext4 => {
-                    // Drain kernel-side buffered writes for this FUSE mount.
-                    syncfs_mount(&mountpoint)?;
-                    let req = rpc::Request::Clone {
-                        continuation_id: continuation,
-                        clone_id: clone,
-                    };
-                    let resp = rpc::call(&mountpoint, &req)?;
-                    if resp.ok {
-                        info!("clone created");
-                    } else {
-                        anyhow::bail!("clone failed: {}", resp.error.unwrap_or_default());
-                    }
-                }
+            HighLevelMode::Lwext4 | HighLevelMode::Nfs => {
+                syncfs_mount(&mountpoint)?;
+                trigger_snapshot(&mountpoint, &new_store)?;
             }
-        }
+        },
+
+        Command::Clone { mountpoint, clone } => match high_level_mode()? {
+            HighLevelMode::Kernel => {
+                sync_stack(&mountpoint)?;
+                let fuse_mount = find_fuse_mount(&mountpoint)?;
+                info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
+                trigger_clone(&fuse_mount, &clone)?;
+            }
+            HighLevelMode::Lwext4 | HighLevelMode::Nfs => {
+                syncfs_mount(&mountpoint)?;
+                trigger_clone(&mountpoint, &clone)?;
+            }
+        },
     }
 
     Ok(())

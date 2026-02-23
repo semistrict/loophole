@@ -19,8 +19,10 @@ def test_format_creates_mountable_ext4(hl_mount):
 
 def test_format_custom_sizes(hl_mount):
     sid = unique_store_id("hlfmt-sz")
-    run(LOOPHOLE + ["format", "--store", sid,
-                     "--block-size", "1M", "--volume-size", "64M"])
+    run(
+        LOOPHOLE
+        + ["format", "--store", sid, "--block-size", "1M", "--volume-size", "64M"]
+    )
 
     hl_mount(sid)
     with open(f"{EXT4_MOUNT}/test.txt", "w") as f:

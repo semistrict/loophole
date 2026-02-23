@@ -1,8 +1,31 @@
-"""Tests for low-level store commands: format, FUSE mount layout."""
+"""Tests for store commands: format, mount layout."""
 
 import os
+import pytest
 
-from helpers import FUSE_MOUNT, store_format, unique_store_id
+from helpers import (
+    EXT4_MOUNT,
+    FUSE_MOUNT,
+    IS_LINUX,
+    high_level_format,
+    store_format,
+    unique_store_id,
+)
+
+linux_only = pytest.mark.skipif(
+    not IS_LINUX, reason="requires Linux (FUSE store mount)"
+)
+
+# On Linux the high-level mount uses Kernel mode (FUSE→loop→ext4).
+# The .loophole virtual dir lives at the FUSE layer (internal temp dir),
+# not at the ext4 mountpoint. These tests only apply to modes where
+# .loophole is visible at the user mountpoint (lwext4-fuse, NFS).
+needs_lwext4_mount = pytest.mark.skipif(
+    IS_LINUX, reason="Kernel mode: .loophole is at FUSE layer, not ext4 mount"
+)
+
+
+# ── Format (cross-platform) ────────────────────────────────────────────
 
 
 def test_format_creates_store():
@@ -20,31 +43,47 @@ def test_format_large_volume():
     store_format(sid, volume_size="10G")
 
 
+# ── High-level mount layout ───────────────────────────────────────────
+
+
+@needs_lwext4_mount
+def test_ctl_dirs_exist(hl_mount):
+    sid = unique_store_id("ctl-dirs")
+    high_level_format(sid)
+    hl_mount(sid)
+    assert os.path.isdir(f"{EXT4_MOUNT}/.loophole")
+    assert os.path.isdir(f"{EXT4_MOUNT}/.loophole/snapshots")
+    assert os.path.isdir(f"{EXT4_MOUNT}/.loophole/clones")
+
+
+@needs_lwext4_mount
+def test_loophole_in_listing(hl_mount):
+    sid = unique_store_id("ctl-ls")
+    high_level_format(sid)
+    hl_mount(sid)
+    entries = set(os.listdir(EXT4_MOUNT))
+    assert ".loophole" in entries
+
+
+# ── Raw FUSE layout (Linux only) ───────────────────────────────────────
+
+
+@linux_only
 def test_volume_file_exists(fuse):
     store_format(sid := unique_store_id("layout"))
     fuse(sid)
     assert os.path.isfile(f"{FUSE_MOUNT}/volume")
 
 
-def test_rpc_file_exists(fuse):
-    store_format(sid := unique_store_id("layout-rpc"))
-    fuse(sid)
-    assert os.path.isfile(f"{FUSE_MOUNT}/.loophole/rpc")
-
-
+@linux_only
 def test_volume_size_matches(fuse):
     store_format(sid := unique_store_id("layout-sz"))
     fuse(sid)
     assert os.path.getsize(f"{FUSE_MOUNT}/volume") == 1024 * 1024 * 1024
 
 
-def test_loophole_dir_exists(fuse):
-    store_format(sid := unique_store_id("layout-dir"))
-    fuse(sid)
-    assert os.path.isdir(f"{FUSE_MOUNT}/.loophole")
-
-
-def test_root_listing(fuse):
+@linux_only
+def test_fuse_root_listing(fuse):
     store_format(sid := unique_store_id("layout-ls"))
     fuse(sid)
     entries = set(os.listdir(FUSE_MOUNT))

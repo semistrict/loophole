@@ -44,7 +44,6 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     coreutils \
     util-linux \
-    s3cmd \
     python3 \
     git \
     ripgrep \
@@ -59,9 +58,13 @@ RUN apt-get update && apt-get install -y \
     iftop \
     fio \
     xfsprogs \
-    python3-pytest \
     && rm -rf /var/lib/apt/lists/*
+
+# Install uv and use it for Python test dependencies.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY tests/ /tests/
+RUN cd /tests && uv sync
+
 COPY --from=builder /usr/local/bin/loophole /usr/local/bin/loophole
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
-COPY tests/ /tests/
 ENTRYPOINT ["loophole"]

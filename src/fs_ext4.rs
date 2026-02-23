@@ -1,4 +1,4 @@
-use crate::rpc;
+use crate::ctl::{self, Ctl};
 use crate::store::{S3Access, Store};
 use dashmap::DashMap;
 use ext4_lwext4::{Error as Ext4Error, Ext4Fs, FileType as Ext4FileType, OpenFlags, SeekFrom};
@@ -19,8 +19,6 @@ use tracing::warn;
 
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
-const CTL_DIR_INO: u64 = u64::MAX - 1;
-const RPC_INO: u64 = u64::MAX;
 
 pub struct Ext4Fuse<S: S3Access = aws_sdk_s3::Client> {
     store: Arc<Store<S>>,
@@ -28,19 +26,21 @@ pub struct Ext4Fuse<S: S3Access = aws_sdk_s3::Client> {
     rt: tokio::runtime::Handle,
     path_to_ino: DashMap<String, u64>,
     ino_to_paths: DashMap<u64, BTreeSet<String>>,
-    rpc_handles: DashMap<u64, Vec<u8>>,
+    ctl: Arc<Ctl<S>>,
     next_fh: AtomicU64,
 }
 
 impl<S: S3Access> Ext4Fuse<S> {
     pub fn new(store: Arc<Store<S>>, fs: Ext4Fs) -> Self {
+        let rt = tokio::runtime::Handle::current();
+        let ctl = Arc::new(Ctl::new(Arc::clone(&store)));
         Self {
             store,
             fs: Mutex::new(fs),
-            rt: tokio::runtime::Handle::current(),
+            rt,
             path_to_ino: DashMap::new(),
             ino_to_paths: DashMap::new(),
-            rpc_handles: DashMap::new(),
+            ctl,
             next_fh: AtomicU64::new(1),
         }
     }
@@ -107,29 +107,9 @@ impl<S: S3Access> Ext4Fuse<S> {
         }
     }
 
-    fn rpc_attr(&self) -> FileAttr {
+    fn ctl_dir_attr(&self, ino: u64) -> FileAttr {
         FileAttr {
-            ino: INodeNo(RPC_INO),
-            size: 0,
-            blocks: 0,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
-            kind: FileType::RegularFile,
-            perm: 0o600,
-            nlink: 1,
-            uid: 0,
-            gid: 0,
-            rdev: 0,
-            blksize: 512,
-            flags: 0,
-        }
-    }
-
-    fn ctl_dir_attr(&self) -> FileAttr {
-        FileAttr {
-            ino: INodeNo(CTL_DIR_INO),
+            ino: INodeNo(ino),
             size: 0,
             blocks: 0,
             atime: UNIX_EPOCH,
@@ -139,6 +119,27 @@ impl<S: S3Access> Ext4Fuse<S> {
             kind: FileType::Directory,
             perm: 0o755,
             nlink: 2,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 512,
+            flags: 0,
+        }
+    }
+
+    fn ctl_file_attr(&self, ino: u64) -> FileAttr {
+        let size = self.ctl.file_size(ino).unwrap_or(0);
+        FileAttr {
+            ino: INodeNo(ino),
+            size,
+            blocks: size.div_ceil(512),
+            atime: UNIX_EPOCH,
+            mtime: UNIX_EPOCH,
+            ctime: UNIX_EPOCH,
+            crtime: UNIX_EPOCH,
+            kind: FileType::RegularFile,
+            perm: 0o644,
+            nlink: 1,
             uid: 0,
             gid: 0,
             rdev: 0,
@@ -227,7 +228,7 @@ impl<S: S3Access> Ext4Fuse<S> {
     }
 
     fn track_path(&self, path: String, ino: u64) {
-        if path == "/" || ino == ROOT_INO || ino == CTL_DIR_INO || ino == RPC_INO {
+        if path == "/" || ino == ROOT_INO || ctl::is_virtual_ino(ino) {
             return;
         }
         if let Some(old_ino) = self.path_to_ino.insert(path.clone(), ino)
@@ -328,41 +329,6 @@ impl<S: S3Access> Ext4Fuse<S> {
         }
         self.rt.block_on(self.store.flush()).map_err(|_| libc::EIO)
     }
-
-    fn rpc_response(ok: bool, error: Option<String>) -> Vec<u8> {
-        serde_json::to_vec(&rpc::Response { ok, error }).unwrap_or_else(|_| {
-            b"{\"ok\":false,\"error\":\"failed to encode RPC response\"}".to_vec()
-        })
-    }
-
-    fn handle_rpc(&self, req_bytes: &[u8]) -> Vec<u8> {
-        let req: rpc::Request = match serde_json::from_slice(req_bytes) {
-            Ok(req) => req,
-            Err(err) => return Self::rpc_response(false, Some(format!("{err:#}"))),
-        };
-
-        let result = match req {
-            rpc::Request::Snapshot { new_store_id } => self
-                .sync_underlying()
-                .map_err(|errno| anyhow::anyhow!("sync failed with errno {errno}"))
-                .and_then(|_| self.rt.block_on(self.store.snapshot(new_store_id))),
-            rpc::Request::Clone {
-                continuation_id,
-                clone_id,
-            } => self
-                .sync_underlying()
-                .map_err(|errno| anyhow::anyhow!("sync failed with errno {errno}"))
-                .and_then(|_| {
-                    self.rt
-                        .block_on(self.store.clone_store(continuation_id, clone_id))
-                }),
-        };
-
-        match result {
-            Ok(()) => Self::rpc_response(true, None),
-            Err(err) => Self::rpc_response(false, Some(format!("{err:#}"))),
-        }
-    }
 }
 
 impl<S: S3Access> Filesystem for Ext4Fuse<S> {
@@ -373,29 +339,44 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        match (parent.0, name.to_str()) {
-            (ROOT_INO, Some(".loophole")) => {
-                reply.entry(&TTL, &self.ctl_dir_attr(), Generation(0));
-                return;
-            }
-            (CTL_DIR_INO, Some("rpc")) => {
-                reply.entry(&TTL, &self.rpc_attr(), Generation(0));
-                return;
-            }
-            _ => {}
-        }
-
-        let parent_path = match self.path_for_inode(parent.0) {
-            Some(path) => path,
-            None => {
-                reply.error(Errno::from_i32(libc::ENOENT));
-                return;
-            }
-        };
         let name_str = match name.to_str() {
             Some(s) => s,
             None => {
                 reply.error(Errno::from_i32(libc::EINVAL));
+                return;
+            }
+        };
+
+        // .loophole from root
+        if parent.0 == ROOT_INO && name_str == ".loophole" {
+            reply.entry(&TTL, &self.ctl_dir_attr(ctl::CTL_DIR_INO), Generation(0));
+            return;
+        }
+
+        // ".." from .loophole → root
+        if parent.0 == ctl::CTL_DIR_INO && name_str == ".." {
+            reply.entry(&TTL, &self.root_attr(), Generation(0));
+            return;
+        }
+
+        // Delegate to ctl for virtual dirs/files
+        if let Some(ino) = self.ctl.lookup(parent.0, name_str) {
+            if ino == ctl::CTL_DIR_INO
+                || ino == ctl::SNAPSHOTS_DIR_INO
+                || ino == ctl::CLONES_DIR_INO
+            {
+                reply.entry(&TTL, &self.ctl_dir_attr(ino), Generation(0));
+            } else {
+                reply.entry(&TTL, &self.ctl_file_attr(ino), Generation(0));
+            }
+            return;
+        }
+
+        // ext4 lookup
+        let parent_path = match self.path_for_inode(parent.0) {
+            Some(path) => path,
+            None => {
+                reply.error(Errno::from_i32(libc::ENOENT));
                 return;
             }
         };
@@ -440,12 +421,15 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
                 reply.attr(&TTL, &self.root_attr());
                 return;
             }
-            CTL_DIR_INO => {
-                reply.attr(&TTL, &self.ctl_dir_attr());
+            i if i == ctl::CTL_DIR_INO
+                || i == ctl::SNAPSHOTS_DIR_INO
+                || i == ctl::CLONES_DIR_INO =>
+            {
+                reply.attr(&TTL, &self.ctl_dir_attr(i));
                 return;
             }
-            RPC_INO => {
-                reply.attr(&TTL, &self.rpc_attr());
+            i if ctl::is_virtual_ino(i) => {
+                reply.attr(&TTL, &self.ctl_file_attr(i));
                 return;
             }
             _ => {}
@@ -491,6 +475,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
+        if ctl::is_virtual_ino(ino.0) {
+            self.getattr(_req, ino, None, reply);
+            return;
+        }
+
         let path = match self.path_for_inode(ino.0) {
             Some(path) => path,
             None => {
@@ -583,6 +572,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        if ctl::is_virtual_ino(parent.0) {
+            reply.error(Errno::from_i32(libc::EACCES));
+            return;
+        }
+
         let parent_path = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -624,6 +618,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if ctl::is_virtual_ino(parent.0) {
+            reply.error(Errno::from_i32(libc::EACCES));
+            return;
+        }
+
         let parent_path = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -655,6 +654,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if ctl::is_virtual_ino(parent.0) {
+            reply.error(Errno::from_i32(libc::EACCES));
+            return;
+        }
+
         let parent_path = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -693,6 +697,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         target: &Path,
         reply: ReplyEntry,
     ) {
+        if ctl::is_virtual_ino(parent.0) {
+            reply.error(Errno::from_i32(libc::EACCES));
+            return;
+        }
+
         let parent_path = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -749,6 +758,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _flags: fuser::RenameFlags,
         reply: ReplyEmpty,
     ) {
+        if ctl::is_virtual_ino(parent.0) || ctl::is_virtual_ino(newparent.0) {
+            reply.error(Errno::from_i32(libc::EACCES));
+            return;
+        }
+
         let from_parent = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -843,9 +857,8 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: FuseOpenFlags, reply: ReplyOpen) {
-        if ino.0 == RPC_INO {
+        if ctl::is_virtual_ino(ino.0) {
             let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-            self.rpc_handles.insert(fh, Vec::new());
             reply.opened(FileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
             return;
         }
@@ -866,6 +879,38 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _flags: i32,
         reply: ReplyCreate,
     ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(Errno::from_i32(libc::EINVAL));
+                return;
+            }
+        };
+
+        // Virtual ctl file creation (triggers snapshot/clone)
+        if parent.0 == ctl::SNAPSHOTS_DIR_INO || parent.0 == ctl::CLONES_DIR_INO {
+            if let Err(e) = self.sync_underlying() {
+                warn!(error = ?e, "sync failed before ctl create");
+                reply.error(Errno::from_i32(e));
+                return;
+            }
+            match self.rt.block_on(self.ctl.create(parent.0, name_str)) {
+                Some(Ok((ino, _))) => {
+                    reply.created(
+                        &TTL,
+                        &self.ctl_file_attr(ino),
+                        Generation(0),
+                        FileHandle(0),
+                        FopenFlags::empty(),
+                    );
+                }
+                Some(Err(_)) => reply.error(Errno::from_i32(libc::EEXIST)),
+                None => reply.error(Errno::from_i32(libc::EACCES)),
+            }
+            return;
+        }
+
+        // ext4 file creation
         let parent_path = match self.path_for_inode(parent.0) {
             Some(path) => path,
             None => {
@@ -895,7 +940,7 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
             warn!(error = %err, path = %path, "failed to set mode during create");
         }
 
-        let ino = match self.lookup_child(&parent_path, name.to_str().unwrap_or_default()) {
+        let ino = match self.lookup_child(&parent_path, name_str) {
             Ok(Some((ino, _))) => ino,
             _ => {
                 reply.error(Errno::from_i32(libc::EIO));
@@ -918,16 +963,13 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     fn release(
         &self,
         _req: &Request,
-        ino: INodeNo,
-        fh: FileHandle,
+        _ino: INodeNo,
+        _fh: FileHandle,
         _flags: FuseOpenFlags,
         _lock_owner: Option<fuser::LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        if ino.0 == RPC_INO {
-            self.rpc_handles.remove(&fh.0);
-        }
         reply.ok();
     }
 
@@ -935,22 +977,16 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: FuseOpenFlags,
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyData,
     ) {
-        if ino.0 == RPC_INO {
-            let data = self
-                .rpc_handles
-                .get(&fh.0)
-                .map(|v| v.clone())
-                .unwrap_or_default();
-            let start = (offset as usize).min(data.len());
-            let end = (start + size as usize).min(data.len());
-            reply.data(&data[start..end]);
+        // Virtual ctl file read
+        if let Some((data, _eof)) = self.ctl.read(ino.0, offset, size) {
+            reply.data(&data);
             return;
         }
 
@@ -990,7 +1026,7 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FileHandle,
         offset: u64,
         data: &[u8],
         _write_flags: WriteFlags,
@@ -998,11 +1034,8 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
-        if ino.0 == RPC_INO {
-            let resp = self.handle_rpc(data);
-            if let Some(mut entry) = self.rpc_handles.get_mut(&fh.0) {
-                *entry = resp;
-            }
+        // Writes to virtual ctl files are no-ops
+        if ctl::is_virtual_ino(ino.0) {
             reply.written(data.len() as u32);
             return;
         }
@@ -1047,7 +1080,7 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
-        if ino.0 == RPC_INO {
+        if ctl::is_virtual_ino(ino.0) {
             reply.ok();
             return;
         }
@@ -1065,7 +1098,7 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
-        if ino.0 == RPC_INO {
+        if ctl::is_virtual_ino(ino.0) {
             reply.ok();
             return;
         }
@@ -1083,14 +1116,30 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        if ino.0 == CTL_DIR_INO {
-            let entries: [(u64, FileType, &str); 3] = [
-                (CTL_DIR_INO, FileType::Directory, "."),
-                (ROOT_INO, FileType::Directory, ".."),
-                (RPC_INO, FileType::RegularFile, "rpc"),
+        // Virtual ctl directory
+        if let Some(entries) = self.ctl.readdir(ino.0) {
+            let mut all: Vec<(u64, FileType, String)> = vec![
+                (ino.0, FileType::Directory, ".".into()),
+                (
+                    if ino.0 == ctl::CTL_DIR_INO {
+                        ROOT_INO
+                    } else {
+                        ctl::CTL_DIR_INO
+                    },
+                    FileType::Directory,
+                    "..".into(),
+                ),
             ];
-            for (i, &(entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
-                if reply.add(INodeNo(entry_ino), (i + 1) as u64, kind, name) {
+            for e in entries {
+                let kind = if e.is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                };
+                all.push((e.ino, kind, e.name));
+            }
+            for (i, (entry_ino, kind, name)) in all.iter().enumerate().skip(offset as usize) {
+                if reply.add(INodeNo(*entry_ino), (i + 1) as u64, *kind, name) {
                     break;
                 }
             }
@@ -1098,6 +1147,7 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
             return;
         }
 
+        // ext4 directory
         let path = match self.path_for_inode(ino.0) {
             Some(path) => path,
             None => {
@@ -1113,7 +1163,11 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
         entries.push((parent_ino, FileType::Directory, "..".to_string()));
 
         if ino.0 == ROOT_INO {
-            entries.push((CTL_DIR_INO, FileType::Directory, ".loophole".to_string()));
+            entries.push((
+                ctl::CTL_DIR_INO,
+                FileType::Directory,
+                ".loophole".to_string(),
+            ));
         }
 
         let guard = match self.fs.lock() {
@@ -1183,12 +1237,9 @@ impl<S: S3Access> Filesystem for Ext4Fuse<S> {
     }
 
     fn access(&self, _req: &Request, ino: INodeNo, _mask: AccessFlags, reply: ReplyEmpty) {
-        match ino.0 {
-            ROOT_INO | CTL_DIR_INO | RPC_INO => {
-                reply.ok();
-                return;
-            }
-            _ => {}
+        if ino.0 == ROOT_INO || ctl::is_virtual_ino(ino.0) {
+            reply.ok();
+            return;
         }
         if self.path_for_inode(ino.0).is_some() {
             reply.ok();

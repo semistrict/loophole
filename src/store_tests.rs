@@ -941,13 +941,13 @@ async fn child_writes_do_not_affect_parent() {
 }
 
 // =======================================================================
-// RPC dispatch tests
+// Ctl (virtual control directory) tests
 // =======================================================================
 
-/// RPC dispatch: snapshot via JSON request bytes.
+/// Ctl: snapshot via virtual file creation.
 #[tokio::test]
-async fn rpc_dispatch_snapshot() {
-    let sid = unique_id("rpcsn");
+async fn ctl_snapshot() {
+    let sid = unique_id("ctlsn");
     let child_id = format!("{sid}-child");
     let state = State {
         parent_id: None,
@@ -958,27 +958,28 @@ async fn rpc_dispatch_snapshot() {
     let s3 = mock_s3(&sid, &state, &[]);
     let store = load_store(s3.clone(), &sid).await;
 
-    let req = serde_json::to_vec(&serde_json::json!({
-        "cmd": "snapshot",
-        "new_store_id": child_id,
-    }))
-    .unwrap();
+    let ctl = crate::ctl::Ctl::new(Arc::clone(&store));
+    let result = ctl.create(crate::ctl::SNAPSHOTS_DIR_INO, &child_id).await;
+    assert!(result.is_some());
+    let (ino, _size) = result.unwrap().expect("snapshot should succeed");
 
-    let resp_bytes = crate::rpc::dispatch(&store, &req).await;
-    let resp: crate::rpc::Response = serde_json::from_slice(&resp_bytes).unwrap();
-    assert!(resp.ok, "expected ok, got error: {:?}", resp.error);
+    // Read back status JSON.
+    let (data, _eof) = ctl
+        .read(ino, 0, 4096)
+        .expect("virtual file should be readable");
+    let status: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(status["status"], "complete");
 
-    // Verify child state was created.
+    // Verify child state was created in S3.
     let child_key = format!("stores/{child_id}/state.json");
     assert!(s3.get_object(&child_key).is_some());
     store.close().await.unwrap();
 }
 
-/// RPC dispatch: clone via JSON request bytes.
+/// Ctl: clone via virtual file creation.
 #[tokio::test]
-async fn rpc_dispatch_clone() {
-    let sid = unique_id("rpccl");
-    let cont_id = format!("{sid}-cont");
+async fn ctl_clone() {
+    let sid = unique_id("ctlcl");
     let clone_id = format!("{sid}-clone");
     let state = State {
         parent_id: None,
@@ -989,49 +990,38 @@ async fn rpc_dispatch_clone() {
     let s3 = mock_s3(&sid, &state, &[]);
     let store = load_store(s3.clone(), &sid).await;
 
-    let req = serde_json::to_vec(&serde_json::json!({
-        "cmd": "clone",
-        "continuation_id": cont_id,
-        "clone_id": clone_id,
-    }))
-    .unwrap();
+    let ctl = crate::ctl::Ctl::new(Arc::clone(&store));
+    let result = ctl.create(crate::ctl::CLONES_DIR_INO, &clone_id).await;
+    assert!(result.is_some());
+    let (ino, _size) = result.unwrap().expect("clone should succeed");
 
-    let resp_bytes = crate::rpc::dispatch(&store, &req).await;
-    let resp: crate::rpc::Response = serde_json::from_slice(&resp_bytes).unwrap();
-    assert!(resp.ok, "expected ok, got error: {:?}", resp.error);
+    // Read back status JSON — should include continuation ID.
+    let (data, _eof) = ctl
+        .read(ino, 0, 4096)
+        .expect("virtual file should be readable");
+    let status: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(status["status"], "complete");
+    assert!(
+        status["continuation"].is_string(),
+        "should have continuation ID"
+    );
 
-    // Both children should exist.
-    for id in [&cont_id, &clone_id] {
-        let key = format!("stores/{id}/state.json");
-        assert!(s3.get_object(&key).is_some(), "missing state for {id}");
-    }
+    // Both clone and continuation should exist in S3.
+    let continuation_id = status["continuation"].as_str().unwrap();
+    let clone_key = format!("stores/{clone_id}/state.json");
+    let cont_key = format!("stores/{continuation_id}/state.json");
+    assert!(s3.get_object(&clone_key).is_some(), "missing clone state");
+    assert!(
+        s3.get_object(&cont_key).is_some(),
+        "missing continuation state"
+    );
     store.close().await.unwrap();
 }
 
-/// RPC dispatch: invalid JSON returns an error response.
+/// Ctl: snapshot on an already-frozen store returns error status.
 #[tokio::test]
-async fn rpc_dispatch_invalid_json() {
-    let sid = unique_id("rpcbad");
-    let state = State {
-        parent_id: None,
-        block_size: 64,
-        volume_size: 1024,
-        children: vec![],
-    };
-    let s3 = mock_s3(&sid, &state, &[]);
-    let store = load_store(s3, &sid).await;
-
-    let resp_bytes = crate::rpc::dispatch(&store, b"not json").await;
-    let resp: crate::rpc::Response = serde_json::from_slice(&resp_bytes).unwrap();
-    assert!(!resp.ok);
-    assert!(resp.error.is_some());
-    store.close().await.unwrap();
-}
-
-/// RPC dispatch: second snapshot on an already-frozen store returns error.
-#[tokio::test]
-async fn rpc_dispatch_snapshot_on_frozen_store_fails() {
-    let sid = unique_id("rpcfr");
+async fn ctl_snapshot_on_frozen_store_fails() {
+    let sid = unique_id("ctlfr");
     let state = State {
         parent_id: None,
         block_size: 64,
@@ -1041,17 +1031,22 @@ async fn rpc_dispatch_snapshot_on_frozen_store_fails() {
     let s3 = mock_s3(&sid, &state, &[]);
     let store = load_store(s3, &sid).await;
 
-    let req = serde_json::to_vec(&serde_json::json!({
-        "cmd": "snapshot",
-        "new_store_id": "another-child",
-    }))
-    .unwrap();
+    let ctl = crate::ctl::Ctl::new(Arc::clone(&store));
+    let result = ctl
+        .create(crate::ctl::SNAPSHOTS_DIR_INO, "another-child")
+        .await;
+    assert!(result.is_some());
+    let (ino, _size) = result
+        .unwrap()
+        .expect("create returns Ok even on error status");
 
-    let resp_bytes = crate::rpc::dispatch(&store, &req).await;
-    let resp: crate::rpc::Response = serde_json::from_slice(&resp_bytes).unwrap();
-    // Snapshot on an already-frozen store should fail.
-    assert!(!resp.ok, "snapshot on frozen store should fail");
-    assert!(resp.error.is_some());
+    // Read back status — should be error.
+    let (data, _eof) = ctl
+        .read(ino, 0, 4096)
+        .expect("virtual file should be readable");
+    let status: serde_json::Value = serde_json::from_slice(&data).unwrap();
+    assert_eq!(status["status"], "error");
+    assert!(status["error"].is_string());
     assert!(store.frozen.load(Ordering::Acquire));
     store.close().await.unwrap();
 }

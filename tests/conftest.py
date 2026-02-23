@@ -1,6 +1,14 @@
 import pytest
 from helpers import (
-    FUSE_MOUNT, FuseMount, HighLevelMount, LoopExt4, setup_s3,
+    IS_LINUX,
+    FuseMount,
+    HighLevelMount,
+    LoopExt4,
+    setup_s3,
+)
+
+linux_only = pytest.mark.skipif(
+    not IS_LINUX, reason="requires Linux (FUSE + loop devices)"
 )
 
 
@@ -13,6 +21,8 @@ def _s3_ready():
 def fuse():
     """Factory: call fuse(store_id) to get a started FuseMount.
     All mounts are stopped automatically on teardown."""
+    if not IS_LINUX:
+        pytest.skip("FuseMount requires Linux")
     mounts = []
 
     def _make(store_id, **kwargs):
@@ -30,6 +40,8 @@ def fuse():
 def ext4():
     """Factory: call ext4(volume_path) to get a mounted LoopExt4.
     All loop mounts are torn down automatically."""
+    if not IS_LINUX:
+        pytest.skip("LoopExt4 requires Linux")
     loops = []
 
     def _make(volume_path, format_fs=True, **kwargs):

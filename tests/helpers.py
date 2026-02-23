@@ -2,22 +2,49 @@
 
 import hashlib
 import os
+import platform
 import signal
 import subprocess
 import sys
 import time
 
+import boto3
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError, EndpointConnectionError
+
+IS_LINUX = platform.system() == "Linux"
+IS_MACOS = platform.system() == "Darwin"
+
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://s3:9000")
 BUCKET = os.environ.get("BUCKET", "testbucket")
 SHARD = os.environ.get("SHARD", "")
-CACHE_DIR = f"/tmp/loophole-cache{SHARD}"
-FUSE_MOUNT = f"/mnt/loophole{SHARD}"
-EXT4_MOUNT = f"/mnt/ext4{SHARD}"
-EXT4_VERIFY = f"/mnt/ext4-verify{SHARD}"
+
+if IS_LINUX:
+    CACHE_DIR = f"/tmp/loophole-cache{SHARD}"
+    FUSE_MOUNT = f"/mnt/loophole{SHARD}"
+    EXT4_MOUNT = f"/mnt/ext4{SHARD}"
+    EXT4_VERIFY = f"/mnt/ext4-verify{SHARD}"
+else:
+    _tmpbase = os.environ.get("LOOPHOLE_TMPDIR", "/tmp")
+    CACHE_DIR = f"{_tmpbase}/loophole-cache{SHARD}"
+    FUSE_MOUNT = f"{_tmpbase}/loophole-fuse{SHARD}"
+    EXT4_MOUNT = f"{_tmpbase}/loophole-ext4{SHARD}"
+    EXT4_VERIFY = f"{_tmpbase}/loophole-ext4-verify{SHARD}"
 
 LOOPHOLE = ["loophole", "--bucket", BUCKET, "--endpoint-url", S3_ENDPOINT]
 
 _s3_ready = False
+
+
+def _s3_client():
+    return boto3.client(
+        "s3",
+        endpoint_url=S3_ENDPOINT,
+        aws_access_key_id=os.environ["AWS_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["AWS_SECRET_ACCESS_KEY"],
+        region_name=os.environ.get("AWS_REGION", "us-east-1"),
+        config=BotoConfig(signature_version="s3v4"),
+    )
 
 
 def run(cmd, **kwargs):
@@ -27,13 +54,6 @@ def run(cmd, **kwargs):
 
 def run_quiet(cmd):
     return subprocess.run(cmd, shell=isinstance(cmd, str), capture_output=True)
-
-
-def s3cmd_prefix():
-    host = S3_ENDPOINT.replace("http://", "").replace("https://", "")
-    access = os.environ["AWS_ACCESS_KEY_ID"]
-    secret = os.environ["AWS_SECRET_ACCESS_KEY"]
-    return f"s3cmd --host={host} --host-bucket= --access_key={access} --secret_key={secret} --no-ssl"
 
 
 def md5(path):
@@ -52,26 +72,29 @@ def wait_for_s3():
     global _s3_ready
     if _s3_ready:
         return
-    prefix = s3cmd_prefix()
+    client = _s3_client()
     for _ in range(60):
-        if run_quiet(f"{prefix} ls s3://").returncode == 0:
+        try:
+            client.list_buckets()
             _s3_ready = True
             return
-        time.sleep(1)
+        except (EndpointConnectionError, ClientError, Exception):
+            time.sleep(1)
     sys.exit("S3 did not become ready after 60s")
 
 
 def ensure_bucket():
-    prefix = s3cmd_prefix()
-    run_quiet(f"{prefix} mb s3://{BUCKET}")
+    client = _s3_client()
+    try:
+        client.head_bucket(Bucket=BUCKET)
+    except ClientError:
+        client.create_bucket(Bucket=BUCKET)
 
 
 def wait_for_mountpoint(path, timeout=15, expect_file=None):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if subprocess.run(
-            ["mountpoint", "-q", path], capture_output=True
-        ).returncode == 0:
+        if os.path.ismount(path):
             if expect_file is None or os.path.exists(expect_file):
                 return True
         time.sleep(0.5)
@@ -79,7 +102,7 @@ def wait_for_mountpoint(path, timeout=15, expect_file=None):
 
 
 class FuseMount:
-    """Manages a low-level FUSE store mount lifecycle."""
+    """Manages a low-level FUSE store mount lifecycle. Linux only."""
 
     def __init__(self, store_id, mountpoint=FUSE_MOUNT, cache_dir=CACHE_DIR):
         self.store_id = store_id
@@ -92,11 +115,16 @@ class FuseMount:
         os.makedirs(self.cache_dir, exist_ok=True)
         env = {**os.environ, "RUST_LOG": "info"}
         self.proc = subprocess.Popen(
-            LOOPHOLE + [
-                "store", "mount",
-                "--store", self.store_id,
-                "--cache-dir", self.cache_dir,
-                "--allow-other", self.mountpoint,
+            LOOPHOLE
+            + [
+                "store",
+                "mount",
+                "--store",
+                self.store_id,
+                "--cache-dir",
+                self.cache_dir,
+                "--allow-other",
+                self.mountpoint,
             ],
             env=env,
         )
@@ -119,7 +147,7 @@ class FuseMount:
 
 
 class LoopExt4:
-    """Manages a loopback + ext4 mount on top of a FUSE volume file."""
+    """Manages a loopback + ext4 mount on top of a FUSE volume file. Linux only."""
 
     def __init__(self, volume_path, ext4_mount=EXT4_MOUNT):
         self.volume_path = volume_path
@@ -130,7 +158,9 @@ class LoopExt4:
         os.makedirs(self.ext4_mount, exist_ok=True)
         result = subprocess.run(
             ["losetup", "--find", "--show", self.volume_path],
-            capture_output=True, text=True, check=True,
+            capture_output=True,
+            text=True,
+            check=True,
         )
         self.loop_dev = result.stdout.strip()
         print(f"  loop device: {self.loop_dev}")
@@ -147,7 +177,8 @@ class LoopExt4:
 
 
 class HighLevelMount:
-    """Manages a high-level `loophole mount` (FUSE + loopback + ext4)."""
+    """Manages a high-level `loophole mount` (FUSE + loopback + ext4 on Linux,
+    NFS + lwext4 on macOS)."""
 
     def __init__(self, store_id, mountpoint=EXT4_MOUNT, cache_dir=CACHE_DIR):
         self.store_id = store_id
@@ -160,10 +191,13 @@ class HighLevelMount:
         os.makedirs(self.cache_dir, exist_ok=True)
         env = {**os.environ, "RUST_LOG": "info"}
         self.proc = subprocess.Popen(
-            LOOPHOLE + [
+            LOOPHOLE
+            + [
                 "mount",
-                "--store", self.store_id,
-                "--cache-dir", self.cache_dir,
+                "--store",
+                self.store_id,
+                "--cache-dir",
+                self.cache_dir,
                 self.mountpoint,
             ],
             env=env,
@@ -171,12 +205,11 @@ class HighLevelMount:
         if not wait_for_mountpoint(self.mountpoint):
             if self.proc.poll() is not None:
                 raise RuntimeError("loophole mount process exited early")
-            raise RuntimeError(f"ext4 mount did not appear at {self.mountpoint}")
+            raise RuntimeError(f"mount did not appear at {self.mountpoint}")
 
     def stop(self):
         if self.proc is None:
             return
-        # Send SIGINT which triggers the cleanup handler.
         self.proc.send_signal(signal.SIGINT)
         try:
             self.proc.wait(timeout=15)
@@ -184,8 +217,10 @@ class HighLevelMount:
             self.proc.send_signal(signal.SIGKILL)
             self.proc.wait(timeout=5)
         self.proc = None
-        # Clean up any leftover mounts.
-        run_quiet(f"umount {self.mountpoint}")
+        if IS_MACOS:
+            run_quiet(f"sudo umount {self.mountpoint}")
+        else:
+            run_quiet(f"umount {self.mountpoint}")
 
 
 def setup_s3():
@@ -196,23 +231,43 @@ def setup_s3():
 
 
 def store_format(store_id, block_size="4M", volume_size="1G"):
-    run(LOOPHOLE + ["store", "format", "--store", store_id,
-                     "--block-size", block_size, "--volume-size", volume_size])
+    run(
+        LOOPHOLE
+        + [
+            "store",
+            "format",
+            "--store",
+            store_id,
+            "--block-size",
+            block_size,
+            "--volume-size",
+            volume_size,
+        ]
+    )
 
 
 def high_level_format(store_id, block_size="4M", volume_size="1G"):
     """Create a store AND format ext4 on the volume (high-level command)."""
-    run(LOOPHOLE + ["format", "--store", store_id,
-                     "--block-size", block_size, "--volume-size", volume_size])
+    run(
+        LOOPHOLE
+        + [
+            "format",
+            "--store",
+            store_id,
+            "--block-size",
+            block_size,
+            "--volume-size",
+            volume_size,
+        ]
+    )
 
 
 def cleanup_mounts():
     """Clean up stale mounts and loop devices from previous test runs."""
+    umount = "sudo umount" if IS_MACOS else "umount"
     for path in [EXT4_MOUNT, FUSE_MOUNT, EXT4_VERIFY]:
-        run_quiet(f"umount {path}")
-    # Only detach all loop devices when not running in sharded mode,
-    # since losetup -D is global and would tear down other shards' devices.
-    if not SHARD:
+        run_quiet(f"{umount} {path}")
+    if IS_LINUX and not SHARD:
         run_quiet("losetup -D")
 
 
@@ -234,19 +289,15 @@ def write_test_files(ext4_mount=EXT4_MOUNT):
 def s3_object_size(store_id, block_idx):
     """Return the size of a block's S3 object, or None if missing.
     Returns 0 for tombstones, >0 for real data."""
-    prefix = s3cmd_prefix()
-    key = f"s3://{BUCKET}/stores/{store_id}/{block_idx:016x}"
-    result = subprocess.run(
-        f"{prefix} info {key}",
-        shell=True, capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.startswith("File size:"):
-            return int(line.split(":")[1].strip())
-    return None
+    client = _s3_client()
+    key = f"stores/{store_id}/{block_idx:016x}"
+    try:
+        resp = client.head_object(Bucket=BUCKET, Key=key)
+        return resp["ContentLength"]
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("404", "NoSuchKey"):
+            return None
+        raise
 
 
 def s3_object_exists(store_id, block_idx):

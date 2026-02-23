@@ -1,11 +1,11 @@
+use crate::ctl::{self, Ctl};
 use crate::metrics::timing;
-use crate::rpc;
 use crate::store::{BlockStorage, Store};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo, LockOwner,
-    OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr,
-    Request, WriteFlags,
+    OpenFlags, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
+    ReplyOpen, ReplyWrite, ReplyXattr, Request, WriteFlags,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,23 +15,25 @@ use tracing::{debug, warn};
 const TTL: Duration = Duration::from_secs(1);
 const ROOT_INO: u64 = 1;
 const FILE_INO: u64 = 2;
-const CTL_DIR_INO: u64 = 3;
-const RPC_INO: u64 = 4;
 
 pub struct Fs {
     store: Arc<Store>,
     rt: tokio::runtime::Handle,
-    /// Per-handle response buffer for RPC reads.
-    rpc_handles: DashMap<u64, Vec<u8>>,
+    ctl: Arc<Ctl<aws_sdk_s3::Client>>,
+    /// Tracks which file handles are for virtual ctl files (ino stored per fh).
+    ctl_fh: DashMap<u64, u64>,
     next_fh: AtomicU64,
 }
 
 impl Fs {
     pub fn new(store: Arc<Store>) -> Self {
+        let rt = tokio::runtime::Handle::current();
+        let ctl = Arc::new(Ctl::new(Arc::clone(&store)));
         Self {
             store,
-            rt: tokio::runtime::Handle::current(),
-            rpc_handles: DashMap::new(),
+            rt,
+            ctl,
+            ctl_fh: DashMap::new(),
             next_fh: AtomicU64::new(1),
         }
     }
@@ -84,17 +86,18 @@ impl Fs {
         }
     }
 
-    fn rpc_attr(&self) -> FileAttr {
+    fn ctl_file_attr(&self, ino: u64) -> FileAttr {
+        let size = self.ctl.file_size(ino).unwrap_or(0);
         FileAttr {
-            ino: INodeNo(RPC_INO),
-            size: 0,
-            blocks: 0,
+            ino: INodeNo(ino),
+            size,
+            blocks: size.div_ceil(512),
             atime: UNIX_EPOCH,
             mtime: UNIX_EPOCH,
             ctime: UNIX_EPOCH,
             crtime: UNIX_EPOCH,
             kind: FileType::RegularFile,
-            perm: 0o600,
+            perm: 0o644,
             nlink: 1,
             uid: self.uid(),
             gid: self.gid(),
@@ -113,22 +116,59 @@ impl Filesystem for Fs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &std::ffi::OsStr, reply: ReplyEntry) {
-        match (parent.0, name.to_str()) {
-            (ROOT_INO, Some("volume")) => reply.entry(&TTL, &self.file_attr(), Generation(0)),
-            (ROOT_INO, Some(".loophole")) => {
-                reply.entry(&TTL, &self.dir_attr(CTL_DIR_INO), Generation(0))
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(Errno::from_i32(libc::EINVAL));
+                return;
             }
-            (CTL_DIR_INO, Some("rpc")) => reply.entry(&TTL, &self.rpc_attr(), Generation(0)),
-            _ => reply.error(Errno::from_i32(libc::ENOENT)),
+        };
+
+        // Volume file
+        if parent.0 == ROOT_INO && name_str == "volume" {
+            reply.entry(&TTL, &self.file_attr(), Generation(0));
+            return;
         }
+
+        // .loophole from root
+        if parent.0 == ROOT_INO && name_str == ".loophole" {
+            reply.entry(&TTL, &self.dir_attr(ctl::CTL_DIR_INO), Generation(0));
+            return;
+        }
+
+        // ".." from .loophole → root
+        if parent.0 == ctl::CTL_DIR_INO && name_str == ".." {
+            reply.entry(&TTL, &self.dir_attr(ROOT_INO), Generation(0));
+            return;
+        }
+
+        // Delegate to ctl
+        if let Some(ino) = self.ctl.lookup(parent.0, name_str) {
+            if ino == ctl::CTL_DIR_INO
+                || ino == ctl::SNAPSHOTS_DIR_INO
+                || ino == ctl::CLONES_DIR_INO
+            {
+                reply.entry(&TTL, &self.dir_attr(ino), Generation(0));
+            } else {
+                reply.entry(&TTL, &self.ctl_file_attr(ino), Generation(0));
+            }
+            return;
+        }
+
+        reply.error(Errno::from_i32(libc::ENOENT));
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         match ino.0 {
             ROOT_INO => reply.attr(&TTL, &self.dir_attr(ROOT_INO)),
             FILE_INO => reply.attr(&TTL, &self.file_attr()),
-            CTL_DIR_INO => reply.attr(&TTL, &self.dir_attr(CTL_DIR_INO)),
-            RPC_INO => reply.attr(&TTL, &self.rpc_attr()),
+            i if i == ctl::CTL_DIR_INO
+                || i == ctl::SNAPSHOTS_DIR_INO
+                || i == ctl::CLONES_DIR_INO =>
+            {
+                reply.attr(&TTL, &self.dir_attr(i))
+            }
+            i if ctl::is_virtual_ino(i) => reply.attr(&TTL, &self.ctl_file_attr(i)),
             _ => reply.error(Errno::from_i32(libc::ENOENT)),
         }
     }
@@ -141,40 +181,105 @@ impl Filesystem for Fs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
-        let entries: &[(u64, FileType, &str)] = match ino.0 {
-            ROOT_INO => &[
+        if ino.0 == ROOT_INO {
+            let entries: &[(u64, FileType, &str)] = &[
                 (ROOT_INO, FileType::Directory, "."),
                 (ROOT_INO, FileType::Directory, ".."),
                 (FILE_INO, FileType::RegularFile, "volume"),
-                (CTL_DIR_INO, FileType::Directory, ".loophole"),
-            ],
-            CTL_DIR_INO => &[
-                (CTL_DIR_INO, FileType::Directory, "."),
-                (ROOT_INO, FileType::Directory, ".."),
-                (RPC_INO, FileType::RegularFile, "rpc"),
-            ],
-            _ => {
-                reply.error(Errno::from_i32(libc::ENOTDIR));
+                (ctl::CTL_DIR_INO, FileType::Directory, ".loophole"),
+            ];
+            for (i, &(entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
+                if reply.add(INodeNo(entry_ino), (i + 1) as u64, kind, name) {
+                    break;
+                }
+            }
+            reply.ok();
+            return;
+        }
+
+        if let Some(entries) = self.ctl.readdir(ino.0) {
+            let mut all: Vec<(u64, FileType, String)> = vec![
+                (ino.0, FileType::Directory, ".".into()),
+                (
+                    if ino.0 == ctl::CTL_DIR_INO {
+                        ROOT_INO
+                    } else {
+                        ctl::CTL_DIR_INO
+                    },
+                    FileType::Directory,
+                    "..".into(),
+                ),
+            ];
+            for e in entries {
+                let kind = if e.is_dir {
+                    FileType::Directory
+                } else {
+                    FileType::RegularFile
+                };
+                all.push((e.ino, kind, e.name));
+            }
+            for (i, (entry_ino, kind, name)) in all.iter().enumerate().skip(offset as usize) {
+                if reply.add(INodeNo(*entry_ino), (i + 1) as u64, *kind, name) {
+                    break;
+                }
+            }
+            reply.ok();
+            return;
+        }
+
+        reply.error(Errno::from_i32(libc::ENOTDIR));
+    }
+
+    fn create(
+        &self,
+        _req: &Request,
+        parent: INodeNo,
+        name: &std::ffi::OsStr,
+        _mode: u32,
+        _umask: u32,
+        _flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(Errno::from_i32(libc::EINVAL));
                 return;
             }
         };
 
-        for (i, &(entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
-            if reply.add(INodeNo(entry_ino), (i + 1) as u64, kind, name) {
-                break;
+        // Flush store before snapshot/clone
+        if parent.0 == ctl::SNAPSHOTS_DIR_INO || parent.0 == ctl::CLONES_DIR_INO {
+            if let Err(e) = self.rt.block_on(self.store.flush()) {
+                warn!(error = %e, "flush failed before ctl create");
+                reply.error(Errno::from_i32(libc::EIO));
+                return;
             }
+            match self.rt.block_on(self.ctl.create(parent.0, name_str)) {
+                Some(Ok((ino, _))) => {
+                    reply.created(
+                        &TTL,
+                        &self.ctl_file_attr(ino),
+                        Generation(0),
+                        FileHandle(0),
+                        FopenFlags::empty(),
+                    );
+                }
+                Some(Err(_)) => reply.error(Errno::from_i32(libc::EEXIST)),
+                None => reply.error(Errno::from_i32(libc::EACCES)),
+            }
+            return;
         }
 
-        reply.ok();
+        reply.error(Errno::from_i32(libc::EACCES));
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        if ino.0 == RPC_INO {
+        if ctl::is_virtual_ino(ino.0) {
             let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-            self.rpc_handles.insert(fh, Vec::new());
+            self.ctl_fh.insert(fh, ino.0);
             reply.opened(FileHandle(fh), FopenFlags::FOPEN_DIRECT_IO);
         } else {
-            // Default open for volume file — let fuser handle it.
             reply.opened(FileHandle(0), FopenFlags::empty());
         }
     }
@@ -182,16 +287,14 @@ impl Filesystem for Fs {
     fn release(
         &self,
         _req: &Request,
-        ino: INodeNo,
+        _ino: INodeNo,
         fh: FileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
-        reply: fuser::ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
-        if ino.0 == RPC_INO {
-            self.rpc_handles.remove(&fh.0);
-        }
+        self.ctl_fh.remove(&fh.0);
         reply.ok();
     }
 
@@ -199,22 +302,16 @@ impl Filesystem for Fs {
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FileHandle,
         offset: u64,
         size: u32,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        if ino.0 == RPC_INO {
-            let data = self
-                .rpc_handles
-                .get(&fh.0)
-                .map(|v| v.clone())
-                .unwrap_or_default();
-            let start = (offset as usize).min(data.len());
-            let end = (start + size as usize).min(data.len());
-            reply.data(&data[start..end]);
+        // Virtual ctl file read
+        if let Some((data, _eof)) = self.ctl.read(ino.0, offset, size) {
+            reply.data(&data);
             return;
         }
 
@@ -269,7 +366,7 @@ impl Filesystem for Fs {
         ino: INodeNo,
         _fh: FileHandle,
         _datasync: bool,
-        reply: fuser::ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
         let _timing = timing!("fuse.fsync");
         if ino.0 == FILE_INO {
@@ -291,7 +388,7 @@ impl Filesystem for Fs {
         ino: INodeNo,
         _fh: FileHandle,
         _lock_owner: LockOwner,
-        reply: fuser::ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
         let _timing = timing!("fuse.flush");
         if ino.0 == FILE_INO {
@@ -311,7 +408,7 @@ impl Filesystem for Fs {
         &self,
         _req: &Request,
         ino: INodeNo,
-        fh: FileHandle,
+        _fh: FileHandle,
         offset: u64,
         data: &[u8],
         _write_flags: WriteFlags,
@@ -319,13 +416,8 @@ impl Filesystem for Fs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        if ino.0 == RPC_INO {
-            let _timing = timing!("fuse.rpc");
-            debug!(len = data.len(), "rpc write");
-            let resp = self.rt.block_on(rpc::dispatch(&self.store, data));
-            if let Some(mut entry) = self.rpc_handles.get_mut(&fh.0) {
-                *entry = resp;
-            }
+        // Writes to virtual ctl files are no-ops (create triggers the operation).
+        if ctl::is_virtual_ino(ino.0) {
             reply.written(data.len() as u32);
             return;
         }
@@ -391,7 +483,6 @@ impl Filesystem for Fs {
         _size: u32,
         reply: ReplyXattr,
     ) {
-        // ext4 on FUSE queries security.capability — return ENODATA to suppress warnings.
         reply.error(Errno::from_i32(libc::ENODATA));
     }
 
@@ -403,10 +494,9 @@ impl Filesystem for Fs {
         offset: u64,
         length: u64,
         mode: i32,
-        reply: fuser::ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
         let _timing = timing!("fuse.fallocate");
-        // Only handle PUNCH_HOLE | KEEP_SIZE (mode == 3).
         const FALLOC_FL_KEEP_SIZE: i32 = 1;
         const FALLOC_FL_PUNCH_HOLE: i32 = 2;
         if mode != (FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE) {
@@ -431,7 +521,6 @@ impl Filesystem for Fs {
 
         debug!(offset, length, end, "fallocate punch hole");
 
-        // Compute block range.
         let first_block = offset / block_size;
         let last_block = (end - 1) / block_size;
 
@@ -442,14 +531,12 @@ impl Filesystem for Fs {
             let punch_end = end.min(block_end) - block_start;
 
             if punch_start == 0 && punch_end == block_size {
-                // Full block — use zero_block optimization.
                 if let Err(e) = self.rt.block_on(self.store.zero_block(block_idx)) {
                     warn!(block = block_idx, error = %e, "zero_block failed");
                     reply.error(Errno::from_i32(libc::EIO));
                     return;
                 }
             } else {
-                // Partial block — atomic read-modify-write under block lock.
                 let len = punch_end - punch_start;
                 if let Err(e) = self
                     .rt
