@@ -95,10 +95,18 @@ def wait_for_s3():
 
 def ensure_bucket():
     client = _s3_client()
-    try:
-        client.head_bucket(Bucket=BUCKET)
-    except ClientError:
-        client.create_bucket(Bucket=BUCKET)
+    for _ in range(30):
+        try:
+            client.head_bucket(Bucket=BUCKET)
+            return
+        except ClientError:
+            pass
+        try:
+            client.create_bucket(Bucket=BUCKET)
+            return
+        except Exception:
+            time.sleep(1)
+    sys.exit(f"Could not create/verify bucket {BUCKET} after 30s")
 
 
 def wait_for_mountpoint(path, timeout=15, expect_file=None):

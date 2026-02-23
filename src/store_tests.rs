@@ -693,7 +693,7 @@ async fn write_uses_streaming_put_file_upload() {
     let n = fuse_write(&store, 0, b"HELLO").await.unwrap();
     assert_eq!(n, 5);
 
-    wait_for(Duration::from_secs(2), || s3.put_file_calls() >= 1).await;
+    store.flush().await.unwrap();
     assert!(s3.put_file_calls() >= 1);
 
     let key = format!("stores/{sid}/0000000000000000");

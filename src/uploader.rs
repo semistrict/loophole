@@ -1,256 +1,297 @@
 use crate::cache;
 use crate::s3::{S3Access, block_key, upload_block};
 use crate::store::Store;
-use dashmap::{DashMap, DashSet};
 use metrics::{counter, gauge};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{OwnedSemaphorePermit, mpsc, watch};
-use tokio::task::JoinSet;
-use tracing::{debug, warn};
+use tokio::sync::watch;
+use tracing::{debug, info, warn};
 
-/// Maximum number of upload retry attempts before giving up on a block.
-const MAX_UPLOAD_RETRIES: u32 = 5;
+use anyhow::Context;
 
+/// Default interval between upload cycles when no explicit flush is requested.
+const DEFAULT_UPLOAD_INTERVAL_SECS: u64 = 30;
+
+/// A work item prepared under lock, executed without locks in the S3 phase.
+enum UploadWork {
+    /// Upload block data from this temp file.
+    Data {
+        block_idx: u64,
+        temp_path: tempfile::TempPath,
+    },
+    /// Write a zero-byte tombstone to S3 (ancestor has this block).
+    Tombstone { block_idx: u64 },
+    /// Delete from S3 (no ancestor, but we uploaded it previously).
+    Delete { block_idx: u64 },
+}
+
+/// Run one upload cycle: atomically drain writes, snapshot all dirty blocks
+/// and zero ops, execute S3 work, then handle any pending snapshot/clone request.
+/// Returns Ok((generation, completed_count)) on success. The generation is the
+/// maximum generation this cycle can claim to satisfy (captured under write lock).
+/// Failed blocks remain dirty in SQLite for the next cycle.
+async fn upload_cycle<S: S3Access>(store: &Arc<Store<S>>) -> anyhow::Result<(u64, usize)> {
+    let _timing = crate::metrics::timing!("upload.cycle");
+
+    // 1. Atomically drain writes + collect dirty blocks + acquire block locks.
+    //    This replaces the old manual list_dirty_blocks + lock acquisition.
+    let dirty_set = store.acquire_dirty_blocks().await?;
+    let cycle_generation = dirty_set.generation;
+
+    if dirty_set.dirty_blocks.is_empty() && dirty_set.zero_block_indices.is_empty() {
+        // No dirty work, but still check for snapshot requests.
+        drop(dirty_set);
+        store.execute_snapshot_request().await?;
+        return Ok((cycle_generation, 0));
+    }
+
+    info!(
+        dirty = dirty_set.dirty_blocks.len(),
+        zero_ops = dirty_set.zero_block_indices.len(),
+        "upload cycle starting"
+    );
+
+    // 2. Under locks: decide what to do for each block, prepare work items.
+    //    Release each lock as soon as the decision is made and data is copied.
+    let mut work_items: Vec<UploadWork> = Vec::with_capacity(dirty_set.guards.len());
+    for (block_idx, _guard) in dirty_set.guards {
+        let is_zero = store.zero_blocks.contains(&block_idx);
+
+        if is_zero {
+            // Zero op takes priority — even if the block is also dirty,
+            // the zero supersedes it.
+            let ancestor_has_block = store
+                .ancestors
+                .iter()
+                .any(|(_, idx)| idx.contains(&block_idx));
+            if ancestor_has_block {
+                work_items.push(UploadWork::Tombstone { block_idx });
+            } else if store.local_index.contains(&block_idx) {
+                work_items.push(UploadWork::Delete { block_idx });
+            }
+            // else: no ancestor, not in S3 — nothing to do, will clean up below
+        } else {
+            // Regular dirty block — copy data to temp file.
+            let src = cache::get().block_path(&store.id, block_idx);
+            if !src.exists() {
+                let _ = cache::get().clear_dirty(&store.id, block_idx).await;
+                continue;
+            }
+
+            let temp = tempfile::NamedTempFile::new_in(cache::get().cache_dir())
+                .context("creating upload temp file")?;
+            let temp_path = temp.into_temp_path();
+            std::fs::copy(&src, &temp_path)
+                .with_context(|| format!("copying block {} for upload", block_idx))?;
+
+            cache::get().begin_upload(&store.id, block_idx).await?;
+            work_items.push(UploadWork::Data {
+                block_idx,
+                temp_path,
+            });
+        }
+        // Lock released here (guard dropped) — writes can resume on this block.
+    }
+
+    // 3. Execute all S3 operations concurrently. No locks held.
+    let mut join_set = tokio::task::JoinSet::new();
+    let semaphore = Arc::clone(&store.upload_slots);
+
+    for item in work_items {
+        let permit = semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("semaphore closed");
+        let store = Arc::clone(store);
+
+        join_set.spawn(async move {
+            let _permit = permit;
+            match item {
+                UploadWork::Data {
+                    block_idx,
+                    temp_path,
+                } => {
+                    let key = block_key(&store.prefix, &store.id, block_idx);
+                    debug!(block = block_idx, %key, "uploading block to S3");
+
+                    let upload_bytes = std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0);
+                    let result = upload_block(&store.s3, &store.bucket, &key, &temp_path).await;
+                    // temp_path dropped here (or on early return) — auto-deletes the file.
+
+                    match result {
+                        Ok(()) => {
+                            counter!("upload.success").increment(1);
+                            counter!("upload.bytes").increment(upload_bytes);
+                            let _ = cache::get().clear_uploading(&store.id, block_idx).await;
+                            store.local_index.insert(block_idx);
+                            Ok(block_idx)
+                        }
+                        Err(e) => {
+                            counter!("upload.failure").increment(1);
+                            let _ = cache::get().clear_uploading(&store.id, block_idx).await;
+                            let _ = cache::get().mark_dirty(&store.id, block_idx).await;
+                            warn!(block = block_idx, error = %e, "upload failed");
+                            Err(e)
+                        }
+                    }
+                }
+                UploadWork::Tombstone { block_idx } => {
+                    let key = block_key(&store.prefix, &store.id, block_idx);
+                    debug!(block = block_idx, %key, "writing zero tombstone to S3");
+                    counter!("upload.zero_block.total").increment(1);
+
+                    match store.s3.put_bytes(&store.bucket, &key, Vec::new()).await {
+                        Ok(()) => {
+                            store.local_index.insert(block_idx);
+                            finish_zero_op(&store, block_idx).await;
+                            Ok(block_idx)
+                        }
+                        Err(e) => {
+                            warn!(block = block_idx, error = %e, "tombstone put failed");
+                            Err(e)
+                        }
+                    }
+                }
+                UploadWork::Delete { block_idx } => {
+                    let key = block_key(&store.prefix, &store.id, block_idx);
+                    debug!(block = block_idx, %key, "deleting zero block from S3");
+                    counter!("upload.zero_block.total").increment(1);
+
+                    match store.s3.delete_object(&store.bucket, &key).await {
+                        Ok(()) => {
+                            store.local_index.remove(&block_idx);
+                            finish_zero_op(&store, block_idx).await;
+                            Ok(block_idx)
+                        }
+                        Err(e) => {
+                            warn!(block = block_idx, error = %e, "zero block delete failed");
+                            Err(e)
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // 4. Collect results.
+    let mut completed = 0usize;
+    let mut failed = 0usize;
+    let mut first_error: Option<anyhow::Error> = None;
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok(Ok(_)) => completed += 1,
+            Ok(Err(e)) => {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                warn!(error = %e, "upload task panicked");
+                if first_error.is_none() {
+                    first_error = Some(anyhow::anyhow!("upload task panicked: {e}"));
+                }
+            }
+        }
+    }
+
+    gauge!("store.pending_uploads").set(
+        cache::get()
+            .list_dirty_blocks(&store.id)
+            .await
+            .map(|v| v.len())
+            .unwrap_or(0) as f64,
+    );
+
+    if let Some(e) = first_error {
+        anyhow::bail!("upload cycle: {completed} succeeded, {failed} failed — first error: {e}");
+    }
+
+    // 5. After successful uploads, execute any pending snapshot/clone request.
+    store.execute_snapshot_request().await?;
+
+    Ok((cycle_generation, completed))
+}
+
+/// Clean up after a successful zero-block S3 operation.
+/// Only applies if the block is still in zero_blocks (no concurrent write overwrote it).
+async fn finish_zero_op<S: S3Access>(store: &Arc<Store<S>>, block_idx: u64) {
+    let still_zero = store.zero_blocks.contains(&block_idx);
+    if still_zero {
+        let _ = cache::get().clear_dirty(&store.id, block_idx).await;
+        let _ = cache::get().clear_uploading(&store.id, block_idx).await;
+        let _ = cache::get().complete_zero_op(&store.id, block_idx).await;
+    } else {
+        // Block was written while zero op was in flight — discard.
+        let _ = cache::get().clear_zero_op(&store.id, block_idx).await;
+    }
+}
+
+/// Spawn the upload loop. Returns a JoinHandle.
+///
+/// The loop waits for either:
+/// - `requested_generation > completed_generation` (flush requested)
+/// - interval timer fires and there are dirty blocks
+///
+/// Runs exactly one cycle per wake-up. No retries — failed blocks stay dirty
+/// for the next cycle. On failure, the error is sent via `completed_generation`
+/// so flush() callers see it.
 pub fn spawn<S: S3Access + 'static>(
-    store: Weak<Store<S>>,
-    mut rx: mpsc::Receiver<u64>,
+    store: Arc<Store<S>>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) -> tokio::task::JoinHandle<()> {
+    let interval_secs = std::env::var("LOOPHOLE_UPLOAD_INTERVAL")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_UPLOAD_INTERVAL_SECS);
+
     tokio::spawn(async move {
-        let retry_counts: Arc<DashMap<u64, u32>> = Arc::new(DashMap::new());
-        let inflight: Arc<DashSet<u64>> = Arc::new(DashSet::new());
-        let mut workers: JoinSet<()> = JoinSet::new();
-        let mut shutting_down = false;
+        let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
+            // Wait for: flush request, interval tick, or shutdown.
             tokio::select! {
-                changed = shutdown_rx.changed(), if !shutting_down => {
+                _ = store.flush_notify.notified() => {}
+                _ = interval.tick() => {}
+                changed = shutdown_rx.changed() => {
                     if changed.is_ok() && *shutdown_rx.borrow() {
-                        shutting_down = true;
-                        rx.close();
-                    }
-                }
-                maybe_idx = rx.recv(), if !shutting_down => {
-                    match maybe_idx {
-                        Some(block_idx) => {
-                            let Some(store) = store.upgrade() else {
-                                shutting_down = true;
-                                rx.close();
-                                continue;
-                            };
-
-                            // If the block was zeroed, handle the S3 tombstone/delete here
-                            // instead of doing a normal upload. Zero-block ops are cheap
-                            // (single small PUT or DELETE), so run them inline without
-                            // consuming an upload slot.
-                            if store.zero_blocks.contains(&block_idx) {
-                                handle_zero_block(&store, block_idx, &retry_counts).await;
-                                continue;
+                        // Final upload cycle before shutdown — always report result.
+                        match upload_cycle(&store).await {
+                            Ok((cycle_gen, _)) => {
+                                store.completed_generation.send_modify(|v| {
+                                    *v = (cycle_gen.max(v.0), None);
+                                });
                             }
-
-                            // Skip if this block already has an upload task in flight.
-                            if !inflight.insert(block_idx) {
-                                continue;
+                            Err(e) => {
+                                store.completed_generation.send_modify(|v| {
+                                    v.1 = Some(e.to_string());
+                                });
                             }
-
-                            // Acquire upload slot BEFORE copying so the number of .uploading
-                            // files on disk is bounded by max_uploads.
-                            let permit = store
-                                .upload_slots
-                                .clone()
-                                .acquire_owned()
-                                .await
-                                .expect("semaphore closed");
-
-                            let store = Arc::clone(&store);
-                            let retry_counts = Arc::clone(&retry_counts);
-                            let inflight = Arc::clone(&inflight);
-
-                            workers.spawn(async move {
-                                let requeue_delay =
-                                    upload_one_block(&store, block_idx, permit, &retry_counts).await;
-                                inflight.remove(&block_idx);
-                                if let Some(delay) = requeue_delay {
-                                    if !delay.is_zero() {
-                                        tokio::time::sleep(delay).await;
-                                    }
-                                    let _ = store.upload_tx.send(block_idx).await;
-                                }
-                            });
                         }
-                        None => {
-                            shutting_down = true;
-                        }
+                        break;
                     }
-                }
-                joined = workers.join_next(), if !workers.is_empty() => {
-                    if let Some(Err(e)) = joined {
-                        warn!(error = %e, "uploader worker task join error");
-                    }
-                }
-                else => {
-                    break;
                 }
             }
 
-            if shutting_down && workers.is_empty() {
-                break;
+            // Run exactly one cycle.
+            match upload_cycle(&store).await {
+                Ok((cycle_gen, _)) => {
+                    store.completed_generation.send_modify(|v| {
+                        *v = (cycle_gen.max(v.0), None);
+                    });
+                }
+                Err(e) => {
+                    // Keep the generation unchanged; store the error so that
+                    // any flush() already waiting at this generation sees it.
+                    store.completed_generation.send_modify(|v| {
+                        v.1 = Some(e.to_string());
+                    });
+                }
             }
         }
     })
-}
-
-async fn handle_zero_block<S: S3Access>(
-    store: &Store<S>,
-    block_idx: u64,
-    retry_counts: &DashMap<u64, u32>,
-) {
-    counter!("upload.zero_block.total").increment(1);
-    let key = block_key(&store.prefix, &store.id, block_idx);
-    let ancestor_has_block = store
-        .ancestors
-        .iter()
-        .any(|(_, idx)| idx.contains(&block_idx));
-    let result = if ancestor_has_block {
-        store.s3.put_bytes(&store.bucket, &key, Vec::new()).await
-    } else if store.local_index.contains(&block_idx) {
-        store.s3.delete_object(&store.bucket, &key).await
-    } else {
-        Ok(())
-    };
-    match result {
-        Ok(()) => {
-            if ancestor_has_block {
-                store.local_index.insert(block_idx);
-            } else {
-                store.local_index.remove(&block_idx);
-            }
-            let _ = cache::get().clear_uploading(&store.id, block_idx).await;
-            let _ = cache::get().clear_dirty(&store.id, block_idx).await;
-            // If state changed while the zero op was in flight, this zero result
-            // is stale. Keep the block pending and run another upload cycle.
-            let still_zero = store.zero_blocks.contains(&block_idx);
-            if still_zero {
-                store.pending_uploads.remove(&block_idx);
-                let _ = cache::get().complete_zero_op(&store.id, block_idx).await;
-                retry_counts.remove(&block_idx);
-                store.upload_epoch.send_modify(|v| *v += 1);
-            } else {
-                let _ = cache::get().clear_zero_op(&store.id, block_idx).await;
-                store.pending_uploads.insert(block_idx);
-                retry_counts.remove(&block_idx);
-                let _ = store.upload_tx.send(block_idx).await;
-            }
-        }
-        Err(e) => {
-            warn!(block = block_idx, error = %e, "zero-block S3 op failed, will retry");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            let _ = store.upload_tx.send(block_idx).await;
-        }
-    }
-}
-
-async fn upload_one_block<S: S3Access>(
-    store: &Store<S>,
-    block_idx: u64,
-    _permit: OwnedSemaphorePermit,
-    retry_counts: &DashMap<u64, u32>,
-) -> Option<Duration> {
-    let _timing = crate::metrics::timing!("upload");
-    let lock = store.block_locks.lock(block_idx);
-
-    // Copy to .uploading while holding the block lock so eviction
-    // cannot remove the data file during the copy.
-    let uploading_path = {
-        let _guard = lock.lock().await;
-        match cache::get()
-            .prepare_upload(&store.id, block_idx, store.state.block_size)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(block = block_idx, error = %e, "prepare_upload failed");
-                let _ = cache::get().mark_dirty(&store.id, block_idx).await;
-                store.pending_uploads.insert(block_idx);
-                return Some(Duration::from_secs(1));
-            }
-        }
-    };
-    // Block lock released — pwrite can now proceed on this block.
-
-    let key = block_key(&store.prefix, &store.id, block_idx);
-    debug!(block = block_idx, %key, "uploading block to S3");
-
-    let upload_bytes = std::fs::metadata(&uploading_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-    match upload_block(&store.s3, &store.bucket, &key, &uploading_path).await {
-        Ok(()) => {
-            counter!("upload.success").increment(1);
-            counter!("upload.bytes").increment(upload_bytes);
-            let _ = cache::get().clear_uploading(&store.id, block_idx).await;
-            let _ = tokio::fs::remove_file(&uploading_path).await;
-            store.local_index.insert(block_idx);
-            retry_counts.remove(&block_idx);
-
-            let dirty = cache::get()
-                .is_dirty(&store.id, block_idx)
-                .await
-                .unwrap_or(true);
-            if store.zero_blocks.contains(&block_idx) || dirty {
-                // Newer data (or a newer zero) landed while this upload was in
-                // flight; keep pending and enqueue another pass.
-                store.pending_uploads.insert(block_idx);
-                debug!(
-                    block = block_idx,
-                    "upload complete but block changed; requeued"
-                );
-                Some(Duration::ZERO)
-            } else {
-                store.pending_uploads.remove(&block_idx);
-                gauge!("store.pending_uploads").set(store.pending_uploads.len() as f64);
-                store.upload_epoch.send_modify(|v| *v += 1);
-                debug!(block = block_idx, "upload complete");
-                None
-            }
-        }
-        Err(e) => {
-            counter!("upload.failure").increment(1);
-            let _ = cache::get().clear_uploading(&store.id, block_idx).await;
-            let _ = tokio::fs::remove_file(&uploading_path).await;
-            store.pending_uploads.insert(block_idx);
-            let _ = cache::get().mark_dirty(&store.id, block_idx).await;
-            let count = {
-                let mut entry = retry_counts.entry(block_idx).or_insert(0);
-                *entry += 1;
-                *entry
-            };
-            if count >= MAX_UPLOAD_RETRIES {
-                tracing::error!(
-                    block = block_idx,
-                    retries = count,
-                    error = %e,
-                    "upload exhausted retries, resetting retry counter"
-                );
-                counter!("upload.exhausted_retries").increment(1);
-                // Reset counter so retries start fresh, but do NOT
-                // remove from pending_uploads — flush() must keep
-                // waiting until the block actually lands in S3.
-                retry_counts.remove(&block_idx);
-                Some(Duration::from_secs(1))
-            } else {
-                counter!("upload.retry").increment(1);
-                let delay = Duration::from_secs(1 << (count - 1).min(5));
-                warn!(
-                    block = block_idx,
-                    retry = count,
-                    delay_secs = delay.as_secs(),
-                    error = %e,
-                    "upload failed, will retry"
-                );
-                Some(delay)
-            }
-        }
-    }
 }

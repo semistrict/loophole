@@ -4,8 +4,6 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use std::path::Path;
 use std::time::Duration;
 
-pub const CHUNK_SIZE: u64 = 16 * 1024;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ZeroOpKind {
     Tombstone = 0,
@@ -32,12 +30,6 @@ pub struct PendingZeroOp {
 pub struct RecoveryWork {
     pub dirty_blocks: Vec<u64>,
     pub pending_zero_ops: Vec<PendingZeroOp>,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct BlockRef {
-    pub block_id: i64,
-    pub downloaded_thru: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -115,25 +107,21 @@ impl CacheRepo {
         Ok(row.volume_id)
     }
 
-    pub async fn list_blocks_for_lru(&self, volume_id: i64) -> Result<Vec<(u64, u64)>> {
+    pub async fn list_blocks_for_lru(&self, volume_id: i64) -> Result<Vec<u64>> {
         let rows = sqlx::query!(
-            r#"SELECT block_idx as "block_idx!: i64", size as "size!: i64"
+            r#"SELECT block_idx as "block_idx!: i64"
                FROM blocks WHERE volume_id=? ORDER BY block_idx"#,
             volume_id
         )
         .fetch_all(&self.pool)
         .await?;
-        let out = rows
-            .into_iter()
-            .map(|r| (r.block_idx as u64, r.size.max(0) as u64))
-            .collect();
-        Ok(out)
+        Ok(rows.into_iter().map(|r| r.block_idx as u64).collect())
     }
 
-    pub async fn lookup_block(&self, volume_id: i64, block_idx: u64) -> Result<Option<BlockRef>> {
+    pub async fn lookup_block(&self, volume_id: i64, block_idx: u64) -> Result<Option<i64>> {
         let block_idx_i64 = block_idx as i64;
         let row = sqlx::query!(
-            r#"SELECT block_id as "block_id!: i64", downloaded_thru as "downloaded_thru: i64"
+            r#"SELECT block_id as "block_id!: i64"
                FROM blocks
                WHERE volume_id=? AND block_idx=?"#,
             volume_id,
@@ -141,48 +129,32 @@ impl CacheRepo {
         )
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(|r| BlockRef {
-            block_id: r.block_id,
-            downloaded_thru: r.downloaded_thru,
-        }))
+        Ok(row.map(|r| r.block_id))
     }
 
     pub async fn has_block(&self, volume_id: i64, block_idx: u64) -> Result<bool> {
         Ok(self.lookup_block(volume_id, block_idx).await?.is_some())
     }
 
-    pub async fn read_chunks_in_range(
-        &self,
-        block_id: i64,
-        first_chunk: u64,
-        last_chunk: u64,
-    ) -> Result<Vec<(u64, Vec<u8>)>> {
-        let first_chunk_i64 = first_chunk as i64;
-        let last_chunk_i64 = last_chunk as i64;
-        let rows = sqlx::query!(
-            r#"SELECT chunk_idx as "chunk_idx!: i64", data as "data!: Vec<u8>"
-               FROM chunks
-               WHERE block_id=? AND chunk_idx BETWEEN ? AND ?
-               ORDER BY chunk_idx"#,
-            block_id,
-            first_chunk_i64,
-            last_chunk_i64
+    pub async fn is_populated(&self, volume_id: i64, block_idx: u64) -> Result<bool> {
+        let block_idx_i64 = block_idx as i64;
+        let row = sqlx::query!(
+            r#"SELECT populated as "populated!: bool"
+               FROM blocks
+               WHERE volume_id=? AND block_idx=?"#,
+            volume_id,
+            block_idx_i64
         )
-        .fetch_all(&self.pool)
-        .await
-        .context("querying chunks for read")?;
-        let out = rows
-            .into_iter()
-            .map(|r| (r.chunk_idx as u64, r.data))
-            .collect();
-        Ok(out)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.populated).unwrap_or(false))
     }
 
     pub async fn ensure_block_row(&self, volume_id: i64, block_idx: u64) -> Result<i64> {
         let block_idx_i64 = block_idx as i64;
         sqlx::query!(
-            "INSERT OR IGNORE INTO blocks(volume_id, block_idx, size, downloaded_thru, dirty_at, uploading_at)
-             VALUES(?, ?, 0, NULL, NULL, NULL)",
+            "INSERT OR IGNORE INTO blocks(volume_id, block_idx, populated, dirty_at, uploading_at)
+             VALUES(?, ?, FALSE, NULL, NULL)",
             volume_id,
             block_idx_i64
         )
@@ -199,108 +171,12 @@ impl CacheRepo {
         Ok(row.block_id)
     }
 
-    pub async fn load_chunk(&self, block_id: i64, chunk_idx: u64) -> Result<Option<Vec<u8>>> {
-        let chunk_idx_i64 = chunk_idx as i64;
-        let row = sqlx::query!(
-            r#"SELECT data as "data!: Vec<u8>" FROM chunks WHERE block_id=? AND chunk_idx=?"#,
-            block_id,
-            chunk_idx_i64
-        )
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|r| r.data))
-    }
-
-    pub async fn upsert_chunk(&self, block_id: i64, chunk_idx: u64, data: &[u8]) -> Result<()> {
-        let chunk_idx_i64 = chunk_idx as i64;
+    pub async fn mark_populated(&self, volume_id: i64, block_idx: u64) -> Result<()> {
+        let block_idx_i64 = block_idx as i64;
         sqlx::query!(
-            "INSERT OR REPLACE INTO chunks(block_id, chunk_idx, data) VALUES(?, ?, ?)",
-            block_id,
-            chunk_idx_i64,
-            data
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_chunk(&self, block_id: i64, chunk_idx: u64) -> Result<()> {
-        let chunk_idx_i64 = chunk_idx as i64;
-        sqlx::query!(
-            "DELETE FROM chunks WHERE block_id=? AND chunk_idx=?",
-            block_id,
-            chunk_idx_i64
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_chunks_after(&self, block_id: i64, chunk_idx: u64) -> Result<()> {
-        let chunk_idx_i64 = chunk_idx as i64;
-        sqlx::query!(
-            "DELETE FROM chunks WHERE block_id=? AND chunk_idx>?",
-            block_id,
-            chunk_idx_i64
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn delete_all_chunks(&self, block_id: i64) -> Result<()> {
-        sqlx::query!("DELETE FROM chunks WHERE block_id=?", block_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn chunk_count(&self, block_id: i64) -> Result<u64> {
-        let row = sqlx::query!(
-            r#"SELECT COUNT(*) as "count!: i64" FROM chunks WHERE block_id=?"#,
-            block_id
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(row.count as u64)
-    }
-
-    pub async fn set_block_size_and_downloaded(
-        &self,
-        block_id: i64,
-        size: u64,
-        downloaded_thru: Option<i64>,
-    ) -> Result<()> {
-        let size_i64 = size as i64;
-        sqlx::query!(
-            "UPDATE blocks SET size=?, downloaded_thru=? WHERE block_id=?",
-            size_i64,
-            downloaded_thru,
-            block_id
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn reset_stream_download_state(&self, block_id: i64) -> Result<()> {
-        sqlx::query!(
-            "UPDATE blocks
-             SET downloaded_thru=-1, dirty_at=NULL, uploading_at=NULL, size=0
-             WHERE block_id=?",
-            block_id
-        )
-        .execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-
-    pub async fn set_downloaded_thru(&self, block_id: i64, chunk_idx: u64) -> Result<()> {
-        let chunk_idx_i64 = chunk_idx as i64;
-        sqlx::query!(
-            "UPDATE blocks SET downloaded_thru=? WHERE block_id=?",
-            chunk_idx_i64,
-            block_id
+            "UPDATE blocks SET populated=TRUE WHERE volume_id=? AND block_idx=?",
+            volume_id,
+            block_idx_i64
         )
         .execute(&self.pool)
         .await?;
@@ -370,48 +246,41 @@ impl CacheRepo {
         Ok(row.and_then(|r| r.dirty_at).is_some())
     }
 
-    pub async fn begin_upload(&self, volume_id: i64, block_idx: u64) -> Result<i64> {
-        let block = self
-            .lookup_block(volume_id, block_idx)
-            .await?
-            .ok_or_else(|| {
-                anyhow::anyhow!("prepare_upload for missing block {volume_id}/{block_idx}")
-            })?;
+    pub async fn begin_upload(&self, volume_id: i64, block_idx: u64) -> Result<()> {
+        let block_idx_i64 = block_idx as i64;
         sqlx::query!(
-            "UPDATE blocks SET dirty_at=NULL, uploading_at=unixepoch() WHERE block_id=?",
-            block.block_id
+            "UPDATE blocks SET dirty_at=NULL, uploading_at=unixepoch() WHERE volume_id=? AND block_idx=?",
+            volume_id,
+            block_idx_i64
         )
         .execute(&self.pool)
         .await?;
-        Ok(block.block_id)
+        Ok(())
     }
 
-    pub async fn read_all_chunks(&self, block_id: i64) -> Result<Vec<(u64, Vec<u8>)>> {
+    pub async fn list_dirty_blocks(&self, volume_id: i64) -> Result<Vec<u64>> {
         let rows = sqlx::query!(
-            r#"SELECT chunk_idx as "chunk_idx!: i64", data as "data!: Vec<u8>"
-               FROM chunks WHERE block_id=? ORDER BY chunk_idx"#,
-            block_id
+            r#"SELECT block_idx as "block_idx!: i64"
+               FROM blocks WHERE volume_id=? AND dirty_at IS NOT NULL
+               ORDER BY block_idx"#,
+            volume_id
         )
         .fetch_all(&self.pool)
         .await?;
-        let out = rows
-            .into_iter()
-            .map(|r| (r.chunk_idx as u64, r.data))
-            .collect();
-        Ok(out)
+        Ok(rows.into_iter().map(|r| r.block_idx as u64).collect())
     }
 
     pub async fn remove_block(&self, volume_id: i64, block_idx: u64) -> Result<bool> {
-        let Some(block) = self.lookup_block(volume_id, block_idx).await? else {
-            return Ok(false);
-        };
-        sqlx::query!("DELETE FROM chunks WHERE block_id=?", block.block_id)
-            .execute(&self.pool)
-            .await?;
-        sqlx::query!("DELETE FROM blocks WHERE block_id=?", block.block_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(true)
+        let block_idx_i64 = block_idx as i64;
+        let rows = sqlx::query!(
+            "DELETE FROM blocks WHERE volume_id=? AND block_idx=?",
+            volume_id,
+            block_idx_i64
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(rows > 0)
     }
 
     pub async fn queue_zero_op(
@@ -450,23 +319,16 @@ impl CacheRepo {
     }
 
     pub async fn recover(&self, volume_id: i64) -> Result<RecoveryWork> {
+        // Delete block rows that were mid-download (not yet populated).
+        // The associated files are cleaned up by the cache layer.
         sqlx::query!(
-            "DELETE FROM chunks
-             WHERE block_id IN (
-               SELECT block_id
-               FROM blocks
-               WHERE volume_id=? AND downloaded_thru IS NOT NULL
-             )",
+            "DELETE FROM blocks WHERE volume_id=? AND populated=FALSE AND dirty_at IS NULL AND uploading_at IS NULL",
             volume_id
         )
         .execute(&self.pool)
         .await?;
-        sqlx::query!(
-            "DELETE FROM blocks WHERE volume_id=? AND downloaded_thru IS NOT NULL",
-            volume_id
-        )
-        .execute(&self.pool)
-        .await?;
+
+        // Move uploading → dirty for retry.
         sqlx::query!(
             "UPDATE blocks
              SET dirty_at=COALESCE(dirty_at, unixepoch()), uploading_at=NULL
@@ -531,9 +393,6 @@ impl CacheRepo {
     }
 
     pub async fn delete_block_by_id(&self, block_id: i64) -> Result<()> {
-        sqlx::query!("DELETE FROM chunks WHERE block_id=?", block_id)
-            .execute(&self.pool)
-            .await?;
         sqlx::query!("DELETE FROM blocks WHERE block_id=?", block_id)
             .execute(&self.pool)
             .await?;
@@ -541,6 +400,11 @@ impl CacheRepo {
     }
 
     async fn create_schema(&self) -> Result<()> {
+        // Drop legacy chunks table from older schema versions.
+        sqlx::query!("DROP TABLE IF EXISTS chunks")
+            .execute(&self.pool)
+            .await?;
+
         sqlx::query!(
             "CREATE TABLE IF NOT EXISTS volumes (
                 volume_id        INTEGER PRIMARY KEY,
@@ -551,27 +415,28 @@ impl CacheRepo {
         .execute(&self.pool)
         .await?;
 
+        // Check if blocks table exists with old schema (has 'size' or 'downloaded_thru' columns).
+        let has_old_schema = sqlx::query_scalar::<_, i32>(
+            "SELECT COUNT(*) FROM pragma_table_info('blocks') WHERE name='downloaded_thru'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        if has_old_schema > 0 {
+            sqlx::query!("DROP TABLE blocks")
+                .execute(&self.pool)
+                .await?;
+        }
+
         sqlx::query!(
             "CREATE TABLE IF NOT EXISTS blocks (
                 block_id        INTEGER PRIMARY KEY,
                 volume_id       INTEGER NOT NULL REFERENCES volumes(volume_id),
                 block_idx       INTEGER NOT NULL,
-                size            INTEGER NOT NULL DEFAULT 0,
-                downloaded_thru INTEGER,
+                populated       BOOLEAN NOT NULL DEFAULT FALSE,
                 dirty_at        INTEGER,
                 uploading_at    INTEGER,
                 UNIQUE (volume_id, block_idx)
-            )"
-        )
-        .execute(&self.pool)
-        .await?;
-
-        sqlx::query!(
-            "CREATE TABLE IF NOT EXISTS chunks (
-                block_id  INTEGER NOT NULL REFERENCES blocks(block_id),
-                chunk_idx INTEGER NOT NULL,
-                data      BLOB    NOT NULL,
-                PRIMARY KEY (block_id, chunk_idx)
             )"
         )
         .execute(&self.pool)

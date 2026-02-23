@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["kernel", "lwext4"]
-kernel = ["fuse"]
+default = ["block-fuse", "ext4-fuse"]
+block-fuse = ["dep:fuser"]
+ext4-fuse = ["dep:fuser", "lwext4"]
 lwext4 = ["dep:ext4-lwext4"]
-fuse = ["dep:fuser"]
-no-fuse = []
 nfs = ["dep:nfsserve", "lwext4"]
 
 [[bin]]

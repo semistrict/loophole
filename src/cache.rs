@@ -1,35 +1,35 @@
-use crate::cache_repo::{BlockRef, CacheRepo, EvictionBlockRef};
-pub use crate::cache_repo::{CHUNK_SIZE, RecoveryWork, ZeroOpKind};
+use crate::cache_repo::{CacheRepo, EvictionBlockRef};
+pub use crate::cache_repo::{RecoveryWork, ZeroOpKind};
 use anyhow::{Context, Result};
 use lru::LruCache;
 use metrics::{counter, gauge};
 use std::num::NonZeroUsize;
+use std::os::unix::fs::FileExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
 use crate::store::BlockLockMap;
 
-static UPLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Clone)]
 struct LruEntry {
     locker: Arc<BlockLockMap>,
-    size: u64,
 }
 
-pub struct SqliteCache {
+pub struct DiskCache {
     dir: PathBuf,
     repo: CacheRepo,
     volume_ids: dashmap::DashMap<String, i64>,
+    /// Maps (volume_id, block_idx) → LRU entry. Size tracking uses block_size.
     lru: Mutex<LruCache<(i64, u64), LruEntry>>,
     used_bytes: AtomicU64,
     max_bytes: u64,
+    block_size: AtomicU64,
 }
 
-static GLOBAL: OnceLock<SqliteCache> = OnceLock::new();
+static GLOBAL: OnceLock<DiskCache> = OnceLock::new();
 
 pub async fn init(dir: PathBuf, max_bytes: u64) -> Result<()> {
     std::fs::create_dir_all(&dir)
@@ -39,13 +39,14 @@ pub async fn init(dir: PathBuf, max_bytes: u64) -> Result<()> {
         .with_context(|| format!("canonicalizing {}", dir.display()))?;
     let db_path = dir.join("cache.db");
     let repo = CacheRepo::open(&db_path).await?;
-    let cache = SqliteCache {
+    let cache = DiskCache {
         dir,
         repo,
         volume_ids: dashmap::DashMap::new(),
         lru: Mutex::new(LruCache::new(NonZeroUsize::new(1_000_000).unwrap())),
         used_bytes: AtomicU64::new(0),
         max_bytes,
+        block_size: AtomicU64::new(0),
     };
     gauge!("cache.max_bytes").set(max_bytes as f64);
 
@@ -53,21 +54,44 @@ pub async fn init(dir: PathBuf, max_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-pub fn get() -> &'static SqliteCache {
+pub fn get() -> &'static DiskCache {
     GLOBAL
         .get()
-        .expect("SqliteCache not initialized; call cache::init first")
+        .expect("DiskCache not initialized; call cache::init first")
 }
 
-impl SqliteCache {
+impl DiskCache {
+    /// Returns the path for a block data file.
+    pub fn block_path(&self, store_id: &str, block_idx: u64) -> PathBuf {
+        self.dir.join(store_id).join(format!("{block_idx:016x}"))
+    }
+
+    /// Returns the cache root directory (for temp file creation).
+    pub fn cache_dir(&self) -> &std::path::Path {
+        &self.dir
+    }
+
     pub async fn init_store(
         &self,
         store_id: &str,
         parent_store_id: Option<&str>,
+        block_size: u64,
         locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.repo.init_store(store_id, parent_store_id).await?;
         self.volume_ids.insert(store_id.to_string(), volume_id);
+
+        // Store the block_size so LRU can use it.
+        let prev = self.block_size.load(Ordering::Relaxed);
+        if prev == 0 && block_size > 0 {
+            self.block_size.store(block_size, Ordering::Relaxed);
+        }
+
+        // Ensure store subdirectory exists for block files.
+        let store_dir = self.dir.join(store_id);
+        std::fs::create_dir_all(&store_dir)
+            .with_context(|| format!("creating cache store dir {}", store_dir.display()))?;
+
         self.populate_lru_from_db(volume_id, locker).await
     }
 
@@ -84,55 +108,33 @@ impl SqliteCache {
 
         let r = async {
             let volume_id = self.volume_id(store_id).await?;
-            let Some(BlockRef {
-                block_id,
-                downloaded_thru,
-            }) = self.repo.lookup_block(volume_id, block_idx).await?
-            else {
+
+            // Check if block row exists and is populated.
+            if !self.repo.is_populated(volume_id, block_idx).await? {
                 counter!("cache.miss").increment(1);
                 return Ok(None);
+            }
+
+            let path = self.block_path(store_id, block_idx);
+            let file = match std::fs::File::open(&path) {
+                Ok(f) => f,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    counter!("cache.miss").increment(1);
+                    return Ok(None);
+                }
+                Err(e) => return Err(e).context("opening block file for read"),
             };
 
-            let first_chunk = offset_within_block / CHUNK_SIZE;
-            let last_chunk = (offset_within_block + len as u64 - 1) / CHUNK_SIZE;
-            if let Some(limit) = downloaded_thru
-                && last_chunk > limit as u64
-            {
-                counter!("cache.miss").increment(1);
-                return Ok(None);
-            }
-
-            let chunks = self
-                .repo
-                .read_chunks_in_range(block_id, first_chunk, last_chunk)
-                .await?;
-
-            let mut out = vec![0u8; len];
-            for (chunk_idx, data) in chunks {
-                let chunk_start = chunk_idx * CHUNK_SIZE;
-                let req_start = offset_within_block;
-                let req_end = offset_within_block + len as u64;
-                let chunk_end = chunk_start + CHUNK_SIZE;
-                let copy_start = req_start.max(chunk_start);
-                let copy_end = req_end.min(chunk_end);
-                if copy_start >= copy_end {
-                    continue;
-                }
-
-                let src_off = (copy_start - chunk_start) as usize;
-                let dst_off = (copy_start - req_start) as usize;
-                let copy_len = (copy_end - copy_start) as usize;
-                if src_off >= data.len() {
-                    continue;
-                }
-                let src_end = (src_off + copy_len).min(data.len());
-                let actual = src_end - src_off;
-                out[dst_off..dst_off + actual].copy_from_slice(&data[src_off..src_end]);
-            }
+            let mut buf = vec![0u8; len];
+            let n = file
+                .read_at(&mut buf, offset_within_block)
+                .context("pread block file")?;
+            // If file is shorter than requested, the tail stays as zeros.
+            let _ = n;
 
             counter!("cache.hit").increment(1);
             self.lru_promote(volume_id, block_idx);
-            Ok(Some(out))
+            Ok(Some(buf))
         };
 
         match r.await {
@@ -152,44 +154,26 @@ impl SqliteCache {
     ) -> Result<()> {
         counter!("cache.pwrite.total").increment(1);
         let volume_id = self.volume_id(store_id).await?;
-        let block_id = self.repo.ensure_block_row(volume_id, block_idx).await?;
+        let _ = self.repo.ensure_block_row(volume_id, block_idx).await?;
 
-        let start_chunk = offset_within_block / CHUNK_SIZE;
-        let end_chunk = (offset_within_block + data.len() as u64 - 1) / CHUNK_SIZE;
+        let path = self.block_path(store_id, block_idx);
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening block file for pwrite {}", path.display()))?;
 
-        for chunk_idx in start_chunk..=end_chunk {
-            let mut chunk = self
-                .repo
-                .load_chunk(block_id, chunk_idx)
-                .await?
-                .unwrap_or_else(|| vec![0u8; CHUNK_SIZE as usize]);
-            if chunk.len() < CHUNK_SIZE as usize {
-                chunk.resize(CHUNK_SIZE as usize, 0);
-            }
+        file.write_at(data, offset_within_block)
+            .context("pwrite block file")?;
+        file.sync_data().context("fdatasync block file")?;
 
-            let chunk_start = chunk_idx * CHUNK_SIZE;
-            let write_start = offset_within_block.max(chunk_start);
-            let write_end = (offset_within_block + data.len() as u64).min(chunk_start + CHUNK_SIZE);
-            let src_start = (write_start - offset_within_block) as usize;
-            let dst_start = (write_start - chunk_start) as usize;
-            let write_len = (write_end - write_start) as usize;
-            chunk[dst_start..dst_start + write_len]
-                .copy_from_slice(&data[src_start..src_start + write_len]);
+        // Mark populated since we have data on disk now.
+        self.repo.mark_populated(volume_id, block_idx).await?;
 
-            if chunk.iter().all(|b| *b == 0) {
-                self.repo.delete_chunk(block_id, chunk_idx).await?;
-            } else {
-                self.repo.upsert_chunk(block_id, chunk_idx, &chunk).await?;
-            }
-        }
-
-        let chunk_count = self.repo.chunk_count(block_id).await?;
-        let size = chunk_count * CHUNK_SIZE;
-        self.repo
-            .set_block_size_and_downloaded(block_id, size, None)
-            .await?;
-
-        self.lru_insert(volume_id, block_idx, locker, size);
+        let bs = self.block_size.load(Ordering::Relaxed);
+        self.lru_insert(volume_id, block_idx, locker, bs);
         gauge!("cache.used_bytes").set(self.used_bytes.load(Ordering::Relaxed) as f64);
         Ok(())
     }
@@ -202,55 +186,35 @@ impl SqliteCache {
         mut reader: impl AsyncRead + Unpin,
     ) -> Result<u64> {
         let volume_id = self.volume_id(store_id).await?;
-        let block_id = self.repo.ensure_block_row(volume_id, block_idx).await?;
-        self.repo.delete_all_chunks(block_id).await?;
-        self.repo.reset_stream_download_state(block_id).await?;
+        let _ = self.repo.ensure_block_row(volume_id, block_idx).await?;
+
+        let path = self.block_path(store_id, block_idx);
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .with_context(|| format!("creating block file {}", path.display()))?;
 
         let mut total = 0u64;
-        let mut chunk_idx = 0u64;
-        let mut cached_bytes = 0u64;
-        let mut read_buf = vec![0u8; CHUNK_SIZE as usize];
-        let mut pending = Vec::with_capacity(CHUNK_SIZE as usize * 2);
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
-            let n = reader
-                .read(&mut read_buf)
-                .await
-                .context("reading stream chunk")?;
+            let n = reader.read(&mut buf).await.context("reading stream")?;
             if n == 0 {
                 break;
             }
             total += n as u64;
-            pending.extend_from_slice(&read_buf[..n]);
-
-            while pending.len() >= CHUNK_SIZE as usize {
-                let chunk = &pending[..CHUNK_SIZE as usize];
-                if chunk.iter().any(|b| *b != 0) {
-                    self.repo.upsert_chunk(block_id, chunk_idx, chunk).await?;
-                    cached_bytes += CHUNK_SIZE;
-                }
-                self.repo.set_downloaded_thru(block_id, chunk_idx).await?;
-                chunk_idx += 1;
-                pending.drain(..CHUNK_SIZE as usize);
-            }
+            tokio::io::AsyncWriteExt::write_all(&mut file, &buf[..n])
+                .await
+                .context("writing block file")?;
         }
 
-        if !pending.is_empty() {
-            if pending.iter().any(|b| *b != 0) {
-                self.repo
-                    .upsert_chunk(block_id, chunk_idx, &pending)
-                    .await?;
-                cached_bytes += pending.len() as u64;
-            }
-            self.repo.set_downloaded_thru(block_id, chunk_idx).await?;
-        }
+        tokio::io::AsyncWriteExt::flush(&mut file).await?;
+        file.sync_data().await?;
 
-        self.repo
-            .set_block_size_and_downloaded(block_id, cached_bytes, None)
-            .await?;
+        self.repo.mark_populated(volume_id, block_idx).await?;
 
         counter!("cache.insert.total").increment(1);
         counter!("cache.insert.bytes").increment(total);
-        self.lru_insert(volume_id, block_idx, locker, cached_bytes);
+        let bs = self.block_size.load(Ordering::Relaxed);
+        self.lru_insert(volume_id, block_idx, locker, bs);
         self.evict_if_needed().await?;
         Ok(total)
     }
@@ -259,12 +223,25 @@ impl SqliteCache {
         &self,
         store_id: &str,
         block_idx: u64,
-        _block_size: u64,
+        block_size: u64,
         locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.volume_id(store_id).await?;
         let _ = self.repo.ensure_block_row(volume_id, block_idx).await?;
-        self.lru_insert(volume_id, block_idx, locker, 0);
+
+        // Create the file with block_size length (sparse).
+        let path = self.block_path(store_id, block_idx);
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .with_context(|| format!("creating sparse block {}", path.display()))?;
+        file.set_len(block_size)
+            .context("setting sparse block length")?;
+
+        self.repo.mark_populated(volume_id, block_idx).await?;
+        self.lru_insert(volume_id, block_idx, locker, block_size);
         self.evict_if_needed().await
     }
 
@@ -276,37 +253,17 @@ impl SqliteCache {
         locker: Arc<BlockLockMap>,
     ) -> Result<()> {
         let volume_id = self.volume_id(store_id).await?;
-        let Some(block) = self.repo.lookup_block(volume_id, block_idx).await? else {
+        if !self.repo.has_block(volume_id, block_idx).await? {
             return Ok(());
-        };
-        let block_id = block.block_id;
-
-        if new_len == 0 {
-            self.repo.delete_all_chunks(block_id).await?;
-        } else {
-            let full_chunks = new_len / CHUNK_SIZE;
-            let rem = new_len % CHUNK_SIZE;
-            self.repo.delete_chunks_after(block_id, full_chunks).await?;
-            if rem == 0 {
-                self.repo.delete_chunk(block_id, full_chunks).await?;
-            } else if let Some(mut last) = self.repo.load_chunk(block_id, full_chunks).await?
-                && last.len() > rem as usize
-            {
-                last.truncate(rem as usize);
-                if last.iter().all(|b| *b == 0) {
-                    self.repo.delete_chunk(block_id, full_chunks).await?;
-                } else {
-                    self.repo.upsert_chunk(block_id, full_chunks, &last).await?;
-                }
-            }
         }
 
-        let chunk_count = self.repo.chunk_count(block_id).await?;
-        let size = chunk_count * CHUNK_SIZE;
-        self.repo
-            .set_block_size_and_downloaded(block_id, size, block.downloaded_thru)
-            .await?;
-        self.lru_insert(volume_id, block_idx, locker, size);
+        let path = self.block_path(store_id, block_idx);
+        if let Ok(file) = std::fs::OpenOptions::new().write(true).open(&path) {
+            file.set_len(new_len).context("truncating block file")?;
+        }
+
+        let bs = self.block_size.load(Ordering::Relaxed);
+        self.lru_insert(volume_id, block_idx, locker, bs);
         Ok(())
     }
 
@@ -318,63 +275,6 @@ impl SqliteCache {
     pub async fn try_mark_dirty(&self, store_id: &str, block_idx: u64) -> Result<bool> {
         let volume_id = self.volume_id(store_id).await?;
         self.repo.try_mark_dirty(volume_id, block_idx).await
-    }
-
-    pub async fn prepare_upload(
-        &self,
-        store_id: &str,
-        block_idx: u64,
-        block_size: u64,
-    ) -> Result<PathBuf> {
-        let volume_id = self.volume_id(store_id).await?;
-        let block_id = self.repo.begin_upload(volume_id, block_idx).await?;
-
-        let path = self.dir.join(format!(
-            "upload-{store_id}-{block_idx:016x}-{}.bin",
-            UPLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        let mut f = tokio::fs::File::create(&path)
-            .await
-            .with_context(|| format!("creating upload temp file {}", path.display()))?;
-
-        let chunks = self.repo.read_all_chunks(block_id).await?;
-        let total_chunks = if block_size == 0 {
-            0
-        } else {
-            (block_size - 1) / CHUNK_SIZE + 1
-        };
-        let zero_chunk = vec![0u8; CHUNK_SIZE as usize];
-        let mut expected_idx = 0u64;
-
-        for (chunk_idx, data) in chunks {
-            while expected_idx < chunk_idx && expected_idx < total_chunks {
-                let n = chunk_write_len(block_size, expected_idx) as usize;
-                f.write_all(&zero_chunk[..n]).await?;
-                expected_idx += 1;
-            }
-            if expected_idx >= total_chunks {
-                break;
-            }
-            let n = chunk_write_len(block_size, expected_idx) as usize;
-            let used = n.min(data.len());
-            if used > 0 {
-                f.write_all(&data[..used]).await?;
-            }
-            if n > used {
-                f.write_all(&zero_chunk[..n - used]).await?;
-            }
-            expected_idx += 1;
-        }
-
-        while expected_idx < total_chunks {
-            let n = chunk_write_len(block_size, expected_idx) as usize;
-            f.write_all(&zero_chunk[..n]).await?;
-            expected_idx += 1;
-        }
-
-        f.flush().await?;
-        f.sync_data().await?;
-        Ok(path)
     }
 
     pub async fn mark_dirty(&self, store_id: &str, block_idx: u64) -> Result<()> {
@@ -392,6 +292,16 @@ impl SqliteCache {
         self.repo.clear_uploading(volume_id, block_idx).await
     }
 
+    pub async fn begin_upload(&self, store_id: &str, block_idx: u64) -> Result<()> {
+        let volume_id = self.volume_id(store_id).await?;
+        self.repo.begin_upload(volume_id, block_idx).await
+    }
+
+    pub async fn list_dirty_blocks(&self, store_id: &str) -> Result<Vec<u64>> {
+        let volume_id = self.volume_id(store_id).await?;
+        self.repo.list_dirty_blocks(volume_id).await
+    }
+
     pub async fn is_dirty(&self, store_id: &str, block_idx: u64) -> Result<bool> {
         let volume_id = self.volume_id(store_id).await?;
         self.repo.is_dirty(volume_id, block_idx).await
@@ -400,6 +310,9 @@ impl SqliteCache {
     pub async fn remove_block(&self, store_id: &str, block_idx: u64) -> Result<()> {
         let volume_id = self.volume_id(store_id).await?;
         if self.repo.remove_block(volume_id, block_idx).await? {
+            // Delete the block file.
+            let path = self.block_path(store_id, block_idx);
+            let _ = std::fs::remove_file(&path);
             self.lru_remove(volume_id, block_idx);
         }
         Ok(())
@@ -444,6 +357,7 @@ impl SqliteCache {
             lru.iter().rev().map(|(k, v)| (*k, v.clone())).collect()
         };
 
+        let bs = self.block_size.load(Ordering::Relaxed);
         for ((volume_id, block_idx), entry) in candidates {
             if self.used_bytes.load(Ordering::Relaxed) <= target {
                 break;
@@ -469,9 +383,22 @@ impl SqliteCache {
                 continue;
             }
 
+            // Find the store_id for this volume to delete the file.
+            // We need to iterate volume_ids to find which store matches.
+            let store_id_opt: Option<String> = self
+                .volume_ids
+                .iter()
+                .find(|e| *e.value() == volume_id)
+                .map(|e| e.key().clone());
+
             self.repo.delete_block_by_id(block_id).await?;
+            if let Some(sid) = store_id_opt {
+                let path = self.block_path(&sid, block_idx);
+                let _ = std::fs::remove_file(&path);
+            }
+
             counter!("cache.evict.total").increment(1);
-            counter!("cache.evict.bytes").increment(entry.size);
+            counter!("cache.evict.bytes").increment(bs);
             self.lru_remove(volume_id, block_idx);
             gauge!("cache.used_bytes").set(self.used_bytes.load(Ordering::Relaxed) as f64);
             debug!(volume_id, block = block_idx, "evicted cache block");
@@ -480,8 +407,9 @@ impl SqliteCache {
     }
 
     async fn populate_lru_from_db(&self, volume_id: i64, locker: Arc<BlockLockMap>) -> Result<()> {
-        for (block_idx, size) in self.repo.list_blocks_for_lru(volume_id).await? {
-            self.lru_insert(volume_id, block_idx, Arc::clone(&locker), size);
+        let bs = self.block_size.load(Ordering::Relaxed);
+        for block_idx in self.repo.list_blocks_for_lru(volume_id).await? {
+            self.lru_insert(volume_id, block_idx, Arc::clone(&locker), bs);
         }
         Ok(())
     }
@@ -501,34 +429,24 @@ impl SqliteCache {
 
     fn lru_insert(&self, volume_id: i64, block_idx: u64, locker: Arc<BlockLockMap>, size: u64) {
         let mut lru = self.lru.lock().unwrap();
-        match lru.put((volume_id, block_idx), LruEntry { locker, size }) {
-            None => {
-                self.used_bytes.fetch_add(size, Ordering::Relaxed);
-            }
-            Some(old) if old.size != size => {
-                if size > old.size {
-                    self.used_bytes
-                        .fetch_add(size - old.size, Ordering::Relaxed);
-                } else {
-                    self.used_bytes
-                        .fetch_sub(old.size - size, Ordering::Relaxed);
-                }
-            }
-            Some(_) => {}
+        if lru
+            .put((volume_id, block_idx), LruEntry { locker })
+            .is_none()
+        {
+            self.used_bytes.fetch_add(size, Ordering::Relaxed);
         }
     }
 
     fn lru_remove(&self, volume_id: i64, block_idx: u64) {
-        if let Some(entry) = self.lru.lock().unwrap().pop(&(volume_id, block_idx)) {
-            self.used_bytes.fetch_sub(entry.size, Ordering::Relaxed);
+        let bs = self.block_size.load(Ordering::Relaxed);
+        if self
+            .lru
+            .lock()
+            .unwrap()
+            .pop(&(volume_id, block_idx))
+            .is_some()
+        {
+            self.used_bytes.fetch_sub(bs, Ordering::Relaxed);
         }
     }
-}
-
-fn chunk_write_len(block_size: u64, chunk_idx: u64) -> u64 {
-    let start = chunk_idx * CHUNK_SIZE;
-    if start >= block_size {
-        return 0;
-    }
-    (block_size - start).min(CHUNK_SIZE)
 }

@@ -1,13 +1,13 @@
 use clap::{Parser, Subcommand};
-#[cfg(all(feature = "kernel", feature = "fuse"))]
+#[cfg(feature = "block-fuse")]
 use loophole::fs;
-#[cfg(all(feature = "lwext4", feature = "fuse"))]
+#[cfg(feature = "ext4-fuse")]
 use loophole::fs_ext4;
 use loophole::{assert, cache, metrics, store};
 #[cfg(feature = "lwext4")]
 use loophole::{blockdev_adapter, lwext4_api};
 use std::path::PathBuf;
-#[cfg(all(feature = "lwext4", feature = "fuse"))]
+#[cfg(feature = "ext4-fuse")]
 use std::sync::Arc;
 use tracing::info;
 
@@ -191,24 +191,28 @@ fn parse_size(s: &str) -> Result<u64, String> {
 
 #[derive(Clone, Copy, Debug)]
 enum HighLevelMode {
-    Kernel,
+    Fuse,
     Lwext4,
     Nfs,
 }
 
 fn high_level_mode() -> anyhow::Result<HighLevelMode> {
-    const HAS_KERNEL: bool = cfg!(all(feature = "kernel", feature = "fuse"));
-    const HAS_LWEXT4_FUSE: bool = cfg!(all(feature = "lwext4", feature = "fuse"));
+    const HAS_FUSE: bool = cfg!(feature = "block-fuse");
+    const HAS_LWEXT4_FUSE: bool = cfg!(feature = "ext4-fuse");
     const HAS_NFS: bool = cfg!(feature = "nfs");
 
     let requested = std::env::var("LOOPHOLE_MODE").ok();
     if let Some(mode) = requested.as_deref() {
         return match mode {
-            "kernel" if HAS_KERNEL => Ok(HighLevelMode::Kernel),
+            "fuse" if HAS_FUSE => Ok(HighLevelMode::Fuse),
+            "kernel" if HAS_FUSE => {
+                tracing::warn!("LOOPHOLE_MODE=kernel is deprecated, use LOOPHOLE_MODE=fuse");
+                Ok(HighLevelMode::Fuse)
+            }
             "lwext4" | "lwext4-fuse" if HAS_LWEXT4_FUSE => Ok(HighLevelMode::Lwext4),
             "nfs" if HAS_NFS => Ok(HighLevelMode::Nfs),
-            "kernel" => {
-                anyhow::bail!("LOOPHOLE_MODE=kernel requested but kernel mode is not compiled in")
+            "fuse" | "kernel" => {
+                anyhow::bail!("LOOPHOLE_MODE={mode} requested but fuse mode is not compiled in")
             }
             "lwext4" | "lwext4-fuse" => {
                 anyhow::bail!(
@@ -219,33 +223,33 @@ fn high_level_mode() -> anyhow::Result<HighLevelMode> {
                 anyhow::bail!("LOOPHOLE_MODE=nfs requested but nfs feature is not compiled in")
             }
             other => anyhow::bail!(
-                "unknown LOOPHOLE_MODE={other:?}; expected one of: kernel, lwext4, lwext4-fuse, nfs"
+                "unknown LOOPHOLE_MODE={other:?}; expected one of: fuse, lwext4, lwext4-fuse, nfs"
             ),
         };
     }
 
-    // Auto-detect: on macOS prefer NFS (no FUSE needed), otherwise kernel > lwext4
+    // Auto-detect: on macOS prefer NFS (no FUSE needed), otherwise fuse > lwext4
     if cfg!(target_os = "macos") && HAS_NFS {
         return Ok(HighLevelMode::Nfs);
     }
 
     anyhow::ensure!(
-        HAS_KERNEL || HAS_LWEXT4_FUSE || HAS_NFS,
-        "no high-level mount mode compiled (enable kernel, lwext4+fuse, or nfs)"
+        HAS_FUSE || HAS_LWEXT4_FUSE || HAS_NFS,
+        "no high-level mount mode compiled (enable fuse-mode, lwext4+fuse, or nfs)"
     );
 
-    if HAS_KERNEL && HAS_LWEXT4_FUSE {
+    if HAS_FUSE && HAS_LWEXT4_FUSE {
         if cfg!(target_os = "macos") {
             Ok(HighLevelMode::Lwext4)
         } else {
-            Ok(HighLevelMode::Kernel)
+            Ok(HighLevelMode::Fuse)
         }
     } else if HAS_LWEXT4_FUSE {
         Ok(HighLevelMode::Lwext4)
     } else if HAS_NFS {
         Ok(HighLevelMode::Nfs)
     } else {
-        Ok(HighLevelMode::Kernel)
+        Ok(HighLevelMode::Fuse)
     }
 }
 
@@ -479,7 +483,7 @@ async fn main() -> anyhow::Result<()> {
                 allow_other,
                 mountpoint,
             } => {
-                #[cfg(all(feature = "kernel", feature = "fuse"))]
+                #[cfg(feature = "block-fuse")]
                 {
                     let client = s3_client(cli.endpoint_url.as_deref()).await;
                     cache::init(cache_dir.clone(), cache_size).await?;
@@ -513,7 +517,7 @@ async fn main() -> anyhow::Result<()> {
                     })
                     .await?;
                 }
-                #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                #[cfg(not(feature = "block-fuse"))]
                 {
                     let _ = (
                         store_id,
@@ -524,7 +528,7 @@ async fn main() -> anyhow::Result<()> {
                         allow_other,
                         mountpoint,
                     );
-                    anyhow::bail!("store mount requires the kernel+fuse feature set");
+                    anyhow::bail!("store mount requires the block-fuse feature");
                 }
             }
         },
@@ -538,8 +542,8 @@ async fn main() -> anyhow::Result<()> {
             volume_size,
         } => {
             match high_level_mode()? {
-                HighLevelMode::Kernel => {
-                    #[cfg(all(feature = "kernel", feature = "fuse"))]
+                HighLevelMode::Fuse => {
+                    #[cfg(feature = "block-fuse")]
                     {
                         let client = s3_client(cli.endpoint_url.as_deref()).await;
 
@@ -602,9 +606,9 @@ async fn main() -> anyhow::Result<()> {
                         let volume_path = fuse_path.join("volume");
                         anyhow::ensure!(volume_path.exists(), "FUSE volume file not found");
 
-                        // Create loop device.
+                        // Create loop device with direct I/O to bypass kernel page cache.
                         let output = std::process::Command::new("losetup")
-                            .args(["--find", "--show"])
+                            .args(["--find", "--show", "--direct-io=on"])
                             .arg(&volume_path)
                             .output()
                             .context("running losetup")?;
@@ -646,9 +650,9 @@ async fn main() -> anyhow::Result<()> {
 
                         info!(store = %store_id, "format complete — store has empty ext4 filesystem");
                     }
-                    #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                    #[cfg(not(feature = "block-fuse"))]
                     {
-                        anyhow::bail!("kernel mode is not compiled in");
+                        anyhow::bail!("fuse mode is not compiled in");
                     }
                 }
                 HighLevelMode::Lwext4 | HighLevelMode::Nfs => {
@@ -697,8 +701,8 @@ async fn main() -> anyhow::Result<()> {
             mountpoint,
         } => {
             match high_level_mode()? {
-                HighLevelMode::Kernel => {
-                    #[cfg(all(feature = "kernel", feature = "fuse"))]
+                HighLevelMode::Fuse => {
+                    #[cfg(feature = "block-fuse")]
                     {
                         let client = s3_client(cli.endpoint_url.as_deref()).await;
                         cache::init(cache_dir.clone(), cache_size).await?;
@@ -765,9 +769,9 @@ async fn main() -> anyhow::Result<()> {
 
                         let volume_path = fuse_path.join("volume");
 
-                        // 2. Create loop device.
+                        // 2. Create loop device with direct I/O to bypass kernel page cache.
                         let output = std::process::Command::new("losetup")
-                            .args(["--find", "--show"])
+                            .args(["--find", "--show", "--direct-io=on"])
                             .arg(&volume_path)
                             .output()
                             .context("running losetup")?;
@@ -819,13 +823,13 @@ async fn main() -> anyhow::Result<()> {
                         // Keep fuse_dir alive until after FUSE exits so the tempdir isn't removed early.
                         drop(fuse_dir);
                     }
-                    #[cfg(not(all(feature = "kernel", feature = "fuse")))]
+                    #[cfg(not(feature = "block-fuse"))]
                     {
-                        anyhow::bail!("kernel mode is not compiled in");
+                        anyhow::bail!("fuse mode is not compiled in");
                     }
                 }
                 HighLevelMode::Lwext4 => {
-                    #[cfg(all(feature = "lwext4", feature = "fuse"))]
+                    #[cfg(feature = "ext4-fuse")]
                     {
                         let client = s3_client(cli.endpoint_url.as_deref()).await;
                         cache::init(cache_dir.clone(), cache_size).await?;
@@ -862,7 +866,7 @@ async fn main() -> anyhow::Result<()> {
                         })
                         .await?;
                     }
-                    #[cfg(not(all(feature = "lwext4", feature = "fuse")))]
+                    #[cfg(not(feature = "ext4-fuse"))]
                     {
                         anyhow::bail!("lwext4 mode is not compiled in");
                     }
@@ -978,7 +982,7 @@ async fn main() -> anyhow::Result<()> {
             mountpoint,
             new_store,
         } => match high_level_mode()? {
-            HighLevelMode::Kernel => {
+            HighLevelMode::Fuse => {
                 sync_stack(&mountpoint)?;
                 let fuse_mount = find_fuse_mount(&mountpoint)?;
                 info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");
@@ -991,7 +995,7 @@ async fn main() -> anyhow::Result<()> {
         },
 
         Command::Clone { mountpoint, clone } => match high_level_mode()? {
-            HighLevelMode::Kernel => {
+            HighLevelMode::Fuse => {
                 sync_stack(&mountpoint)?;
                 let fuse_mount = find_fuse_mount(&mountpoint)?;
                 info!(fuse_mount = %fuse_mount.display(), "found FUSE mount");

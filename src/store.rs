@@ -6,13 +6,13 @@ use anyhow::{Context, Result};
 use aws_sdk_s3::Client;
 use dashmap::DashSet;
 use metrics::{counter, gauge};
-use std::collections::HashSet;
+
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
-use tokio::sync::{Mutex, RwLock, Semaphore, mpsc, watch};
+use tokio::sync::{Mutex, Notify, RwLock, Semaphore, oneshot, watch};
 use tracing::{debug, info, instrument, warn};
 
 /// Per-block striped lock shared between the Store and the cache for eviction safety.
@@ -31,6 +31,37 @@ impl BlockLockMap {
     pub(crate) fn lock(&self, block_idx: u64) -> &Mutex<()> {
         &self.stripes[(block_idx as usize) % self.stripes.len()]
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dirty block set — returned by acquire_dirty_blocks(), holds block lock guards
+// ---------------------------------------------------------------------------
+
+pub(crate) struct DirtyBlockSet<'a> {
+    pub dirty_blocks: Vec<u64>,
+    pub zero_block_indices: Vec<u64>,
+    /// Block lock guards — held until caller drops this struct.
+    /// Sorted by block index (deadlock-free).
+    pub guards: Vec<(u64, tokio::sync::MutexGuard<'a, ()>)>,
+    /// The requested_generation observed while write_lock was held.
+    /// This is the maximum generation this cycle can claim to satisfy.
+    pub generation: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot/clone request — submitted to the uploader for execution
+// ---------------------------------------------------------------------------
+
+pub(crate) enum SnapshotRequest {
+    Snapshot {
+        new_store_id: String,
+        tx: oneshot::Sender<Result<()>>,
+    },
+    Clone {
+        continuation_id: String,
+        clone_id: String,
+        tx: oneshot::Sender<Result<()>>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -100,8 +131,6 @@ pub struct Store<S: S3Access = Client> {
     pub state: State,
 
     /// S3-existence index for this store's own prefix.
-    /// Updated after each successful S3 upload so evicted cache files can be
-    /// re-fetched from S3 rather than mistakenly treated as all-zeros.
     pub(crate) local_index: DashSet<u64>,
     /// Ancestor stores from direct parent to root, each with their S3 index.
     pub(crate) ancestors: Vec<(String, BlockIndex)>,
@@ -126,16 +155,19 @@ pub struct Store<S: S3Access = Client> {
     /// True once `close()` has been called.
     closed: AtomicBool,
 
-    /// Send block indices here to trigger background upload.
-    pub(crate) upload_tx: mpsc::Sender<u64>,
+    /// Pending snapshot/clone request for the uploader to execute.
+    pub(crate) snapshot_request: Mutex<Option<SnapshotRequest>>,
 
-    /// Blocks currently pending upload (written but not yet confirmed in S3).
-    pub(crate) pending_uploads: DashSet<u64>,
-    /// Incremented on each upload completion; flush() subscribes to wait.
-    pub(crate) upload_epoch: watch::Sender<u64>,
+    // -- Upload generation mechanism --
+    /// Bumped by flush() to request an upload cycle.
+    pub(crate) requested_generation: AtomicU64,
+    /// Bumped by the uploader after each cycle completes. Carries (generation, Option<error_message>).
+    pub(crate) completed_generation: watch::Sender<(u64, Option<String>)>,
+    /// Notifies the upload loop to wake up immediately.
+    pub(crate) flush_notify: Notify,
     /// Signals uploader shutdown.
     uploader_shutdown_tx: watch::Sender<bool>,
-    /// Join handle for uploader supervisor task.
+    /// Join handle for uploader task.
     uploader_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -211,8 +243,6 @@ impl<S: S3Access> Store<S> {
         while let Some(pid) = current_parent {
             let pstate = read_state(&s3, &bucket, &prefix, &pid).await?;
             let (mut pindex, ptombstones) = list_blocks(&s3, &bucket, &prefix, &pid).await?;
-            // Ancestor tombstones mean those blocks are zero in the ancestor —
-            // they don't provide real data, so exclude them from the index.
             for t in &ptombstones {
                 pindex.remove(t);
             }
@@ -223,17 +253,23 @@ impl<S: S3Access> Store<S> {
 
         let block_locks = Arc::new(BlockLockMap::new());
 
-        // Init cache subdirs BEFORE recover, since recover reads the directory.
+        // Init cache subdirs BEFORE recover.
         cache::get()
             .init_store(
                 &store_id,
                 state.parent_id.as_deref(),
+                state.block_size,
                 Arc::clone(&block_locks),
             )
             .await?;
         for (ancestor_id, _) in &ancestors {
             cache::get()
-                .init_store(ancestor_id, None, Arc::clone(&block_locks))
+                .init_store(
+                    ancestor_id,
+                    None,
+                    state.block_size,
+                    Arc::clone(&block_locks),
+                )
                 .await?;
         }
 
@@ -254,9 +290,7 @@ impl<S: S3Access> Store<S> {
         let upload_slots = Arc::new(Semaphore::new(max_uploads));
         let download_slots = Arc::new(Semaphore::new(max_downloads));
         let inflight_downloads = Arc::new(DashSet::new());
-        let (upload_tx, upload_rx) = mpsc::channel::<u64>(1024);
-        let pending_uploads: DashSet<u64> = DashSet::new();
-        let (upload_epoch, _) = watch::channel(0u64);
+        let (completed_generation, _) = watch::channel((0u64, None));
         let (uploader_shutdown_tx, uploader_shutdown_rx) = watch::channel(false);
         let frozen = AtomicBool::new(!state.children.is_empty());
 
@@ -276,43 +310,28 @@ impl<S: S3Access> Store<S> {
             inflight_downloads,
             frozen,
             closed: AtomicBool::new(false),
-            upload_tx,
-            pending_uploads,
-            upload_epoch,
+            snapshot_request: Mutex::new(None),
+            requested_generation: AtomicU64::new(0),
+            completed_generation,
+            flush_notify: Notify::new(),
             uploader_shutdown_tx,
             uploader_task: StdMutex::new(None),
         });
 
-        // Spawn the uploader BEFORE sending recovered blocks so the consumer
-        // is ready; using .send().await avoids silently dropping blocks if
-        // the channel would otherwise be full.
-        store.spawn_uploader(upload_rx, uploader_shutdown_rx);
+        // Spawn the uploader.
+        store.spawn_uploader(uploader_shutdown_rx);
 
-        let mut to_requeue: HashSet<u64> = HashSet::new();
-        for idx in recovery.dirty_blocks {
-            to_requeue.insert(idx);
-        }
-        for op in recovery.pending_zero_ops {
-            to_requeue.insert(op.block_idx);
-        }
-        for idx in to_requeue {
-            store.pending_uploads.insert(idx);
-            store
-                .upload_tx
-                .send(idx)
-                .await
-                .context("queuing recovered dirty block")?;
+        // If there's recovered dirty work, request an upload cycle.
+        if !recovery.dirty_blocks.is_empty() || !recovery.pending_zero_ops.is_empty() {
+            store.requested_generation.fetch_add(1, Ordering::Release);
+            store.flush_notify.notify_one();
         }
 
         Ok(store)
     }
 
-    fn spawn_uploader(
-        self: &Arc<Self>,
-        rx: mpsc::Receiver<u64>,
-        shutdown_rx: watch::Receiver<bool>,
-    ) {
-        let task = crate::uploader::spawn(Arc::downgrade(self), rx, shutdown_rx);
+    fn spawn_uploader(self: &Arc<Self>, shutdown_rx: watch::Receiver<bool>) {
+        let task = crate::uploader::spawn(Arc::clone(self), shutdown_rx);
         if let Ok(mut slot) = self.uploader_task.lock() {
             *slot = Some(task);
         }
@@ -320,6 +339,7 @@ impl<S: S3Access> Store<S> {
 
     async fn shutdown_uploader(&self) {
         let _ = self.uploader_shutdown_tx.send(true);
+        self.flush_notify.notify_one();
         let task = if let Ok(mut slot) = self.uploader_task.lock() {
             slot.take()
         } else {
@@ -332,6 +352,147 @@ impl<S: S3Access> Store<S> {
 
     fn block_lock(&self, block_idx: u64) -> &Mutex<()> {
         self.block_locks.lock(block_idx)
+    }
+
+    /// Drain in-flight writes, snapshot dirty state, lock all dirty blocks.
+    /// Returns dirty set with guards held. Write lock is released before return.
+    pub(crate) async fn acquire_dirty_blocks(&self) -> Result<DirtyBlockSet<'_>> {
+        // 1. Acquire write_lock.write() — all in-flight writes complete
+        let _write_guard = self.write_lock.write().await;
+
+        // Capture the generation while write lock is held — this is the maximum
+        // generation this cycle can claim to satisfy, since any flush() that
+        // bumped the generation before this point has had its writes drained.
+        let generation = self.requested_generation.load(Ordering::Acquire);
+
+        // 2. List dirty blocks + zero ops (consistent — no writes in flight)
+        let dirty_blocks = cache::get().list_dirty_blocks(&self.id).await?;
+        let zero_block_indices: Vec<u64> = self.zero_blocks.iter().map(|r| *r).collect();
+
+        // 3. Build sorted deduplicated index list
+        let mut all_indices: Vec<u64> = dirty_blocks
+            .iter()
+            .copied()
+            .chain(zero_block_indices.iter().copied())
+            .collect();
+        all_indices.sort_unstable();
+        all_indices.dedup();
+
+        // 4. Acquire all block locks (sorted order)
+        let mut guards = Vec::with_capacity(all_indices.len());
+        for &block_idx in &all_indices {
+            let lock = self.block_locks.lock(block_idx);
+            guards.push((block_idx, lock.lock().await));
+        }
+
+        // 5. write_lock released here (drop _write_guard)
+        //    Writes can resume on non-locked blocks.
+
+        Ok(DirtyBlockSet {
+            dirty_blocks,
+            zero_block_indices,
+            guards,
+            generation,
+        })
+    }
+
+    /// Execute a pending snapshot/clone request after all dirty blocks are uploaded.
+    /// Called by the uploader. Returns the oneshot sender's result.
+    pub(crate) async fn execute_snapshot_request(&self) -> Result<()> {
+        let req = self.snapshot_request.lock().await.take();
+        let Some(req) = req else {
+            return Ok(());
+        };
+
+        let result = match &req {
+            SnapshotRequest::Snapshot { new_store_id, .. } => self.do_snapshot(new_store_id).await,
+            SnapshotRequest::Clone {
+                continuation_id,
+                clone_id,
+                ..
+            } => self.do_clone(continuation_id, clone_id).await,
+        };
+
+        // Send the result back to the caller.
+        match req {
+            SnapshotRequest::Snapshot { tx, .. } => {
+                let _ = tx.send(result);
+            }
+            SnapshotRequest::Clone { tx, .. } => {
+                let _ = tx.send(result);
+            }
+        }
+        Ok(())
+    }
+
+    /// Internal: write snapshot state to S3 and freeze.
+    async fn do_snapshot(&self, new_store_id: &str) -> Result<()> {
+        let child_state = State {
+            parent_id: Some(self.id.clone()),
+            block_size: self.state.block_size,
+            volume_size: self.state.volume_size,
+            children: vec![],
+        };
+        write_state(
+            &self.s3,
+            &self.bucket,
+            &self.prefix,
+            new_store_id,
+            &child_state,
+        )
+        .await?;
+
+        let frozen_state = State {
+            children: vec![new_store_id.to_string()],
+            ..self.state.clone()
+        };
+        write_state(
+            &self.s3,
+            &self.bucket,
+            &self.prefix,
+            &self.id,
+            &frozen_state,
+        )
+        .await?;
+        self.frozen.store(true, Ordering::Release);
+
+        info!(frozen = %self.id, child = %new_store_id, "snapshot created");
+        Ok(())
+    }
+
+    /// Internal: write clone state to S3 and freeze.
+    async fn do_clone(&self, continuation_id: &str, clone_id: &str) -> Result<()> {
+        for child_id in [continuation_id, clone_id] {
+            let child_state = State {
+                parent_id: Some(self.id.clone()),
+                block_size: self.state.block_size,
+                volume_size: self.state.volume_size,
+                children: vec![],
+            };
+            write_state(&self.s3, &self.bucket, &self.prefix, child_id, &child_state).await?;
+        }
+
+        let frozen_state = State {
+            children: vec![continuation_id.to_string(), clone_id.to_string()],
+            ..self.state.clone()
+        };
+        write_state(
+            &self.s3,
+            &self.bucket,
+            &self.prefix,
+            &self.id,
+            &frozen_state,
+        )
+        .await?;
+        self.frozen.store(true, Ordering::Release);
+
+        info!(
+            frozen = %self.id,
+            continuation = %continuation_id,
+            clone = %clone_id,
+            "clone created"
+        );
+        Ok(())
     }
 
     /// Find which store in the chain owns this block in S3, or None if absent.
@@ -348,10 +509,6 @@ impl<S: S3Access> Store<S> {
     }
 
     /// Mark a block as explicitly zeroed.
-    ///
-    /// Updates local state immediately (zero_blocks, cache cleanup) and enqueues
-    /// the S3 tombstone/delete to the upload queue so the FUSE thread is not
-    /// blocked on network I/O.
     async fn do_zero_block(&self, block_idx: u64) -> Result<()> {
         counter!("store.zero_block.total").increment(1);
         let _write_guard = self.write_lock.read().await;
@@ -384,19 +541,10 @@ impl<S: S3Access> Store<S> {
             .queue_zero_op(&self.id, block_idx, zero_kind)
             .await?;
 
-        // Enqueue to the uploader — it will check zero_blocks at processing
-        // time and perform the appropriate S3 operation (tombstone or delete).
-        self.pending_uploads.insert(block_idx);
-        self.upload_tx
-            .send(block_idx)
-            .await
-            .context("upload_tx send failed")?;
-
         Ok(())
     }
 
-    /// Atomically zero a byte range within a single block (read-modify-write
-    /// under the block lock so concurrent writes cannot be lost).
+    /// Atomically zero a byte range within a single block.
     async fn do_zero_range(
         &self,
         block_idx: u64,
@@ -411,10 +559,6 @@ impl<S: S3Access> Store<S> {
             return self.do_zero_block(block_idx).await;
         }
 
-        // Read the full block, zero the range, write back as a full-block write.
-        // do_write_block acquires the block lock internally, and between read and
-        // write another write could slip in. To prevent that, we hold the block
-        // lock across both operations.
         let _write_guard = self.write_lock.read().await;
         anyhow::ensure!(
             !self.closed.load(Ordering::Acquire),
@@ -432,7 +576,6 @@ impl<S: S3Access> Store<S> {
         let mut data = if self.zero_blocks.contains(&block_idx) {
             vec![0u8; block_size as usize]
         } else {
-            // do_read_block does not acquire the block lock, so no deadlock.
             self.do_read_block(block_idx, 0, block_size as usize)
                 .await?
         };
@@ -442,8 +585,7 @@ impl<S: S3Access> Store<S> {
         let end = start + len as usize;
         data[start..end].fill(0);
 
-        // Write back the full block. We already hold write_lock + block_lock,
-        // so call the inner write logic directly to avoid re-acquiring them.
+        // Write back the full block.
         if self.zero_blocks.remove(&block_idx).is_some() {
             cache::get().clear_zero_op(&self.id, block_idx).await?;
         }
@@ -451,7 +593,6 @@ impl<S: S3Access> Store<S> {
     }
 
     /// Read exactly `len` bytes at `offset_within_block` from `block_idx`.
-    /// Returns zeros for blocks that don't exist anywhere in the chain.
     async fn do_read_block(
         &self,
         block_idx: u64,
@@ -461,15 +602,13 @@ impl<S: S3Access> Store<S> {
         let _timing = crate::metrics::timing!("store.read");
         counter!("store.read.bytes").increment(len as u64);
 
-        // Explicitly zeroed blocks return zeros immediately — must be checked
-        // before any cache lookups because ancestor caches may still hold data.
         if self.zero_blocks.contains(&block_idx) {
             debug!(block = block_idx, "zero block, returning zeros");
             counter!("store.read.zeros").increment(1);
             return Ok(vec![0u8; len]);
         }
 
-        // Check local store cache first (handles dirty/in-flight blocks).
+        // Check local store cache first.
         if let Some(result) = cache::get()
             .read(&self.id, block_idx, offset_within_block, len)
             .await
@@ -478,7 +617,7 @@ impl<S: S3Access> Store<S> {
             return result.context("cache read failed");
         }
 
-        // Check ancestor caches before going to S3.
+        // Check ancestor caches.
         for (ancestor_id, ancestor_index) in self.ancestors.iter() {
             if ancestor_index.contains(&block_idx) {
                 if let Some(result) = cache::get()
@@ -488,7 +627,6 @@ impl<S: S3Access> Store<S> {
                     counter!("store.read.cache_hit").increment(1);
                     return result.context("ancestor cache read failed");
                 }
-                // This ancestor owns the block; stop checking further ancestors.
                 break;
             }
         }
@@ -512,15 +650,13 @@ impl<S: S3Access> Store<S> {
             "range read from S3"
         );
 
-        // Range GET — only the exact bytes needed for this request.
         let bytes = self
             .s3
             .get_byte_range(&self.bucket, &key, offset_within_block, len)
             .await
             .context("get_byte_range failed")?;
 
-        // Spawn a background full-block fetch to warm the disk cache so future
-        // reads avoid S3. Works for both local-store blocks and ancestor blocks.
+        // Spawn background full-block fetch to warm cache.
         if self.inflight_downloads.insert(block_idx) {
             gauge!("store.inflight_downloads").set(self.inflight_downloads.len() as f64);
             let download_slots = Arc::clone(&self.download_slots);
@@ -575,8 +711,6 @@ impl<S: S3Access> Store<S> {
                     drop(_permit);
                 });
             } else {
-                // We inserted as inflight before trying to acquire a slot.
-                // If no slot is available, roll back so a future read can retry.
                 self.inflight_downloads.remove(&block_idx);
             }
         }
@@ -584,13 +718,12 @@ impl<S: S3Access> Store<S> {
         Ok(bytes)
     }
 
-    /// Write a full block to cache and enqueue upload.
+    /// Write a full block to cache.
     /// Caller MUST already hold write_lock (read) and the block lock.
     async fn do_write_block_locked(&self, block_idx: u64, data: &[u8]) -> Result<()> {
         let block_size = self.state.block_size;
         debug_assert_eq!(data.len() as u64, block_size);
 
-        // Ensure cache file exists (create or truncate to block_size).
         if !cache::get().has_block(&self.id, block_idx).await? {
             cache::get()
                 .ensure_sparse_block(
@@ -602,27 +735,15 @@ impl<S: S3Access> Store<S> {
                 .await?;
         }
 
-        let dirty_is_new = cache::get().try_mark_dirty(&self.id, block_idx).await?;
+        let _ = cache::get().try_mark_dirty(&self.id, block_idx).await?;
         cache::get()
             .pwrite(&self.id, block_idx, 0, data, Arc::clone(&self.block_locks))
             .await?;
-
-        self.pending_uploads.insert(block_idx);
-        if dirty_is_new {
-            self.upload_tx
-                .send(block_idx)
-                .await
-                .context("upload_tx send failed")?;
-        }
 
         Ok(())
     }
 
     /// Write `data` at `offset_within_block` within `block_idx`.
-    /// Writes to disk cache first (write-back), then enqueues async S3 upload.
-    ///
-    /// If the write is a full-block zero write, it is converted to a
-    /// `do_zero_block` call instead of a normal upload.
     async fn do_write_block(
         &self,
         block_idx: u64,
@@ -633,7 +754,7 @@ impl<S: S3Access> Store<S> {
         counter!("store.write.bytes").increment(data.len() as u64);
         let block_size = self.state.block_size;
 
-        // Detect full-block zero writes upfront so we can short-circuit.
+        // Detect full-block zero writes.
         let is_full_block_zero = offset_within_block == 0
             && data.len() as u64 == block_size
             && data.iter().all(|&b| b == 0);
@@ -642,7 +763,6 @@ impl<S: S3Access> Store<S> {
             return self.do_zero_block(block_idx).await;
         }
 
-        // Shared write lock — blocks if snapshot/clone or close is in progress.
         let _write_guard = self.write_lock.read().await;
         anyhow::ensure!(
             !self.closed.load(Ordering::Acquire),
@@ -656,30 +776,17 @@ impl<S: S3Access> Store<S> {
         let block_lock = self.block_lock(block_idx);
         let _block_guard = block_lock.lock().await;
 
-        // If this block was previously zeroed, clear that status now.
-        // Remember whether it was zeroed so we don't try to fetch stale S3
-        // data — the uploader may not have processed the zero yet, so the
-        // S3 object could still contain the old (pre-zero) data.
         let was_zeroed = self.zero_blocks.remove(&block_idx).is_some();
         if was_zeroed {
             cache::get().clear_zero_op(&self.id, block_idx).await?;
         }
 
-        // Determine the S3 key to fetch from if the cache file is absent.
         let has_cache = cache::get().has_block(&self.id, block_idx).await?;
-        let fetch_key: Option<String> = if has_cache {
-            None
-        } else if was_zeroed {
-            // Block was explicitly zeroed — treat as brand-new regardless of
-            // local_index state (the uploader may not have deleted the S3
-            // object yet, so fetching would return stale pre-zero data).
+        let fetch_key: Option<String> = if has_cache || was_zeroed {
             None
         } else if self.local_index.contains(&block_idx) {
-            // Block was previously written + uploaded; cache file was evicted.
-            // Re-fetch from our own S3 prefix (not from an ancestor).
             Some(block_key(&self.prefix, &self.id, block_idx))
         } else {
-            // New block, or block lives only in an ancestor.
             self.ancestors
                 .iter()
                 .find(|(_, idx)| idx.contains(&block_idx))
@@ -687,10 +794,8 @@ impl<S: S3Access> Store<S> {
         };
 
         if has_cache {
-            // Already cached locally.
+            // Already cached.
         } else if let Some(key) = fetch_key {
-            // Stream the existing block from S3 directly into cache, then pad with
-            // sparse zeros to the fixed block size if the object is short.
             let body = self
                 .s3
                 .get_body(&self.bucket, &key)
@@ -715,7 +820,6 @@ impl<S: S3Access> Store<S> {
                     .await?;
             }
         } else {
-            // Brand-new block: create a sparse zeroed file.
             cache::get()
                 .ensure_sparse_block(
                     &self.id,
@@ -726,7 +830,7 @@ impl<S: S3Access> Store<S> {
                 .await?;
         }
 
-        let dirty_is_new = cache::get().try_mark_dirty(&self.id, block_idx).await?;
+        let _ = cache::get().try_mark_dirty(&self.id, block_idx).await?;
         cache::get()
             .pwrite(
                 &self.id,
@@ -737,43 +841,36 @@ impl<S: S3Access> Store<S> {
             )
             .await?;
 
-        // Mark as pending and enqueue BEFORE releasing the block lock so the
-        // uploader cannot complete and remove from pending_uploads in the gap.
-        self.pending_uploads.insert(block_idx);
-        gauge!("store.pending_uploads").set(self.pending_uploads.len() as f64);
-        if dirty_is_new {
-            self.upload_tx
-                .send(block_idx)
-                .await
-                .context("upload_tx send failed")?;
-        }
-
         drop(_block_guard);
-
-        // write_lock.read() released here.
         Ok(())
     }
 
-    /// Wait until all blocks that are currently pending upload have been
-    /// confirmed in S3.  Blocks dirtied *after* this call starts are not
-    /// waited on — only the snapshot taken at entry matters.
+    /// Wait until all currently dirty blocks have been uploaded to S3.
+    /// The uploader's `acquire_dirty_blocks()` provides the write-lock consistency
+    /// guarantee — no need to hold write_lock here.
     pub async fn flush(&self) -> Result<()> {
         let _timing = crate::metrics::timing!("store.flush");
-        let snapshot: Vec<u64> = self.pending_uploads.iter().map(|r| *r).collect();
-        gauge!("store.flush.pending_blocks").set(snapshot.len() as f64);
-        if snapshot.is_empty() {
-            return Ok(());
-        }
 
+        // Compute target = current + 1, then use fetch_max so concurrent callers
+        // all coalesce on the same generation instead of each bumping by 1.
+        let current = self.requested_generation.load(Ordering::Acquire);
+        let target_gen = current + 1;
+        self.requested_generation
+            .fetch_max(target_gen, Ordering::Release);
+        self.flush_notify.notify_one();
+
+        // Wait until completed_generation >= our requested generation.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
-        let mut rx = self.upload_epoch.subscribe();
-
+        let mut rx = self.completed_generation.subscribe();
         loop {
-            if snapshot
-                .iter()
-                .all(|idx| !self.pending_uploads.contains(idx))
             {
-                return Ok(());
+                let val = rx.borrow();
+                if val.0 >= target_gen {
+                    if let Some(ref err) = val.1 {
+                        anyhow::bail!("upload cycle failed: {err}");
+                    }
+                    return Ok(());
+                }
             }
             tokio::select! {
                 result = rx.changed() => {
@@ -782,12 +879,9 @@ impl<S: S3Access> Store<S> {
                     }
                 }
                 _ = tokio::time::sleep_until(deadline) => {
-                    let remaining: Vec<u64> = snapshot.iter()
-                        .filter(|idx| self.pending_uploads.contains(idx))
-                        .copied()
-                        .collect();
+                    let remaining = cache::get().list_dirty_blocks(&self.id).await.unwrap_or_default();
                     anyhow::bail!(
-                        "flush timed out after 5 minutes — {} blocks still pending: {:?}",
+                        "flush timed out after 5 minutes — {} blocks still dirty: {:?}",
                         remaining.len(),
                         &remaining[..remaining.len().min(10)]
                     );
@@ -796,120 +890,92 @@ impl<S: S3Access> Store<S> {
         }
     }
 
-    /// Freeze this store and register a new child store for continued writes.
-    /// After this call the current store is immutable; mount a new Store with
-    /// `new_store_id` to continue writing.
+    /// Freeze this store and register a new child store.
+    /// The actual S3 state writes happen inside the uploader after all dirty
+    /// blocks have been uploaded, ensuring atomicity.
     pub async fn snapshot(&self, new_store_id: String) -> Result<()> {
         let _timing = crate::metrics::timing!("store.snapshot");
         Self::validate_store_id(&new_store_id)?;
-        // Exclusive write lock — drains all in-flight writes before freezing.
-        let _write_guard = self.write_lock.write().await;
 
         anyhow::ensure!(
             !self.frozen.load(Ordering::Acquire),
             "store is already frozen, cannot snapshot"
         );
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "store is closed, cannot snapshot"
+        );
 
-        self.flush().await.context("flush before snapshot failed")?;
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut req = self.snapshot_request.lock().await;
+            anyhow::ensure!(
+                req.is_none(),
+                "another snapshot/clone is already in progress"
+            );
+            *req = Some(SnapshotRequest::Snapshot { new_store_id, tx });
+        }
 
-        // Write child state FIRST. If we crash before updating the parent, the
-        // child is an orphan but no data is lost. If we crash after updating the
-        // parent, recovery can detect the missing child via the children list.
-        let child_state = State {
-            parent_id: Some(self.id.clone()),
-            block_size: self.state.block_size,
-            volume_size: self.state.volume_size,
-            children: vec![],
-        };
-        write_state(
-            &self.s3,
-            &self.bucket,
-            &self.prefix,
-            &new_store_id,
-            &child_state,
-        )
-        .await?;
+        // Bump generation to trigger the uploader, which will flush dirty
+        // blocks and then execute the snapshot request.
+        self.requested_generation.fetch_add(1, Ordering::Release);
+        self.flush_notify.notify_one();
 
-        let frozen_state = State {
-            children: vec![new_store_id.clone()],
-            ..self.state.clone()
-        };
-        write_state(
-            &self.s3,
-            &self.bucket,
-            &self.prefix,
-            &self.id,
-            &frozen_state,
-        )
-        .await?;
-        self.frozen.store(true, Ordering::Release);
-
-        info!(frozen = %self.id, child = %new_store_id, "snapshot created");
-        Ok(())
+        // Wait for the uploader to complete the snapshot.
+        rx.await
+            .map_err(|_| anyhow::anyhow!("snapshot channel closed"))?
     }
 
     /// Freeze this store and create two child stores (continuation + clone).
+    /// The actual S3 state writes happen inside the uploader after all dirty
+    /// blocks have been uploaded, ensuring atomicity.
     pub async fn clone_store(&self, continuation_id: String, clone_id: String) -> Result<()> {
         let _timing = crate::metrics::timing!("store.clone");
         Self::validate_store_id(&continuation_id)?;
         Self::validate_store_id(&clone_id)?;
-        let _write_guard = self.write_lock.write().await;
 
         anyhow::ensure!(
             !self.frozen.load(Ordering::Acquire),
             "store is already frozen, cannot clone"
         );
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "store is closed, cannot clone"
+        );
 
-        self.flush().await.context("flush before clone failed")?;
-
-        // Write both child states before freezing the parent (crash-safe ordering).
-        for child_id in [&continuation_id, &clone_id] {
-            let child_state = State {
-                parent_id: Some(self.id.clone()),
-                block_size: self.state.block_size,
-                volume_size: self.state.volume_size,
-                children: vec![],
-            };
-            write_state(&self.s3, &self.bucket, &self.prefix, child_id, &child_state).await?;
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut req = self.snapshot_request.lock().await;
+            anyhow::ensure!(
+                req.is_none(),
+                "another snapshot/clone is already in progress"
+            );
+            *req = Some(SnapshotRequest::Clone {
+                continuation_id,
+                clone_id,
+                tx,
+            });
         }
 
-        let frozen_state = State {
-            children: vec![continuation_id.clone(), clone_id.clone()],
-            ..self.state.clone()
-        };
-        write_state(
-            &self.s3,
-            &self.bucket,
-            &self.prefix,
-            &self.id,
-            &frozen_state,
-        )
-        .await?;
-        self.frozen.store(true, Ordering::Release);
+        // Bump generation to trigger the uploader.
+        self.requested_generation.fetch_add(1, Ordering::Release);
+        self.flush_notify.notify_one();
 
-        info!(
-            frozen = %self.id,
-            continuation = %continuation_id,
-            clone = %clone_id,
-            "clone created"
-        );
-        Ok(())
+        // Wait for the uploader to complete the clone.
+        rx.await
+            .map_err(|_| anyhow::anyhow!("clone channel closed"))?
     }
 }
 
 impl<S: S3Access> Store<S> {
-    /// Gracefully shut down this store: drain in-flight writes, flush all
-    /// dirty blocks to S3, and stop the background uploader. Must be called
-    /// (and awaited) before the Store is dropped.
-    ///
-    /// After `close()` returns, all new writes are rejected with an error.
     pub async fn close(&self) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Ok(());
         }
-        // Exclusive write lock — drains all in-flight writes.
-        let _write_guard = self.write_lock.write().await;
-        self.closed.store(true, Ordering::SeqCst);
+        {
+            let _guard = self.write_lock.write().await;
+            self.closed.store(true, Ordering::SeqCst);
+        }
         let result = self.flush().await;
         self.shutdown_uploader().await;
         result

@@ -4,9 +4,9 @@ pub mod assert;
 pub mod cache;
 pub mod cache_repo;
 pub mod ctl;
-#[cfg(all(feature = "kernel", feature = "fuse"))]
+#[cfg(feature = "block-fuse")]
 pub mod fs;
-#[cfg(all(feature = "lwext4", feature = "fuse"))]
+#[cfg(feature = "ext4-fuse")]
 pub mod fs_ext4;
 pub mod metrics;
 pub mod s3;

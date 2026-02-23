@@ -1,8 +1,10 @@
 """Tests for ext4 read/write and persistence across remount."""
 
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from helpers import (
+    CACHE_DIR,
     EXT4_MOUNT,
     HighLevelMount,
     md5,
@@ -114,3 +116,37 @@ def test_files_survive_remount():
         verify_test_files(random_md5)
     finally:
         m2.stop()
+
+
+def test_concurrent_mount_cycles():
+    """Run multiple format+mount+write+unmount cycles concurrently to stress
+    loop device allocation and verify no stale page cache corruption."""
+    n_workers = 20
+
+    def worker(i):
+        sid = unique_store_id(f"concurrent-{i}")
+        mp = f"{EXT4_MOUNT}-conc-{i}"
+        cd = f"{CACHE_DIR}-conc-{i}"
+        high_level_format(sid, block_size="4M", volume_size="64M")
+        m = HighLevelMount(sid, mountpoint=mp, cache_dir=cd)
+        m.start()
+        try:
+            path = f"{mp}/test.txt"
+            with open(path, "w") as f:
+                f.write(f"worker {i}\n")
+            run("sync")
+            with open(path) as f:
+                content = f.read()
+            assert content == f"worker {i}\n", f"worker {i}: got {content!r}"
+        finally:
+            m.stop()
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        futures = [pool.submit(worker, i) for i in range(n_workers)]
+        errors = []
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as e:
+                errors.append(e)
+        assert not errors, f"concurrent mount failures: {errors}"
