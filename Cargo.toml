@@ -37,9 +37,6 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 nfsserve = { version = "0.10.2", optional = true }
 async-trait = "0.1.89"
 
-[[bin]]
-name = "e2e"
-path = "src/bin/e2e.rs"
 
 [dev-dependencies]
 nfs3_client = { version = "0.8.0", features = ["tokio"] }

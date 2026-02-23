@@ -35,8 +35,6 @@ def fuse():
         m.stop()
 
 
-
-
 @pytest.fixture
 def hl_mount():
     """Factory: call hl_mount(store_id) to get a started HighLevelMount.

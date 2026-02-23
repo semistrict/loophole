@@ -61,8 +61,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install uv and use it for Python test dependencies.
+# Only copy dependency files so test code changes don't invalidate the cache.
+# The full tests/ dir is volume-mounted at runtime.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-COPY tests/ /tests/
+COPY tests/pyproject.toml tests/uv.lock /tests/
 RUN cd /tests && uv sync
 
 COPY --from=builder /usr/local/bin/loophole /usr/local/bin/loophole

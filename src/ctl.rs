@@ -5,9 +5,9 @@
 //! Layout:
 //!   .loophole/
 //!     snapshots/
-//!       <name>   — creating this file triggers a snapshot; reading returns status JSON
+//!       {name}   — creating this file triggers a snapshot; reading returns status JSON
 //!     clones/
-//!       <name>   — creating this file triggers a clone; reading returns status JSON
+//!       {name}   — creating this file triggers a clone; reading returns status JSON
 
 use crate::store::{S3Access, Store};
 use dashmap::DashMap;

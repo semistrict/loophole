@@ -16,8 +16,18 @@ IS_LINUX = platform.system() == "Linux"
 IS_MACOS = platform.system() == "Darwin"
 
 S3_ENDPOINT = os.environ.get("S3_ENDPOINT", "http://s3:9000")
-BUCKET = os.environ.get("BUCKET", "testbucket")
-SHARD = os.environ.get("SHARD", "")
+
+# Derive SHARD from env (set by Rust e2e runner) or pytest-xdist worker ID.
+# Each worker gets isolated paths, buckets, and loop devices.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+if os.environ.get("SHARD"):
+    SHARD = os.environ["SHARD"]
+elif _xdist_worker:
+    SHARD = f"-{_xdist_worker}"
+else:
+    SHARD = ""
+
+BUCKET = os.environ.get("BUCKET", f"testbucket{SHARD}" if SHARD else "testbucket")
 
 if IS_LINUX:
     CACHE_DIR = f"/tmp/loophole-cache{SHARD}"
@@ -144,7 +154,6 @@ class FuseMount:
             self.proc.send_signal(signal.SIGTERM)
             self.proc.wait(timeout=10)
         self.proc = None
-
 
 
 class HighLevelMount:

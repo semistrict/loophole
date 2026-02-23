@@ -623,8 +623,10 @@ async fn main() -> anyhow::Result<()> {
                         let status = std::process::Command::new("mkfs.ext4")
                             .args([
                                 "-q",
-                                "-m", "0",
-                                "-E", "lazy_itable_init=1,lazy_journal_init=1",
+                                "-m",
+                                "0",
+                                "-E",
+                                "lazy_itable_init=1,lazy_journal_init=1",
                                 &loop_dev,
                             ])
                             .status()
@@ -781,11 +783,13 @@ async fn main() -> anyhow::Result<()> {
                         info!(loop_device = %loop_dev, "created loop device");
 
                         // 3. Mount ext4.
+                        let mp = mountpoint.to_string_lossy();
                         let status = std::process::Command::new("mount")
                             .args([
-                                "-o", "noatime,data=writeback,nobarrier",
-                                &loop_dev,
-                                &mountpoint.to_string_lossy().to_string(),
+                                "-o",
+                                "noatime,data=writeback,nobarrier",
+                                loop_dev.as_str(),
+                                mp.as_ref(),
                             ])
                             .status()
                             .context("mounting ext4")?;
@@ -921,9 +925,8 @@ async fn main() -> anyhow::Result<()> {
                             .build()
                             .context("building NFS runtime")?;
 
-                        let nfs_handle = std::thread::spawn(move || {
-                            nfs_rt.block_on(listener.handle_forever())
-                        });
+                        let nfs_handle =
+                            std::thread::spawn(move || nfs_rt.block_on(listener.handle_forever()));
 
                         // Mount via mount_nfs on macOS, mount.nfs on Linux
                         let nfs_opts = if cfg!(target_os = "macos") {

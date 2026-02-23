@@ -6,7 +6,6 @@ import os
 import pytest
 
 from helpers import (
-    EXT4_MOUNT,
     FUSE_MOUNT,
     FuseMount,
     IS_LINUX,
@@ -37,13 +36,14 @@ def _punch_hole(fd, offset, length):
     assert ret == 0, f"fallocate failed, errno={ctypes.get_errno()}"
 
 
-def test_punch_hole_zeros_data(fuse, ext4):
+def test_punch_hole_zeros_data(hl_mount):
     """Write data, punch a hole, verify zeros read back."""
-    store_id = unique_store_id("punch-zeros")
-    store_format(store_id, block_size="4K", volume_size="16M")
+    from helpers import EXT4_MOUNT, high_level_format
 
-    fuse(store_id)
-    ext4(f"{FUSE_MOUNT}/volume")
+    store_id = unique_store_id("punch-zeros")
+    high_level_format(store_id, block_size="4K", volume_size="16M")
+
+    hl_mount(store_id)
 
     path = f"{EXT4_MOUNT}/testfile"
     with open(path, "wb") as f:
