@@ -1,3 +1,0 @@
-[submodule "ext4-lwext4-sys/vendor/lwext4"]
-	path = ext4-lwext4-sys/vendor/lwext4
-	url = https://github.com/gkostka/lwext4

@@ -1,6 +1,5 @@
-FROM rust:1.93 AS fsx-builder
+FROM golang:1.25-bookworm AS fsx-builder
 
-# Build fsx from xfstests source in a stage that does not depend on Rust src/.
 RUN apt-get update \
     && apt-get install -y libaio-dev libattr1-dev libacl1-dev xfslibs-dev \
        autoconf automake libtool pkg-config make \
@@ -13,60 +12,26 @@ RUN apt-get update \
     && cp ltp/fsx /usr/local/bin/fsx \
     && rm -rf /tmp/xfstests
 
-FROM rust:1.93 AS builder
+FROM golang:1.25-bookworm
 
-RUN apt-get update && apt-get install -y \
-    libfuse-dev \
-    fuse \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
-COPY src ./src
-COPY vendor ./vendor
-COPY sqlx-macros.db ./sqlx-macros.db
-
-# sqlx::query! needs a compile-time DATABASE_URL in container builds.
-ENV DATABASE_URL=sqlite:///app/sqlx-macros.db
-
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
-    cargo build --release && cp target/release/loophole /usr/local/bin/loophole
-
-FROM ubuntu:24.04
 RUN apt-get update && apt-get install -y \
     fuse \
     e2fsprogs \
-    mount \
-    curl \
-    ca-certificates \
-    coreutils \
     util-linux \
-    python3 \
-    git \
-    ripgrep \
-    bpftrace \
-    perf-tools-unstable \
+    conmon \
+    nbd-client \
+    nbd-server \
     strace \
-    sysstat \
-    iproute2 \
-    iputils-ping \
-    net-tools \
-    tcpdump \
-    iftop \
     fio \
-    xfsprogs \
     && rm -rf /var/lib/apt/lists/*
 
-# Install uv and use it for Python test dependencies.
-# Only copy dependency files so test code changes don't invalidate the cache.
-# The full tests/ dir is volume-mounted at runtime.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-COPY tests/pyproject.toml tests/uv.lock /tests/
-RUN cd /tests && uv sync
-
-COPY --from=builder /usr/local/bin/loophole /usr/local/bin/loophole
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
-ENTRYPOINT ["loophole"]
+
+# Install crun from GitHub (bookworm's version is too old for podman v6)
+RUN GOARCH=$(go env GOARCH) && \
+    curl -fsSL "https://github.com/containers/crun/releases/download/1.26/crun-1.26-linux-${GOARCH}" \
+    -o /usr/bin/crun && chmod +x /usr/bin/crun
+
+WORKDIR /app
+
+CMD ["go", "test", "-v", "-run", "TestFuse", "./..."]

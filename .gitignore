@@ -1,4 +1,7 @@
 /target
+/bin/
+/loophole
 __pycache__/
 tests/*.state
 .claude/
+third_party/**/.git
