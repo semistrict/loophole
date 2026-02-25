@@ -1,0 +1,42 @@
+FROM golang:1.25-bookworm AS fsx-builder
+
+RUN apt-get update \
+    && apt-get install -y libaio-dev libattr1-dev libacl1-dev xfslibs-dev \
+       autoconf automake libtool pkg-config make \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth=1 https://git.kernel.org/pub/scm/fs/xfs/xfstests-dev.git /tmp/xfstests \
+    && cd /tmp/xfstests \
+    && make configure \
+    && ./configure \
+    && make -j$(nproc) \
+    && cp ltp/fsx /usr/local/bin/fsx \
+    && rm -rf /tmp/xfstests
+
+FROM golang:1.25-bookworm
+
+RUN apt-get update && apt-get install -y \
+    fuse \
+    e2fsprogs \
+    util-linux \
+    strace \
+    fio \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
+
+WORKDIR /app
+COPY . .
+RUN go build ./...
+
+CMD ["bash", "-c", "\
+echo '=== Unit tests ===' && \
+go test -count=1 -timeout 120s ./... && \
+echo '' && \
+echo '=== FUSE e2e tests ===' && \
+go test -v -count=1 -timeout 300s ./e2e/ && \
+echo '' && \
+echo '=== lwext4+FUSE e2e tests ===' && \
+LOOPHOLE_MODE=lwext4fuse go test -v -count=1 -timeout 300s ./e2e/ && \
+echo '' && \
+echo '=== All tests passed ==='"]

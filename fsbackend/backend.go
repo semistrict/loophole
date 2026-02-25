@@ -83,10 +83,17 @@ type DevicePather interface {
 
 // DeviceConnector is optionally implemented by drivers that need to
 // explicitly connect/disconnect a volume to a block device (e.g. NBD).
-// FUSE doesn't need this because the FUSE server exposes all open volumes.
 type DeviceConnector interface {
 	ConnectDevice(ctx context.Context, vol *loophole.Volume) (string, error)
 	DisconnectDevice(ctx context.Context, volumeName string) error
+}
+
+// VolumeRegistrar is optionally implemented by drivers that need volumes
+// explicitly registered before their device files become accessible
+// (e.g. FUSE block device server).
+type VolumeRegistrar interface {
+	RegisterVolume(name string, vol *loophole.Volume)
+	UnregisterVolume(name string)
 }
 
 // mountEntry stores the volume name and driver-specific handle for a mount.
@@ -102,6 +109,7 @@ type mountEntry[H any] struct {
 type Backend[H any] struct {
 	vm     *loophole.VolumeManager
 	driver Driver[H]
+	vr     VolumeRegistrar // nil if driver doesn't implement it
 
 	mu     sync.Mutex
 	mounts map[string]mountEntry[H] // mountpoint → entry
@@ -109,9 +117,11 @@ type Backend[H any] struct {
 
 // New creates a Backend with the given driver and volume manager.
 func New[H any](driver Driver[H], vm *loophole.VolumeManager) *Backend[H] {
+	vr, _ := any(driver).(VolumeRegistrar)
 	return &Backend[H]{
 		vm:     vm,
 		driver: driver,
+		vr:     vr,
 		mounts: make(map[string]mountEntry[H]),
 	}
 }
@@ -125,7 +135,13 @@ func (b *Backend[H]) Create(ctx context.Context, volume string) error {
 	if err != nil {
 		return err
 	}
+	if b.vr != nil {
+		b.vr.RegisterVolume(volume, vol)
+	}
 	if err := b.driver.Format(ctx, vol); err != nil {
+		if b.vr != nil {
+			b.vr.UnregisterVolume(volume)
+		}
 		return fmt.Errorf("format: %w", err)
 	}
 	return nil
@@ -160,6 +176,10 @@ func (b *Backend[H]) Unmount(ctx context.Context, mountpoint string) error {
 	b.mu.Lock()
 	delete(b.mounts, mountpoint)
 	b.mu.Unlock()
+
+	if b.vr != nil {
+		b.vr.UnregisterVolume(entry.volume)
+	}
 
 	vol := b.vm.GetVolume(entry.volume)
 	if vol != nil {
@@ -250,8 +270,15 @@ func (b *Backend[H]) DeviceMount(ctx context.Context, volume string) (string, er
 	if err != nil {
 		return "", err
 	}
+	if b.vr != nil {
+		b.vr.RegisterVolume(volume, vol)
+	}
 	if dc, ok := any(b.driver).(DeviceConnector); ok {
-		return dc.ConnectDevice(ctx, vol)
+		path, err := dc.ConnectDevice(ctx, vol)
+		if err != nil && b.vr != nil {
+			b.vr.UnregisterVolume(volume)
+		}
+		return path, err
 	}
 	return b.DevicePath(volume)
 }
@@ -262,6 +289,9 @@ func (b *Backend[H]) DeviceUnmount(ctx context.Context, volume string) error {
 		if err := dc.DisconnectDevice(ctx, volume); err != nil {
 			return err
 		}
+	}
+	if b.vr != nil {
+		b.vr.UnregisterVolume(volume)
 	}
 	vol := b.vm.GetVolume(volume)
 	if vol == nil {
@@ -289,8 +319,15 @@ func (b *Backend[H]) DeviceClone(ctx context.Context, volume string, clone strin
 	if err != nil {
 		return "", err
 	}
+	if b.vr != nil {
+		b.vr.RegisterVolume(clone, cloneVol)
+	}
 	if dc, ok := any(b.driver).(DeviceConnector); ok {
-		return dc.ConnectDevice(ctx, cloneVol)
+		path, err := dc.ConnectDevice(ctx, cloneVol)
+		if err != nil && b.vr != nil {
+			b.vr.UnregisterVolume(clone)
+		}
+		return path, err
 	}
 	return b.DevicePath(clone)
 }
@@ -387,8 +424,14 @@ func (b *Backend[H]) mountVolume(ctx context.Context, vol *loophole.Volume, moun
 	}
 	b.mu.Unlock()
 
+	if b.vr != nil {
+		b.vr.RegisterVolume(vol.Name(), vol)
+	}
 	handle, err := b.driver.Mount(ctx, vol, mountpoint)
 	if err != nil {
+		if b.vr != nil {
+			b.vr.UnregisterVolume(vol.Name())
+		}
 		return err
 	}
 

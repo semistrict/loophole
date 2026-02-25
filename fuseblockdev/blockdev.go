@@ -21,10 +21,14 @@ import (
 const defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
 
 // Server manages the internal FUSE mount that exposes volume device files.
+// Volumes must be explicitly registered via Add before they are visible.
 type Server struct {
 	server   *fuse.Server
 	MountDir string
 	root     *rootNode
+
+	mu      sync.Mutex
+	volumes map[string]*loophole.Volume
 }
 
 // Options configures the FUSE mount.
@@ -37,9 +41,9 @@ type Options struct {
 	Debug bool
 }
 
-// Start mounts a FUSE filesystem at mountDir exposing device files
-// for volumes managed by vm.
-func Start(mountDir string, vm *loophole.VolumeManager, opts *Options) (*Server, error) {
+// Start mounts a FUSE filesystem at mountDir.
+// Volumes are not visible until registered via Add.
+func Start(mountDir string, opts *Options) (*Server, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
@@ -52,7 +56,10 @@ func Start(mountDir string, vm *loophole.VolumeManager, opts *Options) (*Server,
 		return nil, fmt.Errorf("create fuse mount dir: %w", err)
 	}
 
-	root := &rootNode{vm: vm, volumeSize: volumeSize}
+	srv := &Server{
+		volumes: make(map[string]*loophole.Volume),
+	}
+	root := &rootNode{srv: srv, volumeSize: volumeSize}
 
 	cacheTTL := 5 * time.Second
 	negTTL := time.Second
@@ -76,11 +83,10 @@ func Start(mountDir string, vm *loophole.VolumeManager, opts *Options) (*Server,
 		return nil, fmt.Errorf("fuse mount: %w", err)
 	}
 
-	return &Server{
-		server:   server,
-		MountDir: mountDir,
-		root:     root,
-	}, nil
+	srv.server = server
+	srv.MountDir = mountDir
+	srv.root = root
+	return srv, nil
 }
 
 // Wait blocks until the FUSE server is unmounted.
@@ -102,6 +108,37 @@ func UnmountStale(dir string) {
 	}
 }
 
+// Add registers a volume so it becomes visible as a device file.
+func (s *Server) Add(name string, vol *loophole.Volume) {
+	s.mu.Lock()
+	s.volumes[name] = vol
+	s.mu.Unlock()
+}
+
+// Remove unregisters a volume. Existing FUSE inodes continue to work
+// (they hold their own refs) but new Lookups will return ENOENT.
+func (s *Server) Remove(name string) {
+	s.mu.Lock()
+	delete(s.volumes, name)
+	s.mu.Unlock()
+}
+
+func (s *Server) getVolume(name string) *loophole.Volume {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.volumes[name]
+}
+
+func (s *Server) volumeNames() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	names := make([]string, 0, len(s.volumes))
+	for name := range s.volumes {
+		names = append(names, name)
+	}
+	return names
+}
+
 // DevicePath returns the path to the device file for a volume.
 func (s *Server) DevicePath(volumeName string) string {
 	return s.MountDir + "/" + volumeName
@@ -111,12 +148,11 @@ func (s *Server) DevicePath(volumeName string) string {
 
 type rootNode struct {
 	fs.Inode
-	vm         *loophole.VolumeManager
+	srv        *Server
 	volumeSize uint64
 }
 
 var _ = (fs.NodeLookuper)((*rootNode)(nil))
-var _ = (fs.NodeCreater)((*rootNode)(nil))
 var _ = (fs.NodeReaddirer)((*rootNode)(nil))
 var _ = (fs.NodeGetattrer)((*rootNode)(nil))
 
@@ -127,11 +163,12 @@ func (r *rootNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut
 }
 
 func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	vol := r.vm.GetVolume(name)
+	vol := r.srv.getVolume(name)
 	if vol == nil {
 		return nil, syscall.ENOENT
 	}
 	if err := vol.AcquireRef(); err != nil {
+		slog.Warn("fuse lookup: acquire ref", "volume", name, "error", err)
 		return nil, syscall.EIO
 	}
 	devNode := &deviceNode{vol: vol, volumeSize: r.volumeSize}
@@ -141,27 +178,8 @@ func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	return child, fs.OK
 }
 
-func (r *rootNode) Create(ctx context.Context, name string, _ uint32, _ uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
-	vol, err := r.vm.NewVolume(ctx, name)
-	if err != nil {
-		return nil, nil, 0, syscall.EEXIST
-	}
-	if err := vol.AcquireRef(); err != nil {
-		return nil, nil, 0, syscall.EIO
-	}
-	devNode := &deviceNode{vol: vol, volumeSize: r.volumeSize}
-	stable := fs.StableAttr{Mode: syscall.S_IFREG}
-	child := r.NewInode(ctx, devNode, stable)
-	devNode.fillAttr(&out.Attr)
-	if err := vol.AcquireRef(); err != nil {
-		_ = vol.ReleaseRef(ctx)
-		return nil, nil, 0, syscall.EIO
-	}
-	return child, &deviceHandle{vol: vol}, fuse.FOPEN_DIRECT_IO, fs.OK
-}
-
 func (r *rootNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
-	names := r.vm.Volumes()
+	names := r.srv.volumeNames()
 	entries := make([]fuse.DirEntry, len(names))
 	for i, name := range names {
 		entries[i] = fuse.DirEntry{
@@ -236,6 +254,7 @@ func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetA
 
 func (d *deviceNode) Open(_ context.Context, _ uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if err := d.vol.AcquireRef(); err != nil {
+		slog.Warn("fuse open: acquire ref", "error", err)
 		return nil, 0, syscall.EIO
 	}
 	return &deviceHandle{vol: d.vol}, fuse.FOPEN_DIRECT_IO, fs.OK

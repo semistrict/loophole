@@ -38,9 +38,11 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	require.NoError(t, err)
 
 	mountDir := t.TempDir()
-	srv, err := fuseblockdev.Start(mountDir, vm, &fuseblockdev.Options{VolumeSize: 4096})
+	srv, err := fuseblockdev.Start(mountDir, &fuseblockdev.Options{VolumeSize: 4096})
 	require.NoError(t, err)
 	t.Cleanup(func() { srv.Unmount() })
+
+	srv.Add("testvol", vol)
 
 	f, err := os.OpenFile(srv.DevicePath("testvol"), os.O_RDWR, 0)
 	require.NoError(t, err)
@@ -174,16 +176,16 @@ func TestFuseChmodFreezesVolume(t *testing.T) {
 	assert.Equal(t, data, buf)
 }
 
-func TestFuseCreateNewVolume(t *testing.T) {
+func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	f, err := os.Create(env.srv.DevicePath("newvol"))
+	newvol, err := env.vm.NewVolume(t.Context(), "newvol")
+	require.NoError(t, err)
+	env.srv.Add("newvol", newvol)
+
+	f, err := os.OpenFile(env.srv.DevicePath("newvol"), os.O_RDWR, 0)
 	require.NoError(t, err)
 	defer f.Close()
-
-	vol := env.vm.GetVolume("newvol")
-	require.NotNil(t, vol)
-	assert.False(t, vol.ReadOnly())
 
 	_, err = f.WriteAt([]byte("hello new"), 0)
 	require.NoError(t, err)
@@ -201,14 +203,15 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
 
-	_, err = env.vm.NewVolume(t.Context(), "clone")
+	cloneVol, err := env.vm.NewVolume(t.Context(), "clone")
 	require.NoError(t, err)
+	env.srv.Add("clone", cloneVol)
 
 	dst, err := os.OpenFile(env.srv.DevicePath("clone"), os.O_RDWR, 0)
 	require.NoError(t, err)
 	defer dst.Close()
 
-	n, err := env.vm.GetVolume("clone").CopyFrom(t.Context(), env.vol, 0, 0, 256)
+	n, err := cloneVol.CopyFrom(t.Context(), env.vol, 0, 0, 256)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(256), n)
 
@@ -229,6 +232,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	dstVol, err := env.vm.NewVolume(t.Context(), "refclone")
 	require.NoError(t, err)
+	env.srv.Add("refclone", dstVol)
 
 	n, err := dstVol.CopyFrom(t.Context(), env.vol, 0, 0, 192)
 	require.NoError(t, err)
