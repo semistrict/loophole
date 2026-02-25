@@ -42,6 +42,7 @@ var fsCounter atomic.Int64
 type FormatOptions struct {
 	BlockSize uint32 // default 4096
 	Label     string
+	NoJournal bool // default false (journal enabled)
 }
 
 // FS is a mounted lwext4 filesystem instance.
@@ -86,6 +87,7 @@ func Format(dev BlockDevice, size int64, opts *FormatOptions) (*FS, error) {
 	var info C.struct_ext4_mkfs_info
 	info.len = C.uint64_t(size)
 	info.block_size = C.uint32_t(blockSize)
+	info.journal = C.bool(opts == nil || !opts.NoJournal)
 
 	if opts != nil && opts.Label != "" {
 		cLabel := C.CString(opts.Label)

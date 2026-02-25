@@ -48,6 +48,14 @@ func TestFormatAndClose(t *testing.T) {
 	require.NoError(t, fs.Close())
 }
 
+func TestFormatWithJournal1GB(t *testing.T) {
+	const size = 1 * 1024 * 1024 * 1024 // 1GB
+	dev := newMemDev(size)
+	fs, err := Format(dev, int64(size), nil) // journal enabled by default
+	require.NoError(t, err)
+	require.NoError(t, fs.Close())
+}
+
 func TestMountExisting(t *testing.T) {
 	dev := newMemDev(testDevSize)
 	fs, err := Format(dev, int64(testDevSize), nil)
