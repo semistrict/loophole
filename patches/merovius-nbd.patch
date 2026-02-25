@@ -1,0 +1,665 @@
+diff -ruN --exclude=.git a/merovius-nbd/device.go b/merovius-nbd/device.go
+--- a/merovius-nbd/device.go	1970-01-01 08:00:00
++++ b/merovius-nbd/device.go	2026-02-24 19:33:41
+@@ -0,0 +1,22 @@
++package nbd
++
++// Trimmer is an optional interface that a Device may implement to support
++// the NBD_CMD_TRIM command. Trim hints that the byte range is no longer
++// needed and the backend may deallocate it.
++type Trimmer interface {
++	Trim(offset, length int64) error
++}
++
++// WriteZeroer is an optional interface that a Device may implement to support
++// the NBD_CMD_WRITE_ZEROES command. WriteZeroes writes zeros to the given range.
++// If punch is true, the backend may deallocate the range (sparse hole).
++type WriteZeroer interface {
++	WriteZeroes(offset, length int64, punch bool) error
++}
++
++// FUAWriter is an optional interface that a Device may implement to support
++// the Force Unit Access flag. WriteAtFUA writes data and ensures it is on
++// stable storage before returning.
++type FUAWriter interface {
++	WriteAtFUA(p []byte, off int64) (n int, err error)
++}
+diff -ruN --exclude=.git a/merovius-nbd/doc.go b/merovius-nbd/doc.go
+--- a/merovius-nbd/doc.go	2026-02-25 10:51:44
++++ b/merovius-nbd/doc.go	2026-02-24 19:37:32
+@@ -38,21 +38,9 @@
+ 
+ // BUG(1): BlockSizeConstraints are not yet enforced by the server.
+ 
+-// BUG(2): The server does not yet support FUA for direct IO.
+-
+ // BUG(3): StartTLS is not supported yet.
+ 
+-// BUG(4): There is no way to declare a preferred block size for Loopback yet.
+-
+-// BUG(5): Server flags are not yet set (or used) correctly.
+-
+ // BUG(6): Structured replies are not yet supported.
+-
+-// BUG(7): CMD_TRIM is not yet supported.
+-
+-// BUG(8): Lame-duck mode (ESHUTDOWN) is not yet implemented.
+-
+-// BUG(9): CMD_WRITE_ZEROES is not yet supported.
+ 
+ // BUG(10): Metadata querying is not yet supported.
+ 
+diff -ruN --exclude=.git a/merovius-nbd/go.mod b/merovius-nbd/go.mod
+--- a/merovius-nbd/go.mod	2026-02-25 10:51:44
++++ b/merovius-nbd/go.mod	2026-02-24 22:59:20
+@@ -1,6 +1,6 @@
+ module github.com/Merovius/nbd
+ 
+-go 1.20
++go 1.25.2
+ 
+ require (
+ 	github.com/google/subcommands v1.2.0
+diff -ruN --exclude=.git a/merovius-nbd/nbdnl/nbd.go b/merovius-nbd/nbdnl/nbd.go
+--- a/merovius-nbd/nbdnl/nbd.go	2026-02-25 10:51:44
++++ b/merovius-nbd/nbdnl/nbd.go	2026-02-24 19:33:32
+@@ -159,8 +159,12 @@
+ 	FlagSendFUA ServerFlags = 1 << 3
+ 	// FlagSendTrim is set if the export supports the Trim command.
+ 	FlagSendTrim ServerFlags = 1 << 5
++	// FlagSendWriteZeroes is set if the export supports the WriteZeroes command.
++	FlagSendWriteZeroes ServerFlags = 1 << 6
+ 	// FlagCanMulticonn is set if the export can serve multiple connections.
+ 	FlagCanMulticonn ServerFlags = 1 << 8
++	// FlagSendFastZero is set if the export supports fast zero detection.
++	FlagSendFastZero ServerFlags = 1 << 11
+ )
+ 
+ // Connect instructs the kernel to connect the given set of sockets to the
+diff -ruN --exclude=.git a/merovius-nbd/netlink.go b/merovius-nbd/netlink.go
+--- a/merovius-nbd/netlink.go	2026-02-25 10:51:44
++++ b/merovius-nbd/netlink.go	2026-02-24 22:57:50
+@@ -43,7 +43,44 @@
+ 	return nbdnl.Connect(nbdnl.IndexAny, socks, e.Size, 0, nbdnl.ServerFlags(e.Flags), opts...)
+ }
+ 
+-// Loopback serves d on a private socket, passing the other end to the kernel
++// LoopbackOption configures a Loopback call.
++type LoopbackOption func(*loopbackConfig)
++
++type loopbackConfig struct {
++	clientFlags    nbdnl.ClientFlags
++	serverFlags    nbdnl.ServerFlags
++	blockSize      uint64
++	numConnections int
++}
++
++// WithClientFlags sets the client flags passed to the kernel.
++// Use nbdnl.FlagDisconnectOnClose to auto-disconnect when the socket closes
++// (prevents unkillable D-state processes on crash).
++func WithClientFlags(cf nbdnl.ClientFlags) LoopbackOption {
++	return func(c *loopbackConfig) { c.clientFlags = cf }
++}
++
++// WithServerFlags overrides the server flags passed to the kernel.
++// By default, Loopback sets FlagHasFlags | FlagSendFlush plus any flags
++// implied by the Device's optional interfaces (Trimmer, WriteZeroer, etc.).
++func WithServerFlags(sf nbdnl.ServerFlags) LoopbackOption {
++	return func(c *loopbackConfig) { c.serverFlags = sf }
++}
++
++// WithLoopbackBlockSize sets the block size for the kernel block device.
++func WithLoopbackBlockSize(n uint64) LoopbackOption {
++	return func(c *loopbackConfig) { c.blockSize = n }
++}
++
++// WithNumConnections sets the number of parallel socket pairs between the
++// kernel and userspace. The kernel round-robins I/O requests across
++// connections, giving N-way serve parallelism. Requires FlagCanMulticonn
++// (automatically added when n > 1). Default is 1.
++func WithNumConnections(n int) LoopbackOption {
++	return func(c *loopbackConfig) { c.numConnections = n }
++}
++
++// Loopback serves d on private sockets, passing the other ends to the kernel
+ // to connect to an NBD device. It returns the device-number that the kernel
+ // chose. wait should be called to check for errors from serving the device. It
+ // blocks until ctx is cancelled or an error occurs (so it behaves like Serve).
+@@ -51,36 +88,91 @@
+ // encountered while disconnecting will be returned by wait.
+ //
+ // This is a Linux-only API.
+-func Loopback(ctx context.Context, d Device, size uint64) (idx uint32, wait func() error, err error) {
+-	sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
+-	if err != nil {
+-		return 0, nil, err
++func Loopback(ctx context.Context, d Device, size uint64, opts ...LoopbackOption) (idx uint32, wait func() error, err error) {
++	cfg := loopbackConfig{
++		serverFlags:    nbdnl.FlagHasFlags | nbdnl.FlagSendFlush,
++		blockSize:      4096,
++		numConnections: 1,
+ 	}
++	// Auto-detect capabilities from optional interfaces.
++	if _, ok := d.(Trimmer); ok {
++		cfg.serverFlags |= nbdnl.FlagSendTrim
++	}
++	if _, ok := d.(WriteZeroer); ok {
++		cfg.serverFlags |= nbdnl.FlagSendWriteZeroes
++	}
++	if _, ok := d.(FUAWriter); ok {
++		cfg.serverFlags |= nbdnl.FlagSendFUA
++	}
++	for _, o := range opts {
++		o(&cfg)
++	}
++	if cfg.numConnections < 1 {
++		cfg.numConnections = 1
++	}
++	if cfg.numConnections > 1 {
++		cfg.serverFlags |= nbdnl.FlagCanMulticonn
++	}
++
++	nconn := cfg.numConnections
+ 	exp := Export{
+ 		Size:       size,
+ 		Device:     d,
+-		BlockSizes: &defaultBlockSizes,
+-		Flags:      uint16(nbdnl.FlagHasFlags | nbdnl.FlagSendFlush),
++		BlockSizes: &BlockSizeConstraints{Min: 1, Preferred: uint32(cfg.blockSize), Max: 0xffffffff},
++		Flags:      uint16(cfg.serverFlags),
+ 	}
+ 
+-	client, server := os.NewFile(uintptr(sp[0]), "client"), os.NewFile(uintptr(sp[1]), "server")
+-	serverc, err := net.FileConn(server)
+-	server.Close()
+-	if err != nil {
+-		client.Close()
+-		return 0, nil, err
++	// Create N socket pairs: client fds go to the kernel, server fds we serve on.
++	clients := make([]*os.File, nconn)
++	servers := make([]net.Conn, nconn)
++	cleanup := func(upTo int) {
++		for j := range upTo {
++			if clients[j] != nil {
++				clients[j].Close()
++			}
++			if servers[j] != nil {
++				servers[j].Close()
++			}
++		}
+ 	}
+ 
+-	idx, err = Configure(exp, client)
++	for i := range nconn {
++		sp, serr := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM, 0)
++		if serr != nil {
++			cleanup(i)
++			return 0, nil, serr
++		}
++		clientFile := os.NewFile(uintptr(sp[0]), fmt.Sprintf("client-%d", i))
++		serverFile := os.NewFile(uintptr(sp[1]), fmt.Sprintf("server-%d", i))
++		serverConn, serr := net.FileConn(serverFile)
++		serverFile.Close()
++		if serr != nil {
++			clientFile.Close()
++			cleanup(i)
++			return 0, nil, serr
++		}
++		clients[i] = clientFile
++		servers[i] = serverConn
++	}
++
++	var connectOpts []nbdnl.ConnectOption
++	if cfg.blockSize != 0 {
++		connectOpts = append(connectOpts, nbdnl.WithBlockSize(cfg.blockSize))
++	}
++	idx, err = nbdnl.Connect(nbdnl.IndexAny, clients, size, cfg.clientFlags, cfg.serverFlags, connectOpts...)
+ 	if err != nil {
+-		client.Close()
++		cleanup(nconn)
+ 		return 0, nil, err
+ 	}
+ 
++	parms := connParameters{exp, *exp.BlockSizes}
+ 	var eg errgroup.Group
+-	eg.Go(func() error {
+-		return serve(ctx, serverc, connParameters{exp, defaultBlockSizes})
+-	})
++	for i := range nconn {
++		sc := servers[i]
++		eg.Go(func() error {
++			return serve(ctx, sc, parms)
++		})
++	}
+ 	wait = func() error {
+ 		err := eg.Wait()
+ 		// canceling the context is the only way for Loopback to return, so do
+@@ -91,13 +183,22 @@
+ 		if e := nbdnl.Disconnect(idx); e != nil && err == nil {
+ 			err = fmt.Errorf("failed to disconnect device: %w", e)
+ 		}
+-		if e := client.Close(); e != nil && err == nil {
+-			err = fmt.Errorf("failed to close client socket: %w", e)
++		for _, c := range clients {
++			if e := c.Close(); e != nil && err == nil {
++				err = fmt.Errorf("failed to close client socket: %w", e)
++			}
+ 		}
+-		if e := serverc.Close(); e != nil && err == nil {
+-			err = fmt.Errorf("failed to close server connection: %w", e)
++		for _, s := range servers {
++			if e := s.Close(); e != nil && err == nil {
++				err = fmt.Errorf("failed to close server connection: %w", e)
++			}
+ 		}
+ 		return err
+ 	}
+ 	return idx, wait, nil
++}
++
++// DevicePath returns the /dev/nbdN path for a device index.
++func DevicePath(idx uint32) string {
++	return fmt.Sprintf("/dev/nbd%d", idx)
+ }
+diff -ruN --exclude=.git a/merovius-nbd/netlink_test.go b/merovius-nbd/netlink_test.go
+--- a/merovius-nbd/netlink_test.go	1970-01-01 08:00:00
++++ b/merovius-nbd/netlink_test.go	2026-02-24 19:42:05
+@@ -0,0 +1,141 @@
++//go:build linux
++
++package nbd_test
++
++import (
++	"context"
++	"fmt"
++	"os"
++	"testing"
++
++	nbd "github.com/Merovius/nbd"
++	"github.com/Merovius/nbd/nbdnl"
++)
++
++// memDevice is a minimal in-memory nbd.Device for testing.
++type memDevice struct {
++	data []byte
++}
++
++func newMemDevice(size int) *memDevice {
++	return &memDevice{data: make([]byte, size)}
++}
++
++func (d *memDevice) ReadAt(p []byte, off int64) (int, error) {
++	copy(p, d.data[off:])
++	return len(p), nil
++}
++
++func (d *memDevice) WriteAt(p []byte, off int64) (int, error) {
++	copy(d.data[off:], p)
++	return len(p), nil
++}
++
++func (d *memDevice) Sync() error { return nil }
++
++func TestLoopbackDeviceSize(t *testing.T) {
++	const size = 128 * 1024 * 1024 // 128 MB
++	dev := newMemDevice(size)
++
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++
++	idx, wait, err := nbd.Loopback(ctx, dev, size,
++		nbd.WithClientFlags(nbdnl.FlagDisconnectOnClose),
++	)
++	if err != nil {
++		t.Fatal("Loopback:", err)
++	}
++
++	// Read the kernel-reported size (in 512-byte sectors).
++	sysPath := fmt.Sprintf("/sys/block/nbd%d/size", idx)
++	data, err := os.ReadFile(sysPath)
++	if err != nil {
++		cancel()
++		wait()
++		t.Fatal("read sysfs size:", err)
++	}
++
++	var sectors uint64
++	fmt.Sscanf(string(data), "%d", &sectors)
++	gotBytes := sectors * 512
++
++	if gotBytes != size {
++		cancel()
++		wait()
++		t.Fatalf("kernel reports %d bytes (%d sectors), want %d bytes", gotBytes, sectors, size)
++	}
++
++	t.Logf("device /dev/nbd%d: %d sectors = %d bytes (correct)", idx, sectors, gotBytes)
++
++	cancel()
++	if err := wait(); err != nil {
++		t.Fatal("wait:", err)
++	}
++}
++
++func TestLoopbackReadWrite(t *testing.T) {
++	const size = 64 * 1024 * 1024 // 64 MB
++	dev := newMemDevice(size)
++
++	ctx, cancel := context.WithCancel(t.Context())
++	defer cancel()
++
++	idx, wait, err := nbd.Loopback(ctx, dev, size,
++		nbd.WithClientFlags(nbdnl.FlagDisconnectOnClose),
++	)
++	if err != nil {
++		t.Fatal("Loopback:", err)
++	}
++
++	devPath := nbd.DevicePath(idx)
++
++	// Write through the block device.
++	f, err := os.OpenFile(devPath, os.O_RDWR, 0)
++	if err != nil {
++		cancel()
++		wait()
++		t.Fatal("open device:", err)
++	}
++	payload := []byte("hello from nbd test")
++	if _, err := f.WriteAt(payload, 4096); err != nil {
++		f.Close()
++		cancel()
++		wait()
++		t.Fatal("write:", err)
++	}
++	if err := f.Sync(); err != nil {
++		f.Close()
++		cancel()
++		wait()
++		t.Fatal("sync:", err)
++	}
++
++	// Read back through the block device.
++	buf := make([]byte, len(payload))
++	if _, err := f.ReadAt(buf, 4096); err != nil {
++		f.Close()
++		cancel()
++		wait()
++		t.Fatal("read:", err)
++	}
++	f.Close()
++
++	if string(buf) != string(payload) {
++		cancel()
++		wait()
++		t.Fatalf("read back %q, want %q", buf, payload)
++	}
++
++	// Verify the in-memory device got the write.
++	if string(dev.data[4096:4096+len(payload)]) != string(payload) {
++		cancel()
++		wait()
++		t.Fatal("in-memory device doesn't contain the written data")
++	}
++
++	cancel()
++	if err := wait(); err != nil {
++		t.Fatal("wait:", err)
++	}
++}
+diff -ruN --exclude=.git a/merovius-nbd/transmission.go b/merovius-nbd/transmission.go
+--- a/merovius-nbd/transmission.go	2026-02-25 10:51:44
++++ b/merovius-nbd/transmission.go	2026-02-24 23:47:03
+@@ -16,6 +16,7 @@
+ 
+ import (
+ 	"context"
++	"encoding/binary"
+ 	"errors"
+ 	"io"
+ 	"net"
+@@ -93,63 +94,216 @@
+ 	return serve(ctx, c, parms)
+ }
+ 
+-// serve serves nbd requests for a connection in transmission mode using p. It
+-// returns after ctx is cancelled or an error occurs.
++// serve serves nbd requests for a connection in transmission mode using p.
++// Requests are read sequentially but dispatched to goroutines for concurrent
++// processing. Replies are written back in any order (the NBD protocol allows
++// this — the kernel matches replies to requests via the handle field).
++//
++// On context cancellation, serve enters lame-duck mode: it replies ESHUTDOWN
++// to the next request and then returns, giving the kernel a clean signal that
++// the device is going away rather than an abrupt socket close.
+ func serve(ctx context.Context, c net.Conn, p connParameters) error {
+-	rw := wrapConn(ctx, c)
+-	defer rw.Close()
+-	return do(rw, func(e *encoder) {
+-		var req request
++	d := p.Export.Device
++	trimmer, _ := d.(Trimmer)
++	wzeroer, _ := d.(WriteZeroer)
++	fuaWriter, _ := d.(FUAWriter)
++
++	shutdownCh := ctx.Done()
++
++	// replyWriter serializes reply writes to the connection.
++	rw := &replyWriter{w: c}
++
++	// wg tracks in-flight request handlers.
++	var wg sync.WaitGroup
++	defer wg.Wait()
++
++	return do(c, func(e *encoder) {
+ 		for {
++			select {
++			case <-shutdownCh:
++				c.SetDeadline(time.Now().Add(time.Second))
++				var req request
++				if err := req.decode(e); err != nil {
++					return
++				}
++				rw.sendError(req.handle, ESHUTDOWN)
++				return
++			default:
++			}
++
++			var req request
+ 			if err := req.decode(e); err != nil {
+-				respondErr(e, req.handle, err)
++				rw.sendError(req.handle, err)
+ 				continue
+ 			}
++
+ 			switch req.typ {
+ 			case cmdRead:
+ 				if req.length == 0 {
+-					respondErr(e, req.handle, EINVAL)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				buf := make([]byte, req.length)
+-				_, err := p.Export.Device.ReadAt(buf, int64(req.offset))
+-				if err != nil {
+-					respondErr(e, req.handle, err)
+-					continue
+-				}
+-				(&simpleReply{0, req.handle, buf, 0}).encode(e)
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					buf := make([]byte, req.length)
++					_, err := d.ReadAt(buf, int64(req.offset))
++					if err != nil {
++						rw.sendError(req.handle, err)
++						return
++					}
++					rw.sendData(req.handle, buf)
++				}()
++
+ 			case cmdWrite:
+ 				if req.length == 0 {
+-					respondErr(e, req.handle, EINVAL)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				_, err := p.Export.Device.WriteAt(req.data, int64(req.offset))
+-				if err != nil {
+-					respondErr(e, req.handle, err)
+-					continue
+-				}
+-				(&simpleReply{0, req.handle, nil, 0}).encode(e)
++				// req.data is already read from the socket by decode.
++				data := req.data
++				handle := req.handle
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if fua && fuaWriter != nil {
++						if _, err := fuaWriter.WriteAtFUA(data, int64(req.offset)); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					} else {
++						if _, err := d.WriteAt(data, int64(req.offset)); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++						if fua {
++							if err := d.Sync(); err != nil {
++								rw.sendError(handle, err)
++								return
++							}
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
+ 			case cmdDisc:
+ 				return
++
+ 			case cmdFlush:
+ 				if req.length != 0 || req.offset != 0 {
+-					respondErr(e, req.handle, EINVAL)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				err := p.Export.Device.Sync()
+-				if err != nil {
+-					respondErr(e, req.handle, err)
++				handle := req.handle
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := d.Sync(); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					rw.sendOK(handle)
++				}()
++
++			case cmdTrim:
++				if trimmer == nil {
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				(&simpleReply{0, req.handle, nil, 0}).encode(e)
++				handle := req.handle
++				offset, length := req.offset, req.length
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := trimmer.Trim(int64(offset), int64(length)); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					if fua {
++						if err := d.Sync(); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
++			case cmdWriteZeroes:
++				if wzeroer == nil {
++					rw.sendError(req.handle, EINVAL)
++					continue
++				}
++				handle := req.handle
++				offset, length := req.offset, req.length
++				punch := req.flags&cmdFlagNoHole == 0
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := wzeroer.WriteZeroes(int64(offset), int64(length), punch); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					if fua {
++						if err := d.Sync(); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
+ 			default:
+-				respondErr(e, req.handle, EINVAL)
++				rw.sendError(req.handle, EINVAL)
+ 			}
+ 		}
+ 	})
+ }
+ 
+-// respondErr writes an error respons to e, based on handle an err.
++// replyWriter serializes NBD simple reply writes to a connection.
++// All methods are safe for concurrent use.
++type replyWriter struct {
++	mu sync.Mutex
++	w  io.Writer
++}
++
++// sendOK writes a success reply with no data payload.
++func (rw *replyWriter) sendOK(handle uint64) {
++	rw.writeReply(0, handle, nil)
++}
++
++// sendData writes a success reply with a data payload (for reads).
++func (rw *replyWriter) sendData(handle uint64, data []byte) {
++	rw.writeReply(0, handle, data)
++}
++
++// sendError writes an error reply.
++func (rw *replyWriter) sendError(handle uint64, err error) {
++	code := uint32(EIO)
++	if e, ok := err.(Error); ok {
++		code = uint32(e.Errno())
++	}
++	rw.writeReply(code, handle, nil)
++}
++
++// writeReply writes a complete simple reply as a single Write call.
++// Header: magic(4) + errno(4) + handle(8) = 16 bytes, followed by data.
++func (rw *replyWriter) writeReply(errno uint32, handle uint64, data []byte) {
++	buf := make([]byte, 16+len(data))
++	binary.BigEndian.PutUint32(buf[0:4], simpleReplyMagic)
++	binary.BigEndian.PutUint32(buf[4:8], errno)
++	binary.BigEndian.PutUint64(buf[8:16], handle)
++	copy(buf[16:], data)
++
++	rw.mu.Lock()
++	rw.w.Write(buf)
++	rw.mu.Unlock()
++}
++
++// respondErr writes an error response to e, based on handle and err.
++// Used only during the sequential phase (shutdown).
+ func respondErr(e *encoder, handle uint64, err error) {
+ 	code := EIO
+ 	if e, ok := err.(Error); ok {

@@ -4,4 +4,4 @@
 __pycache__/
 tests/*.state
 .claude/
-third_party/**/.git
+third_party/

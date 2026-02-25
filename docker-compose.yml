@@ -9,7 +9,7 @@ services:
       - s3-logs:/logs
 
   go:
-    build: ./go
+    build: .
     privileged: true
     entrypoint: ["sleep", "infinity"]
     environment:
@@ -20,7 +20,7 @@ services:
       AWS_REGION: us-east-1
       LOOPHOLE_S3_URL: s3://testbucket
     volumes:
-      - ./go:/app
+      - .:/app
       - go-mod:/go/pkg/mod
       - go-cache:/root/.cache/go-build
     depends_on:

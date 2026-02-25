@@ -1,0 +1,14 @@
+diff -ruN --exclude=.git a/containers-storage/drivers/driver.go b/containers-storage/drivers/driver.go
+--- a/containers-storage/drivers/driver.go	2026-02-25 10:51:51
++++ b/containers-storage/drivers/driver.go	2026-02-24 12:36:41
+@@ -100,6 +100,10 @@
+ 	Deduped uint64
+ }
+ 
++// CleanupTempDirFunc is re-exported from internal/tempdir for use by
++// out-of-tree driver implementations.
++type CleanupTempDirFunc = tempdir.CleanupTempDirFunc
++
+ // InitFunc initializes the storage driver.
+ type InitFunc func(homedir string, options Options) (Driver, error)
+ 
