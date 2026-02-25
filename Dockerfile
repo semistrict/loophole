@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     nbd-server \
     strace \
     fio \
+    cmake \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx

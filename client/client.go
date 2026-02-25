@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"time"
 
@@ -17,39 +18,52 @@ import (
 
 // Client talks to a running loophole daemon over its Unix socket.
 type Client struct {
-	sock   string
-	http   *http.Client
+	Dir  loophole.Dir
+	Inst loophole.Instance
+	Bin  string        // path to loophole binary; empty = find in PATH
+	Sudo bool          // wrap daemon start with sudo
+	Mode loophole.Mode // mode for spawned daemon; empty = use daemon's default
+
+	sock string
+	http *http.Client
 }
 
-// New creates a client that talks to the daemon for the given instance.
-// It does NOT start the daemon — call EnsureDaemon first if needed.
+// New creates a client for the given instance.
 func New(dir loophole.Dir, inst loophole.Instance) *Client {
-	return NewFromSocket(dir.Socket(inst))
+	sock := dir.Socket(inst)
+	return &Client{
+		Dir:  dir,
+		Inst: inst,
+		Sudo: true,
+		sock: sock,
+		http: httpClient(sock),
+	}
 }
 
 // NewFromSocket creates a client connected to a specific socket path.
 func NewFromSocket(sock string) *Client {
 	return &Client{
 		sock: sock,
-		http: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-					return net.Dial("unix", sock)
-				},
+		http: httpClient(sock),
+	}
+}
+
+func httpClient(sock string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+				return net.Dial("unix", sock)
 			},
 		},
 	}
 }
 
 // EnsureDaemon starts the daemon if it isn't already running.
-// The loopholeBin argument is the path to the loophole binary; pass ""
-// to use os.Executable().
-func EnsureDaemon(dir loophole.Dir, inst loophole.Instance, loopholeBin string) error {
-	sock := dir.Socket(inst)
-	if isSocketAlive(sock) {
+func (c *Client) EnsureDaemon() error {
+	if isSocketAlive(c.sock) {
 		return nil
 	}
-	return startDaemon(dir, inst, loopholeBin)
+	return c.startDaemon()
 }
 
 // --- RPC methods ---
@@ -159,8 +173,15 @@ func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
 	return result.Volumes, nil
 }
 
+// Shutdown asks the daemon to shut down gracefully.
+func (c *Client) Shutdown(ctx context.Context) error {
+	_, err := c.rpc(ctx, "POST", "/shutdown", nil)
+	return err
+}
+
 type StatusResponse struct {
 	S3      string            `json:"s3"`
+	Mode    string            `json:"mode"`
 	Socket  string            `json:"socket"`
 	Fuse    string            `json:"fuse"`
 	Volumes []string          `json:"volumes"`
@@ -231,16 +252,40 @@ func isSocketAlive(path string) bool {
 	return true
 }
 
-func startDaemon(dir loophole.Dir, inst loophole.Instance, loopholeBin string) error {
-	if loopholeBin == "" {
+func (c *Client) startDaemon() error {
+	// Wait for any previous daemon to fully exit so its cleanup doesn't
+	// race with our new socket (the old daemon removes the socket file
+	// on shutdown, which could delete the new daemon's socket).
+	dead := false
+	for range 50 {
+		if !isSocketAlive(c.sock) {
+			dead = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !dead {
+		fmt.Fprintln(os.Stderr, "warning: previous daemon still running after 5s")
+	}
+
+	bin := c.Bin
+	if bin == "" {
 		var err error
-		loopholeBin, err = exec.LookPath("loophole")
+		bin, err = exec.LookPath("loophole")
 		if err != nil {
 			return fmt.Errorf("find loophole binary: %w (is loophole in PATH?)", err)
 		}
 	}
 
-	cmd := exec.Command(loopholeBin, "start", inst.S3URL())
+	var cmd *exec.Cmd
+	if c.Sudo && os.Getuid() != 0 {
+		cmd = exec.Command("sudo", "-E", bin, "start", "--socket-mode", fmt.Sprintf("%d", 0o666), c.Inst.S3URL())
+	} else {
+		cmd = exec.Command(bin, "start", c.Inst.S3URL())
+	}
+	if c.Mode != "" {
+		cmd.Env = append(os.Environ(), "LOOPHOLE_MODE="+string(c.Mode))
+	}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
 	cmd.SysProcAttr = daemonSysProcAttr()
@@ -249,12 +294,11 @@ func startDaemon(dir loophole.Dir, inst loophole.Instance, loopholeBin string) e
 	}
 	cmd.Process.Release()
 
-	sock := dir.Socket(inst)
 	for range 50 {
 		time.Sleep(100 * time.Millisecond)
-		if isSocketAlive(sock) {
+		if isSocketAlive(c.sock) {
 			return nil
 		}
 	}
-	return fmt.Errorf("daemon did not start within 5s (socket: %s, log: %s)", sock, dir.Log(inst))
+	return fmt.Errorf("daemon did not start within 5s (socket: %s, log: %s)", c.sock, c.Dir.Log(c.Inst))
 }

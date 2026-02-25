@@ -1,7 +1,6 @@
 package e2e
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -10,10 +9,7 @@ import (
 func TestE2E_ClonePreservesData(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint("cln-parent")
-	if isKernelMode() {
-		os.MkdirAll(parentMP, 0o755)
-	}
+	parentMP := mountpoint(t, "cln-parent")
 
 	require.NoError(t, b.Create(ctx, "cln-parent"))
 	err := b.Mount(ctx, "cln-parent", parentMP)
@@ -22,10 +18,7 @@ func TestE2E_ClonePreservesData(t *testing.T) {
 	tfs := newTestFS(t, b, parentMP)
 	randomMD5 := writeTestFiles(t, tfs)
 
-	cloneMP := mountpoint("cln-clone")
-	if isKernelMode() {
-		os.MkdirAll(cloneMP, 0o755)
-	}
+	cloneMP := mountpoint(t, "cln-clone")
 	err = b.Clone(t.Context(), parentMP, "cln-clone", cloneMP)
 	require.NoError(t, err)
 
@@ -38,10 +31,7 @@ func TestE2E_ClonePreservesData(t *testing.T) {
 func TestE2E_CloneBranchesAreIndependent(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint("cln-ind-parent")
-	if isKernelMode() {
-		os.MkdirAll(parentMP, 0o755)
-	}
+	parentMP := mountpoint(t, "cln-ind-parent")
 
 	require.NoError(t, b.Create(ctx, "cln-ind-parent"))
 	err := b.Mount(ctx, "cln-ind-parent", parentMP)
@@ -49,14 +39,11 @@ func TestE2E_CloneBranchesAreIndependent(t *testing.T) {
 
 	parentFS := newTestFS(t, b, parentMP)
 	parentFS.WriteFile(t, "shared.txt", []byte("from parent\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
-	cloneMP := mountpoint("cln-ind-clone")
-	if isKernelMode() {
-		os.MkdirAll(cloneMP, 0o755)
-	}
+	cloneMP := mountpoint(t, "cln-ind-clone")
 	err = b.Clone(t.Context(), parentMP, "cln-ind-clone", cloneMP)
 	require.NoError(t, err)
 

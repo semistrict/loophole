@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/linuxutil"
 )
 
@@ -20,7 +21,7 @@ func TestE2E_FormatCreatesMountableExt4(t *testing.T) {
 	tfs, _ := mountVolume(t, "fmttest")
 
 	tfs.WriteFile(t, "hello.txt", []byte("formatted via high-level\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -31,7 +32,7 @@ func TestE2E_SmallTextFile(t *testing.T) {
 	tfs, _ := mountVolume(t, "smalltext")
 
 	tfs.WriteFile(t, "greeting.txt", []byte("hello from loophole\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -46,7 +47,7 @@ func TestE2E_BinaryFileIntegrity(t *testing.T) {
 	require.NoError(t, err)
 
 	tfs.WriteFile(t, "random.bin", randomData)
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -59,7 +60,7 @@ func TestE2E_NestedDirectories(t *testing.T) {
 
 	tfs.MkdirAll(t, "subdir/nested")
 	tfs.WriteFile(t, "subdir/nested/deep.txt", []byte("nested file\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -74,7 +75,7 @@ func TestE2E_LargeSequentialFile(t *testing.T) {
 		fmt.Fprintf(&buf, "%d\n", i)
 	}
 	tfs.WriteFile(t, "numbers.txt", []byte(buf.String()))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -87,11 +88,11 @@ func TestE2E_OverwriteFile(t *testing.T) {
 	tfs, _ := mountVolume(t, "overwrite")
 
 	tfs.WriteFile(t, "overwrite.txt", []byte("version 1\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 	tfs.WriteFile(t, "overwrite.txt", []byte("version 2\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -102,7 +103,7 @@ func TestE2E_DeleteAndRecreate(t *testing.T) {
 	tfs, _ := mountVolume(t, "delrecreate")
 
 	tfs.WriteFile(t, "ephemeral.txt", []byte("exists\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -110,7 +111,7 @@ func TestE2E_DeleteAndRecreate(t *testing.T) {
 	require.False(t, tfs.Exists(t, "ephemeral.txt"))
 
 	tfs.WriteFile(t, "ephemeral.txt", []byte("back again\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -121,10 +122,7 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 	vol := "remount-empty"
-	mp := mountpoint(vol)
-	if isKernelMode() {
-		os.MkdirAll(mp, 0o755)
-	}
+	mp := mountpoint(t, vol)
 
 	require.NoError(t, b.Create(ctx, vol))
 
@@ -151,10 +149,7 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	mp := mountpoint("persist")
-	if isKernelMode() {
-		os.MkdirAll(mp, 0o755)
-	}
+	mp := mountpoint(t, "persist")
 
 	require.NoError(t, b.Create(ctx, "persist"))
 
@@ -166,7 +161,7 @@ func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	_, err = rand.Read(randomData)
 	require.NoError(t, err)
 	tfs.WriteFile(t, "random.bin", randomData)
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 	checksum := tfs.MD5(t, "random.bin")
@@ -190,7 +185,7 @@ func TestE2E_NestedDirsAndLargeFile(t *testing.T) {
 	_, err := rand.Read(bigData)
 	require.NoError(t, err)
 	tfs.WriteFile(t, "a/big.bin", bigData)
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -202,10 +197,7 @@ func TestE2E_NestedDirsAndLargeFile(t *testing.T) {
 func TestE2E_FilesSurviveRemount(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	mp := mountpoint("survive")
-	if isKernelMode() {
-		os.MkdirAll(mp, 0o755)
-	}
+	mp := mountpoint(t, "survive")
 
 	require.NoError(t, b.Create(ctx, "survive"))
 
@@ -225,13 +217,13 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 }
 
 func TestE2E_ConcurrentMountCycles(t *testing.T) {
-	if !isKernelMode() {
-		t.Skip("concurrent mount test only supported in kernel mode (lwext4 has per-process mount limits)")
+	if !needsKernelExt4() {
+		t.Skip("concurrent mount test only supported in kernel ext4 mode (lwext4 has per-process mount limits)")
 	}
 
 	b := newBackend(t)
 	nWorkers := 10
-	if isNBDMode() {
+	if mode() == loophole.ModeNBD {
 		nWorkers = 5
 	}
 	if maxLoop, err := linuxutil.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
@@ -244,8 +236,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 	for i := range nWorkers {
 		g.Go(func() error {
 			volName := fmt.Sprintf("concurrent-%d", i)
-			mp := mountpoint(volName)
-			os.MkdirAll(mp, 0o755)
+			mp := mountpoint(t, volName)
 
 			if err := b.Create(ctx, volName); err != nil {
 				return fmt.Errorf("worker %d create: %w", i, err)
@@ -274,7 +265,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 
 func logKernelDebug(t *testing.T, mountpoint, volume string) {
 	t.Helper()
-	if !isKernelMode() {
+	if !needsKernelExt4() {
 		return
 	}
 	logCmd(t, "findmnt", "-n", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS", mountpoint)
@@ -285,7 +276,7 @@ func logKernelDebug(t *testing.T, mountpoint, volume string) {
 // TestE2E_NBDDeviceExclOpen checks whether a freshly-connected NBD device
 // can be opened with O_EXCL, which mkfs.ext4 uses to detect "in use" devices.
 func TestE2E_NBDDeviceExclOpen(t *testing.T) {
-	if !isNBDMode() {
+	if mode() != loophole.ModeNBD {
 		t.Skip("NBD-only test")
 	}
 

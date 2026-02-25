@@ -6,7 +6,6 @@
 package metrics
 
 import (
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -26,17 +25,9 @@ func init() {
 
 // ListenAndServe starts an HTTP server on addr serving /metrics.
 // It logs a warning and returns if the listener fails.
-func ListenAndServe(addr string, log *slog.Logger) {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(Registry, promhttp.HandlerOpts{}))
-	if log != nil {
-		log.Info("metrics server listening", "addr", addr)
-	}
-	if err := http.ListenAndServe(addr, mux); err != nil {
-		if log != nil {
-			log.Warn("metrics server failed", "err", err)
-		}
-	}
+// Handler returns an http.Handler that serves Prometheus metrics.
+func Handler() http.Handler {
+	return promhttp.HandlerFor(Registry, promhttp.HandlerOpts{})
 }
 
 // --- Helpers ---

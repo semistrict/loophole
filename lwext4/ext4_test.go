@@ -261,6 +261,92 @@ func TestRename(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestWriteAtPastEOF(t *testing.T) {
+	fs := newTestFS(t)
+
+	ino, err := fs.Mknod(RootIno, "sparse.txt", 0o644)
+	require.NoError(t, err)
+
+	f, err := fs.OpenFile(ino, os.O_RDWR)
+	require.NoError(t, err)
+
+	// Write 5 bytes at offset 0.
+	_, err = f.WriteAt([]byte("HELLO"), 0)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), f.Size())
+
+	// Write past EOF — gap should be zero-filled.
+	_, err = f.WriteAt([]byte("WORLD"), 100)
+	require.NoError(t, err)
+	require.Equal(t, int64(105), f.Size())
+
+	// Read the whole file and verify.
+	buf := make([]byte, 105)
+	n, err := f.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 105, n)
+	require.Equal(t, []byte("HELLO"), buf[:5])
+	// Gap must be zeros.
+	for i := 5; i < 100; i++ {
+		require.Equal(t, byte(0), buf[i], "byte %d should be zero", i)
+	}
+	require.Equal(t, []byte("WORLD"), buf[100:])
+	require.NoError(t, f.Close())
+}
+
+func TestTruncateExtendZeroFills(t *testing.T) {
+	fs := newTestFS(t)
+
+	ino, err := fs.Mknod(RootIno, "extend.txt", 0o644)
+	require.NoError(t, err)
+
+	f, err := fs.OpenFile(ino, os.O_RDWR)
+	require.NoError(t, err)
+
+	_, err = f.Write([]byte("ABC"))
+	require.NoError(t, err)
+
+	// Extend to 1000 bytes.
+	require.NoError(t, f.Truncate(1000))
+	require.Equal(t, int64(1000), f.Size())
+
+	// Read and verify: first 3 bytes are "ABC", rest are zeros.
+	buf := make([]byte, 1000)
+	n, err := f.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, 1000, n)
+	require.Equal(t, []byte("ABC"), buf[:3])
+	for i := 3; i < 1000; i++ {
+		require.Equal(t, byte(0), buf[i], "byte %d should be zero", i)
+	}
+	require.NoError(t, f.Close())
+}
+
+func TestSeekPastEOF(t *testing.T) {
+	fs := newTestFS(t)
+
+	ino, err := fs.Mknod(RootIno, "seekpast.txt", 0o644)
+	require.NoError(t, err)
+
+	f, err := fs.OpenFile(ino, os.O_RDWR)
+	require.NoError(t, err)
+
+	_, err = f.Write([]byte("data"))
+	require.NoError(t, err)
+
+	// Seek past EOF should succeed.
+	pos, err := f.Seek(100, 0) // SEEK_SET
+	require.NoError(t, err)
+	require.Equal(t, int64(100), pos)
+
+	// Seek relative past EOF.
+	pos, err = f.Seek(50, 1) // SEEK_CUR
+	require.NoError(t, err)
+	require.Equal(t, int64(150), pos)
+
+	require.NoError(t, f.Close())
+}
+
 func TestGetSetAttr(t *testing.T) {
 	fs := newTestFS(t)
 
@@ -334,4 +420,90 @@ func TestSymlink(t *testing.T) {
 	target, err := fs.Readlink(linkIno)
 	require.NoError(t, err)
 	require.Equal(t, "target.txt", target)
+}
+
+// TestTruncateDownThenWritePastEOF reproduces the fsx failure pattern:
+// write non-zero data, truncate down, write past EOF to extend,
+// then read the hole region — it must be zeros.
+func TestTruncateDownThenWritePastEOF(t *testing.T) {
+	fs := newTestFS(t)
+
+	ino, err := fs.Mknod(RootIno, "trunc-hole.txt", 0o644)
+	require.NoError(t, err)
+
+	f, err := fs.OpenFile(ino, os.O_RDWR)
+	require.NoError(t, err)
+
+	// Step 1: Write 128KB of 0xAA.
+	data := make([]byte, 128*1024)
+	for i := range data {
+		data[i] = 0xAA
+	}
+	_, err = f.WriteAt(data, 0)
+	require.NoError(t, err)
+
+	// Step 2: Truncate down to 16KB — bytes 16K-128K are gone.
+	require.NoError(t, f.Truncate(16*1024))
+
+	// Step 3: Write at the end to extend back to 128KB.
+	// The region 16K to (128K-6) should be a zero-filled hole.
+	marker := []byte("MARKER")
+	_, err = f.WriteAt(marker, 128*1024-int64(len(marker)))
+	require.NoError(t, err)
+
+	// Step 4: Read the hole and verify it's all zeros.
+	holeLen := 128*1024 - 16*1024 - len(marker)
+	hole := make([]byte, holeLen)
+	_, err = f.ReadAt(hole, 16*1024)
+	require.NoError(t, err)
+	for i := range hole {
+		if hole[i] != 0 {
+			t.Fatalf("byte %d (offset 0x%x): expected 0x00, got 0x%02x", i, 16*1024+i, hole[i])
+		}
+	}
+	require.NoError(t, f.Close())
+}
+
+// TestTruncateViaSeparateHandle reproduces the FUSE Setattr pattern:
+// write data via handle A, truncate via a SEPARATE handle B (as Setattr does),
+// then write past EOF via handle A, read back — hole must be zeros.
+func TestTruncateViaSeparateHandle(t *testing.T) {
+	fs := newTestFS(t)
+
+	ino, err := fs.Mknod(RootIno, "trunc-sep.txt", 0o644)
+	require.NoError(t, err)
+
+	// Handle A: write 128KB of 0xAA.
+	fA, err := fs.OpenFile(ino, os.O_RDWR)
+	require.NoError(t, err)
+
+	data := make([]byte, 128*1024)
+	for i := range data {
+		data[i] = 0xAA
+	}
+	_, err = fA.WriteAt(data, 0)
+	require.NoError(t, err)
+
+	// Handle B: truncate down to 16KB (mimics FUSE Setattr).
+	fB, err := fs.OpenFile(ino, os.O_WRONLY)
+	require.NoError(t, err)
+	require.NoError(t, fB.Truncate(16*1024))
+	require.NoError(t, fB.Close())
+
+	// Handle A: write past EOF to extend back to 128KB.
+	marker := []byte("MARKER")
+	_, err = fA.WriteAt(marker, 128*1024-int64(len(marker)))
+	require.NoError(t, err)
+
+	// Handle A: read the hole — must be zeros.
+	holeLen := 128*1024 - 16*1024 - len(marker)
+	hole := make([]byte, holeLen)
+	_, err = fA.ReadAt(hole, 16*1024)
+	require.NoError(t, err)
+	for i := range hole {
+		if hole[i] != 0 {
+			t.Fatalf("byte %d (offset 0x%x): expected 0x00, got 0x%02x", i, 16*1024+i, hole[i])
+		}
+	}
+	require.NoError(t, fA.Close())
 }

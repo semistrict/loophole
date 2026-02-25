@@ -14,6 +14,13 @@ import (
 	"github.com/semistrict/loophole/linuxutil"
 )
 
+// mkfsFeatures is the pinned set of ext4 features for mkfs.ext4.
+// Pinning avoids surprises when mkfs.ext4 defaults change across distro versions.
+// These match Debian bookworm e2fsprogs 1.47 defaults and are all supported by lwext4.
+const mkfsFeatures = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
+	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
+	"dir_nlink,extra_isize,metadata_csum"
+
 // Format creates an ext4 filesystem on a block device via a loop device.
 func Format(ctx context.Context, devicePath string) error {
 	dev, err := linuxutil.LoopAttach(devicePath)
@@ -22,7 +29,7 @@ func Format(ctx context.Context, devicePath string) error {
 	}
 	defer dev.Detach()
 
-	if err := run(ctx, "mkfs.ext4", "-q", dev.Path); err != nil {
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, dev.Path); err != nil {
 		return fmt.Errorf("mkfs.ext4: %w", err)
 	}
 	return nil
@@ -31,7 +38,7 @@ func Format(ctx context.Context, devicePath string) error {
 // FormatDirect creates an ext4 filesystem directly on a block device
 // (e.g. /dev/nbdN) without loop device setup.
 func FormatDirect(ctx context.Context, blockDev string) error {
-	if err := run(ctx, "mkfs.ext4", "-q", blockDev); err != nil {
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, blockDev); err != nil {
 		return fmt.Errorf("mkfs.ext4: %w", err)
 	}
 	return nil

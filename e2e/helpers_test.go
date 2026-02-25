@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,24 +20,36 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 )
 
-// e2eMode controls how tests interact with the filesystem.
-//
-//	"kernel"  — FUSE + loop device + kernel ext4 (Linux-only, root required)
-//	"lwext4"  — in-process lwext4 via fsbackend (cross-platform, no root)
-//
-// Set via E2E_MODE env var. Default: "lwext4" on macOS, "kernel" on Linux.
-func e2eMode() string {
-	if m := os.Getenv("E2E_MODE"); m != "" {
-		return m
-	}
-	if runtime.GOOS == "linux" {
-		return "kernel"
-	}
-	return "lwext4"
+// mode returns the LOOPHOLE_MODE for tests, using DefaultMode() as fallback.
+func mode() loophole.Mode {
+	return loophole.DefaultMode()
 }
 
-func isKernelMode() bool { return e2eMode() == "kernel" }
-func isNBDMode() bool    { return os.Getenv("LOOPHOLE_MODE") == "nbd" }
+// needsRoot returns true if the mode requires root privileges.
+func needsRoot() bool {
+	switch mode() {
+	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP:
+		return true
+	default:
+		return false
+	}
+}
+
+// needsRealMount returns true if the mode does real filesystem mounts.
+// All current modes (fuse, nbd, testnbdtcp, lwext4fuse) use real mounts.
+func needsRealMount() bool {
+	return true
+}
+
+// needsKernelExt4 returns true if the mode uses kernel ext4 (needs sync, FIFREEZE, etc.).
+func needsKernelExt4() bool {
+	switch mode() {
+	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP:
+		return true
+	default:
+		return false
+	}
+}
 
 func defaultS3Options() *loophole.S3Options {
 	return &loophole.S3Options{
@@ -61,18 +72,15 @@ func envOrDefault(key, fallback string) string {
 
 func skipE2E(t *testing.T) {
 	t.Helper()
-	if isKernelMode() && os.Getuid() != 0 {
-		t.Skip("kernel mode requires root; skipping E2E test")
-	}
-	if isKernelMode() && runtime.GOOS != "linux" {
-		t.Skip("kernel mode requires Linux; skipping E2E test")
+	if needsRoot() && os.Getuid() != 0 {
+		t.Skip("mode requires root; skipping")
 	}
 }
 
 func skipKernelOnly(t *testing.T) {
 	t.Helper()
-	if !isKernelMode() {
-		t.Skip("test requires kernel mode (FUSE + loop + ext4)")
+	if !needsKernelExt4() {
+		t.Skip("test requires kernel ext4 mode")
 	}
 }
 
@@ -80,9 +88,8 @@ const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 
 // ---------- Backend creation ----------
 
-// newBackend creates a *fsbackend.Backend for the current e2e mode.
-// On kernel mode it uses NewFUSE; on lwext4 mode it uses NewLwext4.
-func newBackend(t *testing.T) *fsbackend.Backend {
+// newBackend creates a fsbackend.Service for the current mode.
+func newBackend(t *testing.T) fsbackend.Service {
 	t.Helper()
 	skipE2E(t)
 
@@ -113,7 +120,7 @@ type testFS struct {
 	fs fsbackend.FS
 }
 
-func newTestFS(t *testing.T, b *fsbackend.Backend, mountpoint string) testFS {
+func newTestFS(t *testing.T, b fsbackend.Service, mountpoint string) testFS {
 	t.Helper()
 	f, err := b.FS(mountpoint)
 	require.NoError(t, err)
@@ -212,7 +219,7 @@ func writeTestFiles(t *testing.T, tfs testFS) string {
 	}
 	tfs.WriteFile(t, "numbers.txt", []byte(buf.String()))
 
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
@@ -232,7 +239,7 @@ func verifyTestFiles(t *testing.T, tfs testFS, randomMD5 string) {
 	require.Equal(t, 1000, len(lines))
 }
 
-// syncFS calls sync to flush filesystem buffers (kernel mode only).
+// syncFS calls sync to flush filesystem buffers (kernel ext4 mode only).
 func syncFS(t *testing.T) {
 	t.Helper()
 	err := exec.Command("sync").Run()
@@ -256,7 +263,7 @@ func runCmd(t *testing.T, name string, args ...string) {
 }
 
 // mountVolume is a convenience: creates a backend, creates+formats a volume, mounts it, returns testFS + backend.
-func mountVolume(t *testing.T, name string) (testFS, *fsbackend.Backend) {
+func mountVolume(t *testing.T, name string) (testFS, fsbackend.Service) {
 	t.Helper()
 	b := newBackend(t)
 	ctx := t.Context()
@@ -264,21 +271,19 @@ func mountVolume(t *testing.T, name string) (testFS, *fsbackend.Backend) {
 	err := b.Create(ctx, name)
 	require.NoError(t, err)
 
-	mp := mountpoint(name)
-	if isKernelMode() {
-		os.MkdirAll(mp, 0o755)
-	}
+	mp := mountpoint(t, name)
 	err = b.Mount(ctx, name, mp)
 	require.NoError(t, err)
 	return newTestFS(t, b, mp), b
 }
 
 // mountpoint returns a mountpoint path for a volume name.
-// For kernel mode, returns a real temp directory.
-// For lwext4 mode, returns a logical key.
-func mountpoint(volume string) string {
-	if isKernelMode() {
-		return fmt.Sprintf("/tmp/loophole-e2e-%s", volume)
+// For modes with real mounts, returns a temp directory.
+// For in-process lwext4 mode, returns a logical key.
+func mountpoint(t *testing.T, volume string) string {
+	if needsRealMount() {
+		dir := t.TempDir()
+		return dir
 	}
 	return "/" + volume
 }

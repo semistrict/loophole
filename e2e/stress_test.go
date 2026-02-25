@@ -15,11 +15,9 @@ import (
 
 func stressMount(t *testing.T, name string) string {
 	t.Helper()
-	skipKernelOnly(t)
 	b := newBackend(t)
 	ctx := t.Context()
-	mp := mountpoint(name)
-	os.MkdirAll(mp, 0o755)
+	mp := mountpoint(t, name)
 	require.NoError(t, b.Create(ctx, name))
 	err := b.Mount(ctx, name, mp)
 	require.NoError(t, err)
@@ -35,6 +33,7 @@ func TestE2E_FsxBasic(t *testing.T) {
 }
 
 func TestE2E_FsxWithPunchHole(t *testing.T) {
+	skipKernelOnly(t)
 	if !hasTool("fsx") {
 		t.Skip("fsx not installed")
 	}
@@ -103,6 +102,7 @@ func TestE2E_FioSequentialWriteVerify(t *testing.T) {
 }
 
 func TestE2E_FioFallocatePunchHole(t *testing.T) {
+	skipKernelOnly(t)
 	if !hasTool("fio") {
 		t.Skip("fio not installed")
 	}

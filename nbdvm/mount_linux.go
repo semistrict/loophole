@@ -44,6 +44,7 @@ type volumeExport struct {
 type Options struct {
 	VolumeSize     uint64
 	NumConnections int // parallel socket pairs per device (default 4)
+	Logger         *slog.Logger
 }
 
 // NewServer creates a new NBD volume server.
@@ -59,11 +60,15 @@ func NewServer(vm *loophole.VolumeManager, opts *Options) (*Server, error) {
 	if numConns == 0 {
 		numConns = defaultNumConns
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Server{
 		vm:         vm,
 		volumeSize: volumeSize,
 		numConns:   numConns,
-		log:        slog.Default(),
+		log:        logger,
 		exports:    make(map[string]*volumeExport),
 	}, nil
 }

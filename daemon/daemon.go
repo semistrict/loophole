@@ -16,16 +16,12 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/fatih/color"
+
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/fuseblockdev"
 	"github.com/semistrict/loophole/metrics"
-)
-
-const (
-	defaultBlockSize    = 4 * 1024 * 1024
-	defaultMaxUploads   = 20
-	defaultMaxDownloads = 200
 )
 
 // Daemon serves the loophole HTTP API over a Unix socket.
@@ -33,13 +29,13 @@ type Daemon struct {
 	inst    loophole.Instance
 	dir     loophole.Dir
 	mode    loophole.Mode
-	backend *fsbackend.Backend
+	backend fsbackend.Service
 	ln      net.Listener
 	log     *slog.Logger
 }
 
 // Start initializes everything and returns a Daemon ready to Serve.
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug bool, s3opts *loophole.S3Options) (*Daemon, error) {
+func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug, foreground bool, socketMode os.FileMode, mode loophole.Mode, s3opts *loophole.S3Options) (*Daemon, error) {
 	logPath := dir.Log(inst)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
@@ -53,32 +49,37 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug 
 	if debug {
 		level = slog.LevelDebug
 	}
-	logger := slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: level}))
+	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: level})
+	var handler slog.Handler = fileHandler
+	if foreground {
+		handler = multiHandler{fileHandler, &consoleHandler{level: level}}
+	}
+	logger := slog.New(handler)
 	logger.Info("starting daemon", "s3", inst.S3URL(), "log", logPath)
 
-	store, err := loophole.NewS3Store(ctx, inst, s3opts)
+	vm, err := loophole.SetupVolumeManager(ctx, inst, dir, s3opts, logger)
 	if err != nil {
-		return nil, fmt.Errorf("connect to S3: %w", err)
+		return nil, err
 	}
 
-	if err := loophole.FormatSystem(ctx, store, defaultBlockSize); err != nil {
-		logger.Debug("format system (may already exist)", "error", err)
+	if mode == "" {
+		mode = loophole.DefaultMode()
 	}
 
-	vm, err := loophole.NewVolumeManager(ctx, store, dir.Cache(inst), defaultMaxUploads, defaultMaxDownloads)
-	if err != nil {
-		return nil, fmt.Errorf("init volume manager: %w", err)
-	}
-
-	mode := loophole.ModeFromEnv()
-
-	var backend *fsbackend.Backend
+	var backend fsbackend.Service
 	switch mode {
 	case loophole.ModeNBD:
 		backend, err = fsbackend.NewNBD(vm, nil)
 		if err != nil {
 			return nil, fmt.Errorf("start NBD backend: %w", err)
 		}
+	case loophole.ModeTestNBDTCP:
+		backend, err = fsbackend.NewNBDTCP(vm, nil)
+		if err != nil {
+			return nil, fmt.Errorf("start NBD TCP backend: %w", err)
+		}
+	case loophole.ModeLwext4FUSE:
+		backend = fsbackend.NewLwext4FUSE(vm, nil)
 	default:
 		backend, err = fsbackend.NewFUSE(dir.Fuse(inst), vm, &fuseblockdev.Options{Debug: debug})
 		if err != nil {
@@ -96,9 +97,12 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug 
 	if err != nil {
 		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
 	}
-
-	// Start Prometheus metrics server in background.
-	go metrics.ListenAndServe(":9090", logger)
+	if socketMode != 0 {
+		if err := os.Chmod(sockPath, socketMode); err != nil {
+			ln.Close()
+			return nil, fmt.Errorf("chmod socket: %w", err)
+		}
+	}
 
 	return &Daemon{
 		inst:    inst,
@@ -115,7 +119,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{Handler: d.mux()}
+	srv := &http.Server{Handler: d.mux(stop)}
 	go func() {
 		<-ctx.Done()
 		srv.Close()
@@ -139,7 +143,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	return err
 }
 
-func (d *Daemon) mux() *http.ServeMux {
+func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /device/mount", d.handleDeviceMount)
@@ -152,9 +156,15 @@ func (d *Daemon) mux() *http.ServeMux {
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
 	mux.HandleFunc("POST /clone", d.handleClone)
+	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
+		d.log.Info("shutdown requested")
+		writeJSON(w, map[string]string{"status": "ok"})
+		stop()
+	})
 
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)
+	mux.Handle("GET /metrics", metrics.Handler())
 
 	return mux
 }
@@ -344,6 +354,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"s3":      d.inst.S3URL(),
 		"mode":    string(d.mode),
 		"socket":  d.dir.Socket(d.inst),
+		"log":     d.dir.Log(d.inst),
 		"volumes": d.backend.VM().Volumes(),
 		"mounts":  d.backend.Mounts(),
 	})
@@ -388,4 +399,110 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 	if err := os.Symlink(d.dir.Socket(d.inst), symPath); err != nil {
 		d.log.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}
+}
+
+// consoleHandler writes human-friendly log lines to stderr.
+type consoleHandler struct {
+	level slog.Level
+	attrs []slog.Attr
+}
+
+func (h *consoleHandler) Enabled(_ context.Context, l slog.Level) bool {
+	return l >= h.level
+}
+
+var (
+	colorTime  = color.New(color.FgHiBlack)
+	colorDebug = color.New(color.FgHiBlack)
+	colorInfo  = color.New(color.FgCyan)
+	colorWarn  = color.New(color.FgYellow)
+	colorError = color.New(color.FgRed, color.Bold)
+	colorKey   = color.New(color.FgHiBlack)
+	colorMsg   = color.New(color.FgWhite, color.Bold)
+)
+
+func levelColor(l slog.Level) *color.Color {
+	switch {
+	case l >= slog.LevelError:
+		return colorError
+	case l >= slog.LevelWarn:
+		return colorWarn
+	case l >= slog.LevelInfo:
+		return colorInfo
+	default:
+		return colorDebug
+	}
+}
+
+func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
+	var buf []byte
+	buf = append(buf, colorTime.Sprint(r.Time.Format("15:04:05"))...)
+	buf = append(buf, ' ')
+	lc := levelColor(r.Level)
+	buf = append(buf, lc.Sprintf("%-5s", r.Level.String())...)
+	buf = append(buf, ' ')
+	buf = append(buf, colorMsg.Sprint(r.Message)...)
+	appendAttr := func(a slog.Attr) {
+		buf = append(buf, ' ')
+		buf = append(buf, colorKey.Sprint(a.Key)...)
+		buf = append(buf, '=')
+		buf = append(buf, a.Value.String()...)
+	}
+	for _, a := range h.attrs {
+		appendAttr(a)
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		appendAttr(a)
+		return true
+	})
+	buf = append(buf, '\n')
+	_, err := os.Stderr.Write(buf)
+	return err
+}
+
+func (h *consoleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &consoleHandler{level: h.level, attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...)}
+}
+
+func (h *consoleHandler) WithGroup(_ string) slog.Handler {
+	return h
+}
+
+// multiHandler fans out log records to multiple handlers.
+type multiHandler []slog.Handler
+
+func (m multiHandler) Enabled(_ context.Context, l slog.Level) bool {
+	for _, h := range m {
+		if h.Enabled(context.Background(), l) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m multiHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, h := range m {
+		if h.Enabled(ctx, r.Level) {
+			if err := h.Handle(ctx, r.Clone()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	handlers := make(multiHandler, len(m))
+	for i, h := range m {
+		handlers[i] = h.WithAttrs(attrs)
+	}
+	return handlers
+}
+
+func (m multiHandler) WithGroup(name string) slog.Handler {
+	handlers := make(multiHandler, len(m))
+	for i, h := range m {
+		handlers[i] = h.WithGroup(name)
+	}
+	return handlers
 }

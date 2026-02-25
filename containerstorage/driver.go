@@ -69,11 +69,11 @@ func Init(home string, options graphdriver.Options) (graphdriver.Driver, error) 
 
 	// Start the daemon if it isn't already running. The daemon owns the
 	// VolumeManager, FUSE server, and leases — we just talk to it over UDS.
-	if err := client.EnsureDaemon(dir, inst, binPath); err != nil {
+	c := client.New(dir, inst)
+	c.Bin = binPath
+	if err := c.EnsureDaemon(); err != nil {
 		return nil, fmt.Errorf("ensure daemon: %w", err)
 	}
-
-	c := client.New(dir, inst)
 
 	mountDir := filepath.Join(home, "mounts")
 	if err := os.MkdirAll(mountDir, 0o755); err != nil {

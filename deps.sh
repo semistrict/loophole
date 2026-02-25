@@ -50,17 +50,23 @@ apply_patch() {
   if [ ! -f "$patch" ]; then
     return
   fi
-  local marker="$DEPS_DIR/$dep/.patched"
+  local dir="$DEPS_DIR/$dep"
+  local marker="$dir/.patched"
   if [ -f "$marker" ]; then
     echo "Skipping patch for $dep (already applied)"
     return
   fi
   echo "Applying patch for $dep"
-  patch -d "$DEPS_DIR/$dep" -p2 < "$patch"
+  if is_git_dep "$dep"; then
+    git -C "$dir" apply < "$patch"
+  else
+    patch -d "$dir" -p2 < "$patch"
+  fi
   touch "$marker"
 }
 
 cmd_patch() {
+  apply_patch lwext4
   apply_patch containers-storage
   apply_patch container-libs
   apply_patch merovius-nbd
@@ -73,7 +79,18 @@ cmd_setup() {
   cmd_patch
 }
 
-PATCHED_DEPS=(containers-storage container-libs merovius-nbd podman)
+PATCHED_DEPS=(lwext4 containers-storage container-libs merovius-nbd podman)
+
+# Deps that use git diff/apply instead of diff -ruN/patch.
+GIT_DEPS=(lwext4)
+
+is_git_dep() {
+  local dep=$1
+  for d in "${GIT_DEPS[@]}"; do
+    if [ "$d" = "$dep" ]; then return 0; fi
+  done
+  return 1
+}
 
 cmd_reset() {
   for dep in "${PATCHED_DEPS[@]}"; do
@@ -98,6 +115,94 @@ cmd_clean() {
   rm -rf "$DEPS_DIR"
 }
 
+# Map dep names to repo and SHA for genpatch.
+dep_repo() {
+  case "$1" in
+    lwext4)             echo "$LWEXT4_REPO" "$LWEXT4_SHA" ;;
+    containers-storage) echo "$CONTAINERS_STORAGE_REPO" "$CONTAINERS_STORAGE_SHA" ;;
+    container-libs)     echo "$CONTAINER_LIBS_REPO" "$CONTAINER_LIBS_SHA" ;;
+    merovius-nbd)       echo "$MEROVIUS_NBD_REPO" "$MEROVIUS_NBD_SHA" ;;
+    podman)             echo "$PODMAN_REPO" "$PODMAN_SHA" ;;
+    *) echo "Unknown dep: $1" >&2; return 1 ;;
+  esac
+}
+
+# Generate a patch using git diff (respects .gitignore).
+gen_one_patch_git() {
+  local dep=$1
+  local working="$DEPS_DIR/$dep"
+  local out="$PATCHES_DIR/$dep.patch"
+
+  git -C "$working" diff HEAD > "$out"
+  # Append untracked files (that aren't gitignored) as new file diffs.
+  local untracked
+  untracked=$(git -C "$working" ls-files --others --exclude-standard)
+  if [ -n "$untracked" ]; then
+    while IFS= read -r f; do
+      git -C "$working" diff --no-index /dev/null "$f" >> "$out" || true
+    done <<< "$untracked"
+  fi
+}
+
+# Generate a patch by cloning upstream and diffing against working tree.
+gen_one_patch_diff() {
+  local dep=$1
+  local working="$DEPS_DIR/$dep"
+  local out="$PATCHES_DIR/$dep.patch"
+
+  read -r repo sha < <(dep_repo "$dep")
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap "rm -rf '$tmpdir'" RETURN
+
+  echo "Cloning upstream $dep at $sha..." >&2
+  mkdir -p "$tmpdir/a"
+  git clone --filter=blob:none -q "$repo" "$tmpdir/a/$dep"
+  git -C "$tmpdir/a/$dep" checkout -q "$sha"
+
+  mkdir -p "$tmpdir/b"
+  rsync -a --exclude=.git --exclude=.patched "$working/" "$tmpdir/b/$dep/"
+
+  (cd "$tmpdir" && diff -ruN --exclude=.git --exclude=.patched "a/$dep" "b/$dep") > "$out" || true
+}
+
+gen_one_patch() {
+  local dep=$1
+  local working="$DEPS_DIR/$dep"
+  if [ ! -d "$working" ]; then
+    echo "Skipping $dep (not downloaded)" >&2
+    return
+  fi
+
+  mkdir -p "$PATCHES_DIR"
+  local out="$PATCHES_DIR/$dep.patch"
+
+  if is_git_dep "$dep"; then
+    gen_one_patch_git "$dep"
+  else
+    gen_one_patch_diff "$dep"
+  fi
+
+  if [ -s "$out" ]; then
+    echo "Wrote $out"
+  else
+    rm -f "$out"
+    echo "No diff for $dep, removed patch file"
+  fi
+}
+
+cmd_genpatch() {
+  if [ $# -gt 0 ]; then
+    for dep in "$@"; do
+      gen_one_patch "$dep"
+    done
+  else
+    for dep in "${PATCHED_DEPS[@]}"; do
+      gen_one_patch "$dep"
+    done
+  fi
+}
+
 usage() {
   echo "Usage: $0 <command>"
   echo ""
@@ -107,6 +212,7 @@ usage() {
   echo "  patch      Apply patches to already-downloaded dependencies"
   echo "  reset      Reset patched deps to upstream state"
   echo "  repatch    Reset and re-apply patches"
+  echo "  genpatch   Regenerate patch files from working tree (optionally: genpatch <dep>)"
   echo "  clean      Remove third_party directory"
 }
 
@@ -116,6 +222,7 @@ case "${1:-setup}" in
   patch)    cmd_patch ;;
   reset)    cmd_reset ;;
   repatch)  cmd_repatch ;;
+  genpatch) shift; cmd_genpatch "$@" ;;
   clean)    cmd_clean ;;
   -h|--help|help) usage ;;
   *)

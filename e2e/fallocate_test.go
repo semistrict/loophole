@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+
+	"github.com/semistrict/loophole"
 )
 
 // Fallocate tests are Linux-only: they need FUSE + fallocate syscall.
@@ -36,8 +38,7 @@ func TestE2E_PunchHoleZerosData(t *testing.T) {
 	skipKernelOnly(t)
 	b := newBackend(t)
 	ctx := t.Context()
-	mp := mountpoint("punch-zeros")
-	os.MkdirAll(mp, 0o755)
+	mp := mountpoint(t, "punch-zeros")
 	require.NoError(t, b.Create(ctx, "punch-zeros"))
 	err := b.Mount(ctx, "punch-zeros", mp)
 	require.NoError(t, err)
@@ -184,7 +185,7 @@ func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 
 func TestE2E_PunchHolePartialBlock(t *testing.T) {
 	skipKernelOnly(t)
-	if isNBDMode() {
+	if mode() == loophole.ModeNBD || mode() == loophole.ModeTestNBDTCP {
 		t.Skip("NBD does not support sub-block-aligned punch holes")
 	}
 	b := newBackend(t)

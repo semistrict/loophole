@@ -10,11 +10,8 @@ import (
 func TestE2E_SnapshotPreservesData(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint("parent")
-	if isKernelMode() {
-		os.MkdirAll(parentMP, 0o755)
-	}
-
+	parentMP := mountpoint(t, "parent")
+	
 	require.NoError(t, b.Create(ctx, "parent"))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
@@ -22,10 +19,7 @@ func TestE2E_SnapshotPreservesData(t *testing.T) {
 	tfs := newTestFS(t, b, parentMP)
 	randomMD5 := writeTestFiles(t, tfs)
 
-	childMP := mountpoint("child")
-	if isKernelMode() {
-		os.MkdirAll(childMP, 0o755)
-	}
+	childMP := mountpoint(t, "child")
 	err = b.Clone(t.Context(), parentMP, "child", childMP)
 	require.NoError(t, err)
 
@@ -38,25 +32,19 @@ func TestE2E_SnapshotPreservesData(t *testing.T) {
 func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint("parent")
-	if isKernelMode() {
-		os.MkdirAll(parentMP, 0o755)
-	}
-
+	parentMP := mountpoint(t, "parent")
+	
 	require.NoError(t, b.Create(ctx, "parent"))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
 
 	parentFS := newTestFS(t, b, parentMP)
 	parentFS.WriteFile(t, "parent.txt", []byte("from parent\n"))
-	if isKernelMode() {
+	if needsKernelExt4() {
 		syncFS(t)
 	}
 
-	childMP := mountpoint("child")
-	if isKernelMode() {
-		os.MkdirAll(childMP, 0o755)
-	}
+	childMP := mountpoint(t, "child")
 	err = b.Clone(t.Context(), parentMP, "child", childMP)
 	require.NoError(t, err)
 

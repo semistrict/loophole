@@ -1,0 +1,50 @@
+diff --git a/src/ext4.c b/src/ext4.c
+index 90ce45e..a0eef66 100644
+--- a/src/ext4.c
++++ b/src/ext4.c
+@@ -2021,24 +2021,22 @@ int ext4_fseek(ext4_file *file, int64_t offset, uint32_t origin)
+ {
+ 	switch (origin) {
+ 	case SEEK_SET:
+-		if (offset < 0 || (uint64_t)offset > file->fsize)
++		if (offset < 0)
+ 			return EINVAL;
+ 
+ 		file->fpos = offset;
+ 		return EOK;
+ 	case SEEK_CUR:
+-		if ((offset < 0 && (uint64_t)(-offset) > file->fpos) ||
+-		    (offset > 0 &&
+-		     (uint64_t)offset > (file->fsize - file->fpos)))
++		if (offset < 0 && (uint64_t)(-offset) > file->fpos)
+ 			return EINVAL;
+ 
+ 		file->fpos += offset;
+ 		return EOK;
+ 	case SEEK_END:
+-		if (offset < 0 || (uint64_t)offset > file->fsize)
++		if (offset < 0 && (uint64_t)(-offset) > file->fsize)
+ 			return EINVAL;
+ 
+-		file->fpos = file->fsize - offset;
++		file->fpos = file->fsize + offset;
+ 		return EOK;
+ 	}
+ 	return EINVAL;
+@@ -2051,7 +2049,15 @@ uint64_t ext4_ftell(ext4_file *file)
+ 
+ uint64_t ext4_fsize(ext4_file *file)
+ {
+-	return file->fsize;
++	struct ext4_inode_ref ref;
++	int r = ext4_fs_get_inode_ref(&file->mp->fs, file->inode, &ref);
++	if (r != EOK)
++		return file->fsize;
++
++	uint64_t size = ext4_inode_get_size(&file->mp->fs.sb, ref.inode);
++	ext4_fs_put_inode_ref(&ref);
++	file->fsize = size;
++	return size;
+ }
+ 
+ 

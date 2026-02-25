@@ -15,18 +15,43 @@ import (
 )
 
 // Driver is the pluggable interface that backends implement.
-// FUSE, NBD, and lwext4 each provide a Driver.
-type Driver interface {
+// H is the per-mount handle type returned by Mount. The Backend stores
+// handles and passes them back to Unmount/Freeze/Thaw/FS — drivers need
+// no internal mount tracking.
+type Driver[H any] interface {
 	// Format creates a new ext4 filesystem on the volume's block device.
 	Format(ctx context.Context, vol *loophole.Volume) error
-	Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) error
-	Unmount(ctx context.Context, mountpoint string, volumeName string) error
-	Freeze(ctx context.Context, mountpoint string) error
-	Thaw(ctx context.Context, mountpoint string) error
+	Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (H, error)
+	Unmount(ctx context.Context, handle H) error
+	Freeze(ctx context.Context, handle H) error
+	Thaw(ctx context.Context, handle H) error
 	Close(ctx context.Context) error
 
-	// FS returns a filesystem handle for the given mountpoint.
+	// FS returns a filesystem handle for the given mount.
+	FS(handle H) (FS, error)
+}
+
+// Service is the non-generic interface that Backend[H] implements.
+// The daemon and HTTP handlers use this.
+type Service interface {
+	Create(ctx context.Context, volume string) error
+	Mount(ctx context.Context, volume, mountpoint string) error
+	Unmount(ctx context.Context, mountpoint string) error
+	Snapshot(ctx context.Context, mountpoint, name string) error
+	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
+	Freeze(ctx context.Context, mountpoint string) error
+	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
+	DeviceMount(ctx context.Context, volume string) (string, error)
+	DeviceUnmount(ctx context.Context, volume string) error
+	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
+	DeviceClone(ctx context.Context, volume, clone string) (string, error)
+	DevicePath(volume string) (string, error)
+	IsMounted(mountpoint string) bool
+	VolumeAt(mountpoint string) string
+	Mounts() map[string]string
+	VM() *loophole.VolumeManager
+	Close(ctx context.Context) error
 }
 
 // FS provides path-based filesystem operations on a mounted volume.
@@ -64,32 +89,38 @@ type DeviceConnector interface {
 	DisconnectDevice(ctx context.Context, volumeName string) error
 }
 
+// mountEntry stores the volume name and driver-specific handle for a mount.
+type mountEntry[H any] struct {
+	volume string
+	handle H
+}
+
 // Backend owns a VolumeManager and Driver. It provides the complete
 // high-level API: mount, unmount, snapshot, clone, and filesystem access.
 // A volume may only be mounted once; mounting the same volume at the same
 // mountpoint is idempotent.
-type Backend struct {
+type Backend[H any] struct {
 	vm     *loophole.VolumeManager
-	driver Driver
+	driver Driver[H]
 
 	mu     sync.Mutex
-	mounts map[string]string // mountpoint → volume name
+	mounts map[string]mountEntry[H] // mountpoint → entry
 }
 
 // New creates a Backend with the given driver and volume manager.
-func New(driver Driver, vm *loophole.VolumeManager) *Backend {
-	return &Backend{
+func New[H any](driver Driver[H], vm *loophole.VolumeManager) *Backend[H] {
+	return &Backend[H]{
 		vm:     vm,
 		driver: driver,
-		mounts: make(map[string]string),
+		mounts: make(map[string]mountEntry[H]),
 	}
 }
 
 // VM returns the underlying VolumeManager.
-func (b *Backend) VM() *loophole.VolumeManager { return b.vm }
+func (b *Backend[H]) VM() *loophole.VolumeManager { return b.vm }
 
 // Create creates a new volume and formats it with ext4.
-func (b *Backend) Create(ctx context.Context, volume string) error {
+func (b *Backend[H]) Create(ctx context.Context, volume string) error {
 	vol, err := b.vm.NewVolume(ctx, volume)
 	if err != nil {
 		return err
@@ -104,7 +135,7 @@ func (b *Backend) Create(ctx context.Context, volume string) error {
 // The volume must already exist and be formatted with ext4.
 // Idempotent: if the volume is already mounted at this mountpoint, returns nil.
 // Returns an error if the volume is mounted at a different mountpoint.
-func (b *Backend) Mount(ctx context.Context, volume string, mountpoint string) error {
+func (b *Backend[H]) Mount(ctx context.Context, volume string, mountpoint string) error {
 	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
 		return err
@@ -113,16 +144,16 @@ func (b *Backend) Mount(ctx context.Context, volume string, mountpoint string) e
 }
 
 // Unmount tears down the filesystem at mountpoint and closes the volume.
-func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
+func (b *Backend[H]) Unmount(ctx context.Context, mountpoint string) error {
 	b.mu.Lock()
-	volName := b.mounts[mountpoint]
+	entry, ok := b.mounts[mountpoint]
 	b.mu.Unlock()
 
-	if volName == "" {
+	if !ok {
 		return fmt.Errorf("mountpoint %q not tracked", mountpoint)
 	}
 
-	if err := b.driver.Unmount(ctx, mountpoint, volName); err != nil {
+	if err := b.driver.Unmount(ctx, entry.handle); err != nil {
 		return err
 	}
 
@@ -130,7 +161,7 @@ func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
 	delete(b.mounts, mountpoint)
 	b.mu.Unlock()
 
-	vol := b.vm.GetVolume(volName)
+	vol := b.vm.GetVolume(entry.volume)
 	if vol != nil {
 		return vol.Close(ctx)
 	}
@@ -138,17 +169,17 @@ func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
 }
 
 // Snapshot freezes the filesystem, takes a snapshot, and thaws.
-func (b *Backend) Snapshot(ctx context.Context, mountpoint string, name string) error {
-	vol, err := b.volumeAt(mountpoint)
+func (b *Backend[H]) Snapshot(ctx context.Context, mountpoint string, name string) error {
+	vol, handle, err := b.volumeAndHandle(mountpoint)
 	if err != nil {
 		return err
 	}
 
-	if err := b.driver.Freeze(ctx, mountpoint); err != nil {
+	if err := b.driver.Freeze(ctx, handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
 	err = vol.Snapshot(ctx, name)
-	if thawErr := b.driver.Thaw(ctx, mountpoint); thawErr != nil {
+	if thawErr := b.driver.Thaw(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after snapshot", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
 			err = thawErr
@@ -158,17 +189,17 @@ func (b *Backend) Snapshot(ctx context.Context, mountpoint string, name string) 
 }
 
 // Clone freezes the filesystem, clones the volume, thaws, and mounts the clone.
-func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string, cloneMountpoint string) error {
-	vol, err := b.volumeAt(mountpoint)
+func (b *Backend[H]) Clone(ctx context.Context, mountpoint string, cloneName string, cloneMountpoint string) error {
+	vol, handle, err := b.volumeAndHandle(mountpoint)
 	if err != nil {
 		return err
 	}
 
-	if err := b.driver.Freeze(ctx, mountpoint); err != nil {
+	if err := b.driver.Freeze(ctx, handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
 	cloneVol, err := vol.Clone(ctx, cloneName)
-	if thawErr := b.driver.Thaw(ctx, mountpoint); thawErr != nil {
+	if thawErr := b.driver.Thaw(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
 			err = thawErr
@@ -182,38 +213,52 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 }
 
 // Freeze flushes dirty data and quiesces the filesystem.
-func (b *Backend) Freeze(ctx context.Context, mountpoint string) error {
-	return b.driver.Freeze(ctx, mountpoint)
+func (b *Backend[H]) Freeze(ctx context.Context, mountpoint string) error {
+	_, handle, err := b.volumeAndHandle(mountpoint)
+	if err != nil {
+		return err
+	}
+	return b.driver.Freeze(ctx, handle)
 }
 
 // Thaw resumes the filesystem after Freeze.
-func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
-	return b.driver.Thaw(ctx, mountpoint)
+func (b *Backend[H]) Thaw(ctx context.Context, mountpoint string) error {
+	_, handle, err := b.volumeAndHandle(mountpoint)
+	if err != nil {
+		return err
+	}
+	return b.driver.Thaw(ctx, handle)
 }
 
 // FS returns a filesystem handle for the given mountpoint.
-func (b *Backend) FS(mountpoint string) (FS, error) {
-	return b.driver.FS(mountpoint)
+func (b *Backend[H]) FS(mountpoint string) (FS, error) {
+	b.mu.Lock()
+	entry, ok := b.mounts[mountpoint]
+	b.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("mountpoint %q not tracked", mountpoint)
+	}
+	return b.driver.FS(entry.handle)
 }
 
 // --- Device-level operations (raw block device access) ---
 
 // DeviceMount opens an existing volume and returns its block device path.
 // No filesystem is mounted — the caller manages the raw device.
-func (b *Backend) DeviceMount(ctx context.Context, volume string) (string, error) {
+func (b *Backend[H]) DeviceMount(ctx context.Context, volume string) (string, error) {
 	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
 		return "", err
 	}
-	if dc, ok := b.driver.(DeviceConnector); ok {
+	if dc, ok := any(b.driver).(DeviceConnector); ok {
 		return dc.ConnectDevice(ctx, vol)
 	}
 	return b.DevicePath(volume)
 }
 
 // DeviceUnmount disconnects the block device and closes a volume opened via DeviceMount.
-func (b *Backend) DeviceUnmount(ctx context.Context, volume string) error {
-	if dc, ok := b.driver.(DeviceConnector); ok {
+func (b *Backend[H]) DeviceUnmount(ctx context.Context, volume string) error {
+	if dc, ok := any(b.driver).(DeviceConnector); ok {
 		if err := dc.DisconnectDevice(ctx, volume); err != nil {
 			return err
 		}
@@ -226,7 +271,7 @@ func (b *Backend) DeviceUnmount(ctx context.Context, volume string) error {
 }
 
 // DeviceSnapshot takes a snapshot of a volume by name (no freeze/thaw).
-func (b *Backend) DeviceSnapshot(ctx context.Context, volume string, snapshot string) error {
+func (b *Backend[H]) DeviceSnapshot(ctx context.Context, volume string, snapshot string) error {
 	vol := b.vm.GetVolume(volume)
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
@@ -235,7 +280,7 @@ func (b *Backend) DeviceSnapshot(ctx context.Context, volume string, snapshot st
 }
 
 // DeviceClone clones a volume and returns the clone's device path.
-func (b *Backend) DeviceClone(ctx context.Context, volume string, clone string) (string, error) {
+func (b *Backend[H]) DeviceClone(ctx context.Context, volume string, clone string) (string, error) {
 	vol := b.vm.GetVolume(volume)
 	if vol == nil {
 		return "", fmt.Errorf("volume %q not open", volume)
@@ -244,15 +289,15 @@ func (b *Backend) DeviceClone(ctx context.Context, volume string, clone string) 
 	if err != nil {
 		return "", err
 	}
-	if dc, ok := b.driver.(DeviceConnector); ok {
+	if dc, ok := any(b.driver).(DeviceConnector); ok {
 		return dc.ConnectDevice(ctx, cloneVol)
 	}
 	return b.DevicePath(clone)
 }
 
 // DevicePath returns the block device path for a volume.
-func (b *Backend) DevicePath(volume string) (string, error) {
-	dp, ok := b.driver.(DevicePather)
+func (b *Backend[H]) DevicePath(volume string) (string, error) {
+	dp, ok := any(b.driver).(DevicePather)
 	if !ok {
 		return "", fmt.Errorf("backend does not expose device paths")
 	}
@@ -266,7 +311,7 @@ func (b *Backend) DevicePath(volume string) (string, error) {
 // --- Query methods ---
 
 // IsMounted reports whether mountpoint is tracked as an active mount.
-func (b *Backend) IsMounted(mountpoint string) bool {
+func (b *Backend[H]) IsMounted(mountpoint string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	_, ok := b.mounts[mountpoint]
@@ -274,25 +319,25 @@ func (b *Backend) IsMounted(mountpoint string) bool {
 }
 
 // VolumeAt returns the volume name mounted at mountpoint, or "" if none.
-func (b *Backend) VolumeAt(mountpoint string) string {
+func (b *Backend[H]) VolumeAt(mountpoint string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.mounts[mountpoint]
+	return b.mounts[mountpoint].volume
 }
 
 // Mounts returns a snapshot of all active mountpoint → volume name mappings.
-func (b *Backend) Mounts() map[string]string {
+func (b *Backend[H]) Mounts() map[string]string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	cp := make(map[string]string, len(b.mounts))
 	for k, v := range b.mounts {
-		cp[k] = v
+		cp[k] = v.volume
 	}
 	return cp
 }
 
 // Close unmounts all volumes and releases all resources.
-func (b *Backend) Close(ctx context.Context) error {
+func (b *Backend[H]) Close(ctx context.Context) error {
 	var firstErr error
 	for mountpoint := range b.Mounts() {
 		if err := b.Unmount(ctx, mountpoint); err != nil {
@@ -321,9 +366,9 @@ func (b *Backend) Close(ctx context.Context) error {
 
 // mountpointFor returns the mountpoint for a volume, or "" if not mounted.
 // Caller must hold b.mu.
-func (b *Backend) mountpointFor(volume string) string {
-	for mp, vol := range b.mounts {
-		if vol == volume {
+func (b *Backend[H]) mountpointFor(volume string) string {
+	for mp, entry := range b.mounts {
+		if entry.volume == volume {
 			return mp
 		}
 	}
@@ -331,7 +376,7 @@ func (b *Backend) mountpointFor(volume string) string {
 }
 
 // mountVolume mounts an already-open *Volume. Used by Mount and Clone.
-func (b *Backend) mountVolume(ctx context.Context, vol *loophole.Volume, mountpoint string) error {
+func (b *Backend[H]) mountVolume(ctx context.Context, vol *loophole.Volume, mountpoint string) error {
 	b.mu.Lock()
 	if mp := b.mountpointFor(vol.Name()); mp != "" {
 		b.mu.Unlock()
@@ -342,24 +387,30 @@ func (b *Backend) mountVolume(ctx context.Context, vol *loophole.Volume, mountpo
 	}
 	b.mu.Unlock()
 
-	if err := b.driver.Mount(ctx, vol, mountpoint); err != nil {
+	handle, err := b.driver.Mount(ctx, vol, mountpoint)
+	if err != nil {
 		return err
 	}
 
 	b.mu.Lock()
-	b.mounts[mountpoint] = vol.Name()
+	b.mounts[mountpoint] = mountEntry[H]{volume: vol.Name(), handle: handle}
 	b.mu.Unlock()
 	return nil
 }
 
-func (b *Backend) volumeAt(mountpoint string) (*loophole.Volume, error) {
-	volName := b.VolumeAt(mountpoint)
-	if volName == "" {
-		return nil, fmt.Errorf("mountpoint %q not tracked", mountpoint)
+// volumeAndHandle returns the volume and mount handle for a mountpoint.
+func (b *Backend[H]) volumeAndHandle(mountpoint string) (*loophole.Volume, H, error) {
+	b.mu.Lock()
+	entry, ok := b.mounts[mountpoint]
+	b.mu.Unlock()
+	if !ok {
+		var zero H
+		return nil, zero, fmt.Errorf("mountpoint %q not tracked", mountpoint)
 	}
-	vol := b.vm.GetVolume(volName)
+	vol := b.vm.GetVolume(entry.volume)
 	if vol == nil {
-		return nil, fmt.Errorf("volume %q not open", volName)
+		var zero H
+		return nil, zero, fmt.Errorf("volume %q not open", entry.volume)
 	}
-	return vol, nil
+	return vol, entry.handle, nil
 }

@@ -42,7 +42,9 @@ var fsCounter atomic.Int64
 type FormatOptions struct {
 	BlockSize uint32 // default 4096
 	Label     string
-	NoJournal bool // default false (journal enabled)
+	NoJournal bool   // default false (journal enabled)
+	Uid       uint32 // owner uid for root dir and lost+found (default 0)
+	Gid       uint32 // owner gid for root dir and lost+found (default 0)
 }
 
 // FS is a mounted lwext4 filesystem instance.
@@ -120,13 +122,25 @@ func Format(dev BlockDevice, size int64, opts *FormatOptions) (*FS, error) {
 		return nil, fmt.Errorf("lwext4: failed to get mountpoint")
 	}
 
-	return &FS{
+	fs := &FS{
 		bdev:       bdev,
 		handle:     handle,
 		devName:    devName,
 		mountPoint: mountPoint,
 		mp:         mp,
-	}, nil
+	}
+
+	// Set ownership on root dir and lost+found if requested.
+	if opts != nil && (opts.Uid != 0 || opts.Gid != 0) {
+		ownerAttr := &Attr{Uid: opts.Uid, Gid: opts.Gid}
+		ownerMask := uint32(AttrUid | AttrGid)
+		_ = fs.SetAttr(RootIno, ownerAttr, ownerMask)
+		if lfIno, err := fs.Lookup(RootIno, "lost+found"); err == nil {
+			_ = fs.SetAttr(lfIno, ownerAttr, ownerMask)
+		}
+	}
+
+	return fs, nil
 }
 
 // Open mounts an existing ext4 filesystem from dev.
@@ -158,7 +172,7 @@ func Mount(dev BlockDevice, size int64) (*FS, error) {
 	if rc != 0 {
 		C.ext4_device_unregister(cDevName)
 		destroyBlockdev(bdev, handle)
-		return nil, fmt.Errorf("lwext4: ext4_mount: %d", rc)
+		return nil, fmt.Errorf("lwext4: mount failed (error %d); volume may be corrupt or incompatible — try recreating it", rc)
 	}
 
 	C.ext4_cache_write_back(cMountPoint, C.bool(true))
@@ -542,6 +556,15 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	// If writing past EOF, zero-fill the gap. lwext4's ext4_fwrite
+	// allocates blocks but doesn't zero the gap between old EOF and the
+	// write offset, violating POSIX sparse-file semantics.
+	curSize := f.Size()
+	if off > curSize {
+		if err := f.zeroFill(curSize, off-curSize); err != nil {
+			return 0, err
+		}
+	}
 	rc := C.ext4_fseek(&f.f, C.int64_t(off), 0) // SEEK_SET
 	if rc != 0 {
 		return 0, fmt.Errorf("lwext4: fseek: %d", rc)
@@ -554,6 +577,28 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	return int(wcnt), nil
 }
 
+// zeroFill writes zeros from offset for length bytes.
+func (f *File) zeroFill(offset, length int64) error {
+	rc := C.ext4_fseek(&f.f, C.int64_t(offset), 0)
+	if rc != 0 {
+		return fmt.Errorf("lwext4: fseek (zerofill): %d", rc)
+	}
+	var zeros [4096]byte
+	for length > 0 {
+		n := int64(len(zeros))
+		if n > length {
+			n = length
+		}
+		var wcnt C.size_t
+		rc = C.ext4_fwrite(&f.f, unsafe.Pointer(&zeros[0]), C.size_t(n), &wcnt)
+		if rc != 0 {
+			return fmt.Errorf("lwext4: fwrite (zerofill): %d", rc)
+		}
+		length -= int64(wcnt)
+	}
+	return nil
+}
+
 func (f *File) Seek(offset int64, whence int) (int64, error) {
 	rc := C.ext4_fseek(&f.f, C.int64_t(offset), C.uint32_t(whence))
 	if rc != 0 {
@@ -564,9 +609,17 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (f *File) Truncate(size int64) error {
+	curSize := f.Size()
 	rc := C.ext4_ftruncate(&f.f, C.uint64_t(size))
 	if rc != 0 {
 		return fmt.Errorf("lwext4: ftruncate: %d", rc)
+	}
+	// If extending, zero-fill the new region. lwext4 allocates blocks
+	// but may leave stale data in them.
+	if size > curSize {
+		if err := f.zeroFill(curSize, size-curSize); err != nil {
+			return err
+		}
 	}
 	return nil
 }

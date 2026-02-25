@@ -1,6 +1,6 @@
-diff -ruN --exclude=.git a/merovius-nbd/device.go b/merovius-nbd/device.go
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/device.go b/merovius-nbd/device.go
 --- a/merovius-nbd/device.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/device.go	2026-02-24 19:33:41
++++ b/merovius-nbd/device.go	2026-02-25 11:07:07
 @@ -0,0 +1,22 @@
 +package nbd
 +
@@ -24,9 +24,9 @@ diff -ruN --exclude=.git a/merovius-nbd/device.go b/merovius-nbd/device.go
 +type FUAWriter interface {
 +	WriteAtFUA(p []byte, off int64) (n int, err error)
 +}
-diff -ruN --exclude=.git a/merovius-nbd/doc.go b/merovius-nbd/doc.go
---- a/merovius-nbd/doc.go	2026-02-25 10:51:44
-+++ b/merovius-nbd/doc.go	2026-02-24 19:37:32
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/doc.go b/merovius-nbd/doc.go
+--- a/merovius-nbd/doc.go	2026-02-25 14:45:31
++++ b/merovius-nbd/doc.go	2026-02-25 11:07:07
 @@ -38,21 +38,9 @@
  
  // BUG(1): BlockSizeConstraints are not yet enforced by the server.
@@ -49,9 +49,66 @@ diff -ruN --exclude=.git a/merovius-nbd/doc.go b/merovius-nbd/doc.go
  
  // BUG(10): Metadata querying is not yet supported.
  
-diff -ruN --exclude=.git a/merovius-nbd/go.mod b/merovius-nbd/go.mod
---- a/merovius-nbd/go.mod	2026-02-25 10:51:44
-+++ b/merovius-nbd/go.mod	2026-02-24 22:59:20
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/export_flags.go b/merovius-nbd/export_flags.go
+--- a/merovius-nbd/export_flags.go	1970-01-01 08:00:00
++++ b/merovius-nbd/export_flags.go	2026-02-25 14:37:39
+@@ -0,0 +1,34 @@
++package nbd
++
++// Cross-platform NBD export flag constants.
++// These duplicate the values from nbdnl (which is linux-only) so that
++// TCP-based NBD servers can set flags on any platform.
++const (
++	FlagHasFlags        uint16 = 1 << 0
++	FlagReadOnly        uint16 = 1 << 1
++	FlagSendFlush       uint16 = 1 << 2
++	FlagSendFUA         uint16 = 1 << 3
++	FlagSendTrim        uint16 = 1 << 5
++	FlagSendWriteZeroes uint16 = 1 << 6
++	FlagCanMulticonn    uint16 = 1 << 8
++)
++
++// ExportFlags returns the appropriate NBD export flags for d.
++// It auto-detects optional capabilities (Trimmer, WriteZeroer, FUAWriter)
++// via type assertion.
++func ExportFlags(d Device, readOnly bool) uint16 {
++	flags := FlagHasFlags | FlagSendFlush
++	if readOnly {
++		flags |= FlagReadOnly
++	}
++	if _, ok := d.(Trimmer); ok {
++		flags |= FlagSendTrim
++	}
++	if _, ok := d.(WriteZeroer); ok {
++		flags |= FlagSendWriteZeroes
++	}
++	if _, ok := d.(FUAWriter); ok {
++		flags |= FlagSendFUA
++	}
++	return flags
++}
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/export_provider.go b/merovius-nbd/export_provider.go
+--- a/merovius-nbd/export_provider.go	1970-01-01 08:00:00
++++ b/merovius-nbd/export_provider.go	2026-02-25 14:37:45
+@@ -0,0 +1,15 @@
++package nbd
++
++import "context"
++
++// ExportProvider resolves exports dynamically by name.
++// This is the dynamic counterpart to passing a static []Export to Serve.
++type ExportProvider interface {
++	// FindExport returns the export for the given name.
++	// If name is empty, return a default export.
++	FindExport(ctx context.Context, name string) (Export, error)
++
++	// ListExports returns all available export names.
++	// The Device field may be nil in the returned exports (only Name is required for listing).
++	ListExports(ctx context.Context) ([]Export, error)
++}
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/go.mod b/merovius-nbd/go.mod
+--- a/merovius-nbd/go.mod	2026-02-25 14:45:31
++++ b/merovius-nbd/go.mod	2026-02-25 11:07:07
 @@ -1,6 +1,6 @@
  module github.com/Merovius/nbd
  
@@ -60,9 +117,107 @@ diff -ruN --exclude=.git a/merovius-nbd/go.mod b/merovius-nbd/go.mod
  
  require (
  	github.com/google/subcommands v1.2.0
-diff -ruN --exclude=.git a/merovius-nbd/nbdnl/nbd.go b/merovius-nbd/nbdnl/nbd.go
---- a/merovius-nbd/nbdnl/nbd.go	2026-02-25 10:51:44
-+++ b/merovius-nbd/nbdnl/nbd.go	2026-02-24 19:33:32
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/handshake.go b/merovius-nbd/handshake.go
+--- a/merovius-nbd/handshake.go	2026-02-25 14:45:31
++++ b/merovius-nbd/handshake.go	2026-02-25 14:38:04
+@@ -301,6 +301,94 @@
+ 	return c.rw.Close()
+ }
+ 
++func serverHandshakeDynamic(rw io.ReadWriter, provider ExportProvider) (connParameters, error) {
++	parms := connParameters{
++		BlockSizes: defaultBlockSizes,
++	}
++	return parms, do(rw, func(e *encoder) {
++		e.writeUint64(nbdMagic)
++		e.writeUint64(optMagic)
++		e.writeUint16(flagDefaults)
++		clientFlags := e.uint32()
++
++		if clientFlags & ^uint32(flagDefaults) != 0 {
++			e.check(fmt.Errorf("handshake aborted due to unknown handshake flags 0x%d", clientFlags & ^uint32(flagDefaults)))
++		}
++		if clientFlags != flagDefaults {
++			e.check(fmt.Errorf("refusing deprecated handshake flags 0x%x", clientFlags))
++		}
++
++		ctx := context.Background()
++
++		for {
++			code, o, err := decodeOption(e)
++			if err != 0 {
++				encodeReply(e, code, &repError{err, ""})
++				continue
++			}
++			switch o := o.(type) {
++			case *optExportName:
++				exp, findErr := provider.FindExport(ctx, o.name)
++				if findErr != nil {
++					encodeReply(e, code, &repError{errUnknown, ""})
++					continue
++				}
++				parms.Export = exp
++				e.writeUint64(parms.Export.Size)
++				e.writeUint16(parms.Export.Flags)
++				return
++			case *optAbort:
++				encodeReply(e, code, &repAck{})
++				e.check(errors.New("client aborted negotiation"))
++			case *optList:
++				exports, listErr := provider.ListExports(ctx)
++				if listErr != nil {
++					encodeReply(e, code, &repError{errUnknown, ""})
++					continue
++				}
++				for _, ex := range exports {
++					encodeReply(e, code, &repServer{ex.Name, ""})
++				}
++				encodeReply(e, code, &repAck{})
++			case *optInfo:
++				exp, findErr := provider.FindExport(ctx, o.name)
++				if findErr != nil {
++					encodeReply(e, code, &repError{errUnknown, ""})
++					continue
++				}
++				parms.Export = exp
++				encodeReply(e, code, &infoExport{parms.Export.Size, parms.Export.Flags})
++				for _, r := range o.reqs {
++					switch r {
++					case cInfoExport:
++						// already sent
++					case cInfoName:
++						encodeReply(e, code, &infoName{parms.Export.Name})
++					case cInfoDescription:
++						encodeReply(e, code, &infoDescription{parms.Export.Description})
++					case cInfoBlockSize:
++						if parms.Export.BlockSizes == nil {
++							break
++						}
++						if o.done {
++							parms.BlockSizes = *parms.Export.BlockSizes
++						}
++						encodeReply(e, code, &infoBlockSize{
++							parms.BlockSizes.Min,
++							parms.BlockSizes.Preferred,
++							parms.BlockSizes.Max,
++						})
++					}
++				}
++				encodeReply(e, code, &repAck{})
++				if o.done {
++					return
++				}
++			}
++		}
++	})
++}
++
+ // findExport searches the list of exports for one with the given name. If name
+ // is empty, it returns the first export. findExport performs a linear search,
+ // so it doesn't scale to a large number of exports, but we assume for now that
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/nbdnl/nbd.go b/merovius-nbd/nbdnl/nbd.go
+--- a/merovius-nbd/nbdnl/nbd.go	2026-02-25 14:45:31
++++ b/merovius-nbd/nbdnl/nbd.go	2026-02-25 11:07:07
 @@ -159,8 +159,12 @@
  	FlagSendFUA ServerFlags = 1 << 3
  	// FlagSendTrim is set if the export supports the Trim command.
@@ -76,9 +231,9 @@ diff -ruN --exclude=.git a/merovius-nbd/nbdnl/nbd.go b/merovius-nbd/nbdnl/nbd.go
  )
  
  // Connect instructs the kernel to connect the given set of sockets to the
-diff -ruN --exclude=.git a/merovius-nbd/netlink.go b/merovius-nbd/netlink.go
---- a/merovius-nbd/netlink.go	2026-02-25 10:51:44
-+++ b/merovius-nbd/netlink.go	2026-02-24 22:57:50
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius-nbd/netlink.go
+--- a/merovius-nbd/netlink.go	2026-02-25 14:45:31
++++ b/merovius-nbd/netlink.go	2026-02-25 11:07:07
 @@ -43,7 +43,44 @@
  	return nbdnl.Connect(nbdnl.IndexAny, socks, e.Size, 0, nbdnl.ServerFlags(e.Flags), opts...)
  }
@@ -261,9 +416,9 @@ diff -ruN --exclude=.git a/merovius-nbd/netlink.go b/merovius-nbd/netlink.go
 +func DevicePath(idx uint32) string {
 +	return fmt.Sprintf("/dev/nbd%d", idx)
  }
-diff -ruN --exclude=.git a/merovius-nbd/netlink_test.go b/merovius-nbd/netlink_test.go
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink_test.go b/merovius-nbd/netlink_test.go
 --- a/merovius-nbd/netlink_test.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/netlink_test.go	2026-02-24 19:42:05
++++ b/merovius-nbd/netlink_test.go	2026-02-25 11:07:07
 @@ -0,0 +1,141 @@
 +//go:build linux
 +
@@ -406,9 +561,9 @@ diff -ruN --exclude=.git a/merovius-nbd/netlink_test.go b/merovius-nbd/netlink_t
 +		t.Fatal("wait:", err)
 +	}
 +}
-diff -ruN --exclude=.git a/merovius-nbd/transmission.go b/merovius-nbd/transmission.go
---- a/merovius-nbd/transmission.go	2026-02-25 10:51:44
-+++ b/merovius-nbd/transmission.go	2026-02-24 23:47:03
+diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/transmission.go b/merovius-nbd/transmission.go
+--- a/merovius-nbd/transmission.go	2026-02-25 14:45:31
++++ b/merovius-nbd/transmission.go	2026-02-25 14:38:13
 @@ -16,6 +16,7 @@
  
  import (
@@ -417,12 +572,60 @@ diff -ruN --exclude=.git a/merovius-nbd/transmission.go b/merovius-nbd/transmiss
  	"errors"
  	"io"
  	"net"
-@@ -93,63 +94,216 @@
+@@ -93,63 +94,264 @@
  	return serve(ctx, c, parms)
  }
  
 -// serve serves nbd requests for a connection in transmission mode using p. It
 -// returns after ctx is cancelled or an error occurs.
++// ListenAndServeDynamic is like ListenAndServe but resolves exports dynamically
++// using the given ExportProvider instead of a static list.
++func ListenAndServeDynamic(ctx context.Context, network, addr string, provider ExportProvider) error {
++	var wg sync.WaitGroup
++	defer wg.Wait()
++
++	ctxCancel, cancel := context.WithCancel(ctx)
++	defer cancel()
++
++	l, err := net.Listen(network, addr)
++	if err != nil {
++		return err
++	}
++
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		<-ctxCancel.Done()
++		l.Close()
++	}()
++
++	for {
++		c, err := l.Accept()
++		if err != nil {
++			if errors.Is(err, net.ErrClosed) {
++				return nil
++			}
++			return err
++		}
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			ServeDynamic(ctx, c, provider)
++			c.Close()
++		}()
++	}
++}
++
++// ServeDynamic is like Serve but resolves exports dynamically using the given
++// ExportProvider instead of a static list.
++func ServeDynamic(ctx context.Context, c net.Conn, provider ExportProvider) error {
++	parms, err := serverHandshakeDynamic(c, provider)
++	if err != nil {
++		return err
++	}
++	return serve(ctx, c, parms)
++}
++
 +// serve serves nbd requests for a connection in transmission mode using p.
 +// Requests are read sequentially but dispatched to goroutines for concurrent
 +// processing. Replies are written back in any order (the NBD protocol allows

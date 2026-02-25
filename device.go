@@ -1,19 +1,21 @@
 package loophole
 
-import "os"
-
 // Mode selects the block device mechanism.
 type Mode string
 
 const (
-	ModeFUSE Mode = "fuse"
-	ModeNBD  Mode = "nbd"
+	ModeFUSE       Mode = "fuse"
+	ModeNBD        Mode = "nbd"
+	ModeTestNBDTCP Mode = "testnbdtcp"
+	ModeLwext4FUSE Mode = "lwext4fuse"
 )
 
-// ModeFromEnv reads LOOPHOLE_MODE from the environment. Defaults to "fuse".
-func ModeFromEnv() Mode {
-	if os.Getenv("LOOPHOLE_MODE") == "nbd" {
-		return ModeNBD
+// NeedsRoot reports whether the mode requires root privileges.
+func (m Mode) NeedsRoot() bool {
+	switch m {
+	case ModeLwext4FUSE:
+		return false
+	default:
+		return true
 	}
-	return ModeFUSE
 }
