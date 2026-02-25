@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -216,7 +217,9 @@ func (l *Layer) Close(ctx context.Context) error {
 	// Close all open mutable block file handles.
 	l.mu.Lock()
 	for _, f := range l.openBlocks {
-		f.Close()
+		if err := f.Close(); err != nil {
+			slog.Warn("close cached block file", "error", err)
+		}
 	}
 	l.openBlocks = nil
 	l.mu.Unlock()

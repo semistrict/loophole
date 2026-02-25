@@ -3,6 +3,7 @@ package loophole
 import (
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -70,7 +71,9 @@ func (d Dir) FindSocket() (string, error) {
 	var live []string
 	for _, path := range matches {
 		if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
-			conn.Close()
+			if err := conn.Close(); err != nil {
+				slog.Warn("close failed", "error", err)
+			}
 			live = append(live, path)
 		}
 	}

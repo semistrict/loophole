@@ -2,6 +2,7 @@ package fuselwext4
 
 import (
 	"context"
+	"io"
 	"sync"
 	"syscall"
 
@@ -17,10 +18,10 @@ type ext4FileHandle struct {
 }
 
 var (
-	_ fs.FileReader   = (*ext4FileHandle)(nil)
-	_ fs.FileWriter   = (*ext4FileHandle)(nil)
-	_ fs.FileFlusher  = (*ext4FileHandle)(nil)
-	_ fs.FileReleaser = (*ext4FileHandle)(nil)
+	_ fs.FileReader    = (*ext4FileHandle)(nil)
+	_ fs.FileWriter    = (*ext4FileHandle)(nil)
+	_ fs.FileFlusher   = (*ext4FileHandle)(nil)
+	_ fs.FileReleaser  = (*ext4FileHandle)(nil)
 	_ fs.FileGetattrer = (*ext4FileHandle)(nil)
 )
 
@@ -28,8 +29,18 @@ func (fh *ext4FileHandle) Read(ctx context.Context, dest []byte, off int64) (fus
 	fh.mu.Lock()
 	n, err := fh.f.ReadAt(dest, off)
 	fh.mu.Unlock()
-	if err != nil && n == 0 {
-		return nil, errToStatus(err)
+	if err != nil {
+		if err == io.EOF {
+			// With writeback cache, the kernel may read offsets beyond
+			// lwext4's file size (unflushed writes extended the file in
+			// kernel page cache). Return the full requested buffer with
+			// zeros past EOF — the kernel expects data, not a short read.
+			clear(dest[n:])
+			return fuse.ReadResultData(dest), 0
+		}
+		if n == 0 {
+			return nil, errToStatus(err)
+		}
 	}
 	return fuse.ReadResultData(dest[:n]), 0
 }

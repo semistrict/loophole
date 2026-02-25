@@ -11,7 +11,11 @@ import (
 
 func TestAcquireRefOnLiveVolume(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.AcquireRef())
 	require.NoError(t, vol.ReleaseRef(t.Context()))
@@ -29,7 +33,11 @@ func TestAcquireRefOnClosedVolumeReturnsError(t *testing.T) {
 
 func TestMultipleAcquireRefAllSucceed(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	for range 5 {
 		require.NoError(t, vol.AcquireRef())
@@ -43,7 +51,11 @@ func TestMultipleAcquireRefAllSucceed(t *testing.T) {
 
 func TestCloseWithOutstandingRefKeepsVolumeAlive(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.AcquireRef())
 	require.NoError(t, vol.Close(t.Context()))
@@ -65,7 +77,11 @@ func TestCloseWithOutstandingRefKeepsVolumeAlive(t *testing.T) {
 
 func TestCloseWithMultipleOutstandingRefs(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.AcquireRef())
 	require.NoError(t, vol.AcquireRef())
@@ -131,7 +147,11 @@ func TestReleaseRefOnDestroyedVolumeIsNoop(t *testing.T) {
 
 func TestReleaseRefWithoutAcquireDestroysVolume(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// No AcquireRef was called. ReleaseRef decrements the namespace
 	// ref (refs 1→0), which destroys the volume. This is a caller
@@ -145,7 +165,11 @@ func TestReleaseRefWithoutAcquireDestroysVolume(t *testing.T) {
 
 func TestAcquireRefAfterCloseWithOutstandingRef(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.AcquireRef())
 	require.NoError(t, vol.Close(t.Context()))
@@ -167,7 +191,11 @@ func TestAcquireRefAfterCloseWithOutstandingRef(t *testing.T) {
 func TestVolumesExcludesClosedVolumes(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, err := vm.NewVolume(t.Context(), "alive")
 	require.NoError(t, err)
@@ -201,7 +229,11 @@ func TestDestroyFlushesDirtyData(t *testing.T) {
 	// Reopen from a fresh VM and verify the data was flushed.
 	vm2, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm2.Close(t.Context())
+	defer func() {
+		if err := vm2.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol2, err := vm2.OpenVolume(t.Context(), "flush-on-destroy")
 	require.NoError(t, err)

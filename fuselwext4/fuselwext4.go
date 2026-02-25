@@ -27,14 +27,22 @@ func Mount(mountpoint string, ext4fs *lwext4.FS) (*Server, error) {
 		ino:    lwext4.RootIno,
 	}
 
-	sec := time.Second
+	cacheTTL := 5 * time.Second
+	negTTL := time.Second
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName: "loophole-lwext4",
-			Name:   "loophole",
+			FsName:            "loophole-lwext4",
+			Name:              "loophole",
+			DisableXAttrs:     true,
+			MaxWrite:          1 << 20, // 1 MiB
+			MaxReadAhead:      1 << 20, // 1 MiB
+			MaxBackground:     128,
+			DirectMount:       true,
+			ExtraCapabilities: fuse.CAP_WRITEBACK_CACHE, // kernel batches writes into page cache
 		},
-		AttrTimeout:  &sec,
-		EntryTimeout: &sec,
+		AttrTimeout:     &cacheTTL,
+		EntryTimeout:    &cacheTTL,
+		NegativeTimeout: &negTTL, // cache ENOENT lookups
 	})
 	if err != nil {
 		return nil, err

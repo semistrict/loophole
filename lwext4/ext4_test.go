@@ -37,7 +37,11 @@ func newTestFS(t *testing.T) *FS {
 	dev := newMemDev(testDevSize)
 	fs, err := Format(dev, int64(testDevSize), nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { fs.Close() })
+	t.Cleanup(func() {
+		if err := fs.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	})
 	return fs
 }
 

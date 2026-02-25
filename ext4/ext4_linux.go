@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,7 +28,11 @@ func Format(ctx context.Context, devicePath string) error {
 	if err != nil {
 		return fmt.Errorf("loop attach: %w", err)
 	}
-	defer dev.Detach()
+	defer func() {
+		if err := dev.Detach(); err != nil {
+			slog.Warn("loop detach failed", "error", err)
+		}
+	}()
 
 	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, dev.Path); err != nil {
 		return fmt.Errorf("mkfs.ext4: %w", err)
@@ -54,12 +59,16 @@ func Mount(ctx context.Context, devicePath, mountpoint string) (loopDevice strin
 	}
 
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
-		dev.Detach()
+		if derr := dev.Detach(); derr != nil {
+			slog.Warn("loop detach failed", "error", derr)
+		}
 		return "", err
 	}
 
 	if err := linuxutil.Mount(dev.Path, mountpoint, "ext4"); err != nil {
-		dev.Detach()
+		if derr := dev.Detach(); derr != nil {
+			slog.Warn("loop detach failed", "error", derr)
+		}
 		return "", err
 	}
 	return dev.Path, nil

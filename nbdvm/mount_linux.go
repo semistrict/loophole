@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
-	defaultNumConns   = 4                         // parallel socket pairs per device
+	defaultNumConns   = 4                        // parallel socket pairs per device
 )
 
 // Server manages NBD exports for loophole volumes using nbd.Loopback.
@@ -26,8 +26,8 @@ const (
 type Server struct {
 	vm         *loophole.VolumeManager
 	volumeSize uint64
-	numConns int
-	log      *slog.Logger
+	numConns   int
+	log        *slog.Logger
 
 	mu      sync.Mutex
 	exports map[string]*volumeExport // volume name → export state
@@ -104,7 +104,9 @@ func (s *Server) Connect(ctx context.Context, vol *loophole.Volume) (string, err
 
 	if err := ensureDeviceNode(idx); err != nil {
 		cancel()
-		wait()
+		if werr := wait(); werr != nil {
+			slog.Warn("nbd wait failed", "error", werr)
+		}
 		return "", fmt.Errorf("mknod %s: %w", nbd.DevicePath(idx), err)
 	}
 
@@ -150,7 +152,9 @@ func (s *Server) Disconnect(ctx context.Context, volumeName string) error {
 	s.log.Info("nbd: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
 
 	// Tell the kernel to disconnect this NBD device via netlink.
-	nbdnl.Disconnect(exp.devIdx)
+	if err := nbdnl.Disconnect(exp.devIdx); err != nil {
+		slog.Warn("nbd disconnect failed", "device", nbd.DevicePath(exp.devIdx), "error", err)
+	}
 	// Cancel the server context so the Go-side goroutine exits.
 	exp.cancel()
 	return exp.wait()
@@ -166,7 +170,9 @@ func (s *Server) Close(ctx context.Context) {
 	s.mu.Unlock()
 
 	for _, name := range names {
-		s.Disconnect(ctx, name)
+		if err := s.Disconnect(ctx, name); err != nil {
+			slog.Warn("disconnect failed", "volume", name, "error", err)
+		}
 	}
 }
 

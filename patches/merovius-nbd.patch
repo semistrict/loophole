@@ -1,33 +1,8 @@
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/device.go b/merovius-nbd/device.go
---- a/merovius-nbd/device.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/device.go	2026-02-25 11:07:07
-@@ -0,0 +1,22 @@
-+package nbd
-+
-+// Trimmer is an optional interface that a Device may implement to support
-+// the NBD_CMD_TRIM command. Trim hints that the byte range is no longer
-+// needed and the backend may deallocate it.
-+type Trimmer interface {
-+	Trim(offset, length int64) error
-+}
-+
-+// WriteZeroer is an optional interface that a Device may implement to support
-+// the NBD_CMD_WRITE_ZEROES command. WriteZeroes writes zeros to the given range.
-+// If punch is true, the backend may deallocate the range (sparse hole).
-+type WriteZeroer interface {
-+	WriteZeroes(offset, length int64, punch bool) error
-+}
-+
-+// FUAWriter is an optional interface that a Device may implement to support
-+// the Force Unit Access flag. WriteAtFUA writes data and ensures it is on
-+// stable storage before returning.
-+type FUAWriter interface {
-+	WriteAtFUA(p []byte, off int64) (n int, err error)
-+}
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/doc.go b/merovius-nbd/doc.go
---- a/merovius-nbd/doc.go	2026-02-25 14:45:31
-+++ b/merovius-nbd/doc.go	2026-02-25 11:07:07
-@@ -38,21 +38,9 @@
+diff --git a/doc.go b/doc.go
+index 68a0248..ea720d8 100644
+--- a/doc.go
++++ b/doc.go
+@@ -38,22 +38,10 @@ package nbd
  
  // BUG(1): BlockSizeConstraints are not yet enforced by the server.
  
@@ -40,75 +15,20 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/doc.go b/merovius-nbd
 -// BUG(5): Server flags are not yet set (or used) correctly.
 -
  // BUG(6): Structured replies are not yet supported.
--
+ 
 -// BUG(7): CMD_TRIM is not yet supported.
 -
 -// BUG(8): Lame-duck mode (ESHUTDOWN) is not yet implemented.
 -
 -// BUG(9): CMD_WRITE_ZEROES is not yet supported.
- 
+-
  // BUG(10): Metadata querying is not yet supported.
  
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/export_flags.go b/merovius-nbd/export_flags.go
---- a/merovius-nbd/export_flags.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/export_flags.go	2026-02-25 14:37:39
-@@ -0,0 +1,34 @@
-+package nbd
-+
-+// Cross-platform NBD export flag constants.
-+// These duplicate the values from nbdnl (which is linux-only) so that
-+// TCP-based NBD servers can set flags on any platform.
-+const (
-+	FlagHasFlags        uint16 = 1 << 0
-+	FlagReadOnly        uint16 = 1 << 1
-+	FlagSendFlush       uint16 = 1 << 2
-+	FlagSendFUA         uint16 = 1 << 3
-+	FlagSendTrim        uint16 = 1 << 5
-+	FlagSendWriteZeroes uint16 = 1 << 6
-+	FlagCanMulticonn    uint16 = 1 << 8
-+)
-+
-+// ExportFlags returns the appropriate NBD export flags for d.
-+// It auto-detects optional capabilities (Trimmer, WriteZeroer, FUAWriter)
-+// via type assertion.
-+func ExportFlags(d Device, readOnly bool) uint16 {
-+	flags := FlagHasFlags | FlagSendFlush
-+	if readOnly {
-+		flags |= FlagReadOnly
-+	}
-+	if _, ok := d.(Trimmer); ok {
-+		flags |= FlagSendTrim
-+	}
-+	if _, ok := d.(WriteZeroer); ok {
-+		flags |= FlagSendWriteZeroes
-+	}
-+	if _, ok := d.(FUAWriter); ok {
-+		flags |= FlagSendFUA
-+	}
-+	return flags
-+}
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/export_provider.go b/merovius-nbd/export_provider.go
---- a/merovius-nbd/export_provider.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/export_provider.go	2026-02-25 14:37:45
-@@ -0,0 +1,15 @@
-+package nbd
-+
-+import "context"
-+
-+// ExportProvider resolves exports dynamically by name.
-+// This is the dynamic counterpart to passing a static []Export to Serve.
-+type ExportProvider interface {
-+	// FindExport returns the export for the given name.
-+	// If name is empty, return a default export.
-+	FindExport(ctx context.Context, name string) (Export, error)
-+
-+	// ListExports returns all available export names.
-+	// The Device field may be nil in the returned exports (only Name is required for listing).
-+	ListExports(ctx context.Context) ([]Export, error)
-+}
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/go.mod b/merovius-nbd/go.mod
---- a/merovius-nbd/go.mod	2026-02-25 14:45:31
-+++ b/merovius-nbd/go.mod	2026-02-25 11:07:07
+ // BUG(11): FLAG_ROTATIONAL is not yet supported.
+diff --git a/go.mod b/go.mod
+index 7b68fb7..44b0fee 100644
+--- a/go.mod
++++ b/go.mod
 @@ -1,6 +1,6 @@
  module github.com/Merovius/nbd
  
@@ -117,14 +37,15 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/go.mod b/merovius-nbd
  
  require (
  	github.com/google/subcommands v1.2.0
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/handshake.go b/merovius-nbd/handshake.go
---- a/merovius-nbd/handshake.go	2026-02-25 14:45:31
-+++ b/merovius-nbd/handshake.go	2026-02-25 14:38:04
-@@ -301,6 +301,94 @@
+diff --git a/handshake.go b/handshake.go
+index d391ee5..a3056e8 100644
+--- a/handshake.go
++++ b/handshake.go
+@@ -301,6 +301,92 @@ func (c *Client) close() error {
  	return c.rw.Close()
  }
  
-+func serverHandshakeDynamic(rw io.ReadWriter, provider ExportProvider) (connParameters, error) {
++func serverHandshakeDynamic(ctx context.Context, rw io.ReadWriter, provider ExportProvider) (connParameters, error) {
 +	parms := connParameters{
 +		BlockSizes: defaultBlockSizes,
 +	}
@@ -140,8 +61,6 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/handshake.go b/merovi
 +		if clientFlags != flagDefaults {
 +			e.check(fmt.Errorf("refusing deprecated handshake flags 0x%x", clientFlags))
 +		}
-+
-+		ctx := context.Background()
 +
 +		for {
 +			code, o, err := decodeOption(e)
@@ -215,10 +134,11 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/handshake.go b/merovi
  // findExport searches the list of exports for one with the given name. If name
  // is empty, it returns the first export. findExport performs a linear search,
  // so it doesn't scale to a large number of exports, but we assume for now that
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/nbdnl/nbd.go b/merovius-nbd/nbdnl/nbd.go
---- a/merovius-nbd/nbdnl/nbd.go	2026-02-25 14:45:31
-+++ b/merovius-nbd/nbdnl/nbd.go	2026-02-25 11:07:07
-@@ -159,8 +159,12 @@
+diff --git a/nbdnl/nbd.go b/nbdnl/nbd.go
+index 9fddabd..85bf52a 100644
+--- a/nbdnl/nbd.go
++++ b/nbdnl/nbd.go
+@@ -159,8 +159,12 @@ const (
  	FlagSendFUA ServerFlags = 1 << 3
  	// FlagSendTrim is set if the export supports the Trim command.
  	FlagSendTrim ServerFlags = 1 << 5
@@ -231,10 +151,11 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/nbdnl/nbd.go b/merovi
  )
  
  // Connect instructs the kernel to connect the given set of sockets to the
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius-nbd/netlink.go
---- a/merovius-nbd/netlink.go	2026-02-25 14:45:31
-+++ b/merovius-nbd/netlink.go	2026-02-25 11:07:07
-@@ -43,7 +43,44 @@
+diff --git a/netlink.go b/netlink.go
+index 647157b..4bd32f6 100644
+--- a/netlink.go
++++ b/netlink.go
+@@ -43,7 +43,44 @@ func Configure(e Export, socks ...*os.File) (uint32, error) {
  	return nbdnl.Connect(nbdnl.IndexAny, socks, e.Size, 0, nbdnl.ServerFlags(e.Flags), opts...)
  }
  
@@ -280,7 +201,7 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius
  // to connect to an NBD device. It returns the device-number that the kernel
  // chose. wait should be called to check for errors from serving the device. It
  // blocks until ctx is cancelled or an error occurs (so it behaves like Serve).
-@@ -51,36 +88,91 @@
+@@ -51,36 +88,91 @@ func Configure(e Export, socks ...*os.File) (uint32, error) {
  // encountered while disconnecting will be returned by wait.
  //
  // This is a Linux-only API.
@@ -293,7 +214,7 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius
 +		serverFlags:    nbdnl.FlagHasFlags | nbdnl.FlagSendFlush,
 +		blockSize:      4096,
 +		numConnections: 1,
- 	}
++	}
 +	// Auto-detect capabilities from optional interfaces.
 +	if _, ok := d.(Trimmer); ok {
 +		cfg.serverFlags |= nbdnl.FlagSendTrim
@@ -303,7 +224,7 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius
 +	}
 +	if _, ok := d.(FUAWriter); ok {
 +		cfg.serverFlags |= nbdnl.FlagSendFUA
-+	}
+ 	}
 +	for _, o := range opts {
 +		o(&cfg)
 +	}
@@ -389,7 +310,7 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius
  	wait = func() error {
  		err := eg.Wait()
  		// canceling the context is the only way for Loopback to return, so do
-@@ -91,13 +183,22 @@
+@@ -91,13 +183,22 @@ func Loopback(ctx context.Context, d Device, size uint64) (idx uint32, wait func
  		if e := nbdnl.Disconnect(idx); e != nil && err == nil {
  			err = fmt.Errorf("failed to disconnect device: %w", e)
  		}
@@ -410,15 +331,412 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink.go b/merovius
  		return err
  	}
  	return idx, wait, nil
-+}
+ }
 +
 +// DevicePath returns the /dev/nbdN path for a device index.
 +func DevicePath(idx uint32) string {
 +	return fmt.Sprintf("/dev/nbd%d", idx)
++}
+diff --git a/transmission.go b/transmission.go
+index 155f4d1..4513c28 100644
+--- a/transmission.go
++++ b/transmission.go
+@@ -16,6 +16,7 @@ package nbd
+ 
+ import (
+ 	"context"
++	"encoding/binary"
+ 	"errors"
+ 	"io"
+ 	"net"
+@@ -93,63 +94,264 @@ func Serve(ctx context.Context, c net.Conn, exp ...Export) error {
+ 	return serve(ctx, c, parms)
  }
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink_test.go b/merovius-nbd/netlink_test.go
---- a/merovius-nbd/netlink_test.go	1970-01-01 08:00:00
-+++ b/merovius-nbd/netlink_test.go	2026-02-25 11:07:07
+ 
+-// serve serves nbd requests for a connection in transmission mode using p. It
+-// returns after ctx is cancelled or an error occurs.
++// ListenAndServeDynamic is like ListenAndServe but resolves exports dynamically
++// using the given ExportProvider instead of a static list.
++func ListenAndServeDynamic(ctx context.Context, network, addr string, provider ExportProvider) error {
++	var wg sync.WaitGroup
++	defer wg.Wait()
++
++	ctxCancel, cancel := context.WithCancel(ctx)
++	defer cancel()
++
++	l, err := net.Listen(network, addr)
++	if err != nil {
++		return err
++	}
++
++	wg.Add(1)
++	go func() {
++		defer wg.Done()
++		<-ctxCancel.Done()
++		l.Close()
++	}()
++
++	for {
++		c, err := l.Accept()
++		if err != nil {
++			if errors.Is(err, net.ErrClosed) {
++				return nil
++			}
++			return err
++		}
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			ServeDynamic(ctx, c, provider)
++			c.Close()
++		}()
++	}
++}
++
++// ServeDynamic is like Serve but resolves exports dynamically using the given
++// ExportProvider instead of a static list.
++func ServeDynamic(ctx context.Context, c net.Conn, provider ExportProvider) error {
++	parms, err := serverHandshakeDynamic(ctx, c, provider)
++	if err != nil {
++		return err
++	}
++	return serve(ctx, c, parms)
++}
++
++// serve serves nbd requests for a connection in transmission mode using p.
++// Requests are read sequentially but dispatched to goroutines for concurrent
++// processing. Replies are written back in any order (the NBD protocol allows
++// this — the kernel matches replies to requests via the handle field).
++//
++// On context cancellation, serve enters lame-duck mode: it replies ESHUTDOWN
++// to the next request and then returns, giving the kernel a clean signal that
++// the device is going away rather than an abrupt socket close.
+ func serve(ctx context.Context, c net.Conn, p connParameters) error {
+-	rw := wrapConn(ctx, c)
+-	defer rw.Close()
+-	return do(rw, func(e *encoder) {
+-		var req request
++	d := p.Export.Device
++	trimmer, _ := d.(Trimmer)
++	wzeroer, _ := d.(WriteZeroer)
++	fuaWriter, _ := d.(FUAWriter)
++
++	shutdownCh := ctx.Done()
++
++	// replyWriter serializes reply writes to the connection.
++	rw := &replyWriter{w: c}
++
++	// wg tracks in-flight request handlers.
++	var wg sync.WaitGroup
++	defer wg.Wait()
++
++	return do(c, func(e *encoder) {
+ 		for {
++			select {
++			case <-shutdownCh:
++				c.SetDeadline(time.Now().Add(time.Second))
++				var req request
++				if err := req.decode(e); err != nil {
++					return
++				}
++				rw.sendError(req.handle, ESHUTDOWN)
++				return
++			default:
++			}
++
++			var req request
+ 			if err := req.decode(e); err != nil {
+-				respondErr(e, req.handle, err)
++				rw.sendError(req.handle, err)
+ 				continue
+ 			}
++
+ 			switch req.typ {
+ 			case cmdRead:
+ 				if req.length == 0 {
+-					respondErr(e, req.handle, EINVAL)
+-					continue
+-				}
+-				buf := make([]byte, req.length)
+-				_, err := p.Export.Device.ReadAt(buf, int64(req.offset))
+-				if err != nil {
+-					respondErr(e, req.handle, err)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				(&simpleReply{0, req.handle, buf, 0}).encode(e)
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					buf := make([]byte, req.length)
++					_, err := d.ReadAt(buf, int64(req.offset))
++					if err != nil {
++						rw.sendError(req.handle, err)
++						return
++					}
++					rw.sendData(req.handle, buf)
++				}()
++
+ 			case cmdWrite:
+ 				if req.length == 0 {
+-					respondErr(e, req.handle, EINVAL)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				_, err := p.Export.Device.WriteAt(req.data, int64(req.offset))
+-				if err != nil {
+-					respondErr(e, req.handle, err)
+-					continue
+-				}
+-				(&simpleReply{0, req.handle, nil, 0}).encode(e)
++				// req.data is already read from the socket by decode.
++				data := req.data
++				handle := req.handle
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if fua && fuaWriter != nil {
++						if _, err := fuaWriter.WriteAtFUA(data, int64(req.offset)); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					} else {
++						if _, err := d.WriteAt(data, int64(req.offset)); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++						if fua {
++							if err := d.Sync(); err != nil {
++								rw.sendError(handle, err)
++								return
++							}
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
+ 			case cmdDisc:
+ 				return
++
+ 			case cmdFlush:
+ 				if req.length != 0 || req.offset != 0 {
+-					respondErr(e, req.handle, EINVAL)
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				err := p.Export.Device.Sync()
+-				if err != nil {
+-					respondErr(e, req.handle, err)
++				handle := req.handle
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := d.Sync(); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					rw.sendOK(handle)
++				}()
++
++			case cmdTrim:
++				if trimmer == nil {
++					rw.sendError(req.handle, EINVAL)
++					continue
++				}
++				handle := req.handle
++				offset, length := req.offset, req.length
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := trimmer.Trim(int64(offset), int64(length)); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					if fua {
++						if err := d.Sync(); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
++			case cmdWriteZeroes:
++				if wzeroer == nil {
++					rw.sendError(req.handle, EINVAL)
+ 					continue
+ 				}
+-				(&simpleReply{0, req.handle, nil, 0}).encode(e)
++				handle := req.handle
++				offset, length := req.offset, req.length
++				punch := req.flags&cmdFlagNoHole == 0
++				fua := req.flags&cmdFlagFUA != 0
++				wg.Add(1)
++				go func() {
++					defer wg.Done()
++					if err := wzeroer.WriteZeroes(int64(offset), int64(length), punch); err != nil {
++						rw.sendError(handle, err)
++						return
++					}
++					if fua {
++						if err := d.Sync(); err != nil {
++							rw.sendError(handle, err)
++							return
++						}
++					}
++					rw.sendOK(handle)
++				}()
++
+ 			default:
+-				respondErr(e, req.handle, EINVAL)
++				rw.sendError(req.handle, EINVAL)
+ 			}
+ 		}
+ 	})
+ }
+ 
+-// respondErr writes an error respons to e, based on handle an err.
++// replyWriter serializes NBD simple reply writes to a connection.
++// All methods are safe for concurrent use.
++type replyWriter struct {
++	mu sync.Mutex
++	w  io.Writer
++}
++
++// sendOK writes a success reply with no data payload.
++func (rw *replyWriter) sendOK(handle uint64) {
++	rw.writeReply(0, handle, nil)
++}
++
++// sendData writes a success reply with a data payload (for reads).
++func (rw *replyWriter) sendData(handle uint64, data []byte) {
++	rw.writeReply(0, handle, data)
++}
++
++// sendError writes an error reply.
++func (rw *replyWriter) sendError(handle uint64, err error) {
++	code := uint32(EIO)
++	if e, ok := err.(Error); ok {
++		code = uint32(e.Errno())
++	}
++	rw.writeReply(code, handle, nil)
++}
++
++// writeReply writes a complete simple reply as a single Write call.
++// Header: magic(4) + errno(4) + handle(8) = 16 bytes, followed by data.
++func (rw *replyWriter) writeReply(errno uint32, handle uint64, data []byte) {
++	buf := make([]byte, 16+len(data))
++	binary.BigEndian.PutUint32(buf[0:4], simpleReplyMagic)
++	binary.BigEndian.PutUint32(buf[4:8], errno)
++	binary.BigEndian.PutUint64(buf[8:16], handle)
++	copy(buf[16:], data)
++
++	rw.mu.Lock()
++	rw.w.Write(buf)
++	rw.mu.Unlock()
++}
++
++// respondErr writes an error response to e, based on handle and err.
++// Used only during the sequential phase (shutdown).
+ func respondErr(e *encoder, handle uint64, err error) {
+ 	code := EIO
+ 	if e, ok := err.(Error); ok {
+diff --git a/device.go b/device.go
+new file mode 100644
+index 0000000..e9876b0
+--- /dev/null
++++ b/device.go
+@@ -0,0 +1,22 @@
++package nbd
++
++// Trimmer is an optional interface that a Device may implement to support
++// the NBD_CMD_TRIM command. Trim hints that the byte range is no longer
++// needed and the backend may deallocate it.
++type Trimmer interface {
++	Trim(offset, length int64) error
++}
++
++// WriteZeroer is an optional interface that a Device may implement to support
++// the NBD_CMD_WRITE_ZEROES command. WriteZeroes writes zeros to the given range.
++// If punch is true, the backend may deallocate the range (sparse hole).
++type WriteZeroer interface {
++	WriteZeroes(offset, length int64, punch bool) error
++}
++
++// FUAWriter is an optional interface that a Device may implement to support
++// the Force Unit Access flag. WriteAtFUA writes data and ensures it is on
++// stable storage before returning.
++type FUAWriter interface {
++	WriteAtFUA(p []byte, off int64) (n int, err error)
++}
+diff --git a/export_flags.go b/export_flags.go
+new file mode 100644
+index 0000000..f65548a
+--- /dev/null
++++ b/export_flags.go
+@@ -0,0 +1,34 @@
++package nbd
++
++// Cross-platform NBD export flag constants.
++// These duplicate the values from nbdnl (which is linux-only) so that
++// TCP-based NBD servers can set flags on any platform.
++const (
++	FlagHasFlags        uint16 = 1 << 0
++	FlagReadOnly        uint16 = 1 << 1
++	FlagSendFlush       uint16 = 1 << 2
++	FlagSendFUA         uint16 = 1 << 3
++	FlagSendTrim        uint16 = 1 << 5
++	FlagSendWriteZeroes uint16 = 1 << 6
++	FlagCanMulticonn    uint16 = 1 << 8
++)
++
++// ExportFlags returns the appropriate NBD export flags for d.
++// It auto-detects optional capabilities (Trimmer, WriteZeroer, FUAWriter)
++// via type assertion.
++func ExportFlags(d Device, readOnly bool) uint16 {
++	flags := FlagHasFlags | FlagSendFlush
++	if readOnly {
++		flags |= FlagReadOnly
++	}
++	if _, ok := d.(Trimmer); ok {
++		flags |= FlagSendTrim
++	}
++	if _, ok := d.(WriteZeroer); ok {
++		flags |= FlagSendWriteZeroes
++	}
++	if _, ok := d.(FUAWriter); ok {
++		flags |= FlagSendFUA
++	}
++	return flags
++}
+diff --git a/export_provider.go b/export_provider.go
+new file mode 100644
+index 0000000..50dacd5
+--- /dev/null
++++ b/export_provider.go
+@@ -0,0 +1,15 @@
++package nbd
++
++import "context"
++
++// ExportProvider resolves exports dynamically by name.
++// This is the dynamic counterpart to passing a static []Export to Serve.
++type ExportProvider interface {
++	// FindExport returns the export for the given name.
++	// If name is empty, return a default export.
++	FindExport(ctx context.Context, name string) (Export, error)
++
++	// ListExports returns all available export names.
++	// The Device field may be nil in the returned exports (only Name is required for listing).
++	ListExports(ctx context.Context) ([]Export, error)
++}
+diff --git a/netlink_test.go b/netlink_test.go
+new file mode 100644
+index 0000000..f75b1e7
+--- /dev/null
++++ b/netlink_test.go
 @@ -0,0 +1,141 @@
 +//go:build linux
 +
@@ -561,308 +879,3 @@ diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/netlink_test.go b/mer
 +		t.Fatal("wait:", err)
 +	}
 +}
-diff -ruN --exclude=.git --exclude=.patched a/merovius-nbd/transmission.go b/merovius-nbd/transmission.go
---- a/merovius-nbd/transmission.go	2026-02-25 14:45:31
-+++ b/merovius-nbd/transmission.go	2026-02-25 14:38:13
-@@ -16,6 +16,7 @@
- 
- import (
- 	"context"
-+	"encoding/binary"
- 	"errors"
- 	"io"
- 	"net"
-@@ -93,63 +94,264 @@
- 	return serve(ctx, c, parms)
- }
- 
--// serve serves nbd requests for a connection in transmission mode using p. It
--// returns after ctx is cancelled or an error occurs.
-+// ListenAndServeDynamic is like ListenAndServe but resolves exports dynamically
-+// using the given ExportProvider instead of a static list.
-+func ListenAndServeDynamic(ctx context.Context, network, addr string, provider ExportProvider) error {
-+	var wg sync.WaitGroup
-+	defer wg.Wait()
-+
-+	ctxCancel, cancel := context.WithCancel(ctx)
-+	defer cancel()
-+
-+	l, err := net.Listen(network, addr)
-+	if err != nil {
-+		return err
-+	}
-+
-+	wg.Add(1)
-+	go func() {
-+		defer wg.Done()
-+		<-ctxCancel.Done()
-+		l.Close()
-+	}()
-+
-+	for {
-+		c, err := l.Accept()
-+		if err != nil {
-+			if errors.Is(err, net.ErrClosed) {
-+				return nil
-+			}
-+			return err
-+		}
-+		wg.Add(1)
-+		go func() {
-+			defer wg.Done()
-+			ServeDynamic(ctx, c, provider)
-+			c.Close()
-+		}()
-+	}
-+}
-+
-+// ServeDynamic is like Serve but resolves exports dynamically using the given
-+// ExportProvider instead of a static list.
-+func ServeDynamic(ctx context.Context, c net.Conn, provider ExportProvider) error {
-+	parms, err := serverHandshakeDynamic(c, provider)
-+	if err != nil {
-+		return err
-+	}
-+	return serve(ctx, c, parms)
-+}
-+
-+// serve serves nbd requests for a connection in transmission mode using p.
-+// Requests are read sequentially but dispatched to goroutines for concurrent
-+// processing. Replies are written back in any order (the NBD protocol allows
-+// this — the kernel matches replies to requests via the handle field).
-+//
-+// On context cancellation, serve enters lame-duck mode: it replies ESHUTDOWN
-+// to the next request and then returns, giving the kernel a clean signal that
-+// the device is going away rather than an abrupt socket close.
- func serve(ctx context.Context, c net.Conn, p connParameters) error {
--	rw := wrapConn(ctx, c)
--	defer rw.Close()
--	return do(rw, func(e *encoder) {
--		var req request
-+	d := p.Export.Device
-+	trimmer, _ := d.(Trimmer)
-+	wzeroer, _ := d.(WriteZeroer)
-+	fuaWriter, _ := d.(FUAWriter)
-+
-+	shutdownCh := ctx.Done()
-+
-+	// replyWriter serializes reply writes to the connection.
-+	rw := &replyWriter{w: c}
-+
-+	// wg tracks in-flight request handlers.
-+	var wg sync.WaitGroup
-+	defer wg.Wait()
-+
-+	return do(c, func(e *encoder) {
- 		for {
-+			select {
-+			case <-shutdownCh:
-+				c.SetDeadline(time.Now().Add(time.Second))
-+				var req request
-+				if err := req.decode(e); err != nil {
-+					return
-+				}
-+				rw.sendError(req.handle, ESHUTDOWN)
-+				return
-+			default:
-+			}
-+
-+			var req request
- 			if err := req.decode(e); err != nil {
--				respondErr(e, req.handle, err)
-+				rw.sendError(req.handle, err)
- 				continue
- 			}
-+
- 			switch req.typ {
- 			case cmdRead:
- 				if req.length == 0 {
--					respondErr(e, req.handle, EINVAL)
-+					rw.sendError(req.handle, EINVAL)
- 					continue
- 				}
--				buf := make([]byte, req.length)
--				_, err := p.Export.Device.ReadAt(buf, int64(req.offset))
--				if err != nil {
--					respondErr(e, req.handle, err)
--					continue
--				}
--				(&simpleReply{0, req.handle, buf, 0}).encode(e)
-+				wg.Add(1)
-+				go func() {
-+					defer wg.Done()
-+					buf := make([]byte, req.length)
-+					_, err := d.ReadAt(buf, int64(req.offset))
-+					if err != nil {
-+						rw.sendError(req.handle, err)
-+						return
-+					}
-+					rw.sendData(req.handle, buf)
-+				}()
-+
- 			case cmdWrite:
- 				if req.length == 0 {
--					respondErr(e, req.handle, EINVAL)
-+					rw.sendError(req.handle, EINVAL)
- 					continue
- 				}
--				_, err := p.Export.Device.WriteAt(req.data, int64(req.offset))
--				if err != nil {
--					respondErr(e, req.handle, err)
--					continue
--				}
--				(&simpleReply{0, req.handle, nil, 0}).encode(e)
-+				// req.data is already read from the socket by decode.
-+				data := req.data
-+				handle := req.handle
-+				fua := req.flags&cmdFlagFUA != 0
-+				wg.Add(1)
-+				go func() {
-+					defer wg.Done()
-+					if fua && fuaWriter != nil {
-+						if _, err := fuaWriter.WriteAtFUA(data, int64(req.offset)); err != nil {
-+							rw.sendError(handle, err)
-+							return
-+						}
-+					} else {
-+						if _, err := d.WriteAt(data, int64(req.offset)); err != nil {
-+							rw.sendError(handle, err)
-+							return
-+						}
-+						if fua {
-+							if err := d.Sync(); err != nil {
-+								rw.sendError(handle, err)
-+								return
-+							}
-+						}
-+					}
-+					rw.sendOK(handle)
-+				}()
-+
- 			case cmdDisc:
- 				return
-+
- 			case cmdFlush:
- 				if req.length != 0 || req.offset != 0 {
--					respondErr(e, req.handle, EINVAL)
-+					rw.sendError(req.handle, EINVAL)
- 					continue
- 				}
--				err := p.Export.Device.Sync()
--				if err != nil {
--					respondErr(e, req.handle, err)
-+				handle := req.handle
-+				wg.Add(1)
-+				go func() {
-+					defer wg.Done()
-+					if err := d.Sync(); err != nil {
-+						rw.sendError(handle, err)
-+						return
-+					}
-+					rw.sendOK(handle)
-+				}()
-+
-+			case cmdTrim:
-+				if trimmer == nil {
-+					rw.sendError(req.handle, EINVAL)
- 					continue
- 				}
--				(&simpleReply{0, req.handle, nil, 0}).encode(e)
-+				handle := req.handle
-+				offset, length := req.offset, req.length
-+				fua := req.flags&cmdFlagFUA != 0
-+				wg.Add(1)
-+				go func() {
-+					defer wg.Done()
-+					if err := trimmer.Trim(int64(offset), int64(length)); err != nil {
-+						rw.sendError(handle, err)
-+						return
-+					}
-+					if fua {
-+						if err := d.Sync(); err != nil {
-+							rw.sendError(handle, err)
-+							return
-+						}
-+					}
-+					rw.sendOK(handle)
-+				}()
-+
-+			case cmdWriteZeroes:
-+				if wzeroer == nil {
-+					rw.sendError(req.handle, EINVAL)
-+					continue
-+				}
-+				handle := req.handle
-+				offset, length := req.offset, req.length
-+				punch := req.flags&cmdFlagNoHole == 0
-+				fua := req.flags&cmdFlagFUA != 0
-+				wg.Add(1)
-+				go func() {
-+					defer wg.Done()
-+					if err := wzeroer.WriteZeroes(int64(offset), int64(length), punch); err != nil {
-+						rw.sendError(handle, err)
-+						return
-+					}
-+					if fua {
-+						if err := d.Sync(); err != nil {
-+							rw.sendError(handle, err)
-+							return
-+						}
-+					}
-+					rw.sendOK(handle)
-+				}()
-+
- 			default:
--				respondErr(e, req.handle, EINVAL)
-+				rw.sendError(req.handle, EINVAL)
- 			}
- 		}
- 	})
- }
- 
--// respondErr writes an error respons to e, based on handle an err.
-+// replyWriter serializes NBD simple reply writes to a connection.
-+// All methods are safe for concurrent use.
-+type replyWriter struct {
-+	mu sync.Mutex
-+	w  io.Writer
-+}
-+
-+// sendOK writes a success reply with no data payload.
-+func (rw *replyWriter) sendOK(handle uint64) {
-+	rw.writeReply(0, handle, nil)
-+}
-+
-+// sendData writes a success reply with a data payload (for reads).
-+func (rw *replyWriter) sendData(handle uint64, data []byte) {
-+	rw.writeReply(0, handle, data)
-+}
-+
-+// sendError writes an error reply.
-+func (rw *replyWriter) sendError(handle uint64, err error) {
-+	code := uint32(EIO)
-+	if e, ok := err.(Error); ok {
-+		code = uint32(e.Errno())
-+	}
-+	rw.writeReply(code, handle, nil)
-+}
-+
-+// writeReply writes a complete simple reply as a single Write call.
-+// Header: magic(4) + errno(4) + handle(8) = 16 bytes, followed by data.
-+func (rw *replyWriter) writeReply(errno uint32, handle uint64, data []byte) {
-+	buf := make([]byte, 16+len(data))
-+	binary.BigEndian.PutUint32(buf[0:4], simpleReplyMagic)
-+	binary.BigEndian.PutUint32(buf[4:8], errno)
-+	binary.BigEndian.PutUint64(buf[8:16], handle)
-+	copy(buf[16:], data)
-+
-+	rw.mu.Lock()
-+	rw.w.Write(buf)
-+	rw.mu.Unlock()
-+}
-+
-+// respondErr writes an error response to e, based on handle and err.
-+// Used only during the sequential phase (shutdown).
- func respondErr(e *encoder, handle uint64, err error) {
- 	code := EIO
- 	if e, ok := err.(Error); ok {

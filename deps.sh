@@ -57,11 +57,7 @@ apply_patch() {
     return
   fi
   echo "Applying patch for $dep"
-  if is_git_dep "$dep"; then
-    git -C "$dir" apply < "$patch"
-  else
-    patch -d "$dir" -p2 < "$patch"
-  fi
+  git -C "$dir" apply < "$patch"
   touch "$marker"
 }
 
@@ -71,7 +67,6 @@ cmd_patch() {
   apply_patch container-libs
   apply_patch merovius-nbd
   apply_patch podman
-
 }
 
 cmd_setup() {
@@ -80,17 +75,6 @@ cmd_setup() {
 }
 
 PATCHED_DEPS=(lwext4 containers-storage container-libs merovius-nbd podman)
-
-# Deps that use git diff/apply instead of diff -ruN/patch.
-GIT_DEPS=(lwext4)
-
-is_git_dep() {
-  local dep=$1
-  for d in "${GIT_DEPS[@]}"; do
-    if [ "$d" = "$dep" ]; then return 0; fi
-  done
-  return 1
-}
 
 cmd_reset() {
   for dep in "${PATCHED_DEPS[@]}"; do
@@ -115,57 +99,7 @@ cmd_clean() {
   rm -rf "$DEPS_DIR"
 }
 
-# Map dep names to repo and SHA for genpatch.
-dep_repo() {
-  case "$1" in
-    lwext4)             echo "$LWEXT4_REPO" "$LWEXT4_SHA" ;;
-    containers-storage) echo "$CONTAINERS_STORAGE_REPO" "$CONTAINERS_STORAGE_SHA" ;;
-    container-libs)     echo "$CONTAINER_LIBS_REPO" "$CONTAINER_LIBS_SHA" ;;
-    merovius-nbd)       echo "$MEROVIUS_NBD_REPO" "$MEROVIUS_NBD_SHA" ;;
-    podman)             echo "$PODMAN_REPO" "$PODMAN_SHA" ;;
-    *) echo "Unknown dep: $1" >&2; return 1 ;;
-  esac
-}
-
-# Generate a patch using git diff (respects .gitignore).
-gen_one_patch_git() {
-  local dep=$1
-  local working="$DEPS_DIR/$dep"
-  local out="$PATCHES_DIR/$dep.patch"
-
-  git -C "$working" diff HEAD > "$out"
-  # Append untracked files (that aren't gitignored) as new file diffs.
-  local untracked
-  untracked=$(git -C "$working" ls-files --others --exclude-standard)
-  if [ -n "$untracked" ]; then
-    while IFS= read -r f; do
-      git -C "$working" diff --no-index /dev/null "$f" >> "$out" || true
-    done <<< "$untracked"
-  fi
-}
-
-# Generate a patch by cloning upstream and diffing against working tree.
-gen_one_patch_diff() {
-  local dep=$1
-  local working="$DEPS_DIR/$dep"
-  local out="$PATCHES_DIR/$dep.patch"
-
-  read -r repo sha < <(dep_repo "$dep")
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  trap "rm -rf '$tmpdir'" RETURN
-
-  echo "Cloning upstream $dep at $sha..." >&2
-  mkdir -p "$tmpdir/a"
-  git clone --filter=blob:none -q "$repo" "$tmpdir/a/$dep"
-  git -C "$tmpdir/a/$dep" checkout -q "$sha"
-
-  mkdir -p "$tmpdir/b"
-  rsync -a --exclude=.git --exclude=.patched "$working/" "$tmpdir/b/$dep/"
-
-  (cd "$tmpdir" && diff -ruN --exclude=.git --exclude=.patched "a/$dep" "b/$dep") > "$out" || true
-}
-
+# Generate a patch for a single dep using git diff.
 gen_one_patch() {
   local dep=$1
   local working="$DEPS_DIR/$dep"
@@ -177,10 +111,14 @@ gen_one_patch() {
   mkdir -p "$PATCHES_DIR"
   local out="$PATCHES_DIR/$dep.patch"
 
-  if is_git_dep "$dep"; then
-    gen_one_patch_git "$dep"
-  else
-    gen_one_patch_diff "$dep"
+  git -C "$working" diff HEAD > "$out"
+  # Append untracked files (that aren't gitignored) as new file diffs.
+  local untracked
+  untracked=$(git -C "$working" ls-files --others --exclude-standard --exclude=.patched)
+  if [ -n "$untracked" ]; then
+    while IFS= read -r f; do
+      git -C "$working" diff --no-index /dev/null "$f" >> "$out" || true
+    done <<< "$untracked"
   fi
 
   if [ -s "$out" ]; then
@@ -203,6 +141,56 @@ cmd_genpatch() {
   fi
 }
 
+# Check that committed patches match the current worktree state.
+# Generates patches into a temp dir using the same codepath as genpatch,
+# then compares against the committed patch files.
+cmd_checkpatch() {
+  local failed=0
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Temporarily redirect gen_one_patch output to tmpdir.
+  local saved_patches="$PATCHES_DIR"
+  PATCHES_DIR="$tmpdir"
+
+  for dep in "${PATCHED_DEPS[@]}"; do
+    local working="$DEPS_DIR/$dep"
+    if [ ! -d "$working" ]; then
+      continue
+    fi
+
+    gen_one_patch "$dep" >/dev/null 2>&1
+
+    local committed="$saved_patches/$dep.patch"
+    local actual="$tmpdir/$dep.patch"
+
+    if [ ! -f "$actual" ] && [ ! -f "$committed" ]; then
+      :
+    elif [ ! -f "$actual" ] && [ -f "$committed" ]; then
+      echo "STALE: $dep has no changes but $committed exists" >&2
+      failed=1
+    elif [ -f "$actual" ] && [ ! -f "$committed" ]; then
+      echo "STALE: $dep has changes but $committed does not exist" >&2
+      failed=1
+    elif ! diff -q "$committed" "$actual" >/dev/null 2>&1; then
+      echo "STALE: $committed does not match worktree" >&2
+      diff -u "$committed" "$actual" >&2 || true
+      failed=1
+    else
+      echo "OK: $dep"
+    fi
+  done
+
+  PATCHES_DIR="$saved_patches"
+  rm -rf "$tmpdir"
+
+  if [ "$failed" -ne 0 ]; then
+    echo "" >&2
+    echo "Run './deps.sh genpatch' to update patch files." >&2
+    exit 1
+  fi
+}
+
 usage() {
   echo "Usage: $0 <command>"
   echo ""
@@ -213,17 +201,19 @@ usage() {
   echo "  reset      Reset patched deps to upstream state"
   echo "  repatch    Reset and re-apply patches"
   echo "  genpatch   Regenerate patch files from working tree (optionally: genpatch <dep>)"
+  echo "  checkpatch Verify patch files match the current worktree"
   echo "  clean      Remove third_party directory"
 }
 
 case "${1:-setup}" in
-  setup)    cmd_setup ;;
-  download) cmd_download ;;
-  patch)    cmd_patch ;;
-  reset)    cmd_reset ;;
-  repatch)  cmd_repatch ;;
-  genpatch) shift; cmd_genpatch "$@" ;;
-  clean)    cmd_clean ;;
+  setup)       cmd_setup ;;
+  download)    cmd_download ;;
+  patch)       cmd_patch ;;
+  reset)       cmd_reset ;;
+  repatch)     cmd_repatch ;;
+  genpatch)    shift; cmd_genpatch "$@" ;;
+  checkpatch)  cmd_checkpatch ;;
+  clean)       cmd_clean ;;
   -h|--help|help) usage ;;
   *)
     echo "Unknown command: $1" >&2

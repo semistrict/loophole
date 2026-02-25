@@ -132,8 +132,8 @@ func lsCmd() *cobra.Command {
 			dim := color.New(color.FgHiBlack)
 			for _, v := range volumes {
 				if mp, ok := mounted[v]; ok {
-					green.Print(v)
-					dim.Printf("  %s\n", mp)
+					_, _ = green.Print(v)
+					_, _ = dim.Printf("  %s\n", mp)
 				} else {
 					fmt.Println(v)
 				}
@@ -288,7 +288,7 @@ func deviceStartCmd() *cobra.Command {
 	cmd := startCmd()
 	cmd.Short = "Start daemon in foreground"
 	// Remove the --daemon flag — device start is always foreground.
-	cmd.Flags().MarkHidden("daemon")
+	_ = cmd.Flags().MarkHidden("daemon")
 	return cmd
 }
 

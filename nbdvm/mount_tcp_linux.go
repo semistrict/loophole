@@ -113,7 +113,11 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 	// Start serving NBD connections in the background.
 	go func() {
-		defer ln.Close()
+		defer func() {
+			if err := ln.Close(); err != nil {
+				slog.Warn("close failed", "error", err)
+			}
+		}()
 		for {
 			c, err := ln.Accept()
 			if err != nil {
@@ -124,7 +128,9 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 			go func() {
 				err := nbd.ServeDynamic(srvCtx, c, provider)
 				s.log.Debug("nbd-tcp: ServeDynamic returned", "remote", c.RemoteAddr(), "err", err)
-				c.Close()
+				if cerr := c.Close(); cerr != nil {
+					slog.Warn("close failed", "error", cerr)
+				}
 			}()
 		}
 	}()
@@ -132,7 +138,9 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 	// Close listener when context is cancelled.
 	go func() {
 		<-srvCtx.Done()
-		ln.Close()
+		if err := ln.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
 	}()
 
 	serverFlags := nbdnl.FlagHasFlags | nbdnl.FlagSendFlush |
@@ -150,7 +158,9 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 	cleanup := func(upTo int) {
 		for j := range upTo {
 			if kernelFDs[j] != nil {
-				kernelFDs[j].Close()
+				if err := kernelFDs[j].Close(); err != nil {
+					slog.Warn("close failed", "error", err)
+				}
 			}
 		}
 	}
@@ -166,9 +176,13 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 		proxyFile := os.NewFile(uintptr(sp[1]), fmt.Sprintf("proxy-%d", i))
 
 		proxyConn, err := net.FileConn(proxyFile)
-		proxyFile.Close()
+		if cerr := proxyFile.Close(); cerr != nil {
+			slog.Warn("close failed", "error", cerr)
+		}
 		if err != nil {
-			kernelFile.Close()
+			if cerr := kernelFile.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
 			cleanup(i)
 			cancel()
 			return "", fmt.Errorf("fileconn: %w", err)
@@ -179,8 +193,12 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 		// Dial the TCP NBD server and do the full handshake.
 		tcpConn, err := net.Dial("tcp", tcpAddr)
 		if err != nil {
-			proxyConn.Close()
-			kernelFile.Close()
+			if cerr := proxyConn.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
+			if cerr := kernelFile.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
 			cleanup(i)
 			cancel()
 			return "", fmt.Errorf("dial NBD server: %w", err)
@@ -188,9 +206,15 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 		client, err := nbd.ClientHandshake(ctx, tcpConn)
 		if err != nil {
-			tcpConn.Close()
-			proxyConn.Close()
-			kernelFile.Close()
+			if cerr := tcpConn.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
+			if cerr := proxyConn.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
+			if cerr := kernelFile.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
 			cleanup(i)
 			cancel()
 			return "", fmt.Errorf("client handshake: %w", err)
@@ -198,9 +222,15 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 		_, err = client.Go(name)
 		if err != nil {
-			tcpConn.Close()
-			proxyConn.Close()
-			kernelFile.Close()
+			if cerr := tcpConn.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
+			if cerr := proxyConn.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
+			if cerr := kernelFile.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
 			cleanup(i)
 			cancel()
 			return "", fmt.Errorf("client go: %w", err)
@@ -208,7 +238,10 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 		// client.Go() internally closes the ctxRW wrapper, which sets
 		// the TCP conn deadline to the past. Reset it so the proxy works.
-		tcpConn.SetDeadline(time.Time{})
+		if err := tcpConn.SetDeadline(time.Time{}); err != nil {
+			cancel()
+			return "", fmt.Errorf("reset deadline: %w", err)
+		}
 
 		// Both sides are now in transmission mode. Proxy between the
 		// kernel's socketpair end and the TCP connection.
@@ -231,11 +264,15 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 	// Close our copies of the kernel-side fds. The kernel has its own
 	// copies via netlink. Keeping ours open can interfere with Go's poller.
 	for _, f := range kernelFDs {
-		f.Close()
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
 	}
 
 	if err := ensureDeviceNode(idx); err != nil {
-		nbdnl.Disconnect(idx)
+		if derr := nbdnl.Disconnect(idx); derr != nil {
+			slog.Warn("nbd disconnect failed", "device", nbd.DevicePath(idx), "error", derr)
+		}
 		cancel()
 		return "", fmt.Errorf("mknod %s: %w", nbd.DevicePath(idx), err)
 	}
@@ -288,8 +325,12 @@ func proxy(ctx context.Context, a, b net.Conn, log *slog.Logger, connIdx int) {
 	case <-ctx.Done():
 	case <-done:
 	}
-	a.Close()
-	b.Close()
+	if err := a.Close(); err != nil {
+		slog.Warn("close failed", "error", err)
+	}
+	if err := b.Close(); err != nil {
+		slog.Warn("close failed", "error", err)
+	}
 }
 
 // DevicePath returns the /dev/nbdN path for a connected volume, or empty string.
@@ -317,7 +358,9 @@ func (s *TCPServer) Disconnect(ctx context.Context, volumeName string) error {
 
 	s.log.Info("nbd-tcp: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
 
-	nbdnl.Disconnect(exp.devIdx)
+	if err := nbdnl.Disconnect(exp.devIdx); err != nil {
+		slog.Warn("nbd disconnect failed", "device", nbd.DevicePath(exp.devIdx), "error", err)
+	}
 	exp.cancel()
 	return nil
 }
@@ -332,7 +375,9 @@ func (s *TCPServer) Close(ctx context.Context) {
 	s.mu.Unlock()
 
 	for _, name := range names {
-		s.Disconnect(ctx, name)
+		if err := s.Disconnect(ctx, name); err != nil {
+			slog.Warn("disconnect failed", "volume", name, "error", err)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
-diff -ruN --exclude=.git a/container-libs/go.work b/container-libs/go.work
---- a/container-libs/go.work	2026-02-25 10:52:26
-+++ b/container-libs/go.work	1970-01-01 08:00:00
+diff --git a/go.work b/go.work
+index 18d449218..e69de29bb 100644
+--- a/go.work
++++ b/go.work
 @@ -1,7 +0,0 @@
 -go 1.24.6
 -
@@ -9,20 +10,10 @@ diff -ruN --exclude=.git a/container-libs/go.work b/container-libs/go.work
 -	./image
 -	./storage
 -)
-diff -ruN --exclude=.git a/container-libs/go.work.disabled b/container-libs/go.work.disabled
---- a/container-libs/go.work.disabled	1970-01-01 08:00:00
-+++ b/container-libs/go.work.disabled	2026-02-24 13:13:49
-@@ -0,0 +1,7 @@
-+go 1.24.6
-+
-+use (
-+	./common
-+	./image
-+	./storage
-+)
-diff -ruN --exclude=.git a/container-libs/go.work.sum b/container-libs/go.work.sum
---- a/container-libs/go.work.sum	2026-02-25 10:52:26
-+++ b/container-libs/go.work.sum	1970-01-01 08:00:00
+diff --git a/go.work.sum b/go.work.sum
+index 022d91195..e69de29bb 100644
+--- a/go.work.sum
++++ b/go.work.sum
 @@ -1,184 +0,0 @@
 -cel.dev/expr v0.24.0/go.mod h1:hLPLo1W4QUmuYdA72RBX06QTs6MXw941piREPl3Yfiw=
 -chainguard.dev/go-grpc-kit v0.17.15/go.mod h1:1wAVAX2CCamtFlfMs9PFzfgQQxX1/TQyF6cbWApbJ2U=
@@ -208,9 +199,39 @@ diff -ruN --exclude=.git a/container-libs/go.work.sum b/container-libs/go.work.s
 -sigs.k8s.io/release-utils v0.12.2/go.mod h1:Ab9Lb/FpGUw4lUXj1QYbUcF2TRzll+GS7Md54W1G7sA=
 -tags.cncf.io/container-device-interface/specs-go v1.0.0/go.mod h1:u86hoFWqnh3hWz3esofRFKbI261bUlvUfLKGrDhJkgQ=
 -tags.cncf.io/container-device-interface/specs-go v1.1.0/go.mod h1:u86hoFWqnh3hWz3esofRFKbI261bUlvUfLKGrDhJkgQ=
-diff -ruN --exclude=.git a/container-libs/go.work.sum.disabled b/container-libs/go.work.sum.disabled
---- a/container-libs/go.work.sum.disabled	1970-01-01 08:00:00
-+++ b/container-libs/go.work.sum.disabled	2026-02-24 13:13:49
+diff --git a/storage/drivers/driver.go b/storage/drivers/driver.go
+index 38706dc99..c6c38c818 100644
+--- a/storage/drivers/driver.go
++++ b/storage/drivers/driver.go
+@@ -99,6 +99,10 @@ type DedupResult struct {
+ 	Deduped uint64
+ }
+ 
++// CleanupTempDirFunc is re-exported from internal/tempdir for use by
++// out-of-tree driver implementations.
++type CleanupTempDirFunc = tempdir.CleanupTempDirFunc
++
+ // InitFunc initializes the storage driver.
+ type InitFunc func(homedir string, options Options) (Driver, error)
+ 
+diff --git a/go.work.disabled b/go.work.disabled
+new file mode 100644
+index 000000000..18d449218
+--- /dev/null
++++ b/go.work.disabled
+@@ -0,0 +1,7 @@
++go 1.24.6
++
++use (
++	./common
++	./image
++	./storage
++)
+diff --git a/go.work.sum.disabled b/go.work.sum.disabled
+new file mode 100644
+index 000000000..022d91195
+--- /dev/null
++++ b/go.work.sum.disabled
 @@ -0,0 +1,184 @@
 +cel.dev/expr v0.24.0/go.mod h1:hLPLo1W4QUmuYdA72RBX06QTs6MXw941piREPl3Yfiw=
 +chainguard.dev/go-grpc-kit v0.17.15/go.mod h1:1wAVAX2CCamtFlfMs9PFzfgQQxX1/TQyF6cbWApbJ2U=
@@ -396,26 +417,11 @@ diff -ruN --exclude=.git a/container-libs/go.work.sum.disabled b/container-libs/
 +sigs.k8s.io/release-utils v0.12.2/go.mod h1:Ab9Lb/FpGUw4lUXj1QYbUcF2TRzll+GS7Md54W1G7sA=
 +tags.cncf.io/container-device-interface/specs-go v1.0.0/go.mod h1:u86hoFWqnh3hWz3esofRFKbI261bUlvUfLKGrDhJkgQ=
 +tags.cncf.io/container-device-interface/specs-go v1.1.0/go.mod h1:u86hoFWqnh3hWz3esofRFKbI261bUlvUfLKGrDhJkgQ=
-File a/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-ca/unreadable.crt is a unknown type while file b/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-ca/unreadable.crt is a unknown type
-File a/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-cert/client-cert-1.cert is a unknown type while file b/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-cert/client-cert-1.cert is a unknown type
-File a/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-key/client-cert-1.key is a unknown type while file b/container-libs/image/pkg/tlsclientconfig/testdata/unreadable-key/client-cert-1.key is a unknown type
-diff -ruN --exclude=.git a/container-libs/storage/drivers/driver.go b/container-libs/storage/drivers/driver.go
---- a/container-libs/storage/drivers/driver.go	2026-02-25 10:52:26
-+++ b/container-libs/storage/drivers/driver.go	2026-02-24 13:16:48
-@@ -99,6 +99,10 @@
- 	Deduped uint64
- }
- 
-+// CleanupTempDirFunc is re-exported from internal/tempdir for use by
-+// out-of-tree driver implementations.
-+type CleanupTempDirFunc = tempdir.CleanupTempDirFunc
-+
- // InitFunc initializes the storage driver.
- type InitFunc func(homedir string, options Options) (Driver, error)
- 
-diff -ruN --exclude=.git a/container-libs/storage/drivers/register/register_loophole.go b/container-libs/storage/drivers/register/register_loophole.go
---- a/container-libs/storage/drivers/register/register_loophole.go	1970-01-01 08:00:00
-+++ b/container-libs/storage/drivers/register/register_loophole.go	2026-02-24 13:18:40
+diff --git a/storage/drivers/register/register_loophole.go b/storage/drivers/register/register_loophole.go
+new file mode 100644
+index 000000000..bdcf82f18
+--- /dev/null
++++ b/storage/drivers/register/register_loophole.go
 @@ -0,0 +1,8 @@
 +//go:build linux
 +

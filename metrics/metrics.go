@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -19,8 +20,8 @@ var Registry = prometheus.NewRegistry()
 
 func init() {
 	// Include Go runtime metrics alongside ours.
-	Registry.MustRegister(prometheus.NewGoCollector())
-	Registry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	Registry.MustRegister(collectors.NewGoCollector())
+	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 }
 
 // ListenAndServe starts an HTTP server on addr serving /metrics.

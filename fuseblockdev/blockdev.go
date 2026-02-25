@@ -54,17 +54,21 @@ func Start(mountDir string, vm *loophole.VolumeManager, opts *Options) (*Server,
 
 	root := &rootNode{vm: vm, volumeSize: volumeSize}
 
-	sec := time.Second
+	cacheTTL := 5 * time.Second
+	negTTL := time.Second
 	server, err := fs.Mount(mountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
 			FsName:        "loophole",
 			Name:          "loophole",
 			DisableXAttrs: true,
 			MaxWrite:      1024 * 1024,
+			MaxBackground: 128,
+			DirectMount:   true,
 			Debug:         opts.Debug,
 		},
-		EntryTimeout: &sec,
-		AttrTimeout:  &sec,
+		EntryTimeout:    &cacheTTL,
+		AttrTimeout:     &cacheTTL,
+		NegativeTimeout: &negTTL,
 		UID:          uint32(os.Getuid()),
 		GID:          uint32(os.Getgid()),
 	})

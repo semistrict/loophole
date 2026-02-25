@@ -5,6 +5,7 @@ package fsbackend
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/ext4"
@@ -49,7 +50,9 @@ func (n *NBDDriver) Mount(ctx context.Context, vol *loophole.Volume, mountpoint 
 		return nbdMount{}, err
 	}
 	if err := ext4.MountDirect(ctx, dev, mountpoint); err != nil {
-		n.nbd.Disconnect(ctx, vol.Name())
+		if disconnErr := n.nbd.Disconnect(ctx, vol.Name()); disconnErr != nil {
+			slog.Warn("nbd disconnect error during mount cleanup", "error", disconnErr)
+		}
 		return nbdMount{}, err
 	}
 	return nbdMount{mountpoint: mountpoint, volumeName: vol.Name()}, nil

@@ -1,6 +1,7 @@
 package loophole
 
 import (
+	"log/slog"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -12,16 +13,24 @@ func cloneFile(srcPath, dstPath string) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() {
+		if err := src.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		dst.Close()
+		if cerr := dst.Close(); cerr != nil {
+			slog.Warn("close failed", "error", cerr)
+		}
 		if err != nil {
-			os.Remove(dstPath)
+			if rerr := os.Remove(dstPath); rerr != nil {
+				slog.Warn("remove failed", "path", dstPath, "error", rerr)
+			}
 		}
 	}()
 

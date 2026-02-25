@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"sort"
@@ -72,7 +73,11 @@ func (f *lwext4FSImpl) ReadFile(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Warn("lwext4 close error", "error", err)
+		}
+	}()
 	return io.ReadAll(file)
 }
 
@@ -96,7 +101,11 @@ func (f *lwext4FSImpl) WriteFile(name string, data []byte, perm fs.FileMode) err
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); err != nil {
+			slog.Warn("lwext4 close error", "error", err)
+		}
+	}()
 
 	if err := file.Truncate(0); err != nil {
 		return err
@@ -215,7 +224,9 @@ func (f *lwext4FSImpl) Create(name string) (File, error) {
 		return nil, err
 	}
 	if err := file.Truncate(0); err != nil {
-		file.Close()
+		if closeErr := file.Close(); closeErr != nil {
+			slog.Warn("lwext4 close error", "error", closeErr)
+		}
 		return nil, err
 	}
 	return file, nil
@@ -227,7 +238,7 @@ type lwext4FileInfo struct {
 	attr *lwext4.Attr
 }
 
-func (fi *lwext4FileInfo) Name() string      { return fi.name }
+func (fi *lwext4FileInfo) Name() string       { return fi.name }
 func (fi *lwext4FileInfo) Size() int64        { return int64(fi.attr.Size) }
 func (fi *lwext4FileInfo) Mode() fs.FileMode  { return fs.FileMode(fi.attr.Mode) & 0o7777 }
 func (fi *lwext4FileInfo) ModTime() time.Time { return time.Unix(int64(fi.attr.Mtime), 0) }

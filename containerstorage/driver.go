@@ -15,13 +15,13 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/ext4"
 	graphdriver "go.podman.io/storage/drivers"
 	"go.podman.io/storage/pkg/archive"
 	"go.podman.io/storage/pkg/directory"
 	"go.podman.io/storage/pkg/idtools"
-	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/ext4"
 )
 
 func init() {
@@ -183,7 +183,9 @@ func (d *Driver) Remove(id string) error {
 	if err := d.client.Unmount(ctx, mountpoint); err != nil {
 		slog.Warn("unmount failed during Remove", "mountpoint", mountpoint, "error", err)
 	}
-	os.Remove(mountpoint)
+	if err := os.Remove(mountpoint); err != nil {
+		slog.Warn("remove failed", "path", mountpoint, "error", err)
+	}
 
 	d.mu.Lock()
 	delete(d.layers, id)

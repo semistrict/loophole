@@ -33,6 +33,9 @@ RUN GOARCH=$(go env GOARCH) && \
     curl -fsSL "https://github.com/containers/crun/releases/download/1.26/crun-1.26-linux-${GOARCH}" \
     -o /usr/bin/crun && chmod +x /usr/bin/crun
 
+# Install golangci-lint
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b /usr/local/bin
+
 WORKDIR /app
 
 CMD ["go", "test", "-v", "-run", "TestFuse", "./..."]

@@ -1,0 +1,27 @@
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - errcheck
+    - staticcheck
+    - unused
+    - ineffassign
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+        - shadow
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+    paths:
+      - third_party
+      - old
+
+formatters:
+  enable:
+    - gofmt

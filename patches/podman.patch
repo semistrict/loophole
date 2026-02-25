@@ -1,7 +1,8 @@
-diff -ruN --exclude=.git --exclude=vendor a/podman/cmd/podman/main.go b/podman/cmd/podman/main.go
---- a/podman/cmd/podman/main.go	2026-02-25 10:52:23
-+++ b/podman/cmd/podman/main.go	2026-02-24 13:45:00
-@@ -8,6 +8,7 @@
+diff --git a/cmd/podman/main.go b/cmd/podman/main.go
+index 1ce01bac5..49eceacac 100644
+--- a/cmd/podman/main.go
++++ b/cmd/podman/main.go
+@@ -8,6 +8,7 @@ import (
  	"strings"
  
  	_ "github.com/containers/podman/v6/cmd/podman/artifact"
@@ -9,10 +10,11 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/cmd/podman/main.go b/podman/c
  	_ "github.com/containers/podman/v6/cmd/podman/completion"
  	_ "github.com/containers/podman/v6/cmd/podman/farm"
  	_ "github.com/containers/podman/v6/cmd/podman/generate"
-diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
---- a/podman/go.mod	2026-02-25 10:52:23
-+++ b/podman/go.mod	2026-02-24 13:48:18
-@@ -3,7 +3,7 @@
+diff --git a/go.mod b/go.mod
+index 8a88954e0..d8a777f95 100644
+--- a/go.mod
++++ b/go.mod
+@@ -3,7 +3,7 @@ module github.com/containers/podman/v6
  // Warning: if there is a "toolchain" directive anywhere in this file (and most of the
  // time there shouldn't be), its version must be an exact match to the "go" directive.
  
@@ -21,7 +23,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
  
  require (
  	github.com/Microsoft/go-winio v0.6.2
-@@ -56,6 +56,7 @@
+@@ -56,6 +56,7 @@ require (
  	github.com/opencontainers/selinux v1.13.1
  	github.com/openshift/imagebuilder v1.2.20
  	github.com/rootless-containers/rootlesskit/v2 v2.3.6
@@ -29,7 +31,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
  	github.com/shirou/gopsutil/v4 v4.26.1
  	github.com/sirupsen/logrus v1.9.4
  	github.com/spf13/cobra v1.10.2
-@@ -88,6 +89,25 @@
+@@ -88,6 +89,25 @@ require (
  	github.com/VividCortex/ewma v1.2.0 // indirect
  	github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d // indirect
  	github.com/aead/serpent v0.0.0-20160714141033-fba169763ea6 // indirect
@@ -55,7 +57,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
  	github.com/chzyer/readline v1.5.1 // indirect
  	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
  	github.com/containerd/errdefs v1.0.0 // indirect
-@@ -123,6 +143,7 @@
+@@ -123,6 +143,7 @@ require (
  	github.com/google/go-containerregistry v0.20.6 // indirect
  	github.com/google/go-intervals v0.0.2 // indirect
  	github.com/google/pprof v0.0.0-20260115054156-294ebfa9ad83 // indirect
@@ -63,7 +65,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
  	github.com/hashicorp/errwrap v1.1.0 // indirect
  	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
  	github.com/hashicorp/go-retryablehttp v0.7.8 // indirect
-@@ -190,3 +211,7 @@
+@@ -190,3 +211,7 @@ require (
  	gopkg.in/tomb.v1 v1.0.0-20141024135613-dd632973f1e7 // indirect
  	tags.cncf.io/container-device-interface/specs-go v1.1.0 // indirect
  )
@@ -71,10 +73,11 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.mod b/podman/go.mod
 +replace go.podman.io/storage => ../container-libs/storage
 +
 +replace github.com/semistrict/loophole => ../../
-diff -ruN --exclude=.git --exclude=vendor a/podman/go.sum b/podman/go.sum
---- a/podman/go.sum	2026-02-25 10:52:23
-+++ b/podman/go.sum	2026-02-24 13:20:10
-@@ -20,6 +20,44 @@
+diff --git a/go.sum b/go.sum
+index fb7760b3f..80ffd0363 100644
+--- a/go.sum
++++ b/go.sum
+@@ -20,6 +20,44 @@ github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d h1:licZJFw2RwpH
  github.com/acarl005/stripansi v0.0.0-20180116102854-5a71ef0e047d/go.mod h1:asat636LX7Bqt5lYEZ27JNDcqxfjdBQuJ/MM4CN/Lzo=
  github.com/aead/serpent v0.0.0-20160714141033-fba169763ea6 h1:5L8Mj9Co9sJVgW3TpYk2gxGJnDjsYuboNTcRmbtGKGs=
  github.com/aead/serpent v0.0.0-20160714141033-fba169763ea6/go.mod h1:3HgLJ9d18kXMLQlJvIY3+FszZYMxCz8WfE2MQ7hDY0w=
@@ -119,7 +122,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.sum b/podman/go.sum
  github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
  github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
  github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
-@@ -180,6 +218,8 @@
+@@ -180,6 +218,8 @@ github.com/gorilla/schema v1.4.1 h1:jUg5hUjCSDZpNGLuXQOgIWGdlgrIdYvgQ0wZtdK1M3E=
  github.com/gorilla/schema v1.4.1/go.mod h1:Dg5SSm5PV60mhF2NFaTV1xuYYj8tV8NOPRo4FggUMnM=
  github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3 h1:NmZ1PKzSTQbuGHw9DGPFomqkkLWMC+vZCkfs+FHv1Vg=
  github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.3/go.mod h1:zQrxl1YP88HQlA6i9c63DSVPFklWpGX4OWAc9bFuaH4=
@@ -128,7 +131,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.sum b/podman/go.sum
  github.com/hashicorp/errwrap v1.0.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
  github.com/hashicorp/errwrap v1.1.0 h1:OxrOeh75EUXMY8TBjag2fzXGZ40LB6IKw45YeGUDY2I=
  github.com/hashicorp/errwrap v1.1.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
-@@ -223,6 +263,8 @@
+@@ -223,6 +263,8 @@ github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=
  github.com/kr/pretty v0.3.1/go.mod h1:hoEshYVHaxMs3cyo3Yncou5ZscifuDolrwPKZanG3xk=
  github.com/kr/text v0.2.0 h1:5Nx0Ya0ZqY2ygV366QzturHI13Jq95ApcVaJBhpS+AY=
  github.com/kr/text v0.2.0/go.mod h1:eLer722TekiGuMkidMxC/pM04lWEeraHUUmBw8l2grE=
@@ -137,7 +140,7 @@ diff -ruN --exclude=.git --exclude=vendor a/podman/go.sum b/podman/go.sum
  github.com/linuxkit/virtsock v0.0.0-20241009230534-cb6a20cc0422 h1:XvRuyDDRvi+UDxHN/M4MW4HxjmNVMmUKQj/+AbgsYgk=
  github.com/linuxkit/virtsock v0.0.0-20241009230534-cb6a20cc0422/go.mod h1:JLgfq4XMVbvfNlAXla/41lZnp21O72a/wWHGJefAvgQ=
  github.com/lufia/plan9stats v0.0.0-20240909124753-873cd0166683 h1:7UMa6KCCMjZEMDtTVdcGu0B1GmmC7QJKiCCjyTAWQy0=
-@@ -447,8 +489,6 @@
+@@ -447,8 +489,6 @@ go.podman.io/common v0.67.1-0.20260217150212-026c3538f3d1 h1:MhQdvsUa8hef3qN+hRt
  go.podman.io/common v0.67.1-0.20260217150212-026c3538f3d1/go.mod h1:KKYaKM+ZTve0ZW+3yvd05PpWawetNGNzb05dDUw+LG0=
  go.podman.io/image/v5 v5.39.2-0.20260217150212-026c3538f3d1 h1:41n9FLO6l3xQ7yVAE9oxKNwmJgXbFRTeS1BHTAQjt80=
  go.podman.io/image/v5 v5.39.2-0.20260217150212-026c3538f3d1/go.mod h1:ZcbaWguhrYsWLx6kbX+gcVq9yzIrvzu21JF2bgQIlMc=

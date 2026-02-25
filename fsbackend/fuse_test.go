@@ -48,7 +48,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func newFUSEBackend(t *testing.T) *Backend {
+func newFUSEBackend(t *testing.T) Service {
 	t.Helper()
 	skipIfNotLinuxRoot(t)
 

@@ -42,7 +42,11 @@ func TestS3PutGetRoundtrip(t *testing.T) {
 
 	body, etag, err := store.Get(t.Context(), "key1", 0)
 	require.NoError(t, err)
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	got, err := readAll(body)
 	require.NoError(t, err)
@@ -58,7 +62,11 @@ func TestS3GetWithOffset(t *testing.T) {
 
 	body, _, err := store.Get(t.Context(), "offset", 5)
 	require.NoError(t, err)
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	got, err := readAll(body)
 	require.NoError(t, err)
@@ -79,7 +87,11 @@ func TestS3PutIfNotExists(t *testing.T) {
 	// Verify first value is preserved.
 	body, _, err := store.Get(t.Context(), "unique", 0)
 	require.NoError(t, err)
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 	got, _ := readAll(body)
 	assert.Equal(t, []byte("first"), got)
 }
@@ -139,7 +151,11 @@ func TestS3At(t *testing.T) {
 
 	body, _, err := sub.Get(t.Context(), "nested", 0)
 	require.NoError(t, err)
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 	got, _ := readAll(body)
 	assert.Equal(t, []byte("deep"), got)
 
@@ -155,7 +171,11 @@ func TestS3PutReader(t *testing.T) {
 
 	body, _, err := store.Get(t.Context(), "fromreader", 0)
 	require.NoError(t, err)
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 	got, _ := readAll(body)
 	assert.Equal(t, []byte("reader content"), got)
 }
@@ -168,7 +188,11 @@ func TestS3VolumeWriteReadFlush(t *testing.T) {
 	require.NoError(t, FormatSystem(t.Context(), store, 64))
 	vm, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol, err := vm.NewVolume(t.Context(), "testvol")
 	require.NoError(t, err)
@@ -189,7 +213,11 @@ func TestS3SnapshotAndClone(t *testing.T) {
 	require.NoError(t, FormatSystem(t.Context(), store, 64))
 	vm, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol, err := vm.NewVolume(t.Context(), "original")
 	require.NoError(t, err)
@@ -226,7 +254,11 @@ func TestS3CopyFromCoW(t *testing.T) {
 	require.NoError(t, FormatSystem(t.Context(), store, 64))
 	vm, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	src, err := vm.NewVolume(t.Context(), "src")
 	require.NoError(t, err)
@@ -267,7 +299,11 @@ func TestS3Reopen(t *testing.T) {
 	// Read with second VM (different cache dir).
 	vm2, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm2.Close(t.Context())
+	defer func() {
+		if err := vm2.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol2, err := vm2.OpenVolume(t.Context(), "persist")
 	require.NoError(t, err)

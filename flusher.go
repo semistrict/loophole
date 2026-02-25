@@ -146,8 +146,9 @@ func (l *Layer) flushOne(ctx context.Context, item flushItem) error {
 
 	// Snapshot the block into a memory buffer using pread (offset-
 	// independent, safe with concurrent pwrite from NBD/FUSE).
-	buf := l.vm.flushPool.Get().([]byte)
-	defer l.vm.flushPool.Put(buf)
+	bufp := l.vm.flushPool.Get().(*[]byte)
+	defer l.vm.flushPool.Put(bufp)
+	buf := *bufp
 
 	n, err := readFullAt(item.file, buf)
 	if err != nil {

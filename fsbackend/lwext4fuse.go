@@ -3,6 +3,7 @@ package fsbackend
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 
@@ -57,15 +58,21 @@ func (d *Lwext4FUSEDriver) Mount(ctx context.Context, vol *loophole.Volume, moun
 	}
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
 		// Try to recover from a stale FUSE mount.
-		exec.Command("fusermount", "-u", mountpoint).Run()
+		if err := exec.Command("fusermount", "-u", mountpoint).Run(); err != nil {
+			slog.Warn("fusermount -u failed", "mountpoint", mountpoint, "error", err)
+		}
 		if err := os.MkdirAll(mountpoint, 0o755); err != nil {
-			ext4fs.Close()
+			if closeErr := ext4fs.Close(); closeErr != nil {
+				slog.Warn("ext4fs close error", "error", closeErr)
+			}
 			return lwext4FUSEMount{}, fmt.Errorf("mkdir %s: %w", mountpoint, err)
 		}
 	}
 	server, err := fuselwext4.Mount(mountpoint, ext4fs)
 	if err != nil {
-		ext4fs.Close()
+		if closeErr := ext4fs.Close(); closeErr != nil {
+			slog.Warn("ext4fs close error", "error", closeErr)
+		}
 		return lwext4FUSEMount{}, fmt.Errorf("fuse mount %s: %w", mountpoint, err)
 	}
 	return lwext4FUSEMount{mountpoint: mountpoint, ext4fs: ext4fs, server: server}, nil

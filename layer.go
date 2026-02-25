@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
@@ -186,7 +187,11 @@ func (l *Layer) readCached(ctx context.Context, layerID string, blockIdx BlockId
 		clear(buf)
 		return nil
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 	_, err = f.ReadAt(buf, int64(offInBlock))
 	return err
 }
@@ -234,7 +239,11 @@ func (l *Layer) openBlock(ctx context.Context, blockIdx BlockIdx) (*os.File, err
 			if tombstone {
 				src = nil // zeros
 			} else {
-				defer src.Close()
+				defer func() {
+					if err := src.Close(); err != nil {
+						slog.Warn("close failed", "error", err)
+					}
+				}()
 			}
 		}
 
@@ -381,7 +390,9 @@ func (dst *Layer) CopyFrom(ctx context.Context, src *Layer, srcOff, dstOff, leng
 			if ownerFrozen {
 				dst.mu.Lock()
 				if f := dst.openBlocks[dstBlockIdx]; f != nil {
-					f.Close()
+					if err := f.Close(); err != nil {
+						slog.Warn("close cached block file", "block", dstBlockIdx, "error", err)
+					}
 					delete(dst.openBlocks, dstBlockIdx)
 				}
 				delete(dst.dirty, dstBlockIdx)

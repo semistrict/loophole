@@ -57,6 +57,8 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 	logger := slog.New(handler)
 	logger.Info("starting daemon", "s3", inst.S3URL(), "log", logPath)
 
+	tuneProcess(logger)
+
 	vm, err := loophole.SetupVolumeManager(ctx, inst, dir, s3opts, logger)
 	if err != nil {
 		return nil, err
@@ -91,7 +93,9 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		return nil, err
 	}
-	os.Remove(sockPath)
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		logger.Warn("remove stale socket failed", "path", sockPath, "error", err)
+	}
 
 	ln, err := net.Listen("unix", sockPath)
 	if err != nil {
@@ -99,7 +103,9 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 	}
 	if socketMode != 0 {
 		if err := os.Chmod(sockPath, socketMode); err != nil {
-			ln.Close()
+			if closeErr := ln.Close(); closeErr != nil {
+				logger.Warn("listener close error", "error", closeErr)
+			}
 			return nil, fmt.Errorf("chmod socket: %w", err)
 		}
 	}
@@ -122,7 +128,9 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	srv := &http.Server{Handler: d.mux(stop)}
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		if err := srv.Close(); err != nil {
+			d.log.Warn("http server close error", "error", err)
+		}
 	}()
 
 	d.log.Info("daemon ready", "mode", d.mode, "socket", d.dir.Socket(d.inst))
@@ -225,7 +233,9 @@ func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err)
 		return
 	}
-	os.Remove(d.dir.MountSymlink(req.Mountpoint))
+	if err := os.Remove(d.dir.MountSymlink(req.Mountpoint)); err != nil && !os.IsNotExist(err) {
+		d.log.Warn("remove mount symlink failed", "error", err)
+	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -380,13 +390,17 @@ func readJSON(r *http.Request, v any) error {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Warn("writeJSON encode error", "error", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); encErr != nil {
+		slog.Warn("writeError encode error", "error", encErr)
+	}
 }
 
 func (d *Daemon) writeSymlink(mountpoint string) {
@@ -395,7 +409,9 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 		d.log.Warn("create symlink dir failed", "path", symPath, "error", err)
 		return
 	}
-	os.Remove(symPath) // best-effort, may not exist
+	if err := os.Remove(symPath); err != nil && !os.IsNotExist(err) {
+		d.log.Warn("remove old symlink failed", "path", symPath, "error", err)
+	}
 	if err := os.Symlink(d.dir.Socket(d.inst), symPath); err != nil {
 		d.log.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}

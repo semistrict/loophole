@@ -96,7 +96,6 @@ func NewS3Store(ctx context.Context, inst Instance, opts *S3Options) (*S3Store, 
 	return &S3Store{client: client, bucket: inst.Bucket, prefix: prefix}, nil
 }
 
-
 func (s *S3Store) fullKey(key string) string {
 	if s.prefix == "" {
 		return key

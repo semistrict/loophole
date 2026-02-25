@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/semistrict/loophole/metrics"
 )
@@ -44,7 +45,11 @@ func ReadJSON[T any](ctx context.Context, objects ObjectStore, key string) (T, s
 	if err != nil {
 		return zero, "", err
 	}
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return zero, "", err

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,9 +109,16 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) (
 		return false, err
 	}
 	_, err = file.Write(data)
-	file.Close()
+	if cerr := file.Close(); cerr != nil {
+		slog.Warn("close after write failed", "path", p, "error", cerr)
+		if err == nil {
+			err = cerr
+		}
+	}
 	if err != nil {
-		os.Remove(p)
+		if rerr := os.Remove(p); rerr != nil {
+			slog.Warn("remove failed", "path", p, "error", rerr)
+		}
 		return false, err
 	}
 	return true, nil

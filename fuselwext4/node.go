@@ -22,20 +22,22 @@ type ext4Node struct {
 }
 
 var (
-	_ fs.NodeLookuper      = (*ext4Node)(nil)
-	_ fs.NodeGetattrer     = (*ext4Node)(nil)
-	_ fs.NodeSetattrer     = (*ext4Node)(nil)
-	_ fs.NodeMkdirer       = (*ext4Node)(nil)
-	_ fs.NodeCreater       = (*ext4Node)(nil)
-	_ fs.NodeUnlinker      = (*ext4Node)(nil)
-	_ fs.NodeRmdirer       = (*ext4Node)(nil)
-	_ fs.NodeRenamer       = (*ext4Node)(nil)
-	_ fs.NodeLinker        = (*ext4Node)(nil)
-	_ fs.NodeSymlinker     = (*ext4Node)(nil)
-	_ fs.NodeReadlinker    = (*ext4Node)(nil)
-	_ fs.NodeReaddirer     = (*ext4Node)(nil)
-	_ fs.NodeOpener        = (*ext4Node)(nil)
-	_ fs.NodeFsyncer       = (*ext4Node)(nil)
+	_ fs.NodeLookuper   = (*ext4Node)(nil)
+	_ fs.NodeGetattrer  = (*ext4Node)(nil)
+	_ fs.NodeSetattrer  = (*ext4Node)(nil)
+	_ fs.NodeMkdirer    = (*ext4Node)(nil)
+	_ fs.NodeCreater    = (*ext4Node)(nil)
+	_ fs.NodeUnlinker   = (*ext4Node)(nil)
+	_ fs.NodeRmdirer    = (*ext4Node)(nil)
+	_ fs.NodeRenamer    = (*ext4Node)(nil)
+	_ fs.NodeLinker     = (*ext4Node)(nil)
+	_ fs.NodeSymlinker  = (*ext4Node)(nil)
+	_ fs.NodeReadlinker = (*ext4Node)(nil)
+	_ fs.NodeReaddirer  = (*ext4Node)(nil)
+	_ fs.NodeOpener     = (*ext4Node)(nil)
+	// Note: NodeOpendirHandler with FOPEN_CACHE_DIR is not safe here because
+	// we don't send cache invalidation notifications when directory contents change.
+	_ fs.NodeFsyncer = (*ext4Node)(nil)
 )
 
 func (n *ext4Node) child(ino lwext4.Ino) *ext4Node {
@@ -47,8 +49,8 @@ func attrFromLwext4(a *lwext4.Attr, out *fuse.Attr) {
 	out.Size = a.Size
 	out.Mode = a.Mode
 	out.Nlink = uint32(a.Links)
-	out.Owner.Uid = a.Uid
-	out.Owner.Gid = a.Gid
+	out.Uid = a.Uid
+	out.Gid = a.Gid
 	out.Atime = uint64(a.Atime)
 	out.Mtime = uint64(a.Mtime)
 	out.Ctime = uint64(a.Ctime)
@@ -142,11 +144,15 @@ func (n *ext4Node) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAt
 			return errToStatus(err)
 		}
 		if err := f.Truncate(int64(size)); err != nil {
-			f.Close()
+			if closeErr := f.Close(); closeErr != nil {
+				slog.Warn("fuse truncate close error", "error", closeErr)
+			}
 			n.mu.Unlock()
 			return errToStatus(err)
 		}
-		f.Close()
+		if err := f.Close(); err != nil {
+			slog.Warn("fuse truncate close error", "error", err)
+		}
 	}
 
 	if mask != 0 {
@@ -325,7 +331,7 @@ func (n *ext4Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint3
 	if err != nil {
 		return nil, 0, errToStatus(err)
 	}
-	return &ext4FileHandle{f: f, mu: n.mu}, 0, 0
+	return &ext4FileHandle{f: f, mu: n.mu}, fuse.FOPEN_KEEP_CACHE, 0
 }
 
 func (n *ext4Node) Fsync(ctx context.Context, fh fs.FileHandle, flags uint32) syscall.Errno {

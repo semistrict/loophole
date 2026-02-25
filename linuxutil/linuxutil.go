@@ -8,6 +8,7 @@ package linuxutil
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 	"unsafe"
@@ -38,7 +39,11 @@ func FindMount(mountpoint string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -78,7 +83,11 @@ func Freeze(mountpoint string) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", mountpoint, err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), uintptr(fiFreeze), 0)
 	if errno != 0 {
 		return fmt.Errorf("FIFREEZE %s: %w", mountpoint, errno)
@@ -92,7 +101,11 @@ func Thaw(mountpoint string) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", mountpoint, err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), uintptr(fiThaw), 0)
 	if errno != 0 {
 		return fmt.Errorf("FITHAW %s: %w", mountpoint, errno)
@@ -171,7 +184,11 @@ func LoopAttach(backingPath string) (*LoopDevice, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open backing file %s: %w", backingPath, err)
 	}
-	defer unix.Close(backingFD)
+	defer func() {
+		if err := unix.Close(backingFD); err != nil {
+			slog.Warn("close failed", "fd", backingFD, "error", err)
+		}
+	}()
 
 	const maxRetries = 6
 	for attempt := range maxRetries {
@@ -210,7 +227,9 @@ func loopConfigure1(backingFD int) (string, error) {
 		return "", fmt.Errorf("open loop-control: %w", err)
 	}
 	nr, err := unix.IoctlRetInt(int(ctl.Fd()), loopCtlGetFree)
-	ctl.Close()
+	if cerr := ctl.Close(); cerr != nil {
+		slog.Warn("close failed", "error", cerr)
+	}
 	if err != nil {
 		return "", fmt.Errorf("LOOP_CTL_GET_FREE: %w", err)
 	}
@@ -240,7 +259,9 @@ func loopConfigure1(backingFD int) (string, error) {
 		uintptr(loopFile.Fd()),
 		uintptr(loopConfigure),
 		uintptr(unsafe.Pointer(&cfg)))
-	loopFile.Close()
+	if cerr := loopFile.Close(); cerr != nil {
+		slog.Warn("close failed", "error", cerr)
+	}
 	if errno != 0 {
 		return "", fmt.Errorf("LOOP_CONFIGURE %s: %w", devPath, errno)
 	}
@@ -259,7 +280,11 @@ func LoopDetachPath(devPath string) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath, err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 	if err := unix.IoctlSetInt(int(f.Fd()), loopClearFD, 0); err != nil {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
 	}

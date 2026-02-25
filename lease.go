@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -131,7 +132,9 @@ func (lm *LeaseManager) createLease(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read back lease etag: %w", err)
 	}
-	body.Close()
+	if err := body.Close(); err != nil {
+		slog.Warn("close failed", "error", err)
+	}
 	lm.etag = etag
 	return nil
 }

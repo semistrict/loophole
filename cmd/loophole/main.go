@@ -103,7 +103,11 @@ func startWithNBD(inst loophole.Instance, dir loophole.Dir, debug bool, nbdAddr 
 	if err != nil {
 		return err
 	}
-	defer vm.Close(context.Background())
+	defer func() {
+		if err := vm.Close(context.Background()); err != nil {
+			logger.Warn("failed to close volume manager", "error", err)
+		}
+	}()
 
 	nbdSrv := nbdserve.NewServer(vm, 0)
 

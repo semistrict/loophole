@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -41,7 +42,9 @@ func NewBlockCache(dir string, layers ObjectStore, blockSize uint64, maxDownload
 	mutableDir := filepath.Join(dir, "mutable")
 
 	// Wipe mutable cache — may be stale from a previous run.
-	os.RemoveAll(mutableDir)
+	if err := os.RemoveAll(mutableDir); err != nil {
+		slog.Warn("remove all failed", "dir", mutableDir, "error", err)
+	}
 
 	if err := os.MkdirAll(immutableDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create immutable cache dir: %w", err)
@@ -109,7 +112,11 @@ func (bc *BlockCache) fetchToCache(ctx context.Context, layerID string, blockIdx
 	if err != nil {
 		return fmt.Errorf("fetch block %s/%d: %w", layerID, blockIdx, err)
 	}
-	defer body.Close()
+	defer func() {
+		if err := body.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 
 	path := bc.immutablePath(layerID, blockIdx)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -122,9 +129,13 @@ func (bc *BlockCache) fetchToCache(ctx context.Context, layerID string, blockIdx
 		return err
 	}
 	defer func() {
-		f.Close()
+		if cerr := f.Close(); cerr != nil {
+			slog.Warn("close failed", "error", cerr)
+		}
 		if err != nil {
-			os.Remove(tmp)
+			if rerr := os.Remove(tmp); rerr != nil {
+				slog.Warn("remove failed", "path", tmp, "error", rerr)
+			}
 		}
 	}()
 
@@ -212,7 +223,11 @@ func cloneOrCopyFile(srcPath, dstPath string, blockSize uint64) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() {
+		if err := src.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 
 	dst, err := os.Create(dstPath)
 	if err != nil {
@@ -224,7 +239,9 @@ func cloneOrCopyFile(srcPath, dstPath string, blockSize uint64) error {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(dstPath)
+		if rerr := os.Remove(dstPath); rerr != nil {
+			slog.Warn("remove failed", "path", dstPath, "error", rerr)
+		}
 		return err
 	}
 
@@ -245,7 +262,9 @@ func createZeroFile(path string, blockSize uint64) error {
 		err = cerr
 	}
 	if err != nil {
-		os.Remove(path)
+		if rerr := os.Remove(path); rerr != nil {
+			slog.Warn("remove failed", "path", path, "error", rerr)
+		}
 	}
 	return err
 }

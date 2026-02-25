@@ -91,7 +91,10 @@ func NewVolumeManager(ctx context.Context, base ObjectStore, cacheDir string, ma
 		blockSize:  blockSize,
 		uploadSem:  semaphore.NewWeighted(int64(maxUploads)),
 		flushPool: sync.Pool{
-			New: func() any { return make([]byte, blockSize) },
+			New: func() any {
+				b := make([]byte, blockSize)
+				return &b
+			},
 		},
 	}, nil
 }

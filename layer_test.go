@@ -176,7 +176,7 @@ func TestFreezeClosedLayerPanics(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, layer.Close(t.Context()))
 
-	assert.Panics(t, func() { layer.Freeze(t.Context()) })
+	assert.Panics(t, func() { _ = layer.Freeze(t.Context()) })
 }
 
 // --- Flush / tombstone tests ---
@@ -224,7 +224,11 @@ func TestPunchHoleAndWriteZerosAreIdentical(t *testing.T) {
 	// and PunchHole to the other, then compare S3 state.
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Root layer with blocks 0..3.
 	seedLayer(t, store, "root", frozenLayerState(), map[BlockIdx][]byte{
@@ -420,10 +424,10 @@ func TestCloseIsIdempotent(t *testing.T) {
 
 func TestListBlocksParseHexKeys(t *testing.T) {
 	store := NewMemStore()
-	store.PutBytes(t.Context(), "0000000000000000", make([]byte, 64))
-	store.PutBytes(t.Context(), "000000000000000a", make([]byte, 64))
-	store.PutBytes(t.Context(), "00000000000000ff", []byte{}) // tombstone
-	store.PutBytes(t.Context(), "state.json", []byte("{}"))   // should be skipped
+	require.NoError(t, store.PutBytes(t.Context(), "0000000000000000", make([]byte, 64)))
+	require.NoError(t, store.PutBytes(t.Context(), "000000000000000a", make([]byte, 64)))
+	require.NoError(t, store.PutBytes(t.Context(), "00000000000000ff", []byte{})) // tombstone
+	require.NoError(t, store.PutBytes(t.Context(), "state.json", []byte("{}")))   // should be skipped
 
 	blocks, tombstones, err := listBlocks(t.Context(), store)
 	require.NoError(t, err)

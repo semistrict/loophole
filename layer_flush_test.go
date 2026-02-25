@@ -14,7 +14,11 @@ import (
 func TestFlushRedirtiesOnUploadFailure(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
 	layer, err := NewLayer(t.Context(), vm, "layer-a")
@@ -57,7 +61,11 @@ func TestFlushRedirtiesOnUploadFailure(t *testing.T) {
 func TestFlushAllZeroBlockBecomesTombstone(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Root has block 0 so the child layer will write a tombstone (not delete).
 	seedLayer(t, store, "root", frozenLayerState(), map[BlockIdx][]byte{
@@ -88,7 +96,11 @@ func TestFlushAllZeroBlockBecomesTombstone(t *testing.T) {
 func TestFlushAllZeroBlockNoAncestorDeletes(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Layer with no ancestors — writing zeros should delete, not tombstone.
 	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
@@ -114,7 +126,11 @@ func TestFlushAllZeroBlockNoAncestorDeletes(t *testing.T) {
 func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
 	layer, err := NewLayer(t.Context(), vm, "layer-a")
@@ -168,7 +184,11 @@ func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 func TestFlushEmptyIsNoop(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
 	layer, err := NewLayer(t.Context(), vm, "layer-a")
@@ -185,7 +205,11 @@ func TestFlushEmptyIsNoop(t *testing.T) {
 func TestOpenBlockConcurrentSameBlock(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Seed a frozen ancestor with block 0 so openBlock must fetch from S3.
 	seedLayer(t, store, "root", frozenLayerState(), map[BlockIdx][]byte{
@@ -251,7 +275,11 @@ func TestCloseFlushesAndReleasesLease(t *testing.T) {
 func TestFreezeFlushesDirtyBlocks(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
 	layer, err := NewLayer(t.Context(), vm, "layer-a")

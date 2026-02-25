@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -225,7 +226,11 @@ func (c *Client) rpc(ctx context.Context, method, path string, body any) (json.R
 	if err != nil {
 		return nil, fmt.Errorf("daemon not reachable at %s: %w", c.sock, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -248,7 +253,9 @@ func isSocketAlive(path string) bool {
 	if err != nil {
 		return false
 	}
-	conn.Close()
+	if err := conn.Close(); err != nil {
+		slog.Warn("close failed", "error", err)
+	}
 	return true
 }
 
@@ -292,7 +299,9 @@ func (c *Client) startDaemon() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start daemon: %w", err)
 	}
-	cmd.Process.Release()
+	if err := cmd.Process.Release(); err != nil {
+		slog.Warn("process release failed", "error", err)
+	}
 
 	for range 50 {
 		time.Sleep(100 * time.Millisecond)

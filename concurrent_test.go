@@ -13,7 +13,11 @@ import (
 func TestConcurrentReadWriteDifferentFiles(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol, err := vm.NewVolume(t.Context(), "concurrent")
 	require.NoError(t, err)

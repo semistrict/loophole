@@ -23,7 +23,11 @@ func setupVolume(t *testing.T) (*MemStore, *VolumeManager, *Volume) {
 
 func TestWriteAndReadBack(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	data := []byte("hello world")
 	require.NoError(t, vol.Write(t.Context(), 0, data))
@@ -37,7 +41,11 @@ func TestWriteAndReadBack(t *testing.T) {
 
 func TestReadUnwrittenReturnsZeros(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	buf := make([]byte, 64)
 	n, err := vol.Read(t.Context(), 0, buf)
@@ -48,7 +56,11 @@ func TestReadUnwrittenReturnsZeros(t *testing.T) {
 
 func TestWriteAtOffset(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 100, []byte("abc")))
 
@@ -61,7 +73,11 @@ func TestWriteAtOffset(t *testing.T) {
 
 func TestWriteSpanningBlocks(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// blockSize=64, write 100 bytes starting at offset 32 — spans blocks 0 and 1
 	data := bytes.Repeat([]byte{0xAB}, 100)
@@ -76,7 +92,11 @@ func TestWriteSpanningBlocks(t *testing.T) {
 
 func TestReadSpanningBlocks(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Write different data to block 0 and block 1
 	block0 := bytes.Repeat([]byte{0x11}, 64)
@@ -96,7 +116,11 @@ func TestReadSpanningBlocks(t *testing.T) {
 
 func TestWritePreservesOtherDataInBlock(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("AAAA")))
 	require.NoError(t, vol.Write(t.Context(), 10, []byte("BBBB")))
@@ -111,7 +135,11 @@ func TestWritePreservesOtherDataInBlock(t *testing.T) {
 
 func TestReadAtHighOffsetReturnsZeros(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	// Sparse volume: reading at any offset returns zeros if unwritten.
 	buf := make([]byte, 100)
@@ -123,7 +151,11 @@ func TestReadAtHighOffsetReturnsZeros(t *testing.T) {
 
 func TestWriteAtHighOffset(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	data := bytes.Repeat([]byte{0xFF}, 100)
 	require.NoError(t, vol.Write(t.Context(), 1<<30, data))
@@ -140,7 +172,11 @@ func TestWriteAtHighOffset(t *testing.T) {
 func TestWriteToReadOnlyVolumeFails(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "frozen-layer", frozenLayerState(), nil)
 	refData, _ := json.Marshal(volumeRef{LayerID: "frozen-layer"})
@@ -156,7 +192,11 @@ func TestWriteToReadOnlyVolumeFails(t *testing.T) {
 func TestReadFromReadOnlyVolumeWithData(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	blocks := map[BlockIdx][]byte{
 		0: append([]byte("hello"), make([]byte, 59)...),
@@ -179,7 +219,11 @@ func TestReadFromReadOnlyVolumeWithData(t *testing.T) {
 
 func TestSnapshotVolumeStaysWritable(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
@@ -191,7 +235,11 @@ func TestSnapshotVolumeStaysWritable(t *testing.T) {
 
 func TestSnapshotPreservesDataInContinuation(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("persistent")))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
@@ -205,7 +253,11 @@ func TestSnapshotPreservesDataInContinuation(t *testing.T) {
 func TestSnapshotReadOnlyVolumeFails(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	seedLayer(t, store, "frozen-layer", frozenLayerState(), nil)
 	refData, _ := json.Marshal(volumeRef{LayerID: "frozen-layer"})
@@ -219,7 +271,11 @@ func TestSnapshotReadOnlyVolumeFails(t *testing.T) {
 
 func TestMultipleSnapshotsPreserveData(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("gen0")))
 	require.NoError(t, vol.Snapshot(t.Context(), ""))
@@ -240,7 +296,11 @@ func TestMultipleSnapshotsPreserveData(t *testing.T) {
 
 func TestSnapshotCreatesNamedReadOnlyVolume(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
@@ -264,7 +324,11 @@ func TestSnapshotCreatesNamedReadOnlyVolume(t *testing.T) {
 
 func TestCloneProducesWritableVolume(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	clone, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
@@ -276,7 +340,11 @@ func TestCloneProducesWritableVolume(t *testing.T) {
 
 func TestCloneOriginalStaysWritable(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
@@ -287,7 +355,11 @@ func TestCloneOriginalStaysWritable(t *testing.T) {
 
 func TestCloneSeesOriginalData(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("original data")))
 
@@ -303,7 +375,11 @@ func TestCloneSeesOriginalData(t *testing.T) {
 
 func TestCloneDataIsIndependent(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("shared")))
 
@@ -328,7 +404,11 @@ func TestCloneDataIsIndependent(t *testing.T) {
 
 func TestCloneWriteDoesNotAffectOriginal(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
 
@@ -346,7 +426,11 @@ func TestCloneWriteDoesNotAffectOriginal(t *testing.T) {
 func TestCloneFromReadOnlyVolume(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	blocks := map[BlockIdx][]byte{
 		0: append([]byte("snapshot data"), make([]byte, 51)...),
@@ -378,7 +462,11 @@ func TestCloneFromReadOnlyVolume(t *testing.T) {
 
 func TestCloneDuplicateNameFails(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
@@ -391,7 +479,11 @@ func TestCloneDuplicateNameFails(t *testing.T) {
 
 func TestFlushPersistsDataToS3(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.Write(t.Context(), 0, []byte("persist me")))
 	require.NoError(t, vol.Flush(t.Context()))
@@ -421,7 +513,11 @@ func TestDataSurvivesFlushAndSnapshotReload(t *testing.T) {
 
 	// Open fresh VM and volume
 	vm2 := newTestVM(t, store)
-	defer vm2.Close(t.Context())
+	defer func() {
+		if err := vm2.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol2, err := vm2.OpenVolume(t.Context(), "mydata")
 	require.NoError(t, err)
@@ -437,7 +533,11 @@ func TestDataSurvivesFlushAndSnapshotReload(t *testing.T) {
 func TestNewVolumeCreatesWritableVolume(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol, err := vm.NewVolume(t.Context(), "test-vol")
 	require.NoError(t, err)
@@ -449,7 +549,11 @@ func TestNewVolumeCreatesWritableVolume(t *testing.T) {
 func TestNewVolumeDuplicateNameFails(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, err := vm.NewVolume(t.Context(), "dup")
 	require.NoError(t, err)
@@ -461,7 +565,11 @@ func TestNewVolumeDuplicateNameFails(t *testing.T) {
 func TestOpenVolumeReturnsCachedInstance(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol1, err := vm.NewVolume(t.Context(), "existing")
 	require.NoError(t, err)
@@ -535,7 +643,11 @@ func TestVolumePanicsAfterClose(t *testing.T) {
 
 func TestVolumeCloseWaitsForHandleRefs(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	require.NoError(t, vol.AcquireRef())
 	require.NoError(t, vol.Close(t.Context()))
@@ -560,7 +672,11 @@ func TestGetVolumeReturnsNilForUnopened(t *testing.T) {
 func TestVolumesListsOpenVolumes(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, _ = vm.NewVolume(t.Context(), "alpha")
 	_, _ = vm.NewVolume(t.Context(), "beta")
@@ -598,7 +714,11 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 
 	vm2, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
 	require.NoError(t, err)
-	defer vm2.Close(t.Context())
+	defer func() {
+		if err := vm2.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	clone2, err := vm2.OpenVolume(t.Context(), "child")
 	require.NoError(t, err)
@@ -614,7 +734,11 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 func TestCloneSeesMultiBlockData(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store) // blockSize=64
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	vol, err := vm.NewVolume(t.Context(), "parent")
 	require.NoError(t, err)
@@ -637,7 +761,11 @@ func TestCloneSeesMultiBlockData(t *testing.T) {
 
 func TestCloneIsRegisteredInVolumeManager(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	defer vm.Close(t.Context())
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
 
 	_, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)

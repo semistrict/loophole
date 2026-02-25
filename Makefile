@@ -1,4 +1,4 @@
-.PHONY: build install test test-lwext4 test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-nbd e2e-testnbdtcp e2e-lwext4fuse
+.PHONY: build install check fmt test test-lwext4 test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse
 
 # Build loophole library and CLI
 build:
@@ -7,6 +7,14 @@ build:
 # Install loophole CLI into $GOPATH/bin
 install:
 	go install ./cmd/loophole
+
+# Static checks: lint + vet + build
+check:
+	golangci-lint run ./...
+
+# Format all Go source files
+fmt:
+	gofmt -w -s $$(find . -name '*.go' -not -path './third_party/*' -not -path './old/*')
 
 # Run unit tests
 test:
@@ -41,9 +49,12 @@ podman:
 deps:
 	./download-deps.sh
 
+# Run all tests: unit tests + all e2e variants
+e2e: test e2e-fuse e2e-nbd e2e-testnbdtcp
+
 # Run e2e tests (FUSE + losetup + kernel ext4)
-# Usage: make e2e [RUN=TestName]
-e2e:
+# Usage: make e2e-fuse [RUN=TestName]
+e2e-fuse:
 	go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (NBD + kernel ext4)
