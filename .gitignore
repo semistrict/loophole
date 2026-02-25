@@ -5,3 +5,4 @@ __pycache__/
 tests/*.state
 .claude/
 third_party/
+/e2e/*.state

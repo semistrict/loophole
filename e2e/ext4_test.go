@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
+
+	"github.com/semistrict/loophole/linuxutil"
 )
 
 func TestE2E_FormatCreatesMountableExt4(t *testing.T) {
@@ -231,6 +233,10 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 	nWorkers := 10
 	if isNBDMode() {
 		nWorkers = 5
+	}
+	if maxLoop, err := linuxutil.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
+		t.Logf("capping workers to max_loop=%d", maxLoop)
+		nWorkers = maxLoop
 	}
 
 	g, ctx := errgroup.WithContext(t.Context())
