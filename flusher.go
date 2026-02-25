@@ -29,20 +29,44 @@ type flushItem struct {
 //
 // On partial failure, blocks that were not successfully uploaded are
 // re-marked dirty so they will be retried on the next flush.
+//
+// Durability guarantee: if another flush is already in progress, this
+// call waits for it to complete before proceeding. This ensures that
+// an fsync caller never gets "success" while data is still in-flight.
 func (l *Layer) Flush(ctx context.Context) error {
 	t := metrics.NewTimer(metrics.FlushDuration)
 	defer t.ObserveDuration()
 
-	// Grab the dirty set atomically.
+	// Wait for any in-flight flush to complete first.
+	l.flushMu.Lock()
+	for l.flushing {
+		l.flushCond.Wait()
+	}
+	l.flushing = true
+	l.flushMu.Unlock()
+
+	// Swap the dirty set atomically.
 	l.mu.Lock()
 	dirty := l.dirty
 	l.dirty = make(map[BlockIdx]struct{})
 	l.mu.Unlock()
 
-	if len(dirty) == 0 {
-		return nil
+	var err error
+	if len(dirty) > 0 {
+		err = l.flushDirty(ctx, dirty)
 	}
 
+	// Release the flush slot and wake waiters.
+	l.flushMu.Lock()
+	l.flushing = false
+	l.flushCond.Broadcast()
+	l.flushMu.Unlock()
+
+	return err
+}
+
+// flushDirty uploads the given set of dirty blocks concurrently.
+func (l *Layer) flushDirty(ctx context.Context, dirty map[BlockIdx]struct{}) error {
 	// Build the upload list: just block index + file path, no data read.
 	items := make([]flushItem, 0, len(dirty))
 	for blockIdx := range dirty {

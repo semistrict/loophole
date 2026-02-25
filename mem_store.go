@@ -26,11 +26,12 @@ const (
 )
 
 // Fault describes an injected fault for a MemStore operation.
-// At most one of Err and Delay should be set. If both are set,
-// the delay is applied first, then the error is returned.
+// Hook, Delay, and Err are applied in order: Hook runs first,
+// then Delay sleeps, then Err is returned (if non-nil).
 type Fault struct {
 	Err   error         // return this error
 	Delay time.Duration // sleep before executing (works with synctest)
+	Hook  func()        // called before delay/error; use to synchronize with test goroutines
 }
 
 // faultKey identifies a fault rule: an operation type + optional key pattern.
@@ -116,6 +117,9 @@ func (m *MemStore) checkFault(op OpType, fullKey string) error {
 
 	if !ok {
 		return nil
+	}
+	if f.Hook != nil {
+		f.Hook()
 	}
 	if f.Delay > 0 {
 		time.Sleep(f.Delay)

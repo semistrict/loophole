@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,6 +183,97 @@ func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 	assert.Equal(t, bytes.Repeat([]byte("D"), 64), data)
 }
 
+// TestFlushConcurrentDurability verifies that if Flush A is mid-upload and
+// Flush B is called concurrently, Flush B does NOT return until the data is
+// durable in S3. This is a correctness requirement: an fsync that triggers
+// Flush B must not return "success" while blocks are still in-flight.
+//
+// Current behavior (BUG): Flush B sees an empty dirty set (Flush A already
+// swapped it) and returns immediately — before Flush A's uploads complete.
+func TestFlushConcurrentDurability(t *testing.T) {
+	store := NewMemStore()
+	vm := newTestVM(t, store)
+	defer func() {
+		if err := vm.Close(t.Context()); err != nil {
+			t.Logf("close failed: %v", err)
+		}
+	}()
+
+	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
+	layer, err := NewLayer(t.Context(), vm, "layer-a")
+	require.NoError(t, err)
+
+	// Write a block so it's dirty.
+	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+
+	// Set up a hook on PutReader: when Flush A starts uploading, it signals
+	// uploadStarted, then blocks until we release it.
+	uploadStarted := make(chan struct{})
+	uploadRelease := make(chan struct{})
+	store.SetFault(OpPutReader, "", Fault{
+		Hook: func() {
+			select {
+			case uploadStarted <- struct{}{}:
+			default:
+			}
+			<-uploadRelease
+		},
+	})
+
+	// Flush A: starts uploading, blocks in PutReader hook.
+	flushADone := make(chan error, 1)
+	go func() {
+		flushADone <- layer.Flush(t.Context())
+	}()
+
+	// Wait for Flush A to be mid-upload.
+	<-uploadStarted
+
+	// Flush B: called while Flush A is mid-upload.
+	// If flush coalescing works correctly, this should block until
+	// Flush A completes (i.e., until the data is in S3).
+	flushBDone := make(chan error, 1)
+	go func() {
+		flushBDone <- layer.Flush(t.Context())
+	}()
+
+	// Give Flush B a moment to execute. If it returns immediately (the bug),
+	// it will be in the channel. If it correctly waits, the channel stays empty.
+	flushBReturnedEarly := false
+	select {
+	case err := <-flushBDone:
+		// Flush B returned while Flush A is still uploading — this is the bug.
+		flushBReturnedEarly = true
+		assert.NoError(t, err)
+	case <-time.After(50 * time.Millisecond):
+		// Flush B is still blocked — correct behavior.
+	}
+
+	// Data should NOT be in S3 yet (Flush A is still blocked).
+	_, inS3 := store.GetObject("layers/layer-a/0000000000000000")
+	assert.False(t, inS3, "block should not be in S3 while upload is in-flight")
+
+	// Release Flush A's upload.
+	close(uploadRelease)
+	store.ClearFault(OpPutReader, "")
+
+	// Both flushes should complete.
+	assert.NoError(t, <-flushADone)
+	if !flushBReturnedEarly {
+		assert.NoError(t, <-flushBDone)
+	}
+
+	// NOW data should be in S3.
+	data, ok := store.GetObject("layers/layer-a/0000000000000000")
+	assert.True(t, ok, "block should be in S3 after flush completes")
+	assert.Equal(t, bytes.Repeat([]byte("X"), 64), data)
+
+	// This is the key assertion: Flush B should NOT have returned before
+	// the data was in S3. If it did, the fsync lied about durability.
+	assert.False(t, flushBReturnedEarly,
+		"concurrent Flush must wait for in-flight uploads to complete (fsync durability guarantee)")
+}
+
 func TestFlushEmptyIsNoop(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
@@ -313,4 +406,231 @@ func TestFreezeFlushesDirtyBlocks(t *testing.T) {
 	dirtyCount := len(layer.dirty)
 	layer.mu.Unlock()
 	assert.Equal(t, 0, dirtyCount, "no dirty blocks should remain after freeze")
+}
+
+// TestFlushWhileBackgroundFlushRunning verifies that an explicit Flush()
+// call while the background flush timer fires works correctly — both
+// flushes complete without data loss.
+func TestFlushWhileBackgroundFlushRunning(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := NewMemStore()
+		vm := newTestVM(t, store)
+
+		seedLayer(t, store, "layer-a", defaultLayerState(), nil)
+		layer, err := NewLayer(t.Context(), vm, "layer-a")
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			layer.Close(t.Context())
+			vm.Close(t.Context())
+		})
+
+		// Write block 0.
+		require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
+
+		// Delay PutReader by 5s so the background flush is mid-upload.
+		store.SetFault(OpPutReader, "", Fault{Delay: 5 * time.Second})
+
+		// Advance time to trigger background flush (30s interval).
+		time.Sleep(backgroundFlushInterval)
+		synctest.Wait()
+
+		// Write block 1 while background flush is uploading block 0.
+		require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("B"), 64)))
+
+		// Explicit flush — should wait for background flush then upload block 1.
+		store.ClearFault(OpPutReader, "")
+		require.NoError(t, layer.Flush(t.Context()))
+
+		// Both blocks should be in S3.
+		data0, ok := store.GetObject("layers/layer-a/0000000000000000")
+		assert.True(t, ok, "block 0 should be in S3")
+		assert.Equal(t, bytes.Repeat([]byte("A"), 64), data0)
+
+		data1, ok := store.GetObject("layers/layer-a/0000000000000001")
+		assert.True(t, ok, "block 1 should be in S3")
+		assert.Equal(t, bytes.Repeat([]byte("B"), 64), data1)
+	})
+}
+
+// TestFlushCoalescingMultipleWaiters verifies that multiple concurrent
+// Flush() calls result in at most one flush cycle at a time, and all
+// callers return only after data is durable.
+func TestFlushCoalescingMultipleWaiters(t *testing.T) {
+	store := NewMemStore()
+	vm := newTestVM(t, store)
+	defer func() {
+		vm.Close(t.Context())
+	}()
+
+	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
+	layer, err := NewLayer(t.Context(), vm, "layer-a")
+	require.NoError(t, err)
+
+	// Write a block.
+	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+
+	// Slow down uploads so the first flush is still running when others call Flush.
+	uploadStarted := make(chan struct{})
+	uploadRelease := make(chan struct{})
+	store.SetFault(OpPutReader, "", Fault{
+		Hook: func() {
+			select {
+			case uploadStarted <- struct{}{}:
+			default:
+			}
+			<-uploadRelease
+		},
+	})
+
+	store.ResetCounts()
+
+	// Start flush A.
+	var g errgroup.Group
+	g.Go(func() error { return layer.Flush(t.Context()) })
+
+	// Wait for flush A to be mid-upload.
+	<-uploadStarted
+
+	// Launch 5 more flush calls — they should all wait for flush A.
+	for range 5 {
+		g.Go(func() error { return layer.Flush(t.Context()) })
+	}
+
+	// Give waiters time to reach the Cond.Wait().
+	time.Sleep(10 * time.Millisecond)
+
+	// Release the upload.
+	close(uploadRelease)
+	store.ClearFault(OpPutReader, "")
+
+	require.NoError(t, g.Wait())
+
+	// Only one PutReader call should have been made (flush A's upload).
+	// The 5 waiters see an empty dirty set after waiting.
+	puts := store.Count(OpPutReader)
+	assert.Equal(t, int64(1), puts, "only one flush cycle should upload (got %d PutReader calls)", puts)
+
+	// Data should be in S3.
+	_, ok := store.GetObject("layers/layer-a/0000000000000000")
+	assert.True(t, ok, "block should be in S3")
+}
+
+// TestFlushPicksUpWritesDuringInFlightFlush verifies that writes landing
+// after Flush A's dirty-set swap but before Flush B is called are picked
+// up by Flush B (not lost).
+func TestFlushPicksUpWritesDuringInFlightFlush(t *testing.T) {
+	store := NewMemStore()
+	vm := newTestVM(t, store)
+	defer func() {
+		vm.Close(t.Context())
+	}()
+
+	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
+	layer, err := NewLayer(t.Context(), vm, "layer-a")
+	require.NoError(t, err)
+
+	// Write block 0 (block A).
+	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
+
+	// Slow down Flush A so we can write block 1 while it's uploading.
+	uploadStarted := make(chan struct{})
+	uploadRelease := make(chan struct{})
+	store.SetFault(OpPutReader, "", Fault{
+		Hook: func() {
+			select {
+			case uploadStarted <- struct{}{}:
+			default:
+			}
+			<-uploadRelease
+		},
+	})
+
+	flushADone := make(chan error, 1)
+	go func() { flushADone <- layer.Flush(t.Context()) }()
+
+	// Wait for Flush A to be mid-upload (dirty set already swapped).
+	<-uploadStarted
+
+	// Write block 1 — this goes into the NEW dirty set.
+	require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("B"), 64)))
+
+	// Release Flush A.
+	close(uploadRelease)
+	store.ClearFault(OpPutReader, "")
+	require.NoError(t, <-flushADone)
+
+	// Block 0 should be in S3 from Flush A.
+	_, ok := store.GetObject("layers/layer-a/0000000000000000")
+	assert.True(t, ok, "block 0 should be in S3 after Flush A")
+
+	// Block 1 should NOT be in S3 yet — it was written after Flush A's swap.
+	_, ok = store.GetObject("layers/layer-a/0000000000000001")
+	assert.False(t, ok, "block 1 should not be in S3 yet")
+
+	// Flush B picks up block 1.
+	require.NoError(t, layer.Flush(t.Context()))
+
+	data1, ok := store.GetObject("layers/layer-a/0000000000000001")
+	assert.True(t, ok, "block 1 should be in S3 after Flush B")
+	assert.Equal(t, bytes.Repeat([]byte("B"), 64), data1)
+}
+
+// TestFlushErrorDoesNotBlockWaiters verifies that if Flush A fails,
+// waiters (Flush B) wake up and proceed rather than deadlocking.
+func TestFlushErrorDoesNotBlockWaiters(t *testing.T) {
+	store := NewMemStore()
+	vm := newTestVM(t, store)
+	defer func() {
+		vm.Close(t.Context())
+	}()
+
+	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
+	layer, err := NewLayer(t.Context(), vm, "layer-a")
+	require.NoError(t, err)
+
+	// Write a block.
+	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+
+	// Make the first upload fail after signaling.
+	uploadStarted := make(chan struct{})
+	uploadRelease := make(chan struct{})
+	store.SetFault(OpPutReader, "", Fault{
+		Hook: func() {
+			select {
+			case uploadStarted <- struct{}{}:
+			default:
+			}
+			<-uploadRelease
+		},
+		Err: fmt.Errorf("injected S3 failure"),
+	})
+
+	flushADone := make(chan error, 1)
+	go func() { flushADone <- layer.Flush(t.Context()) }()
+
+	<-uploadStarted
+
+	// Flush B waits for A.
+	flushBDone := make(chan error, 1)
+	go func() { flushBDone <- layer.Flush(t.Context()) }()
+
+	// Give Flush B time to reach the Cond.Wait.
+	time.Sleep(10 * time.Millisecond)
+
+	// Release Flush A (it will fail).
+	close(uploadRelease)
+	store.ClearFault(OpPutReader, "")
+
+	// Flush A should fail.
+	assert.Error(t, <-flushADone)
+
+	// Flush B should NOT deadlock — it wakes up, sees the re-dirtied block,
+	// and uploads it successfully.
+	err = <-flushBDone
+	assert.NoError(t, err, "Flush B should succeed after Flush A fails")
+
+	// The block should now be in S3 (uploaded by Flush B's retry).
+	data, ok := store.GetObject("layers/layer-a/0000000000000000")
+	assert.True(t, ok, "block should be in S3 after retry")
+	assert.Equal(t, bytes.Repeat([]byte("X"), 64), data)
 }

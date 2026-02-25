@@ -58,6 +58,10 @@ type Layer struct {
 	openBlockSF  singleflight.Group // deduplicates concurrent openBlock calls
 	stopFlush    context.CancelFunc
 	flushStopped chan struct{} // closed when background flush exits
+
+	flushMu   sync.Mutex // serializes flush cycles
+	flushCond *sync.Cond // signaled when a flush cycle completes
+	flushing  bool       // true while a flush is in progress
 }
 
 func (l *Layer) ID() string   { return l.id }

@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP="loophole-e2e"
-REGION="sin"
+IMAGE="registry.fly.io/loophole-e2e:test"
 
-echo "=== Launching test machine in $REGION ==="
-fly machine run . \
-    -a "$APP" \
-    -r "$REGION" \
-    --dockerfile Dockerfile.test \
-    --vm-cpus 4 \
-    --vm-memory 8192 \
-    --rootfs-size 20 \
-    --rm \
-    -e S3_ENDPOINT=https://fly.storage.tigris.dev \
-    -e LOOPHOLE_S3_URL=s3://loophole-e2e
+echo "=== Building test image ==="
+docker build --platform linux/amd64 -t "$IMAGE" -f Dockerfile.test .
+
+echo "=== Pushing test image ==="
+docker push "$IMAGE"
+
+echo "=== Deploying to Fly ==="
+fly deploy -c fly.test.toml --image "$IMAGE"

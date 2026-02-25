@@ -6,3 +6,4 @@ tests/*.state
 .claude/
 third_party/
 /e2e/*.state
+build/

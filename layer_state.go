@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/semistrict/loophole/metrics"
@@ -73,6 +74,7 @@ func NewLayer(ctx context.Context, vm *VolumeManager, id string) (*Layer, error)
 		stopFlush:     cancel,
 		flushStopped:  make(chan struct{}),
 	}
+	l.flushCond = sync.NewCond(&l.flushMu)
 	l.frozen.Store(state.FrozenAt != "")
 
 	if !l.frozen.Load() {

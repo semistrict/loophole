@@ -1,15 +1,65 @@
-.PHONY: build install check fmt test test-lwext4 test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse
+.PHONY: build install check fmt test test-lwext4 test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse liblwext4 clean-lwext4
+
+# --- lwext4 static library ---
+LWEXT4_SRCDIR  := third_party/lwext4/src
+LWEXT4_INCDIR  := third_party/lwext4/include
+BUILD_PLATFORM := $(shell uname -s)-$(shell uname -m)
+LWEXT4_BUILDDIR := build/$(BUILD_PLATFORM)/lwext4
+LWEXT4_OBJDIR  := $(LWEXT4_BUILDDIR)/obj
+LWEXT4_LIB     := $(LWEXT4_BUILDDIR)/liblwext4.a
+
+CC  ?= cc
+AR  ?= ar
+
+LWEXT4_CFLAGS := -O2 -Wall \
+  -DCONFIG_USE_DEFAULT_CFG=1 \
+  -DCONFIG_EXT4_BLOCKDEVS_COUNT=16 \
+  -DCONFIG_EXT4_MOUNTPOINTS_COUNT=16 \
+  -DCONFIG_HAVE_OWN_OFLAGS=1 \
+  -DCONFIG_HAVE_OWN_ERRNO=0 \
+  -DCONFIG_HAVE_OWN_ASSERT=1 \
+  -DCONFIG_DEBUG_PRINTF=0 \
+  -DCONFIG_DEBUG_ASSERT=0 \
+  -I$(LWEXT4_INCDIR)
+
+LWEXT4_SRCS := $(wildcard $(LWEXT4_SRCDIR)/ext4_*.c) $(LWEXT4_SRCDIR)/ext4.c
+LWEXT4_OBJS := $(patsubst $(LWEXT4_SRCDIR)/%.c,$(LWEXT4_OBJDIR)/%.o,$(LWEXT4_SRCS))
+
+# Pass library path to CGo linker
+export CGO_LDFLAGS := -L$(CURDIR)/$(LWEXT4_BUILDDIR) -llwext4
+
+liblwext4: $(LWEXT4_LIB)
+
+$(LWEXT4_LIB): $(LWEXT4_OBJS)
+	$(AR) rcs $@ $^
+
+$(LWEXT4_OBJDIR)/%.o: $(LWEXT4_SRCDIR)/%.c | $(LWEXT4_OBJDIR)
+	$(CC) $(LWEXT4_CFLAGS) -c $< -o $@
+
+$(LWEXT4_OBJDIR):
+	mkdir -p $(LWEXT4_OBJDIR)
+
+clean-lwext4:
+	rm -rf $(LWEXT4_BUILDDIR)
 
 # Build loophole library and CLI
-build:
+build: liblwext4
 	go build ./...
+
+# Build loophole binary
+loophole: liblwext4
+	go build -o loophole ./cmd/loophole
+
+# Build e2e test binary
+e2e.test: liblwext4
+	go test -c -o e2e.test ./e2e/
 
 # Install loophole CLI into $GOPATH/bin
 install:
 	go install ./cmd/loophole
 
 # Static checks: lint + vet + build
-check:
+check: liblwext4
 	golangci-lint run ./...
 
 # Format all Go source files
@@ -17,12 +67,12 @@ fmt:
 	gofmt -w -s $$(find . -name '*.go' -not -path './third_party/*' -not -path './old/*')
 
 # Run unit tests
-test:
+test: liblwext4
 	go test ./...
 
 # Run lwext4 unit tests
 # Usage: make test-lwext4 [RUN=TestName]
-test-lwext4:
+test-lwext4: liblwext4
 	go test -v -count=1 $(if $(RUN),-run '$(RUN)') ./lwext4/
 
 # Build and run lwext4 C tests (client-server model)

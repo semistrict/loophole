@@ -71,6 +71,9 @@ func NewS3Store(ctx context.Context, inst Instance, opts *S3Options) (*S3Store, 
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
+			// Non-AWS S3 providers (Tigris, MinIO, etc.) typically don't
+			// return response checksums, which causes noisy SDK warnings.
+			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		}
 		o.UsePathStyle = true
 	})

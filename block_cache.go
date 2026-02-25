@@ -129,8 +129,10 @@ func (bc *BlockCache) fetchToCache(ctx context.Context, layerID string, blockIdx
 		return err
 	}
 	defer func() {
-		if cerr := f.Close(); cerr != nil {
-			slog.Warn("close failed", "error", cerr)
+		if f != nil {
+			if cerr := f.Close(); cerr != nil {
+				slog.Warn("close failed", "error", cerr)
+			}
 		}
 		if err != nil {
 			if rerr := os.Remove(tmp); rerr != nil {
@@ -151,7 +153,9 @@ func (bc *BlockCache) fetchToCache(ctx context.Context, layerID string, blockIdx
 		}
 	}
 
-	if err = f.Close(); err != nil {
+	err = f.Close()
+	f = nil // prevent defer from closing again
+	if err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)

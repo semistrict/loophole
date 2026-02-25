@@ -34,7 +34,7 @@ func Format(ctx context.Context, devicePath string) error {
 		}
 	}()
 
-	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, dev.Path); err != nil {
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", dev.Path); err != nil {
 		return fmt.Errorf("mkfs.ext4: %w", err)
 	}
 	return nil
@@ -43,7 +43,7 @@ func Format(ctx context.Context, devicePath string) error {
 // FormatDirect creates an ext4 filesystem directly on a block device
 // (e.g. /dev/nbdN) without loop device setup.
 func FormatDirect(ctx context.Context, blockDev string) error {
-	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, blockDev); err != nil {
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", blockDev); err != nil {
 		return fmt.Errorf("mkfs.ext4: %w", err)
 	}
 	return nil
