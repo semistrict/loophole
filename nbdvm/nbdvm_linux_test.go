@@ -13,6 +13,10 @@ import (
 )
 
 func TestLoopbackWithMemDevice(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root for NBD netlink operations")
+	}
+
 	const size = 128 * 1024 * 1024 // 128 MB
 
 	ctx := t.Context()
@@ -32,6 +36,10 @@ func TestLoopbackWithMemDevice(t *testing.T) {
 }
 
 func TestLoopbackWithTrimmerDevice(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("requires root for NBD netlink operations")
+	}
+
 	// Same as above but the device implements Trimmer + WriteZeroer,
 	// matching our real nbdvm.device. Ensures extra server flags
 	// (FlagSendTrim, FlagSendWriteZeroes) don't break the connect.
