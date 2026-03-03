@@ -25,7 +25,6 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 	inst := uniqueInstance(t)
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
-	_ = loophole.FormatSystem(ctx, store, 4*1024*1024)
 
 	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
 	defer vm.Close(ctx)

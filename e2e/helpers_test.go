@@ -96,8 +96,6 @@ func newBackend(t *testing.T) fsbackend.Service {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	_ = loophole.FormatSystem(ctx, store, 4*1024*1024)
-
 	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
 
 	backend := newBackendForMode(t, vm, inst)

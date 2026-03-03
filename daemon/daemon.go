@@ -24,6 +24,7 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
 )
@@ -75,10 +76,26 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 
 	tuneProcess(logger)
 
-	vm, err := loophole.SetupVolumeManager(ctx, inst, dir, logger)
-	if err != nil {
-		return nil, err
+	// Create object store
+	var store loophole.ObjectStore
+	if inst.LocalDir != "" {
+		var err error
+		store, err = loophole.NewFileStore(inst.LocalDir)
+		if err != nil {
+			return nil, fmt.Errorf("create file store: %w", err)
+		}
+		logger.Warn("using local file store — data is NOT replicated to S3")
+	} else {
+		var err error
+		store, err = loophole.NewS3Store(ctx, inst)
+		if err != nil {
+			return nil, fmt.Errorf("create S3 store: %w", err)
+		}
 	}
+
+	// Create LSM volume manager
+	cacheDir := dir.Cache(inst.ProfileName)
+	vm := lsm.NewManager(store, cacheDir, lsm.Config{}, nil, nil, nil)
 
 	backend, err := createBackend(vm, inst, dir)
 	if err != nil {
