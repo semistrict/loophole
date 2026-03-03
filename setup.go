@@ -4,35 +4,31 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"strings"
 )
 
 const (
-	DefaultBlockSize    = 4 * 1024 * 1024
-	DefaultMaxUploads   = 20
-	DefaultMaxDownloads = 200
+	DefaultBlockSize      = 4 * 1024 * 1024
+	DefaultVolumeSize     = 8 * 1024 * 1024 * 1024 // 8 GB
+	DefaultMaxUploads     = 5
+	DefaultMaxDownloads   = 200
+	DefaultMaxDirtyBlocks = 100 // 100 * 4MB = 400MB max dirty data
 )
 
 // NewObjectStore creates an ObjectStore from the instance configuration.
-// If S3_ENDPOINT is "local:/path/to/dir", a local FileStore is used.
-// Otherwise, an S3-compatible store is created.
-func NewObjectStore(ctx context.Context, inst Instance, s3opts *S3Options) (ObjectStore, error) {
-	endpoint := inst.Endpoint
-	if endpoint == "" {
-		endpoint = os.Getenv("S3_ENDPOINT")
+// If the instance has a LocalDir, a FileStore is used. Otherwise, an
+// S3-compatible store is created.
+func NewObjectStore(ctx context.Context, inst Instance) (ObjectStore, error) {
+	if inst.LocalDir != "" {
+		return NewFileStore(inst.LocalDir)
 	}
-	if strings.HasPrefix(endpoint, "local:") {
-		dir := strings.TrimPrefix(endpoint, "local:")
-		return NewFileStore(dir)
-	}
-	return NewS3Store(ctx, inst, s3opts)
+	return NewS3Store(ctx, inst)
 }
 
 // SetupVolumeManager creates an object store, formats the system if needed,
 // and returns a ready VolumeManager.
-func SetupVolumeManager(ctx context.Context, inst Instance, dir Dir, s3opts *S3Options, logger *slog.Logger) (*VolumeManager, error) {
-	store, err := NewObjectStore(ctx, inst, s3opts)
+func SetupVolumeManager(ctx context.Context, inst Instance, dir Dir, logger *slog.Logger) (*legacyVolumeManager, error) {
+	store, err := NewObjectStore(ctx, inst)
 	if err != nil {
 		return nil, fmt.Errorf("connect to store: %w", err)
 	}
@@ -52,8 +48,11 @@ func SetupVolumeManager(ctx context.Context, inst Instance, dir Dir, s3opts *S3O
 		}
 	}
 
-	vm, err := NewVolumeManager(ctx, store, dir.Cache(inst), DefaultMaxUploads, DefaultMaxDownloads)
-	if err != nil {
+	vm := &legacyVolumeManager{
+		Store:    store,
+		CacheDir: dir.Cache(inst.ProfileName),
+	}
+	if err := vm.Connect(ctx); err != nil {
 		return nil, fmt.Errorf("init volume manager: %w", err)
 	}
 

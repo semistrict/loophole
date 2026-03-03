@@ -9,12 +9,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupVolume(t *testing.T) (*MemStore, *VolumeManager, *Volume) {
+func setupVolume(t *testing.T) (*MemStore, *legacyVolumeManager, Volume) {
 	t.Helper()
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 
-	vol, err := vm.NewVolume(t.Context(), "mydata")
+	vol, err := vm.NewVolume(t.Context(), "mydata", 0)
 	require.NoError(t, err)
 	return store, vm, vol
 }
@@ -30,10 +30,10 @@ func TestWriteAndReadBack(t *testing.T) {
 	}()
 
 	data := []byte("hello world")
-	require.NoError(t, vol.Write(t.Context(), 0, data))
+	require.NoError(t, vol.Write(t.Context(), data, 0))
 
 	buf := make([]byte, len(data))
-	n, err := vol.Read(t.Context(), 0, buf)
+	n, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, len(data), n)
 	assert.Equal(t, data, buf)
@@ -48,7 +48,7 @@ func TestReadUnwrittenReturnsZeros(t *testing.T) {
 	}()
 
 	buf := make([]byte, 64)
-	n, err := vol.Read(t.Context(), 0, buf)
+	n, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 64, n)
 	assert.Equal(t, make([]byte, 64), buf)
@@ -62,10 +62,10 @@ func TestWriteAtOffset(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 100, []byte("abc")))
+	require.NoError(t, vol.Write(t.Context(), []byte("abc"), 100))
 
 	buf := make([]byte, 3)
-	n, err := vol.Read(t.Context(), 100, buf)
+	n, err := vol.Read(t.Context(), buf, 100)
 	require.NoError(t, err)
 	assert.Equal(t, 3, n)
 	assert.Equal(t, []byte("abc"), buf)
@@ -81,10 +81,10 @@ func TestWriteSpanningBlocks(t *testing.T) {
 
 	// blockSize=64, write 100 bytes starting at offset 32 — spans blocks 0 and 1
 	data := bytes.Repeat([]byte{0xAB}, 100)
-	require.NoError(t, vol.Write(t.Context(), 32, data))
+	require.NoError(t, vol.Write(t.Context(), data, 32))
 
 	buf := make([]byte, 100)
-	n, err := vol.Read(t.Context(), 32, buf)
+	n, err := vol.Read(t.Context(), buf, 32)
 	require.NoError(t, err)
 	assert.Equal(t, 100, n)
 	assert.Equal(t, data, buf)
@@ -101,12 +101,12 @@ func TestReadSpanningBlocks(t *testing.T) {
 	// Write different data to block 0 and block 1
 	block0 := bytes.Repeat([]byte{0x11}, 64)
 	block1 := bytes.Repeat([]byte{0x22}, 64)
-	require.NoError(t, vol.Write(t.Context(), 0, block0))
-	require.NoError(t, vol.Write(t.Context(), 64, block1))
+	require.NoError(t, vol.Write(t.Context(), block0, 0))
+	require.NoError(t, vol.Write(t.Context(), block1, 64))
 
 	// Read across the boundary
 	buf := make([]byte, 40)
-	n, err := vol.Read(t.Context(), 44, buf)
+	n, err := vol.Read(t.Context(), buf, 44)
 	require.NoError(t, err)
 	assert.Equal(t, 40, n)
 	// First 20 bytes from block 0, last 20 bytes from block 1
@@ -122,11 +122,11 @@ func TestWritePreservesOtherDataInBlock(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("AAAA")))
-	require.NoError(t, vol.Write(t.Context(), 10, []byte("BBBB")))
+	require.NoError(t, vol.Write(t.Context(), []byte("AAAA"), 0))
+	require.NoError(t, vol.Write(t.Context(), []byte("BBBB"), 10))
 
 	buf := make([]byte, 14)
-	_, err := vol.Read(t.Context(), 0, buf)
+	_, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("AAAA"), buf[:4])
 	assert.Equal(t, make([]byte, 6), buf[4:10])
@@ -143,7 +143,7 @@ func TestReadAtHighOffsetReturnsZeros(t *testing.T) {
 
 	// Sparse volume: reading at any offset returns zeros if unwritten.
 	buf := make([]byte, 100)
-	n, err := vol.Read(t.Context(), 1<<30, buf) // 1 GiB offset
+	n, err := vol.Read(t.Context(), buf, 1<<30) // 1 GiB offset
 	require.NoError(t, err)
 	assert.Equal(t, 100, n)
 	assert.Equal(t, make([]byte, 100), buf)
@@ -158,10 +158,10 @@ func TestWriteAtHighOffset(t *testing.T) {
 	}()
 
 	data := bytes.Repeat([]byte{0xFF}, 100)
-	require.NoError(t, vol.Write(t.Context(), 1<<30, data))
+	require.NoError(t, vol.Write(t.Context(), data, 1<<30))
 
 	buf := make([]byte, 100)
-	n, err := vol.Read(t.Context(), 1<<30, buf)
+	n, err := vol.Read(t.Context(), buf, 1<<30)
 	require.NoError(t, err)
 	assert.Equal(t, 100, n)
 	assert.Equal(t, data, buf)
@@ -186,7 +186,7 @@ func TestWriteToReadOnlyVolumeFails(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, vol.ReadOnly())
 
-	assert.Error(t, vol.Write(t.Context(), 0, []byte("nope")))
+	assert.Error(t, vol.Write(t.Context(), []byte("nope"), 0))
 }
 
 func TestReadFromReadOnlyVolumeWithData(t *testing.T) {
@@ -209,7 +209,7 @@ func TestReadFromReadOnlyVolumeWithData(t *testing.T) {
 	require.NoError(t, err)
 
 	buf := make([]byte, 5)
-	n, err := vol.Read(t.Context(), 0, buf)
+	n, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 5, n)
 	assert.Equal(t, []byte("hello"), buf)
@@ -225,12 +225,12 @@ func TestSnapshotVolumeStaysWritable(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
+	require.NoError(t, vol.Write(t.Context(), []byte("before"), 0))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
 
 	// Volume should still be writable after snapshot
 	assert.False(t, vol.ReadOnly())
-	assert.NoError(t, vol.Write(t.Context(), 0, []byte("after!")))
+	assert.NoError(t, vol.Write(t.Context(), []byte("after!"), 0))
 }
 
 func TestSnapshotPreservesDataInContinuation(t *testing.T) {
@@ -241,11 +241,11 @@ func TestSnapshotPreservesDataInContinuation(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("persistent")))
+	require.NoError(t, vol.Write(t.Context(), []byte("persistent"), 0))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
 
 	buf := make([]byte, 10)
-	_, err := vol.Read(t.Context(), 0, buf)
+	_, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("persistent"), buf)
 }
@@ -277,17 +277,17 @@ func TestMultipleSnapshotsPreserveData(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("gen0")))
+	require.NoError(t, vol.Write(t.Context(), []byte("gen0"), 0))
 	require.NoError(t, vol.Snapshot(t.Context(), ""))
 
-	require.NoError(t, vol.Write(t.Context(), 10, []byte("gen1")))
+	require.NoError(t, vol.Write(t.Context(), []byte("gen1"), 10))
 	require.NoError(t, vol.Snapshot(t.Context(), ""))
 
-	require.NoError(t, vol.Write(t.Context(), 20, []byte("gen2")))
+	require.NoError(t, vol.Write(t.Context(), []byte("gen2"), 20))
 
 	// All three generations of data should be readable
 	buf := make([]byte, 24)
-	_, err := vol.Read(t.Context(), 0, buf)
+	_, err := vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("gen0"), buf[0:4])
 	assert.Equal(t, []byte("gen1"), buf[10:14])
@@ -302,7 +302,7 @@ func TestSnapshotCreatesNamedReadOnlyVolume(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
+	require.NoError(t, vol.Write(t.Context(), []byte("before"), 0))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap1"))
 
 	snap, err := vm.OpenVolume(t.Context(), "snap1")
@@ -310,12 +310,12 @@ func TestSnapshotCreatesNamedReadOnlyVolume(t *testing.T) {
 	require.True(t, snap.ReadOnly())
 
 	buf := make([]byte, 6)
-	_, err = snap.Read(t.Context(), 0, buf)
+	_, err = snap.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("before"), buf)
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("after!")))
-	_, err = snap.Read(t.Context(), 0, buf)
+	require.NoError(t, vol.Write(t.Context(), []byte("after!"), 0))
+	_, err = snap.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("before"), buf)
 }
@@ -335,7 +335,7 @@ func TestCloneProducesWritableVolume(t *testing.T) {
 
 	assert.Equal(t, "branch", clone.Name())
 	assert.False(t, clone.ReadOnly())
-	assert.NoError(t, clone.Write(t.Context(), 0, []byte("clone write")))
+	assert.NoError(t, clone.Write(t.Context(), []byte("clone write"), 0))
 }
 
 func TestCloneOriginalStaysWritable(t *testing.T) {
@@ -350,7 +350,7 @@ func TestCloneOriginalStaysWritable(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, vol.ReadOnly())
-	assert.NoError(t, vol.Write(t.Context(), 0, []byte("still writable")))
+	assert.NoError(t, vol.Write(t.Context(), []byte("still writable"), 0))
 }
 
 func TestCloneSeesOriginalData(t *testing.T) {
@@ -361,13 +361,13 @@ func TestCloneSeesOriginalData(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("original data")))
+	require.NoError(t, vol.Write(t.Context(), []byte("original data"), 0))
 
 	clone, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
 
 	buf := make([]byte, 13)
-	n, err := clone.Read(t.Context(), 0, buf)
+	n, err := clone.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 13, n)
 	assert.Equal(t, []byte("original data"), buf)
@@ -381,21 +381,21 @@ func TestCloneDataIsIndependent(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("shared")))
+	require.NoError(t, vol.Write(t.Context(), []byte("shared"), 0))
 
 	clone, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
 
 	// Write different data to each
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("origin")))
-	require.NoError(t, clone.Write(t.Context(), 0, []byte("cloned")))
+	require.NoError(t, vol.Write(t.Context(), []byte("origin"), 0))
+	require.NoError(t, clone.Write(t.Context(), []byte("cloned"), 0))
 
 	origBuf := make([]byte, 6)
 	cloneBuf := make([]byte, 6)
 
-	_, err = vol.Read(t.Context(), 0, origBuf)
+	_, err = vol.Read(t.Context(), origBuf, 0)
 	require.NoError(t, err)
-	_, err = clone.Read(t.Context(), 0, cloneBuf)
+	_, err = clone.Read(t.Context(), cloneBuf, 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, []byte("origin"), origBuf)
@@ -410,15 +410,15 @@ func TestCloneWriteDoesNotAffectOriginal(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("before")))
+	require.NoError(t, vol.Write(t.Context(), []byte("before"), 0))
 
 	clone, err := vol.Clone(t.Context(), "branch")
 	require.NoError(t, err)
 
-	require.NoError(t, clone.Write(t.Context(), 0, []byte("CHANGE")))
+	require.NoError(t, clone.Write(t.Context(), []byte("CHANGE"), 0))
 
 	buf := make([]byte, 6)
-	_, err = vol.Read(t.Context(), 0, buf)
+	_, err = vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("before"), buf)
 }
@@ -449,13 +449,13 @@ func TestCloneFromReadOnlyVolume(t *testing.T) {
 
 	// Clone should see the snapshot's data
 	buf := make([]byte, 13)
-	_, err = clone.Read(t.Context(), 0, buf)
+	_, err = clone.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("snapshot data"), buf)
 
 	// Clone should be writable
-	require.NoError(t, clone.Write(t.Context(), 0, []byte("new data here")))
-	_, err = clone.Read(t.Context(), 0, buf)
+	require.NoError(t, clone.Write(t.Context(), []byte("new data here"), 0))
+	_, err = clone.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("new data here"), buf)
 }
@@ -485,16 +485,16 @@ func TestFlushPersistsDataToS3(t *testing.T) {
 		}
 	}()
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("persist me")))
+	require.NoError(t, vol.Write(t.Context(), []byte("persist me"), 0))
 	require.NoError(t, vol.Flush(t.Context()))
 
 	// Re-open the volume from S3 and verify data survived
-	reopened, err := vm.NewVolume(t.Context(), "mydata2")
+	reopened, err := vm.NewVolume(t.Context(), "mydata2", 0)
 	require.NoError(t, err)
 	// Can't reuse the same volume name, but we can verify the flushed data
 	// is in S3 by reading from the original volume
 	buf := make([]byte, 10)
-	_, err = vol.Read(t.Context(), 0, buf)
+	_, err = vol.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("persist me"), buf)
 	_ = reopened
@@ -504,10 +504,10 @@ func TestDataSurvivesFlushAndSnapshotReload(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 
-	vol, err := vm.NewVolume(t.Context(), "mydata")
+	vol, err := vm.NewVolume(t.Context(), "mydata", 0)
 	require.NoError(t, err)
 
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("important")))
+	require.NoError(t, vol.Write(t.Context(), []byte("important"), 0))
 	require.NoError(t, vol.Snapshot(t.Context(), "snap"))
 	require.NoError(t, vm.Close(t.Context()))
 
@@ -523,7 +523,7 @@ func TestDataSurvivesFlushAndSnapshotReload(t *testing.T) {
 	require.NoError(t, err)
 
 	buf := make([]byte, 9)
-	_, err = vol2.Read(t.Context(), 0, buf)
+	_, err = vol2.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("important"), buf)
 }
@@ -539,7 +539,7 @@ func TestNewVolumeCreatesWritableVolume(t *testing.T) {
 		}
 	}()
 
-	vol, err := vm.NewVolume(t.Context(), "test-vol")
+	vol, err := vm.NewVolume(t.Context(), "test-vol", 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, "test-vol", vol.Name())
@@ -555,10 +555,10 @@ func TestNewVolumeDuplicateNameFails(t *testing.T) {
 		}
 	}()
 
-	_, err := vm.NewVolume(t.Context(), "dup")
+	_, err := vm.NewVolume(t.Context(), "dup", 0)
 	require.NoError(t, err)
 
-	_, err = vm.NewVolume(t.Context(), "dup")
+	_, err = vm.NewVolume(t.Context(), "dup", 0)
 	assert.Error(t, err)
 }
 
@@ -571,20 +571,21 @@ func TestOpenVolumeReturnsCachedInstance(t *testing.T) {
 		}
 	}()
 
-	vol1, err := vm.NewVolume(t.Context(), "existing")
+	vol1, err := vm.NewVolume(t.Context(), "existing", 0)
 	require.NoError(t, err)
 
 	// Write data through vol1
-	require.NoError(t, vol1.Write(t.Context(), 0, []byte("shared")))
+	require.NoError(t, vol1.Write(t.Context(), []byte("shared"), 0))
 
 	vol2, err := vm.OpenVolume(t.Context(), "existing")
 	require.NoError(t, err)
 
 	// vol2 should see vol1's data (same instance)
 	buf := make([]byte, 6)
-	_, err = vol2.Read(t.Context(), 0, buf)
+	_, err = vol2.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("shared"), buf)
+
 }
 
 func TestOpenVolumeNotFoundFails(t *testing.T) {
@@ -599,26 +600,25 @@ func TestVolumeManagerCloseSucceeds(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 
-	_, err := vm.NewVolume(t.Context(), "vol-a")
+	_, err := vm.NewVolume(t.Context(), "vol-a", 0)
 	require.NoError(t, err)
-	_, err = vm.NewVolume(t.Context(), "vol-b")
+	_, err = vm.NewVolume(t.Context(), "vol-b", 0)
 	require.NoError(t, err)
 
 	assert.NoError(t, vm.Close(t.Context()))
 }
 
-func TestVolumePanicsAfterClose(t *testing.T) {
+func TestVolumePanicsAfterDestroy(t *testing.T) {
 	_, vm, vol := setupVolume(t)
-	require.NoError(t, vol.Close(t.Context()))
+	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vm.Close(t.Context()))
 
 	assert.Panics(t, func() { _ = vol.Name() })
 	assert.Panics(t, func() { _ = vol.ReadOnly() })
-	assert.Panics(t, func() { _ = vol.IO(t.Context()) })
 	assert.Panics(t, func() {
-		_, _ = vol.Read(t.Context(), 0, make([]byte, 1))
+		_, _ = vol.Read(t.Context(), make([]byte, 1), 0)
 	})
-	assert.Panics(t, func() { _ = vol.Write(t.Context(), 0, []byte{1}) })
+	assert.Panics(t, func() { _ = vol.Write(t.Context(), []byte{1}, 0) })
 	assert.Panics(t, func() { _ = vol.PunchHole(t.Context(), 0, 1) })
 	assert.Panics(t, func() { _ = vol.Flush(t.Context()) })
 	assert.Panics(t, func() { _ = vol.Snapshot(t.Context(), "snap") })
@@ -629,19 +629,10 @@ func TestVolumePanicsAfterClose(t *testing.T) {
 		_, _ = vol.CopyFrom(t.Context(), vol, 0, 0, 1)
 	})
 	assert.Panics(t, func() { _ = vol.Freeze(t.Context()) })
-	assert.NotPanics(t, func() { _ = vol.Close(t.Context()) })
 
-	vio := &VolumeIO{ctx: t.Context(), vol: vol}
-	assert.Panics(t, func() {
-		_, _ = vio.ReadAt(make([]byte, 1), 0)
-	})
-	assert.Panics(t, func() {
-		_, _ = vio.WriteAt([]byte{1}, 0)
-	})
-	assert.Panics(t, func() { _ = vio.Sync() })
 }
 
-func TestVolumeCloseWaitsForHandleRefs(t *testing.T) {
+func TestVolumeLastRefDestroysVolume(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 	defer func() {
 		if err := vm.Close(t.Context()); err != nil {
@@ -650,15 +641,16 @@ func TestVolumeCloseWaitsForHandleRefs(t *testing.T) {
 	}()
 
 	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.Close(t.Context()))
 
-	// The open handle keeps the volume alive after namespace close.
-	_, err := vol.Read(t.Context(), 0, make([]byte, 1))
+	// Release namespace ref — volume still alive (1 acquired ref).
+	require.NoError(t, vol.ReleaseRef(t.Context()))
+	_, err := vol.Read(t.Context(), make([]byte, 1), 0)
 	require.NoError(t, err)
 
+	// Release last ref — destroyed.
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 	assert.Panics(t, func() {
-		_, _ = vol.Read(t.Context(), 0, make([]byte, 1))
+		_, _ = vol.Read(t.Context(), make([]byte, 1), 0)
 	})
 }
 
@@ -678,8 +670,8 @@ func TestVolumesListsOpenVolumes(t *testing.T) {
 		}
 	}()
 
-	_, _ = vm.NewVolume(t.Context(), "alpha")
-	_, _ = vm.NewVolume(t.Context(), "beta")
+	_, _ = vm.NewVolume(t.Context(), "alpha", 0)
+	_, _ = vm.NewVolume(t.Context(), "beta", 0)
 
 	assert.ElementsMatch(t, []string{"alpha", "beta"}, vm.Volumes())
 }
@@ -691,12 +683,12 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 
-	vol, err := vm.NewVolume(t.Context(), "parent")
+	vol, err := vm.NewVolume(t.Context(), "parent", 0)
 	require.NoError(t, err)
 
 	// Write data to the parent (simulates ext4 writes through FUSE).
 	data := bytes.Repeat([]byte{0xAB}, 64)
-	require.NoError(t, vol.Write(t.Context(), 0, data))
+	require.NoError(t, vol.Write(t.Context(), data, 0))
 
 	// Clone (internally does freeze+flush+createChild).
 	clone, err := vol.Clone(t.Context(), "child")
@@ -704,7 +696,7 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 
 	// Read from clone in the same VM — sanity check.
 	buf := make([]byte, 64)
-	_, err = clone.Read(t.Context(), 0, buf)
+	_, err = clone.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, data, buf)
 
@@ -712,8 +704,8 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 	// (simulates daemon restart or fresh mount of the clone).
 	require.NoError(t, vm.Close(t.Context()))
 
-	vm2, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
-	require.NoError(t, err)
+	vm2 := &legacyVolumeManager{Store: store, CacheDir: t.TempDir()}
+	require.NoError(t, vm2.Connect(t.Context()))
 	defer func() {
 		if err := vm2.Close(t.Context()); err != nil {
 			t.Logf("close failed: %v", err)
@@ -724,7 +716,7 @@ func TestCloneSeesOriginalDataAfterReopen(t *testing.T) {
 	require.NoError(t, err)
 
 	buf2 := make([]byte, 64)
-	_, err = clone2.Read(t.Context(), 0, buf2)
+	_, err = clone2.Read(t.Context(), buf2, 0)
 	require.NoError(t, err)
 	assert.Equal(t, data, buf2)
 }
@@ -740,7 +732,7 @@ func TestCloneSeesMultiBlockData(t *testing.T) {
 		}
 	}()
 
-	vol, err := vm.NewVolume(t.Context(), "parent")
+	vol, err := vm.NewVolume(t.Context(), "parent", 0)
 	require.NoError(t, err)
 
 	// Write data spanning blocks 0, 1, 2, 3 (blockSize=64, so 256 bytes).
@@ -748,13 +740,13 @@ func TestCloneSeesMultiBlockData(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i % 251) // varied pattern
 	}
-	require.NoError(t, vol.Write(t.Context(), 0, data))
+	require.NoError(t, vol.Write(t.Context(), data, 0))
 
 	clone, err := vol.Clone(t.Context(), "child")
 	require.NoError(t, err)
 
 	buf := make([]byte, 256)
-	_, err = clone.Read(t.Context(), 0, buf)
+	_, err = clone.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, data, buf)
 }

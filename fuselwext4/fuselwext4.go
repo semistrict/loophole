@@ -4,6 +4,7 @@
 package fuselwext4
 
 import (
+	"fmt"
 	"sync"
 	"time"
 
@@ -21,10 +22,16 @@ type Server struct {
 // The lwext4.FS must remain valid until Unmount is called.
 // All FUSE operations are serialized through a mutex since lwext4 is not thread-safe.
 func Mount(mountpoint string, ext4fs *lwext4.FS) (*Server, error) {
+	// Clean up any orphaned inodes left from a previous crash.
+	if err := ext4fs.OrphanRecover(); err != nil {
+		return nil, fmt.Errorf("fuselwext4: orphan recovery failed: %w", err)
+	}
+
 	root := &ext4Node{
-		ext4fs: ext4fs,
-		mu:     &sync.Mutex{},
-		ino:    lwext4.RootIno,
+		ext4fs:  ext4fs,
+		mu:      &sync.Mutex{},
+		ino:     lwext4.RootIno,
+		orphans: newOrphanTracker(),
 	}
 
 	cacheTTL := 5 * time.Second

@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 )
 
 // TestE2E_Lwext4FUSEMountIsReal proves that lwext4fuse mode creates a real
@@ -23,7 +24,7 @@ func TestE2E_Lwext4FUSEMountIsReal(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "fuse-proof")
 
-	require.NoError(t, b.Create(ctx, "fuse-proof"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "fuse-proof"}))
 	require.NoError(t, b.Mount(ctx, "fuse-proof", mp))
 
 	// 1. The mountpoint must appear in /proc/mounts as a fuse mount.

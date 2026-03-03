@@ -4,34 +4,31 @@ package nbdserve
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"sync"
 
 	nbd "github.com/Merovius/nbd"
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/util"
 )
-
-const defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
 
 // Server implements nbd.ExportProvider, resolving loophole volumes
 // as NBD exports dynamically at connection time.
 type Server struct {
-	vm         *loophole.VolumeManager
-	volumeSize uint64
+	vm loophole.VolumeManager
 }
 
 var _ nbd.ExportProvider = (*Server)(nil)
 
 // NewServer creates an NBD TCP server backed by vm.
-func NewServer(vm *loophole.VolumeManager, volumeSize uint64) *Server {
-	if volumeSize == 0 {
-		volumeSize = defaultVolumeSize
-	}
-	return &Server{vm: vm, volumeSize: volumeSize}
+func NewServer(vm loophole.VolumeManager) *Server {
+	return &Server{vm: vm}
 }
 
 // FindExport opens the named volume and returns an NBD Export for it.
-// A fresh VolumeIO is created per connection so its context matches
-// the connection lifetime.
 func (s *Server) FindExport(ctx context.Context, name string) (nbd.Export, error) {
 	if name == "" {
 		return nbd.Export{}, fmt.Errorf("no default export; specify a volume name")
@@ -40,10 +37,10 @@ func (s *Server) FindExport(ctx context.Context, name string) (nbd.Export, error
 	if err != nil {
 		return nbd.Export{}, fmt.Errorf("open volume %q: %w", name, err)
 	}
-	dev := vol.IO(ctx)
+	dev := volumeNBD{vol: vol}
 	return nbd.Export{
 		Name:   name,
-		Size:   s.volumeSize,
+		Size:   vol.Size(),
 		Flags:  nbd.ExportFlags(dev, vol.ReadOnly()),
 		Device: dev,
 	}, nil
@@ -62,7 +59,64 @@ func (s *Server) ListExports(ctx context.Context) ([]nbd.Export, error) {
 	return exports, nil
 }
 
-// Serve starts the NBD TCP server, blocking until ctx is cancelled.
+// Serve listens on network/addr and serves NBD, blocking until ctx is cancelled.
 func (s *Server) Serve(ctx context.Context, network, addr string) error {
 	return nbd.ListenAndServeDynamic(ctx, network, addr, s)
+}
+
+// ServeListener accepts connections on ln and serves NBD on each.
+// It closes ln when done and blocks until all connections are finished.
+func (s *Server) ServeListener(ln net.Listener) error {
+	var wg sync.WaitGroup
+	defer wg.Wait()
+
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return err
+		}
+		wg.Add(1) // XXX: can we statically enforce the use of wg.Go ?
+		go func() {
+			defer wg.Done()
+			defer util.SafeClose(c, "close NBD conn")
+			if err := nbd.ServeDynamic(context.Background(), c, s); err != nil { // XXX: should we cancel this context when the connection goes away?
+				slog.Warn("NBD serve", "error", err)
+			}
+		}()
+	}
+}
+
+// volumeNBD adapts a *Volume to the nbd.Device/Trimmer/WriteZeroer interfaces.
+type volumeNBD struct {
+	vol loophole.Volume
+}
+
+func (d volumeNBD) ReadAt(p []byte, off int64) (int, error) {
+	return d.vol.Read(context.Background(), p, uint64(off))
+}
+
+func (d volumeNBD) WriteAt(p []byte, off int64) (int, error) {
+	if err := d.vol.Write(context.Background(), p, uint64(off)); err != nil {
+		return 0, err
+	}
+	return len(p), nil
+}
+
+func (d volumeNBD) Sync() error {
+	err := d.vol.Flush(context.Background())
+	if err != nil {
+		slog.Error("volumeNBD.Sync failed", "volume", d.vol.Name(), "error", err)
+	}
+	return err
+}
+
+func (d volumeNBD) Trim(offset, length int64) error {
+	return d.vol.PunchHole(context.Background(), uint64(offset), uint64(length))
+}
+
+func (d volumeNBD) WriteZeroes(offset, length int64, _ bool) error {
+	return d.vol.PunchHole(context.Background(), uint64(offset), uint64(length))
 }

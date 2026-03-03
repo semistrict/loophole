@@ -16,9 +16,8 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/metrics"
 )
-
-const defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
 
 // Server manages the internal FUSE mount that exposes volume device files.
 // Volumes must be explicitly registered via Add before they are visible.
@@ -28,15 +27,11 @@ type Server struct {
 	root     *rootNode
 
 	mu      sync.Mutex
-	volumes map[string]*loophole.Volume
+	volumes map[string]loophole.Volume
 }
 
 // Options configures the FUSE mount.
 type Options struct {
-	// VolumeSize is the apparent size of each device file in bytes.
-	// Default: 100 GB.
-	VolumeSize uint64
-
 	// Debug enables FUSE debug logging.
 	Debug bool
 }
@@ -47,19 +42,15 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 	if opts == nil {
 		opts = &Options{}
 	}
-	volumeSize := opts.VolumeSize
-	if volumeSize == 0 {
-		volumeSize = defaultVolumeSize
-	}
 
 	if err := os.MkdirAll(mountDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create fuse mount dir: %w", err)
 	}
 
 	srv := &Server{
-		volumes: make(map[string]*loophole.Volume),
+		volumes: make(map[string]loophole.Volume),
 	}
-	root := &rootNode{srv: srv, volumeSize: volumeSize}
+	root := &rootNode{srv: srv}
 
 	cacheTTL := 5 * time.Second
 	negTTL := time.Second
@@ -76,8 +67,8 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 		EntryTimeout:    &cacheTTL,
 		AttrTimeout:     &cacheTTL,
 		NegativeTimeout: &negTTL,
-		UID:          uint32(os.Getuid()),
-		GID:          uint32(os.Getgid()),
+		UID:             uint32(os.Getuid()),
+		GID:             uint32(os.Getgid()),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fuse mount: %w", err)
@@ -109,7 +100,7 @@ func UnmountStale(dir string) {
 }
 
 // Add registers a volume so it becomes visible as a device file.
-func (s *Server) Add(name string, vol *loophole.Volume) {
+func (s *Server) Add(name string, vol loophole.Volume) {
 	s.mu.Lock()
 	s.volumes[name] = vol
 	s.mu.Unlock()
@@ -123,7 +114,7 @@ func (s *Server) Remove(name string) {
 	s.mu.Unlock()
 }
 
-func (s *Server) getVolume(name string) *loophole.Volume {
+func (s *Server) getVolume(name string) loophole.Volume {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.volumes[name]
@@ -148,8 +139,7 @@ func (s *Server) DevicePath(volumeName string) string {
 
 type rootNode struct {
 	fs.Inode
-	srv        *Server
-	volumeSize uint64
+	srv *Server
 }
 
 var _ = (fs.NodeLookuper)((*rootNode)(nil))
@@ -171,7 +161,7 @@ func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 		slog.Warn("fuse lookup: acquire ref", "volume", name, "error", err)
 		return nil, syscall.EIO
 	}
-	devNode := &deviceNode{vol: vol, volumeSize: r.volumeSize}
+	devNode := &deviceNode{vol: vol}
 	stable := fs.StableAttr{Mode: syscall.S_IFREG}
 	child := r.NewInode(ctx, devNode, stable)
 	devNode.fillAttr(&out.Attr)
@@ -194,13 +184,12 @@ func (r *rootNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 
 type deviceNode struct {
 	fs.Inode
-	vol        *loophole.Volume
-	volumeSize uint64
-	nodeOnce   sync.Once
+	vol      loophole.Volume
+	nodeOnce sync.Once
 }
 
 type deviceHandle struct {
-	vol  *loophole.Volume
+	vol  loophole.Volume
 	once sync.Once
 }
 
@@ -230,8 +219,8 @@ func (d *deviceNode) fillAttr(out *fuse.Attr) {
 	} else {
 		out.Mode = syscall.S_IFREG | 0o600
 	}
-	out.Size = d.volumeSize
-	out.Blocks = d.volumeSize / 512
+	out.Size = d.vol.Size()
+	out.Blocks = d.vol.Size() / 512
 	out.Nlink = 1
 }
 
@@ -252,22 +241,33 @@ func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetA
 	return d.Getattr(ctx, nil, out)
 }
 
-func (d *deviceNode) Open(_ context.Context, _ uint32) (fs.FileHandle, uint32, syscall.Errno) {
+func (d *deviceNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	done := metrics.FuseOp("open")
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 && d.vol.ReadOnly() {
+		done(syscall.EROFS)
+		return nil, 0, syscall.EROFS
+	}
 	if err := d.vol.AcquireRef(); err != nil {
 		slog.Warn("fuse open: acquire ref", "error", err)
+		done(syscall.EIO)
 		return nil, 0, syscall.EIO
 	}
+	done(fs.OK)
 	return &deviceHandle{vol: d.vol}, fuse.FOPEN_DIRECT_IO, fs.OK
 }
 
 func (d *deviceNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	done := metrics.FuseOp("release")
 	handle, ok := fh.(*deviceHandle)
 	if !ok {
+		done(fs.OK)
 		return fs.OK
 	}
 	if err := handle.release(ctx); err != nil {
+		done(syscall.EIO)
 		return syscall.EIO
 	}
+	done(fs.OK)
 	return fs.OK
 }
 
@@ -280,55 +280,89 @@ func (d *deviceNode) OnForget() {
 }
 
 func (d *deviceNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
-	if off < 0 || uint64(off) >= d.volumeSize {
+	done := metrics.FuseOp("read")
+	slog.Debug("blockdev: read", "off", off, "len", len(dest), "volSize", d.vol.Size())
+	if off < 0 || uint64(off) >= d.vol.Size() {
+		done(fs.OK)
 		return fuse.ReadResultData(nil), fs.OK
 	}
 
 	end := uint64(off) + uint64(len(dest))
-	if end > d.volumeSize {
-		dest = dest[:d.volumeSize-uint64(off)]
+	if end > d.vol.Size() {
+		dest = dest[:d.vol.Size()-uint64(off)]
 	}
 
-	n, err := d.vol.Read(ctx, uint64(off), dest)
+	n, err := d.vol.Read(ctx, dest, uint64(off))
 	if err != nil {
+		slog.Warn("blockdev: read error", "off", off, "len", len(dest), "error", err)
+		done(syscall.EIO)
 		return nil, syscall.EIO
 	}
+	slog.Debug("blockdev: read done", "off", off, "n", n)
+	metrics.FuseBytes.WithLabelValues("read").Add(float64(n))
+	done(fs.OK)
 	return fuse.ReadResultData(dest[:n]), fs.OK
 }
 
 func (d *deviceNode) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
-	if off < 0 || uint64(off) >= d.volumeSize {
+	done := metrics.FuseOp("write")
+	if d.vol.ReadOnly() {
+		done(syscall.EROFS)
+		return 0, syscall.EROFS
+	}
+	slog.Debug("blockdev: write", "off", off, "len", len(data), "volSize", d.vol.Size())
+	if off < 0 || uint64(off) >= d.vol.Size() {
+		done(syscall.EFBIG)
 		return 0, syscall.EFBIG
 	}
 
 	end := uint64(off) + uint64(len(data))
-	if end > d.volumeSize {
-		data = data[:d.volumeSize-uint64(off)]
+	if end > d.vol.Size() {
+		data = data[:d.vol.Size()-uint64(off)]
 	}
 
-	if err := d.vol.Write(ctx, uint64(off), data); err != nil {
+	if err := d.vol.Write(ctx, data, uint64(off)); err != nil {
+		slog.Warn("blockdev: write error", "off", off, "len", len(data), "error", err)
+		done(syscall.EIO)
 		return 0, syscall.EIO
 	}
+	slog.Debug("blockdev: write done", "off", off, "len", len(data))
+	metrics.FuseBytes.WithLabelValues("write").Add(float64(len(data)))
+	done(fs.OK)
 	return uint32(len(data)), fs.OK
 }
 
 func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) syscall.Errno {
+	slog.Info("blockdev: fsync start")
+	done := metrics.FuseOp("fsync")
 	if _, ok := fh.(*deviceHandle); !ok {
+		done(syscall.EBADF)
 		return syscall.EBADF
 	}
 	if err := d.vol.Flush(ctx); err != nil {
+		slog.Warn("blockdev: fsync error", "error", err)
+		done(syscall.EIO)
 		return syscall.EIO
 	}
+	slog.Info("blockdev: fsync done")
+	done(fs.OK)
 	return fs.OK
 }
 
 func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
+	slog.Info("blockdev: flush start")
+	done := metrics.FuseOp("flush")
 	if _, ok := fh.(*deviceHandle); !ok {
+		done(syscall.EBADF)
 		return syscall.EBADF
 	}
 	if err := d.vol.Flush(ctx); err != nil {
+		slog.Warn("blockdev: flush error", "error", err)
+		done(syscall.EIO)
 		return syscall.EIO
 	}
+	slog.Info("blockdev: flush done")
+	done(fs.OK)
 	return fs.OK
 }
 
@@ -336,47 +370,76 @@ func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, 
 	const (
 		fallocKeepSize  = 0x01
 		fallocPunchHole = 0x02
+		fallocZeroRange = 0x10
 	)
-	if mode != fallocKeepSize|fallocPunchHole {
-		return syscall.ENOTSUP
+	if d.vol.ReadOnly() {
+		metrics.FuseOps.WithLabelValues("fallocate_readonly", "error").Inc()
+		return syscall.EROFS
 	}
 
-	if off >= d.volumeSize || size == 0 {
+	var opName string
+	switch mode {
+	case fallocKeepSize | fallocPunchHole:
+		opName = "fallocate_punch_hole"
+	case fallocKeepSize | fallocZeroRange:
+		opName = "fallocate_zero_range"
+	default:
+		slog.Warn("fuse allocate: unsupported mode", "mode", fmt.Sprintf("0x%x", mode))
+		metrics.FuseOps.WithLabelValues("fallocate_unsupported", "error").Inc()
+		return syscall.ENOTSUP
+	}
+	done := metrics.FuseOp(opName)
+
+	if off >= d.vol.Size() || size == 0 {
+		done(fs.OK)
 		return fs.OK
 	}
 	end := off + size
-	if end > d.volumeSize {
-		end = d.volumeSize
+	if end > d.vol.Size() {
+		end = d.vol.Size()
 	}
 
 	if err := d.vol.PunchHole(ctx, off, end-off); err != nil {
+		done(syscall.EIO)
 		return syscall.EIO
 	}
+	done(fs.OK)
 	return fs.OK
 }
 
 func (d *deviceNode) CopyFileRange(ctx context.Context, _ fs.FileHandle, offIn uint64, outNode *fs.Inode, _ fs.FileHandle, offOut uint64, length uint64, _ uint64) (uint32, syscall.Errno) {
+	done := metrics.FuseOp("copy_file_range")
 	dstNode, ok := outNode.Operations().(*deviceNode)
 	if !ok {
+		done(syscall.ENOTSUP)
 		return 0, syscall.ENOTSUP
 	}
+	if dstNode.vol.ReadOnly() {
+		done(syscall.EROFS)
+		return 0, syscall.EROFS
+	}
 
-	if offIn >= d.volumeSize {
+	if offIn >= d.vol.Size() {
+		done(fs.OK)
 		return 0, fs.OK
 	}
-	if offIn+length > d.volumeSize {
-		length = d.volumeSize - offIn
+	if offIn+length > d.vol.Size() {
+		length = d.vol.Size() - offIn
 	}
-	if offOut >= dstNode.volumeSize {
+	if offOut >= dstNode.vol.Size() {
+		done(syscall.EFBIG)
 		return 0, syscall.EFBIG
 	}
-	if offOut+length > dstNode.volumeSize {
-		length = dstNode.volumeSize - offOut
+	if offOut+length > dstNode.vol.Size() {
+		length = dstNode.vol.Size() - offOut
 	}
 
 	n, err := dstNode.vol.CopyFrom(ctx, d.vol, offIn, offOut, length)
 	if err != nil {
+		done(syscall.EIO)
 		return 0, syscall.EIO
 	}
+	metrics.FuseBytes.WithLabelValues("copy_file_range").Add(float64(n))
+	done(fs.OK)
 	return uint32(n), fs.OK
 }

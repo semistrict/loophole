@@ -19,7 +19,7 @@ func TestConcurrentReadWriteDifferentFiles(t *testing.T) {
 		}
 	}()
 
-	vol, err := vm.NewVolume(t.Context(), "concurrent")
+	vol, err := vm.NewVolume(t.Context(), "concurrent", 0)
 	require.NoError(t, err)
 
 	fs := NewSimpleFS(vol, 64)

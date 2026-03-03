@@ -28,10 +28,9 @@ import (
 // This exercises the full NBD network code path (handshake + dynamic export
 // resolution + transmission) while still producing /dev/nbdN block devices.
 type TCPServer struct {
-	vm         *loophole.VolumeManager
-	volumeSize uint64
-	numConns   int
-	log        *slog.Logger
+	vm       loophole.VolumeManager
+	numConns int
+	log      *slog.Logger
 
 	mu         sync.Mutex
 	exports    map[string]*tcpExport
@@ -39,20 +38,16 @@ type TCPServer struct {
 }
 
 type tcpExport struct {
-	vol    *loophole.Volume
+	vol    loophole.Volume
 	cancel context.CancelFunc
 	ln     net.Listener
 	devIdx uint32
 }
 
 // NewTCPServer creates a new TCP-based NBD server.
-func NewTCPServer(vm *loophole.VolumeManager, opts *Options) (*TCPServer, error) {
+func NewTCPServer(vm loophole.VolumeManager, opts *Options) (*TCPServer, error) {
 	if opts == nil {
 		opts = &Options{}
-	}
-	volumeSize := opts.VolumeSize
-	if volumeSize == 0 {
-		volumeSize = defaultVolumeSize
 	}
 	numConns := opts.NumConnections
 	if numConns == 0 {
@@ -64,7 +59,6 @@ func NewTCPServer(vm *loophole.VolumeManager, opts *Options) (*TCPServer, error)
 	}
 	return &TCPServer{
 		vm:         vm,
-		volumeSize: volumeSize,
 		numConns:   numConns,
 		log:        logger,
 		exports:    make(map[string]*tcpExport),
@@ -74,7 +68,7 @@ func NewTCPServer(vm *loophole.VolumeManager, opts *Options) (*TCPServer, error)
 
 // Connect starts a TCP NBD server for the volume on localhost and connects
 // the kernel NBD device to it via proxied socketpairs.
-func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, error) {
+func (s *TCPServer) Connect(ctx context.Context, vol loophole.Volume) (string, error) {
 	name := vol.Name()
 
 	s.mu.Lock()
@@ -105,10 +99,9 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 	// Create a single-volume provider for this export.
 	provider := &singleVolumeProvider{
-		name:       name,
-		vol:        vol,
-		volumeSize: s.volumeSize,
-		srvCtx:     srvCtx,
+		name:   name,
+		vol:    vol,
+		srvCtx: srvCtx,
 	}
 
 	// Start serving NBD connections in the background.
@@ -250,9 +243,9 @@ func (s *TCPServer) Connect(ctx context.Context, vol *loophole.Volume) (string, 
 
 	// Pass the kernel-side fds to the kernel via netlink.
 	exp := nbd.Export{
-		Size:       s.volumeSize,
+		Size:       vol.Size(),
 		Flags:      uint16(serverFlags),
-		BlockSizes: &nbd.BlockSizeConstraints{Min: 1, Preferred: 4096, Max: 0xffffffff},
+		BlockSizes: &nbd.BlockSizeConstraints{Min: 1, Preferred: 64 * 1024, Max: 0xffffffff},
 	}
 	idx, err := nbd.Configure(exp, kernelFDs...)
 	if err != nil {
@@ -383,10 +376,9 @@ func (s *TCPServer) Close(ctx context.Context) {
 
 // singleVolumeProvider is an ExportProvider that serves a single volume.
 type singleVolumeProvider struct {
-	name       string
-	vol        *loophole.Volume
-	volumeSize uint64
-	srvCtx     context.Context
+	name   string
+	vol    loophole.Volume
+	srvCtx context.Context
 }
 
 // FindExport returns the export for this volume. It uses srvCtx (not the
@@ -396,10 +388,10 @@ func (p *singleVolumeProvider) FindExport(_ context.Context, name string) (nbd.E
 	if name != "" && name != p.name {
 		return nbd.Export{}, fmt.Errorf("unknown export %q", name)
 	}
-	dev := p.vol.IO(p.srvCtx)
+	dev := NewDevice(p.vol)
 	return nbd.Export{
 		Name:   p.name,
-		Size:   p.volumeSize,
+		Size:   p.vol.Size(),
 		Flags:  nbd.ExportFlags(dev, p.vol.ReadOnly()),
 		Device: dev,
 	}, nil
@@ -410,6 +402,6 @@ func (p *singleVolumeProvider) ListExports(_ context.Context) ([]nbd.Export, err
 }
 
 // NewNBDTCPBackend creates an nbdserve.Server for use with --nbd flag.
-func NewNBDTCPBackend(vm *loophole.VolumeManager, volumeSize uint64) *nbdserve.Server {
-	return nbdserve.NewServer(vm, volumeSize)
+func NewNBDTCPBackend(vm loophole.VolumeManager) *nbdserve.Server {
+	return nbdserve.NewServer(vm)
 }

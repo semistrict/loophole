@@ -28,7 +28,7 @@ var _ DevicePather = (*NBDDriver)(nil)
 var _ DeviceConnector = (*NBDDriver)(nil)
 
 // NewNBD creates a Service backed by NBD.
-func NewNBD(vm *loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+func NewNBD(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
 	srv, err := nbdvm.NewServer(vm, opts)
 	if err != nil {
 		return nil, err
@@ -36,7 +36,7 @@ func NewNBD(vm *loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
 	return New[nbdMount](&NBDDriver{nbd: srv}, vm), nil
 }
 
-func (n *NBDDriver) Format(ctx context.Context, vol *loophole.Volume) error {
+func (n *NBDDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	dev, err := n.nbd.Connect(ctx, vol)
 	if err != nil {
 		return err
@@ -44,7 +44,7 @@ func (n *NBDDriver) Format(ctx context.Context, vol *loophole.Volume) error {
 	return ext4.FormatDirect(ctx, dev)
 }
 
-func (n *NBDDriver) Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (nbdMount, error) {
+func (n *NBDDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (nbdMount, error) {
 	dev, err := n.nbd.Connect(ctx, vol)
 	if err != nil {
 		return nbdMount{}, err
@@ -83,7 +83,7 @@ func (n *NBDDriver) Close(ctx context.Context) error {
 	return nil
 }
 
-func (n *NBDDriver) ConnectDevice(ctx context.Context, vol *loophole.Volume) (string, error) {
+func (n *NBDDriver) ConnectDevice(ctx context.Context, vol loophole.Volume) (string, error) {
 	return n.nbd.Connect(ctx, vol)
 }
 
@@ -96,5 +96,5 @@ func (n *NBDDriver) DevicePath(volumeName string) string {
 }
 
 func (n *NBDDriver) FS(h nbdMount) (FS, error) {
-	return newOSFS(h.mountpoint), nil
+	return NewOSFS(h.mountpoint), nil
 }

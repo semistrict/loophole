@@ -1,6 +1,11 @@
 //go:build linux
 
 // Package ext4 provides helpers for mounting ext4 filesystems on loop devices.
+
+// XXX: we should really consider just merging this with linuxutil I don't really know what the difference is
+
+// XXX: in any case I think we should start moving these kinds of packages into internal/
+
 package ext4
 
 import (
@@ -23,8 +28,10 @@ const mkfsFeatures = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
 	"dir_nlink,extra_isize,metadata_csum"
 
 // Format creates an ext4 filesystem on a block device via a loop device.
-func Format(ctx context.Context, devicePath string) error {
-	dev, err := linuxutil.LoopAttach(devicePath)
+// optimalIOSize hints the preferred I/O size to the loop device's block queue
+// (0 = no hint).
+func Format(ctx context.Context, devicePath string, optimalIOSize int) error {
+	dev, err := linuxutil.LoopAttach(devicePath, optimalIOSize)
 	if err != nil {
 		return fmt.Errorf("loop attach: %w", err)
 	}
@@ -51,9 +58,11 @@ func FormatDirect(ctx context.Context, blockDev string) error {
 
 // Mount attaches a loop device to devicePath and mounts ext4 at mountpoint.
 // The device must already contain an ext4 filesystem.
+// optimalIOSize hints the preferred I/O size to the loop device's block queue
+// (0 = no hint).
 // Returns the loop device path so the caller can track it for cleanup.
-func Mount(ctx context.Context, devicePath, mountpoint string) (loopDevice string, err error) {
-	dev, err := linuxutil.LoopAttach(devicePath)
+func Mount(ctx context.Context, devicePath, mountpoint string, optimalIOSize int) (loopDevice string, err error) {
+	dev, err := linuxutil.LoopAttach(devicePath, optimalIOSize)
 	if err != nil {
 		return "", fmt.Errorf("loop attach: %w", err)
 	}
@@ -65,7 +74,7 @@ func Mount(ctx context.Context, devicePath, mountpoint string) (loopDevice strin
 		return "", err
 	}
 
-	if err := linuxutil.Mount(dev.Path, mountpoint, "ext4"); err != nil {
+	if err := linuxutil.Mount(linuxutil.MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true}); err != nil {
 		if derr := dev.Detach(); derr != nil {
 			slog.Warn("loop detach failed", "error", derr)
 		}
@@ -77,9 +86,11 @@ func Mount(ctx context.Context, devicePath, mountpoint string) (loopDevice strin
 // LosetupDetach detaches a loop device by path.
 func LosetupDetach(ctx context.Context, loopDev string) {
 	if err := linuxutil.LoopDetachPath(loopDev); err != nil {
-		fmt.Fprintf(os.Stderr, "loop detach %s: %v\n", loopDev, err)
+		fmt.Fprintf(os.Stderr, "loop detach %s: %v\n", loopDev, err) // XXX: slog
 	}
 }
+
+// XXX: can we actually statically enforce the use of slog in this codebase and not fmt.Fprintf?
 
 // MountDirect mounts ext4 directly on a block device (e.g. /dev/nbdN)
 // without loop device setup. The device must already contain an ext4 filesystem.
@@ -87,7 +98,7 @@ func MountDirect(ctx context.Context, blockDev, mountpoint string) error {
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
 		return err
 	}
-	return linuxutil.Mount(blockDev, mountpoint, "ext4")
+	return linuxutil.Mount(linuxutil.MountOpts{Source: blockDev, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true})
 }
 
 // UnmountDirect unmounts a filesystem without loop device cleanup.
@@ -99,9 +110,12 @@ func UnmountDirect(ctx context.Context, mountpoint string) error {
 func Unmount(ctx context.Context, mountpoint string) error {
 	loopDev, _ := linuxutil.FindMount(mountpoint)
 
+	slog.Info("ext4: unmount start", "mountpoint", mountpoint, "loopDev", loopDev)
 	if err := linuxutil.Unmount(mountpoint); err != nil {
+		slog.Info("ext4: unmount failed", "mountpoint", mountpoint, "error", err)
 		return err
 	}
+	slog.Info("ext4: unmount done", "mountpoint", mountpoint)
 
 	if loopDev != "" {
 		LosetupDetach(ctx, loopDev)

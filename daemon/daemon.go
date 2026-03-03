@@ -1,42 +1,51 @@
-//go:build linux
-
 // Package daemon implements the loophole HTTP/UDS API.
 // It is a thin remoting layer over fsbackend.Backend.
 package daemon
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/fatih/color"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
-	"github.com/semistrict/loophole/fuseblockdev"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/nbdserve"
 )
 
 // Daemon serves the loophole HTTP API over a Unix socket.
 type Daemon struct {
 	inst    loophole.Instance
 	dir     loophole.Dir
-	mode    loophole.Mode
 	backend fsbackend.Service
 	ln      net.Listener
 	log     *slog.Logger
+
+	nbdSock string       // set once NBD server is started
+	nbdLn   net.Listener // NBD listener, closed on shutdown
 }
 
 // Start initializes everything and returns a Daemon ready to Serve.
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug, foreground bool, socketMode os.FileMode, mode loophole.Mode, s3opts *loophole.S3Options) (*Daemon, error) {
-	logPath := dir.Log(inst)
+func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foreground bool, socketMode os.FileMode) (*Daemon, error) {
+	if inst.Mode == "" {
+		inst.Mode = loophole.DefaultMode()
+	}
+	logPath := dir.Log(inst.ProfileName)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -45,9 +54,16 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 		return nil, fmt.Errorf("open log file %s: %w", logPath, err)
 	}
 
-	level := slog.LevelInfo
-	if debug {
+	var level slog.Level
+	switch strings.ToLower(inst.LogLevel) {
+	case "debug":
 		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	default:
+		level = slog.LevelInfo
 	}
 	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: level})
 	var handler slog.Handler = fileHandler
@@ -55,41 +71,21 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 		handler = multiHandler{fileHandler, &consoleHandler{level: level}}
 	}
 	logger := slog.New(handler)
-	logger.Info("starting daemon", "s3", inst.S3URL(), "log", logPath)
+	logger.Info("starting daemon", "s3", inst.URL(), "log", logPath)
 
 	tuneProcess(logger)
 
-	vm, err := loophole.SetupVolumeManager(ctx, inst, dir, s3opts, logger)
+	vm, err := loophole.SetupVolumeManager(ctx, inst, dir, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	if mode == "" {
-		mode = loophole.DefaultMode()
+	backend, err := createBackend(vm, inst, dir)
+	if err != nil {
+		return nil, err
 	}
 
-	var backend fsbackend.Service
-	switch mode {
-	case loophole.ModeNBD:
-		backend, err = fsbackend.NewNBD(vm, nil)
-		if err != nil {
-			return nil, fmt.Errorf("start NBD backend: %w", err)
-		}
-	case loophole.ModeTestNBDTCP:
-		backend, err = fsbackend.NewNBDTCP(vm, nil)
-		if err != nil {
-			return nil, fmt.Errorf("start NBD TCP backend: %w", err)
-		}
-	case loophole.ModeLwext4FUSE:
-		backend = fsbackend.NewLwext4FUSE(vm, nil)
-	default:
-		backend, err = fsbackend.NewFUSE(dir.Fuse(inst), vm, &fuseblockdev.Options{Debug: debug})
-		if err != nil {
-			return nil, fmt.Errorf("start FUSE backend: %w", err)
-		}
-	}
-
-	sockPath := dir.Socket(inst)
+	sockPath := dir.Socket(inst.ProfileName)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -110,14 +106,22 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, debug,
 		}
 	}
 
-	return &Daemon{
+	d := &Daemon{
 		inst:    inst,
 		dir:     dir,
-		mode:    mode,
 		backend: backend,
 		ln:      ln,
 		log:     logger,
-	}, nil
+	}
+
+	// Auto-start NBD server if configured.
+	if inst.NBDSocket != "" {
+		if err := d.startNBD(inst.NBDSocket); err != nil {
+			return nil, fmt.Errorf("start NBD server: %w", err)
+		}
+	}
+
+	return d, nil
 }
 
 // Serve blocks, handling HTTP requests until the context is cancelled.
@@ -125,15 +129,29 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	srv := &http.Server{Handler: d.mux(stop)}
+	srv := &http.Server{Handler: d.instrument(d.mux(stop))}
 	go func() {
 		<-ctx.Done()
+		// Close NBD and HTTP sockets immediately so a new daemon
+		// can bind them without racing against our shutdown cleanup.
+		if d.nbdLn != nil {
+			if err := d.nbdLn.Close(); err != nil {
+				d.log.Warn("NBD listener close error", "error", err)
+			}
+			if err := os.Remove(d.nbdSock); err != nil {
+				d.log.Warn("remove NBD socket", "path", d.nbdSock, "error", err)
+			}
+		}
+		sockPath := d.dir.Socket(d.inst.ProfileName)
+		if err := os.Remove(sockPath); err != nil {
+			d.log.Warn("remove socket", "path", sockPath, "error", err)
+		}
 		if err := srv.Close(); err != nil {
 			d.log.Warn("http server close error", "error", err)
 		}
 	}()
 
-	d.log.Info("daemon ready", "mode", d.mode, "socket", d.dir.Socket(d.inst))
+	d.log.Info("daemon ready", "mode", d.inst.Mode, "socket", d.dir.Socket(d.inst.ProfileName))
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil
@@ -142,10 +160,6 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	d.log.Info("shutting down")
 	if err := d.backend.Close(context.Background()); err != nil {
 		d.log.Warn("backend close error", "error", err)
-	}
-	sockPath := d.dir.Socket(d.inst)
-	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		d.log.Warn("remove socket failed", "path", sockPath, "error", err)
 	}
 	d.log.Info("daemon stopped")
 	return err
@@ -160,10 +174,12 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 
 	mux.HandleFunc("POST /create", d.handleCreate)
+	mux.HandleFunc("POST /delete", d.handleDelete)
 	mux.HandleFunc("POST /mount", d.handleMount)
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
 	mux.HandleFunc("POST /clone", d.handleClone)
+	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
 		d.log.Info("shutdown requested")
 		writeJSON(w, map[string]string{"status": "ok"})
@@ -173,13 +189,78 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)
 	mux.Handle("GET /metrics", metrics.Handler())
+	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
+	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
 
 	return mux
+}
+
+// instrument wraps a handler with logging and metrics.
+func (d *Daemon) instrument(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip endpoints that hijack the connection or don't need metrics.
+		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		start := time.Now()
+		rw := &statusRecorder{ResponseWriter: w, code: 200} // XXX - there is a proper way to wrap this so that e.g. Hijacker etc still work
+		next.ServeHTTP(rw, r)
+		dur := time.Since(start)
+
+		code := strconv.Itoa(rw.code)
+		metrics.HTTPRequests.WithLabelValues(r.Method, r.URL.Path, code).Inc()
+		metrics.HTTPDuration.WithLabelValues(r.Method, r.URL.Path).Observe(dur.Seconds())
+
+		level := slog.LevelInfo
+		if rw.code >= 500 {
+			level = slog.LevelWarn
+		}
+
+		d.log.Log(r.Context(), level, "http", "method", r.Method, "path", r.URL.Path, "status", rw.code, "dur", dur)
+	})
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support Hijack")
 }
 
 // --- High-level handlers ---
 
 func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
+	var req client.CreateParams
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("create", "volume", req.Volume, "size", req.Size, "no_format", req.NoFormat)
+	if err := d.backend.Create(r.Context(), req); err != nil {
+		d.log.Error("create failed", "err", err)
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -188,9 +269,9 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("create", "volume", req.Volume)
-	if err := d.backend.Create(r.Context(), req.Volume); err != nil {
-		d.log.Error("create failed", "err", err)
+	d.log.Info("delete", "volume", req.Volume)
+	if err := d.backend.VM().DeleteVolume(r.Context(), req.Volume); err != nil {
+		d.log.Error("delete failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -207,15 +288,21 @@ func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("mount", "volume", req.Volume, "mountpoint", req.Mountpoint)
-	if err := d.backend.Mount(r.Context(), req.Volume, req.Mountpoint); err != nil {
+	mountpoint := req.Mountpoint
+	if mountpoint == "" {
+		mountpoint = req.Volume
+	}
+	d.log.Info("mount", "volume", req.Volume, "mountpoint", mountpoint)
+	if err := d.backend.Mount(r.Context(), req.Volume, mountpoint); err != nil {
 		d.log.Error("mount failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
 
-	d.writeSymlink(req.Mountpoint)
-	writeJSON(w, map[string]string{"status": "ok", "mountpoint": req.Mountpoint})
+	if req.Mountpoint != "" {
+		d.writeSymlink(mountpoint)
+	}
+	writeJSON(w, map[string]string{"status": "ok", "mountpoint": mountpoint})
 }
 
 func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
@@ -357,14 +444,45 @@ func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"device": device})
 }
 
+// --- NBD ---
+
+func (d *Daemon) startNBD(sockPath string) error {
+	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
+		return fmt.Errorf("create NBD dir: %w", err)
+	}
+
+	// Remove any leftover socket from a previous daemon.
+	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+		d.log.Warn("remove stale NBD socket", "path", sockPath, "error", err)
+	}
+
+	srv := nbdserve.NewServer(d.backend.VM())
+	ln, err := net.Listen("unix", sockPath)
+	if err != nil {
+		return fmt.Errorf("listen NBD socket %s: %w", sockPath, err)
+	}
+
+	d.nbdSock = sockPath
+	d.nbdLn = ln
+	d.log.Info("NBD server started", "socket", sockPath)
+
+	go func() {
+		if err := srv.ServeListener(ln); err != nil {
+			d.log.Error("NBD server error", "error", err)
+		}
+	}()
+
+	return nil
+}
+
 // --- Status ---
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
-		"s3":      d.inst.S3URL(),
-		"mode":    string(d.mode),
-		"socket":  d.dir.Socket(d.inst),
-		"log":     d.dir.Log(d.inst),
+		"s3":      d.inst.URL(),
+		"mode":    string(d.inst.Mode),
+		"socket":  d.dir.Socket(d.inst.ProfileName),
+		"log":     d.dir.Log(d.inst.ProfileName),
 		"volumes": d.backend.VM().Volumes(),
 		"mounts":  d.backend.Mounts(),
 	})
@@ -396,6 +514,7 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 func writeError(w http.ResponseWriter, code int, err error) {
+	slog.Warn("returning http error", "code", code, "err", err)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); encErr != nil {
@@ -412,7 +531,7 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 	if err := os.Remove(symPath); err != nil && !os.IsNotExist(err) {
 		d.log.Warn("remove old symlink failed", "path", symPath, "error", err)
 	}
-	if err := os.Symlink(d.dir.Socket(d.inst), symPath); err != nil {
+	if err := os.Symlink(d.dir.Socket(d.inst.ProfileName), symPath); err != nil {
 		d.log.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}
 }
@@ -427,6 +546,7 @@ func (h *consoleHandler) Enabled(_ context.Context, l slog.Level) bool {
 	return l >= h.level
 }
 
+// XXX - move this logger stuff to a different file
 var (
 	colorTime  = color.New(color.FgHiBlack)
 	colorDebug = color.New(color.FgHiBlack)

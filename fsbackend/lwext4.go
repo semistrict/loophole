@@ -8,8 +8,6 @@ import (
 	"github.com/semistrict/loophole/lwext4"
 )
 
-const defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
-
 // lwext4Mount is the per-mount handle for Lwext4Driver.
 type lwext4Mount struct {
 	fs *lwext4.FS
@@ -17,40 +15,25 @@ type lwext4Mount struct {
 
 // Lwext4Driver implements Driver using an in-process lwext4 filesystem.
 // Mountpoints are logical keys — no kernel mount occurs.
-type Lwext4Driver struct {
-	volumeSize int64
-}
+type Lwext4Driver struct{}
 
 var _ Driver[lwext4Mount] = (*Lwext4Driver)(nil)
 
-// Lwext4Options configures the in-process lwext4 backend.
-type Lwext4Options struct {
-	VolumeSize int64 // apparent volume size; default 100 GB
-}
-
 // NewLwext4 creates a Service backed by in-process lwext4.
-func NewLwext4(vm *loophole.VolumeManager, opts *Lwext4Options) Service {
-	volumeSize := int64(defaultVolumeSize)
-	if opts != nil && opts.VolumeSize > 0 {
-		volumeSize = opts.VolumeSize
-	}
-	return New[lwext4Mount](&Lwext4Driver{
-		volumeSize: volumeSize,
-	}, vm)
+func NewLwext4(vm loophole.VolumeManager) Service {
+	return New[lwext4Mount](&Lwext4Driver{}, vm)
 }
 
-func (l *Lwext4Driver) Format(ctx context.Context, vol *loophole.Volume) error {
-	vio := vol.IO(ctx)
-	fs, err := lwext4.Format(vio, l.volumeSize, nil)
+func (l *Lwext4Driver) Format(ctx context.Context, vol loophole.Volume) error {
+	fs, err := lwext4.Format(vol, int64(vol.Size()), nil)
 	if err != nil {
 		return fmt.Errorf("lwext4: format: %w", err)
 	}
 	return fs.Close()
 }
 
-func (l *Lwext4Driver) Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (lwext4Mount, error) {
-	vio := vol.IO(ctx)
-	fs, err := lwext4.Mount(vio, l.volumeSize)
+func (l *Lwext4Driver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (lwext4Mount, error) {
+	fs, err := lwext4.Mount(vol, int64(vol.Size()))
 	if err != nil {
 		return lwext4Mount{}, fmt.Errorf("lwext4: mount: %w", err)
 	}

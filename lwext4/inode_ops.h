@@ -101,4 +101,30 @@ struct ext4_file;
 int inode_file_open(struct ext4_mountpoint *mp, uint32_t ino,
                     int flags, struct ext4_file *out);
 
+// Unlink a name from parent directory. Decrements link count.
+// If link count reaches 0, adds the inode to the on-disk orphan list
+// instead of freeing it immediately. Returns the child inode number
+// in *child_ino so the caller can track open handles.
+int inode_unlink_orphan(struct ext4_mountpoint *mp, uint32_t parent_ino,
+                        const char *name, uint32_t name_len,
+                        uint32_t *child_ino);
+
+// Free an orphaned inode: truncate data, free inode, remove from orphan list.
+// Call this when the last open file handle for an orphaned inode is closed.
+int inode_free_orphan(struct ext4_mountpoint *mp, uint32_t ino);
+
+// Recover all orphaned inodes: walk the on-disk orphan list and free each
+// inode. Call this once at mount time to clean up after crashes.
+int inode_orphan_recover(struct ext4_mountpoint *mp);
+
+// Read the head of the on-disk orphan list (for testing/debugging).
+uint32_t inode_orphan_head(struct ext4_mountpoint *mp);
+
+// Add an inode to the on-disk orphan list (prepend to superblock's
+// last_orphan linked list using inode deletion_time as next pointer).
+int inode_orphan_add(struct ext4_mountpoint *mp, uint32_t ino);
+
+// Remove an inode from the on-disk orphan list.
+int inode_orphan_remove(struct ext4_mountpoint *mp, uint32_t ino);
+
 #endif // LOOPHOLE_INODE_OPS_H

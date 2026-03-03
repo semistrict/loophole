@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -6,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/lwext4"
 )
 
@@ -19,19 +23,17 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 	ctx := t.Context()
 
 	inst := uniqueInstance(t)
-	store, err := loophole.NewS3Store(ctx, inst, defaultS3Options())
+	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 	_ = loophole.FormatSystem(ctx, store, 4*1024*1024)
 
-	vm, err := loophole.NewVolumeManager(ctx, store, t.TempDir(), 20, 200)
-	require.NoError(t, err)
+	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
 	defer vm.Close(ctx)
 
-	vol, err := vm.NewVolume(ctx, "big")
+	vol, err := vm.NewVolume(ctx, "big", 0)
 	require.NoError(t, err)
 
-	vio := vol.IO(ctx)
-	fs, err := lwext4.Format(vio, daemonVolumeSize, nil)
+	fs, err := lwext4.Format(vol, daemonVolumeSize, nil)
 	require.NoError(t, err, "lwext4.Format must succeed at 100GB")
 	defer fs.Close()
 
@@ -62,13 +64,13 @@ func TestE2E_Lwext4CanMountCurrentFormat(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "compat")
 
-	require.NoError(t, b.Create(ctx, "compat"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "compat"}))
 	require.NoError(t, b.Mount(ctx, "compat", mp))
 
 	tfs := newTestFS(t, b, mp)
 	tfs.WriteFile(t, "hello.txt", []byte("lwext4 compat test\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, mp)
 	}
 
 	require.NoError(t, b.Unmount(ctx, mp))
@@ -77,8 +79,7 @@ func TestE2E_Lwext4CanMountCurrentFormat(t *testing.T) {
 	vol, err := b.VM().OpenVolume(ctx, "compat")
 	require.NoError(t, err)
 
-	vio := vol.IO(ctx)
-	fs, err := lwext4.Mount(vio, defaultVolumeSize)
+	fs, err := lwext4.Mount(vol, defaultVolumeSize)
 	require.NoError(t, err, "lwext4 must be able to mount a volume created by %s mode", mode())
 	defer fs.Close()
 

@@ -23,29 +23,29 @@ func DefaultDir() Dir {
 	return Dir(filepath.Join(home, ".loophole"))
 }
 
-// Socket returns the Unix socket path for the given instance.
-func (d Dir) Socket(inst Instance) string {
-	return filepath.Join(string(d), inst.Hash()+".sock")
+// Socket returns the Unix socket path for the given profile.
+func (d Dir) Socket(profile string) string {
+	return filepath.Join(string(d), profile+".sock")
 }
 
-// Fuse returns the internal FUSE mount directory for the given instance.
-func (d Dir) Fuse(inst Instance) string {
-	return filepath.Join(string(d), "fuse", inst.Hash())
+// Fuse returns the internal FUSE mount directory for the given profile.
+func (d Dir) Fuse(profile string) string {
+	return filepath.Join(string(d), "fuse", profile)
 }
 
 // NBD returns the directory for per-volume NBD Unix sockets.
-func (d Dir) NBD(inst Instance) string {
-	return filepath.Join(string(d), "nbd", inst.Hash())
+func (d Dir) NBD(profile string) string {
+	return filepath.Join(string(d), "nbd", profile)
 }
 
-// Log returns the daemon log file path for the given instance.
-func (d Dir) Log(inst Instance) string {
-	return filepath.Join(string(d), inst.Hash()+".log")
+// Log returns the daemon log file path for the given profile.
+func (d Dir) Log(profile string) string {
+	return filepath.Join(string(d), profile+".log")
 }
 
-// Cache returns the block cache directory for the given instance.
-func (d Dir) Cache(inst Instance) string {
-	return filepath.Join(string(d), "cache", inst.Hash())
+// Cache returns the block cache directory for the given profile.
+func (d Dir) Cache(profile string) string {
+	return filepath.Join(string(d), "cache", profile)
 }
 
 // MountSymlink returns the symlink path that maps a user mountpoint back to
@@ -84,6 +84,6 @@ func (d Dir) FindSocket() (string, error) {
 	case 1:
 		return live[0], nil
 	default:
-		return "", fmt.Errorf("multiple daemons running (%d); specify an S3 URL to select one", len(live))
+		return "", fmt.Errorf("multiple daemons running (%d); specify a profile with -p", len(live))
 	}
 }

@@ -25,14 +25,6 @@ type S3Store struct {
 	prefix string // includes trailing slash if non-empty
 }
 
-// S3Options configures the S3 client. Zero values fall back to
-// the corresponding environment variable, then to a built-in default.
-type S3Options struct {
-	AccessKey string // AWS_ACCESS_KEY_ID
-	SecretKey string // AWS_SECRET_ACCESS_KEY
-	Region    string // AWS_REGION (default "us-east-1")
-}
-
 // optOrEnv returns val if non-empty, otherwise falls back to the
 // environment variable, then to fallback.
 func optOrEnv(val, envKey, fallback string) string {
@@ -46,24 +38,22 @@ func optOrEnv(val, envKey, fallback string) string {
 }
 
 // NewS3Store creates an S3Store from an Instance.
-// If opts is nil, credentials come from environment variables.
-// The endpoint from the Instance is used; opts.Endpoint is ignored.
-func NewS3Store(ctx context.Context, inst Instance, opts *S3Options) (*S3Store, error) {
-	if opts == nil {
-		opts = &S3Options{}
-	}
-	endpoint := inst.Endpoint
-	if endpoint == "" {
-		endpoint = optOrEnv("", "S3_ENDPOINT", "")
-	}
-	accessKey := optOrEnv(opts.AccessKey, "AWS_ACCESS_KEY_ID", "")
-	secretKey := optOrEnv(opts.SecretKey, "AWS_SECRET_ACCESS_KEY", "")
-	region := optOrEnv(opts.Region, "AWS_REGION", "us-east-1")
+func NewS3Store(ctx context.Context, inst Instance) (*S3Store, error) {
+	endpoint := optOrEnv(inst.Endpoint, "S3_ENDPOINT", "")
+	accessKey := optOrEnv(inst.AccessKey, "AWS_ACCESS_KEY_ID", "")
+	secretKey := optOrEnv(inst.SecretKey, "AWS_SECRET_ACCESS_KEY", "")
+	region := optOrEnv(inst.Region, "AWS_REGION", "")
 
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion(region),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")),
-	)
+	var cfgOpts []func(*config.LoadOptions) error
+	if region != "" {
+		cfgOpts = append(cfgOpts, config.WithRegion(region))
+	}
+	if accessKey != "" || secretKey != "" {
+		cfgOpts = append(cfgOpts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")))
+	}
+
+	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)
 	}
@@ -114,18 +104,43 @@ func (s *S3Store) At(path string) ObjectStore {
 	return &S3Store{client: s.client, bucket: s.bucket, prefix: p}
 }
 
-func (s *S3Store) Get(ctx context.Context, key string, offset int64) (io.ReadCloser, string, error) {
+func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
 	done := metrics.S3Op("get")
-	input := &s3.GetObjectInput{
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.fullKey(key)),
-	}
-	if offset > 0 {
-		input.Range = aws.String(fmt.Sprintf("bytes=%d-", offset))
-	}
-	out, err := s.client.GetObject(ctx, input)
+	})
 	done(err)
 	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+		}
+		return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
+	}
+	if out.ContentLength != nil {
+		metrics.S3Transfer("get", "rx", *out.ContentLength)
+	}
+	etag := ""
+	if out.ETag != nil {
+		etag = *out.ETag
+	}
+	return out.Body, etag, nil
+}
+
+func (s *S3Store) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
+	done := metrics.S3Op("get")
+	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.fullKey(key)),
+		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
+	})
+	done(err)
+	if err != nil {
+		var nsk *types.NoSuchKey
+		if errors.As(err, &nsk) {
+			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+		}
 		return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
 	}
 	if out.ContentLength != nil {

@@ -7,12 +7,12 @@ import (
 	"testing"
 )
 
-func newTestVM(t *testing.T, store *MemStore) *VolumeManager {
+func newTestVM(t *testing.T, store *MemStore) *legacyVolumeManager {
 	t.Helper()
 	_ = FormatSystem(t.Context(), store, 64)
-	vm, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
-	if err != nil {
-		t.Fatalf("NewVolumeManager: %v", err)
+	vm := &legacyVolumeManager{Store: store, CacheDir: t.TempDir()}
+	if err := vm.Connect(t.Context()); err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
 	return vm
 }

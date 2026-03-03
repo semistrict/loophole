@@ -28,10 +28,14 @@ const (
 // Fault describes an injected fault for a MemStore operation.
 // Hook, Delay, and Err are applied in order: Hook runs first,
 // then Delay sleeps, then Err is returned (if non-nil).
+// PostErr is different: the operation executes normally, then PostErr
+// is returned instead of nil. This simulates "phantom" operations where
+// the data lands in the store but the caller sees an error.
 type Fault struct {
-	Err   error         // return this error
-	Delay time.Duration // sleep before executing (works with synctest)
-	Hook  func()        // called before delay/error; use to synchronize with test goroutines
+	Err     error         // return this error (operation does NOT execute)
+	PostErr error         // return this error AFTER the operation succeeds
+	Delay   time.Duration // sleep before executing (works with synctest)
+	Hook    func()        // called before delay/error; use to synchronize with test goroutines
 }
 
 // faultKey identifies a fault rule: an operation type + optional key pattern.
@@ -48,7 +52,9 @@ type memStoreShared struct {
 	faultMu sync.RWMutex
 	faults  map[faultKey]Fault
 
-	counts [7]atomic.Int64 // indexed by OpType
+	counts  [7]atomic.Int64 // indexed by OpType
+	bytesRx atomic.Int64    // bytes returned by Get/GetRange
+	bytesTx atomic.Int64    // bytes written by Put*/PutReader
 }
 
 // MemStore is an in-memory ObjectStore, useful for tests and embedded use.
@@ -95,11 +101,19 @@ func (m *MemStore) Count(op OpType) int64 {
 	return m.shared.counts[op].Load()
 }
 
-// ResetCounts zeros all operation counters.
+// BytesRx returns total bytes returned by Get/GetRange.
+func (m *MemStore) BytesRx() int64 { return m.shared.bytesRx.Load() }
+
+// BytesTx returns total bytes written by Put operations.
+func (m *MemStore) BytesTx() int64 { return m.shared.bytesTx.Load() }
+
+// ResetCounts zeros all operation and byte counters.
 func (m *MemStore) ResetCounts() {
 	for i := range m.shared.counts {
 		m.shared.counts[i].Store(0)
 	}
+	m.shared.bytesRx.Store(0)
+	m.shared.bytesTx.Store(0)
 }
 
 // checkFault looks up and applies any matching fault. It checks for a
@@ -127,6 +141,21 @@ func (m *MemStore) checkFault(op OpType, fullKey string) error {
 	return f.Err
 }
 
+// checkPostFault returns a PostErr if one is set for this operation (error
+// returned AFTER the operation succeeds — "phantom" fault).
+func (m *MemStore) checkPostFault(op OpType, fullKey string) error {
+	m.shared.faultMu.RLock()
+	f, ok := m.shared.faults[faultKey{op: op, key: fullKey}]
+	if !ok {
+		f, ok = m.shared.faults[faultKey{op: op}]
+	}
+	m.shared.faultMu.RUnlock()
+	if ok && f.PostErr != nil {
+		return f.PostErr
+	}
+	return nil
+}
+
 func (m *MemStore) count(op OpType) {
 	m.shared.counts[op].Add(1)
 }
@@ -149,7 +178,7 @@ func (m *MemStore) At(path string) ObjectStore {
 	}
 }
 
-func (m *MemStore) Get(_ context.Context, key string, offset int64) (io.ReadCloser, string, error) {
+func (m *MemStore) Get(_ context.Context, key string) (io.ReadCloser, string, error) {
 	fk := m.fullKey(key)
 	m.count(OpGet)
 	if err := m.checkFault(OpGet, fk); err != nil {
@@ -160,17 +189,11 @@ func (m *MemStore) Get(_ context.Context, key string, offset int64) (io.ReadClos
 	data, ok := m.shared.objects[fk]
 	m.shared.mu.RUnlock()
 	if !ok {
-		return nil, "", fmt.Errorf("not found: %s", fk)
-	}
-	if offset > 0 {
-		if int(offset) >= len(data) {
-			data = nil
-		} else {
-			data = data[offset:]
-		}
+		return nil, "", fmt.Errorf("%s: %w", fk, ErrNotFound)
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
+	m.shared.bytesRx.Add(int64(len(cp)))
 	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
 	return io.NopCloser(bytes.NewReader(cp)), etag, nil
 }
@@ -226,8 +249,11 @@ func (m *MemStore) PutReader(_ context.Context, key string, r io.Reader) error {
 		return err
 	}
 	m.shared.mu.Lock()
-	defer m.shared.mu.Unlock()
 	m.shared.objects[fk] = data
+	m.shared.mu.Unlock()
+	if err := m.checkPostFault(OpPutReader, fk); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -239,13 +265,17 @@ func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte) (b
 	}
 
 	m.shared.mu.Lock()
-	defer m.shared.mu.Unlock()
 	if _, ok := m.shared.objects[fk]; ok {
+		m.shared.mu.Unlock()
 		return false, nil
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.shared.objects[fk] = cp
+	m.shared.mu.Unlock()
+	if err := m.checkPostFault(OpPutIfNotExists, fk); err != nil {
+		return false, err
+	}
 	return true, nil
 }
 
@@ -286,6 +316,33 @@ func (m *MemStore) ListKeys(_ context.Context, prefix string) ([]ObjectInfo, err
 		result = append(result, ObjectInfo{Key: rel, Size: int64(len(v))})
 	}
 	return result, nil
+}
+
+func (m *MemStore) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
+	fk := m.fullKey(key)
+	m.count(OpGet)
+	if err := m.checkFault(OpGet, fk); err != nil {
+		return nil, "", err
+	}
+
+	m.shared.mu.RLock()
+	data, ok := m.shared.objects[fk]
+	m.shared.mu.RUnlock()
+	if !ok {
+		return nil, "", fmt.Errorf("%s: %w", fk, ErrNotFound)
+	}
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
+	if int(offset) >= len(data) {
+		return io.NopCloser(bytes.NewReader(nil)), etag, nil
+	}
+	end := offset + length
+	if end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	cp := make([]byte, end-offset)
+	copy(cp, data[offset:end])
+	m.shared.bytesRx.Add(int64(len(cp)))
+	return io.NopCloser(bytes.NewReader(cp)), etag, nil
 }
 
 // GetObject returns raw bytes for a full key (not scoped). For test assertions.

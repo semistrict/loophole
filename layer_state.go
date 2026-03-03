@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +25,7 @@ type LayerState struct {
 
 // NewLayer fetches state.json, lists blocks for this layer and all
 // ancestors in parallel, and builds the block ownership map.
-func NewLayer(ctx context.Context, vm *VolumeManager, id string) (*Layer, error) {
+func NewLayer(ctx context.Context, vm *legacyVolumeManager, id string) (*Layer, error) {
 	t := metrics.NewTimer(metrics.LayerLoadDuration)
 	defer t.ObserveDuration()
 	base := vm.layers.At(id)
@@ -61,10 +62,17 @@ func NewLayer(ctx context.Context, vm *VolumeManager, id string) (*Layer, error)
 	}
 
 	ctx2, cancel := context.WithCancel(context.Background())
+	mutableDir := filepath.Join(vm.mutableDir, id)
+	if err := os.MkdirAll(mutableDir, 0o755); err != nil {
+		cancel()
+		return nil, fmt.Errorf("create mutable dir for %q: %w", id, err)
+	}
+
 	l := &Layer{
 		vm:            vm,
 		base:          base,
 		cache:         vm.cache,
+		mutableDir:    mutableDir,
 		id:            id,
 		refLayers:     state.RefLayers,
 		refBlockIndex: refBlockIndex,
@@ -73,7 +81,9 @@ func NewLayer(ctx context.Context, vm *VolumeManager, id string) (*Layer, error)
 		openBlocks:    make(map[BlockIdx]*os.File),
 		stopFlush:     cancel,
 		flushStopped:  make(chan struct{}),
+		flushTrigger:  make(chan struct{}, 1),
 	}
+	l.dirtyCond = sync.NewCond(&l.mu)
 	l.flushCond = sync.NewCond(&l.flushMu)
 	l.frozen.Store(state.FrozenAt != "")
 
@@ -140,6 +150,22 @@ func (l *Layer) Freeze(ctx context.Context) error {
 		return fmt.Errorf("write frozen state: %w", err)
 	}
 	l.frozen.Store(true)
+
+	// Close mutable file handles — no longer needed after freeze.
+	l.mu.Lock()
+	for _, f := range l.openBlocks {
+		if cerr := f.Close(); cerr != nil {
+			slog.Warn("close open block on freeze", "error", cerr)
+		}
+	}
+	l.openBlocks = nil
+	l.mu.Unlock()
+
+	// Move mutable cache to immutable — blocks are now truly immutable.
+	if err := l.cache.Adopt(l.id, l.mutableDir); err != nil {
+		slog.Warn("adopt mutable cache", "layer", l.id, "error", err)
+	}
+
 	return nil
 }
 
@@ -208,27 +234,26 @@ func (l *Layer) CreateChild(ctx context.Context, childID string) error {
 }
 
 func (l *Layer) Close(ctx context.Context) error {
-	if l.closed.Load() {
-		return nil
-	}
-	l.closed.Store(true)
-	l.stopFlush()
-	<-l.flushStopped
-	err := l.Flush(ctx)
+	var err error
+	l.closeOnce.Do(func() {
+		l.stopFlush()
+		<-l.flushStopped
+		err = l.Flush(ctx)
 
-	// Close all open mutable block file handles.
-	l.mu.Lock()
-	for _, f := range l.openBlocks {
-		if err := f.Close(); err != nil {
-			slog.Warn("close cached block file", "error", err)
+		// Close all open mutable block file handles.
+		l.mu.Lock()
+		for _, f := range l.openBlocks {
+			if cerr := f.Close(); cerr != nil {
+				slog.Warn("close cached block file", "error", cerr)
+			}
 		}
-	}
-	l.openBlocks = nil
-	l.mu.Unlock()
+		l.openBlocks = nil
+		l.mu.Unlock()
 
-	if unmountErr := l.Unmount(ctx); err == nil {
-		err = unmountErr
-	}
+		if unmountErr := l.Unmount(ctx); err == nil {
+			err = unmountErr
+		}
+	})
 	return err
 }
 

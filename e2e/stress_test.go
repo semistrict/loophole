@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/client"
 )
 
 // Stress tests are Linux-only: they need real ext4 mounts for fsx/fio.
@@ -18,7 +20,7 @@ func stressMount(t *testing.T, name string) string {
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, name)
-	require.NoError(t, b.Create(ctx, name))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
 	err := b.Mount(ctx, name, mp)
 	require.NoError(t, err)
 	return mp
@@ -86,7 +88,7 @@ func TestE2E_FioSequentialWriteVerify(t *testing.T) {
 		"--verify_fatal=1",
 		"--do_verify=0",
 	)
-	syncFS(t)
+	syncFS(t, mp)
 
 	// Verify phase.
 	runCmd(t, "fio",

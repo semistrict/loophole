@@ -57,52 +57,62 @@ loophole start s3://mybucket --nbd 127.0.0.1:10809
 This serves all volumes in the bucket as named NBD exports on `localhost:10809`.
 Each volume is accessible by name (e.g. `nbd://127.0.0.1:10809/myvm`).
 
-### 3. Prepare the VM volume (one-time setup on Linux)
+### 3. Prepare the VM volume
 
-The volume needs to be created and have a bootable OS installed. Do this on a
-Linux machine where loophole runs as a daemon:
+The volume is a bare ext4 filesystem (no partition table). We use a Docker image
+as the rootfs source — this avoids needing debootstrap or a separate Linux machine.
 
-```bash
-loophole start s3://mybucket
-loophole create myvm
-loophole mount myvm /mnt/myvm
+#### Build a Docker image with a kernel
 
-# Install a minimal Linux system (e.g. debootstrap, dnf --installroot, etc.)
-debootstrap bookworm /mnt/myvm
+Docker images don't include a kernel (containers share the host kernel), so we
+install one explicitly:
 
-# Install a kernel and configure the bootloader
-chroot /mnt/myvm apt-get install -y linux-image-arm64 grub-efi-arm64
-
-loophole unmount myvm
+```dockerfile
+# Dockerfile.vm
+FROM debian:bookworm
+RUN apt-get update && apt-get install -y \
+    linux-image-arm64 \
+    systemd-sysv \
+    && rm -rf /var/lib/apt/lists/*
 ```
 
-Alternatively, write a raw disk image directly to the block device:
+```bash
+docker build -f Dockerfile.vm -t loophole-vm .
+```
+
+#### Export the rootfs and extract the kernel
 
 ```bash
-loophole device connect myvm
-# Assuming /dev/nbd0:
-dd if=my-rootfs.raw of=/dev/nbd0 bs=4M status=progress
-loophole device disconnect myvm
+# Export the Docker image as a rootfs tarball
+docker create --name loophole-vm-tmp loophole-vm
+docker export loophole-vm-tmp -o rootfs.tar
+docker rm loophole-vm-tmp
+
+# Extract kernel and initrd to the macOS host
+tar xf rootfs.tar boot/vmlinuz-* boot/initrd.img-*
+cp boot/vmlinuz-* vmlinuz
+cp boot/initrd.img-* initrd.img
+```
+
+#### Write the rootfs into a loophole volume
+
+This step requires Linux (to mount the ext4 volume). Run it inside the Docker
+container from `docker-compose.yml`:
+
+```bash
+docker compose run --rm go bash -c '
+  loophole create myvm
+  loophole mount myvm /mnt/myvm
+  tar xf /app/rootfs.tar -C /mnt/myvm
+  sync
+  loophole unmount myvm
+'
 ```
 
 ### 4. Start the VM with vfkit
 
-#### Option A: EFI boot (recommended)
-
-If the volume has a bootable EFI partition:
-
-```bash
-vfkit \
-  --cpus 4 --memory 4096 \
-  --bootloader efi,variable-store=efi-vars,create \
-  --device nbd,uri=nbd://127.0.0.1:10809/myvm,deviceId=root \
-  --device virtio-net,nat \
-  --device virtio-serial,stdio
-```
-
-#### Option B: Direct kernel boot
-
-If you have a kernel and initrd extracted from the guest:
+Direct kernel boot — the kernel and initrd live on the macOS host, the root
+filesystem is the loophole volume served over NBD:
 
 ```bash
 vfkit \

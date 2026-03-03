@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strconv"
 	"sync"
 
 	"github.com/google/uuid"
@@ -23,30 +25,48 @@ type SystemState struct {
 	BlockSize uint64 `json:"block_size"`
 }
 
-type volumeRef struct {
-	LayerID string `json:"layer_id"`
+type volumeRef struct { // XXX: volumeRef is a weird name for this, maybe volumeInfo ?
+	LayerID string `json:"layer_id"`       // XXX: rename this to topLayer
+	Size    string `json:"size,omitempty"` // volume size in bytes as string; empty = default (100 GB)
 }
 
 // VolumeManager creates and tracks open volumes.
-type VolumeManager struct {
-	id    string      // unique instance ID: "hostname:pid:uuid"
-	base  ObjectStore // root of the bucket/prefix
+// Set public fields before calling Connect.
+type legacyVolumeManager struct {
+	Store          ObjectStore // root of the bucket/prefix
+	CacheDir       string
+	MaxUploads     int // default 20
+	MaxDownloads   int // default 200
+	MaxDirtyBlocks int // default 100; global cap on dirty blocks across all layers
+
+	id    string
 	lease *LeaseManager
 
-	layers     ObjectStore // base.At("layers")
-	volumeRefs ObjectStore // base.At("volumes")
-	cache      *BlockCache
-	blockSize  uint64
+	layers          ObjectStore // Store.At("layers")
+	volumeRefs      ObjectStore // Store.At("volumes")
+	cache           *BlockCache
+	BlockDownloader        // XXX: do not embed like this, make unexported and do bd blockDownloader
+	mutableDir      string // per-process mutable block files, wiped on startup
+	blockSize       uint64
 
 	uploadSem *semaphore.Weighted
-	flushPool sync.Pool // pool of []byte buffers (blockSize each) for flush snapshots
+	flushPool sync.Pool // XXX: what are the elements? extract a wrapper struct here to make it clear
 
-	openLayers SyncMap[string, *Layer]
-	volumes    SyncMap[string, *Volume]
+	openLayers SyncMap[string, *Layer] // XXX: unclear to me why we need to track layers independently of volumes
+	volumes    SyncMap[string, *legacyVolume]
+}
+
+// NewLegacyVolumeManager creates and connects a legacy VolumeManager.
+func NewLegacyVolumeManager(ctx context.Context, store ObjectStore, cacheDir string) (VolumeManager, error) {
+	vm := &legacyVolumeManager{Store: store, CacheDir: cacheDir}
+	if err := vm.Connect(ctx); err != nil {
+		return nil, err
+	}
+	return vm, nil
 }
 
 // FormatSystem writes the root state.json with the system-wide block size.
-// Must be called once before NewVolumeManager on a fresh store.
+// Must be called once before VolumeManager.Connect on a fresh store.
 func FormatSystem(ctx context.Context, base ObjectStore, blockSize uint64) error {
 	state := SystemState{BlockSize: blockSize}
 	data, err := json.Marshal(state)
@@ -63,44 +83,64 @@ func FormatSystem(ctx context.Context, base ObjectStore, blockSize uint64) error
 	return nil
 }
 
-// NewVolumeManager reads the root state.json and initializes the system.
-func NewVolumeManager(ctx context.Context, base ObjectStore, cacheDir string, maxUploads, maxDownloads int) (*VolumeManager, error) {
-	state, _, err := ReadJSON[SystemState](ctx, base, "state.json")
-	if err != nil {
-		return nil, fmt.Errorf("read system state: %w (has FormatSystem been called?)", err)
+// Connect reads the root state.json and initializes the system.
+// Zero-valued public fields are replaced with defaults.
+func (vm *legacyVolumeManager) Connect(ctx context.Context) error {
+	if vm.MaxUploads == 0 {
+		vm.MaxUploads = DefaultMaxUploads
+	}
+	if vm.MaxDownloads == 0 {
+		vm.MaxDownloads = DefaultMaxDownloads
+	}
+	if vm.MaxDirtyBlocks == 0 {
+		vm.MaxDirtyBlocks = DefaultMaxDirtyBlocks
 	}
 
-	layers := base.At("layers")
-	cache, err := NewBlockCache(cacheDir, layers, state.BlockSize, maxDownloads)
+	state, _, err := ReadJSON[SystemState](ctx, vm.Store, "state.json")
 	if err != nil {
-		return nil, fmt.Errorf("init block cache: %w", err)
+		return fmt.Errorf("read system state: %w (has FormatSystem been called?)", err)
+	}
+
+	vm.layers = vm.Store.At("layers")
+	vm.BlockDownloader = BlockDownloader{
+		blockSize: state.BlockSize,
+		sem:       semaphore.NewWeighted(int64(vm.MaxDownloads)),
+	}
+	vm.cache, err = NewBlockCache(vm.CacheDir, vm.layers, &vm.BlockDownloader)
+	if err != nil {
+		return fmt.Errorf("init block cache: %w", err)
+	}
+
+	// Each startup gets a fresh mutable dir with a random name so we
+	// never read stale data even if cleanup of old dirs fails.
+	mutableBase := filepath.Join(vm.CacheDir, "mutable")
+	if err := os.RemoveAll(mutableBase); err != nil {
+		slog.Warn("remove old mutable dirs", "dir", mutableBase, "error", err)
+	}
+	vm.mutableDir = filepath.Join(mutableBase, uuid.NewString())
+	if err := os.MkdirAll(vm.mutableDir, 0o755); err != nil {
+		return fmt.Errorf("create mutable dir: %w", err)
 	}
 
 	hostname, _ := os.Hostname()
-	lm := NewLeaseManager(base.At("leases"))
-	id := fmt.Sprintf("%s:%d:%s", hostname, os.Getpid(), lm.Token())
+	vm.lease = NewLeaseManager(vm.Store.At("leases"))
+	vm.id = fmt.Sprintf("%s:%d:%s", hostname, os.Getpid(), vm.lease.Token())
 
-	blockSize := state.BlockSize
-	return &VolumeManager{
-		id:         id,
-		base:       base,
-		lease:      lm,
-		layers:     layers,
-		volumeRefs: base.At("volumes"),
-		cache:      cache,
-		blockSize:  blockSize,
-		uploadSem:  semaphore.NewWeighted(int64(maxUploads)),
-		flushPool: sync.Pool{
-			New: func() any {
-				b := make([]byte, blockSize)
-				return &b
-			},
+	vm.blockSize = state.BlockSize
+	vm.volumeRefs = vm.Store.At("volumes")
+	vm.uploadSem = semaphore.NewWeighted(int64(vm.MaxUploads))
+	vm.flushPool = sync.Pool{
+		New: func() any {
+			b := make([]byte, vm.blockSize)
+			return &b
 		},
-	}, nil
+	}
+	return nil
 }
 
 // NewVolume creates a new volume with an empty layer in S3.
-func (vm *VolumeManager) NewVolume(ctx context.Context, name string) (*Volume, error) {
+// Size is the volume size in bytes; 0 means use DefaultVolumeSize.
+func (vm *legacyVolumeManager) NewVolume(ctx context.Context, name string, size uint64) (Volume, error) {
 	layerID := uuid.NewString()
 
 	state := LayerState{}
@@ -112,7 +152,7 @@ func (vm *VolumeManager) NewVolume(ctx context.Context, name string) (*Volume, e
 		return nil, fmt.Errorf("format layer: %w", err)
 	}
 
-	if err := vm.putVolumeRef(ctx, name, layerID); err != nil {
+	if err := vm.putVolumeRef(ctx, name, layerID, size); err != nil {
 		return nil, fmt.Errorf("create volume ref: %w", err)
 	}
 
@@ -120,7 +160,7 @@ func (vm *VolumeManager) NewVolume(ctx context.Context, name string) (*Volume, e
 }
 
 // OpenVolume loads a volume by name from S3.
-func (vm *VolumeManager) OpenVolume(ctx context.Context, name string) (*Volume, error) {
+func (vm *legacyVolumeManager) OpenVolume(ctx context.Context, name string) (Volume, error) {
 	if v, ok := vm.volumes.Load(name); ok {
 		if err := v.publish(); err == nil {
 			return v, nil
@@ -128,27 +168,29 @@ func (vm *VolumeManager) OpenVolume(ctx context.Context, name string) (*Volume, 
 		vm.volumes.Delete(name)
 	}
 
-	layerID, err := vm.getVolumeRef(ctx, name)
+	ref, err := vm.getVolumeRef(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("resolve volume %q: %w", name, err)
 	}
 
-	layer, err := vm.loadLayer(ctx, layerID)
+	layer, err := vm.loadLayer(ctx, ref.LayerID)
 	if err != nil {
-		return nil, fmt.Errorf("load layer %q: %w", layerID, err)
+		return nil, fmt.Errorf("load layer %q: %w", ref.LayerID, err)
 	}
 
-	v := &Volume{
-		name:  name,
-		layer: layer,
-		vm:    vm,
+	var size uint64
+	if ref.Size != "" {
+		size, err = strconv.ParseUint(ref.Size, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse volume size %q: %w", ref.Size, err)
+		}
 	}
-	v.refs.Store(1)
-	v.readOnly.Store(layer.Frozen())
+
+	v := newVolume(name, size, layer, vm)
 
 	if existing, loaded := vm.volumes.LoadOrStore(name, v); loaded {
 		if err := layer.Close(ctx); err != nil {
-			slog.Warn("close duplicate layer", "layer", layerID, "error", err)
+			slog.Warn("close duplicate layer", "layer", ref.LayerID, "error", err)
 		}
 		if err := existing.publish(); err != nil {
 			vm.volumes.Delete(name)
@@ -162,7 +204,7 @@ func (vm *VolumeManager) OpenVolume(ctx context.Context, name string) (*Volume, 
 }
 
 // GetVolume returns an already-opened volume, or nil.
-func (vm *VolumeManager) GetVolume(name string) *Volume {
+func (vm *legacyVolumeManager) GetVolume(name string) Volume {
 	v, ok := vm.volumes.Load(name)
 	if !ok {
 		return nil
@@ -171,9 +213,9 @@ func (vm *VolumeManager) GetVolume(name string) *Volume {
 }
 
 // Volumes returns all published volume names.
-func (vm *VolumeManager) Volumes() []string {
+func (vm *legacyVolumeManager) Volumes() []string {
 	var names []string
-	vm.volumes.Range(func(name string, v *Volume) bool {
+	vm.volumes.Range(func(name string, v *legacyVolume) bool {
 		if v.publish() != nil {
 			return true
 		}
@@ -184,7 +226,7 @@ func (vm *VolumeManager) Volumes() []string {
 }
 
 // ListAllVolumes returns all volume names from the store (not just open ones).
-func (vm *VolumeManager) ListAllVolumes(ctx context.Context) ([]string, error) {
+func (vm *legacyVolumeManager) ListAllVolumes(ctx context.Context) ([]string, error) {
 	objects, err := vm.volumeRefs.ListKeys(ctx, "")
 	if err != nil {
 		return nil, err
@@ -196,11 +238,83 @@ func (vm *VolumeManager) ListAllVolumes(ctx context.Context) ([]string, error) {
 	return names, nil
 }
 
-// Close shuts down all open volumes and releases the process lease.
-func (vm *VolumeManager) Close(ctx context.Context) error {
+// DeleteVolume removes a volume reference from the store.
+// The volume must not be currently open/mounted.
+// If the layer is mutable (not frozen, no children), its blocks are
+// deleted in the background.
+func (vm *legacyVolumeManager) DeleteVolume(ctx context.Context, name string) error {
+	if v, ok := vm.volumes.Load(name); ok {
+		if v.publish() == nil {
+			return fmt.Errorf("volume %q is currently open; unmount it first", name)
+		}
+		vm.volumes.Delete(name) // XXX: what if this Volume is referenced from somewhere (has positive refcount)?
+		// XXX: we need to handle this. Volume are just turned into normal files so we need to use the same approach
+		// a real filesystem would use.
+		// When instructed to delete a volume if the volume has refs, we need to not actually delete it but instead
+		// add it to some VM-wide orphan volumes list that gets cleaned up on startup.
+	}
+
+	// Read the layer ID before deleting the ref.
+	ref, err := vm.getVolumeRef(ctx, name)
+	if err != nil {
+		return fmt.Errorf("read volume ref %q: %w", name, err)
+	}
+	layerID := ref.LayerID
+
+	// Delete the volume ref (this is the authoritative delete).
+	if err := vm.volumeRefs.DeleteObject(ctx, name); err != nil {
+		return fmt.Errorf("delete volume ref %q: %w", name, err)
+	}
+
+	// If the layer is mutable and has no children, garbage-collect it
+	// in the background. Frozen layers may be referenced by clones.
+	go vm.gcLayer(layerID)
+
+	return nil
+}
+
+// gcLayer deletes a layer and all its blocks if it is mutable and has
+// no children. Errors are logged but not returned.
+func (vm *legacyVolumeManager) gcLayer(layerID string) { // XXX: gc is a weird thing to call this, rename - we are going to add real GC later
+	// XXX: we should probably move this onto Layer
+	ctx := context.Background()
+	layerStore := vm.layers.At(layerID)
+
+	state, _, err := ReadJSON[LayerState](ctx, layerStore, "state.json")
+	if err != nil {
+		slog.Warn("gc layer: read state", "layer", layerID, "error", err)
+		return
+	}
+	if state.FrozenAt != "" {
+		slog.Debug("gc layer: skipping frozen layer", "layer", layerID)
+		return
+	}
+
+	objects, err := layerStore.ListKeys(ctx, "")
+	if err != nil {
+		slog.Warn("gc layer: list keys", "layer", layerID, "error", err)
+		return
+	}
+
+	for _, obj := range objects {
+		if err := layerStore.DeleteObject(ctx, obj.Key); err != nil {
+			slog.Warn("gc layer: delete object", "layer", layerID, "key", obj.Key, "error", err)
+		}
+	}
+	slog.Info("gc layer: deleted", "layer", layerID, "objects", len(objects))
+}
+
+// PageSize returns the system-wide block (page) size in bytes.
+func (vm *legacyVolumeManager) PageSize() int {
+	return int(vm.blockSize)
+}
+
+// Close releases any volumes still tracked by this manager, then
+// releases the process lease.
+func (vm *legacyVolumeManager) Close(ctx context.Context) error {
 	var firstErr error
-	vm.volumes.Range(func(name string, v *Volume) bool {
-		if err := v.Close(ctx); err != nil && firstErr == nil {
+	vm.volumes.Range(func(name string, v *legacyVolume) bool {
+		if err := v.ReleaseRef(ctx); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		return true
@@ -211,8 +325,8 @@ func (vm *VolumeManager) Close(ctx context.Context) error {
 	return firstErr
 }
 
-func (vm *VolumeManager) closeVolume(ctx context.Context, v *Volume) error {
-	if cur, ok := vm.volumes.Load(v.name); ok && cur == v {
+func (vm *legacyVolumeManager) closeVolume(ctx context.Context, v *legacyVolume) error {
+	if cur, ok := vm.volumes.Load(v.name); ok && cur == v { // XXX: when would this not be the case?
 		vm.volumes.Delete(v.name)
 	}
 	if cur, ok := vm.openLayers.Load(v.layer.id); ok && cur == v.layer {
@@ -224,8 +338,8 @@ func (vm *VolumeManager) closeVolume(ctx context.Context, v *Volume) error {
 
 // --- internal ---
 
-func (vm *VolumeManager) loadLayer(ctx context.Context, layerID string) (*Layer, error) {
-	if l, ok := vm.openLayers.Load(layerID); ok {
+func (vm *legacyVolumeManager) loadLayer(ctx context.Context, layerID string) (*Layer, error) {
+	if l, ok := vm.openLayers.Load(layerID); ok { // XXX: why do we need to keep track of open layers?
 		return l, nil
 	}
 
@@ -248,16 +362,20 @@ func (vm *VolumeManager) loadLayer(ctx context.Context, layerID string) (*Layer,
 	return layer, nil
 }
 
-func (vm *VolumeManager) getVolumeRef(ctx context.Context, name string) (string, error) {
+func (vm *legacyVolumeManager) getVolumeRef(ctx context.Context, name string) (volumeRef, error) {
 	ref, _, err := ReadJSON[volumeRef](ctx, vm.volumeRefs, name)
 	if err != nil {
-		return "", err
+		return volumeRef{}, err
 	}
-	return ref.LayerID, nil
+	return ref, nil
 }
 
-func (vm *VolumeManager) putVolumeRef(ctx context.Context, name, layerID string) error {
-	data, err := json.Marshal(volumeRef{LayerID: layerID})
+func (vm *legacyVolumeManager) putVolumeRef(ctx context.Context, name, layerID string, size uint64) error {
+	sizeStr := ""
+	if size > 0 {
+		sizeStr = fmt.Sprintf("%d", size)
+	}
+	data, err := json.Marshal(volumeRef{LayerID: layerID, Size: sizeStr})
 	if err != nil {
 		return fmt.Errorf("marshal volume ref: %w", err)
 	}
@@ -271,7 +389,7 @@ func (vm *VolumeManager) putVolumeRef(ctx context.Context, name, layerID string)
 	return nil
 }
 
-func (vm *VolumeManager) updateVolumeRef(ctx context.Context, name, layerID string) error {
+func (vm *legacyVolumeManager) updateVolumeRef(ctx context.Context, name, layerID string) error {
 	return ModifyJSON(ctx, vm.volumeRefs, name, func(ref *volumeRef) error {
 		ref.LayerID = layerID
 		return nil

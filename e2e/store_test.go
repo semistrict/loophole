@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/client"
 )
 
 // Store tests are kernel-only: they test the raw FUSE device layout.
@@ -15,7 +17,7 @@ func TestE2E_VolumeFileExists(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, "testvolume")
+	err := b.Create(ctx, client.CreateParams{Volume: "testvolume"})
 	require.NoError(t, err)
 
 	device, err := b.DeviceMount(ctx, "testvolume")

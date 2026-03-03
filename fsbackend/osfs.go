@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // osFS implements FS by delegating to os.* with a mountpoint prefix.
@@ -13,7 +14,8 @@ type osFS struct {
 	root string
 }
 
-func newOSFS(mountpoint string) *osFS {
+// NewOSFS creates an FS backed by real OS operations rooted at mountpoint.
+func NewOSFS(mountpoint string) FS {
 	return &osFS{root: mountpoint}
 }
 
@@ -60,4 +62,29 @@ func (f *osFS) Open(name string) (File, error) {
 
 func (f *osFS) Create(name string) (File, error) {
 	return os.Create(f.path(name))
+}
+
+func (f *osFS) Lstat(name string) (fs.FileInfo, error) {
+	return os.Lstat(f.path(name))
+}
+
+func (f *osFS) Symlink(target, name string) error {
+	return os.Symlink(target, f.path(name))
+}
+
+func (f *osFS) Readlink(name string) (string, error) {
+	return os.Readlink(f.path(name))
+}
+
+func (f *osFS) Chmod(name string, mode fs.FileMode) error {
+	return os.Chmod(f.path(name), mode)
+}
+
+func (f *osFS) Lchown(name string, uid, gid int) error {
+	return os.Lchown(f.path(name), uid, gid)
+}
+
+func (f *osFS) Chtimes(name string, mtime int64) error {
+	t := time.Unix(mtime, 0)
+	return os.Chtimes(f.path(name), t, t)
 }

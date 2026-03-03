@@ -16,25 +16,21 @@ import (
 	"github.com/semistrict/loophole"
 )
 
-const (
-	defaultVolumeSize = 100 * 1024 * 1024 * 1024 // 100 GB
-	defaultNumConns   = 4                        // parallel socket pairs per device
-)
+const defaultNumConns = 4 // parallel socket pairs per device
 
 // Server manages NBD exports for loophole volumes using nbd.Loopback.
 // Each volume gets a /dev/nbdN device backed by the volume's block store.
 type Server struct {
-	vm         *loophole.VolumeManager
-	volumeSize uint64
-	numConns   int
-	log        *slog.Logger
+	vm       loophole.VolumeManager
+	numConns int
+	log      *slog.Logger
 
 	mu      sync.Mutex
 	exports map[string]*volumeExport // volume name → export state
 }
 
 type volumeExport struct {
-	vol    *loophole.Volume
+	vol    loophole.Volume
 	cancel context.CancelFunc
 	wait   func() error
 	devIdx uint32
@@ -42,19 +38,14 @@ type volumeExport struct {
 
 // Options configures the NBD server.
 type Options struct {
-	VolumeSize     uint64
 	NumConnections int // parallel socket pairs per device (default 4)
 	Logger         *slog.Logger
 }
 
 // NewServer creates a new NBD volume server.
-func NewServer(vm *loophole.VolumeManager, opts *Options) (*Server, error) {
+func NewServer(vm loophole.VolumeManager, opts *Options) (*Server, error) {
 	if opts == nil {
 		opts = &Options{}
-	}
-	volumeSize := opts.VolumeSize
-	if volumeSize == 0 {
-		volumeSize = defaultVolumeSize
 	}
 	numConns := opts.NumConnections
 	if numConns == 0 {
@@ -65,16 +56,15 @@ func NewServer(vm *loophole.VolumeManager, opts *Options) (*Server, error) {
 		logger = slog.Default()
 	}
 	return &Server{
-		vm:         vm,
-		volumeSize: volumeSize,
-		numConns:   numConns,
-		log:        logger,
-		exports:    make(map[string]*volumeExport),
+		vm:       vm,
+		numConns: numConns,
+		log:      logger,
+		exports:  make(map[string]*volumeExport),
 	}, nil
 }
 
 // Connect creates an NBD device for a volume and returns /dev/nbdN.
-func (s *Server) Connect(ctx context.Context, vol *loophole.Volume) (string, error) {
+func (s *Server) Connect(ctx context.Context, vol loophole.Volume) (string, error) {
 	name := vol.Name()
 
 	s.mu.Lock()
@@ -85,7 +75,7 @@ func (s *Server) Connect(ctx context.Context, vol *loophole.Volume) (string, err
 	s.mu.Unlock()
 
 	srvCtx, cancel := context.WithCancel(context.Background())
-	dev := vol.IO(srvCtx)
+	dev := NewDevice(vol)
 
 	loopOpts := []nbd.LoopbackOption{
 		nbd.WithNumConnections(s.numConns),
@@ -96,7 +86,7 @@ func (s *Server) Connect(ctx context.Context, vol *loophole.Volume) (string, err
 		loopOpts = append(loopOpts, nbd.WithServerFlags(sf))
 	}
 
-	idx, wait, err := nbd.Loopback(srvCtx, dev, s.volumeSize, loopOpts...)
+	idx, wait, err := nbd.Loopback(srvCtx, dev, vol.Size(), loopOpts...)
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("nbd loopback: %w", err)

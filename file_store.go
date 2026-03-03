@@ -43,21 +43,37 @@ func (f *FileStore) At(path string) ObjectStore {
 	return &FileStore{root: f.root, prefix: p}
 }
 
-func (f *FileStore) Get(_ context.Context, key string, offset int64) (io.ReadCloser, string, error) {
+func (f *FileStore) Get(_ context.Context, key string) (io.ReadCloser, string, error) {
 	p := f.path(key)
 	data, err := os.ReadFile(p)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", fmt.Errorf("get %s: %w", key, ErrNotFound)
+		}
 		return nil, "", fmt.Errorf("get %s: %w", key, err)
 	}
 	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
-	if offset > 0 {
-		if int(offset) >= len(data) {
-			data = nil
-		} else {
-			data = data[offset:]
-		}
-	}
 	return io.NopCloser(bytes.NewReader(data)), etag, nil
+}
+
+func (f *FileStore) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
+	p := f.path(key)
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, "", fmt.Errorf("get %s: %w", key, ErrNotFound)
+		}
+		return nil, "", fmt.Errorf("get %s: %w", key, err)
+	}
+	etag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
+	if int(offset) >= len(data) {
+		return io.NopCloser(bytes.NewReader(nil)), etag, nil
+	}
+	end := offset + length
+	if end > int64(len(data)) {
+		end = int64(len(data))
+	}
+	return io.NopCloser(bytes.NewReader(data[offset:end])), etag, nil
 }
 
 func (f *FileStore) PutBytesCAS(_ context.Context, key string, data []byte, etag string) (string, error) {

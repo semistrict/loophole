@@ -21,10 +21,10 @@ func TestAcquireRefOnLiveVolume(t *testing.T) {
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 }
 
-func TestAcquireRefOnClosedVolumeReturnsError(t *testing.T) {
+func TestAcquireRefOnDestroyedVolumeReturnsError(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 
-	require.NoError(t, vol.Close(t.Context()))
+	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vm.Close(t.Context()))
 
 	err := vol.AcquireRef()
@@ -47,9 +47,9 @@ func TestMultipleAcquireRefAllSucceed(t *testing.T) {
 	}
 }
 
-// --- Close + handle ref interaction ---
+// --- Ref counting interaction ---
 
-func TestCloseWithOutstandingRefKeepsVolumeAlive(t *testing.T) {
+func TestMultipleRefsKeepVolumeAlive(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 	defer func() {
 		if err := vm.Close(t.Context()); err != nil {
@@ -58,90 +58,44 @@ func TestCloseWithOutstandingRefKeepsVolumeAlive(t *testing.T) {
 	}()
 
 	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.Close(t.Context()))
+	require.NoError(t, vol.AcquireRef())
+	require.NoError(t, vol.AcquireRef())
 
-	// Volume should still be usable — the FUSE handle keeps it alive.
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("still alive")))
-
-	buf := make([]byte, 11)
-	_, err := vol.Read(t.Context(), 0, buf)
-	require.NoError(t, err)
-	assert.Equal(t, []byte("still alive"), buf)
-
-	// Dropping the last ref should destroy it.
+	// Release the namespace ref (the initial ref from NewVolume).
 	require.NoError(t, vol.ReleaseRef(t.Context()))
-	assert.Panics(t, func() {
-		_, _ = vol.Read(t.Context(), 0, make([]byte, 1))
-	})
-}
 
-func TestCloseWithMultipleOutstandingRefs(t *testing.T) {
-	_, vm, vol := setupVolume(t)
-	defer func() {
-		if err := vm.Close(t.Context()); err != nil {
-			t.Logf("close failed: %v", err)
-		}
-	}()
-
-	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.Close(t.Context()))
-
-	// Still alive — 3 FUSE refs outstanding.
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("ok")))
+	// Still alive — 3 acquired refs outstanding.
+	require.NoError(t, vol.Write(t.Context(), []byte("ok"), 0))
 
 	// Release two — still alive.
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vol.ReleaseRef(t.Context()))
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("ok")))
+	require.NoError(t, vol.Write(t.Context(), []byte("ok"), 0))
 
 	// Release the last one — destroyed.
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 	assert.Panics(t, func() { _ = vol.Name() })
 }
 
-func TestCloseWithNoRefsDestroysImmediately(t *testing.T) {
+func TestReleaseRefDestroysImmediately(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 
-	require.NoError(t, vol.Close(t.Context()))
+	// Releasing the single namespace ref destroys the volume.
+	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vm.Close(t.Context()))
 
 	assert.Panics(t, func() { _ = vol.Name() })
 }
 
-// --- Double close ---
-
-func TestDoubleCloseIsIdempotent(t *testing.T) {
-	_, vm, vol := setupVolume(t)
-
-	require.NoError(t, vol.Close(t.Context()))
-	// Second close should be a no-op, not an error or panic.
-	assert.NoError(t, vol.Close(t.Context()))
-	require.NoError(t, vm.Close(t.Context()))
-}
-
-func TestVMCloseAfterExplicitCloseIsHarmless(t *testing.T) {
-	store := NewMemStore()
-	vm := newTestVM(t, store)
-
-	vol, err := vm.NewVolume(t.Context(), "v")
-	require.NoError(t, err)
-
-	// Explicitly close, then VM shutdown closes everything again.
-	require.NoError(t, vol.Close(t.Context()))
-	assert.NoError(t, vm.Close(t.Context()))
-}
-
 // --- ReleaseRef edge cases ---
 
-func TestReleaseRefOnDestroyedVolumeIsNoop(t *testing.T) {
+func TestExtraReleaseRefOnDestroyedVolumeIsNoop(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 
-	require.NoError(t, vol.Close(t.Context()))
+	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vm.Close(t.Context()))
 
-	// Should not error or panic.
+	// refs is already 0; extra release should not error or panic.
 	assert.NoError(t, vol.ReleaseRef(t.Context()))
 }
 
@@ -161,9 +115,9 @@ func TestReleaseRefWithoutAcquireDestroysVolume(t *testing.T) {
 	assert.Panics(t, func() { _ = vol.Name() })
 }
 
-// --- AcquireRef after Close (but with outstanding refs) ---
+// --- AcquireRef while other refs outstanding ---
 
-func TestAcquireRefAfterCloseWithOutstandingRef(t *testing.T) {
+func TestAcquireRefWhileOtherRefsOutstanding(t *testing.T) {
 	_, vm, vol := setupVolume(t)
 	defer func() {
 		if err := vm.Close(t.Context()); err != nil {
@@ -172,14 +126,12 @@ func TestAcquireRefAfterCloseWithOutstandingRef(t *testing.T) {
 	}()
 
 	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.Close(t.Context()))
 
-	// Volume is still alive (1 FUSE ref). Can we acquire another?
-	// This simulates a second FUSE open on a volume that's been
-	// removed from the namespace but still has live file handles.
+	// Volume still alive (2 refs). Can acquire another.
 	require.NoError(t, vol.AcquireRef())
 
-	// Release both.
+	// Release all three (1 namespace + 2 acquired).
+	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 
@@ -188,7 +140,7 @@ func TestAcquireRefAfterCloseWithOutstandingRef(t *testing.T) {
 
 // --- Volumes() listing ---
 
-func TestVolumesExcludesClosedVolumes(t *testing.T) {
+func TestVolumesExcludesDestroyedVolumes(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 	defer func() {
@@ -197,16 +149,16 @@ func TestVolumesExcludesClosedVolumes(t *testing.T) {
 		}
 	}()
 
-	_, err := vm.NewVolume(t.Context(), "alive")
+	_, err := vm.NewVolume(t.Context(), "alive", 0)
 	require.NoError(t, err)
 
-	vol2, err := vm.NewVolume(t.Context(), "closed")
+	vol2, err := vm.NewVolume(t.Context(), "destroyed", 0)
 	require.NoError(t, err)
-	require.NoError(t, vol2.Close(t.Context()))
+	require.NoError(t, vol2.ReleaseRef(t.Context()))
 
 	names := vm.Volumes()
 	assert.Contains(t, names, "alive")
-	assert.NotContains(t, names, "closed")
+	assert.NotContains(t, names, "destroyed")
 }
 
 // --- Flush on destroy ---
@@ -215,20 +167,18 @@ func TestDestroyFlushesDirtyData(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
 
-	vol, err := vm.NewVolume(t.Context(), "flush-on-destroy")
+	vol, err := vm.NewVolume(t.Context(), "flush-on-destroy", 0)
 	require.NoError(t, err)
 
-	require.NoError(t, vol.AcquireRef())
-	require.NoError(t, vol.Write(t.Context(), 0, []byte("dirty data here!")))
-	require.NoError(t, vol.Close(t.Context()))
+	require.NoError(t, vol.Write(t.Context(), []byte("dirty data here!"), 0))
 
-	// Data is dirty, not yet in S3. The last ReleaseRef should
-	// trigger closeVolume which flushes.
+	// Data is dirty, not yet in S3. ReleaseRef brings refs to 0,
+	// triggering destroy → closeVolume which flushes.
 	require.NoError(t, vol.ReleaseRef(t.Context()))
 
 	// Reopen from a fresh VM and verify the data was flushed.
-	vm2, err := NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
-	require.NoError(t, err)
+	vm2 := &legacyVolumeManager{Store: store, CacheDir: t.TempDir()}
+	require.NoError(t, vm2.Connect(t.Context()))
 	defer func() {
 		if err := vm2.Close(t.Context()); err != nil {
 			t.Logf("close failed: %v", err)
@@ -239,7 +189,7 @@ func TestDestroyFlushesDirtyData(t *testing.T) {
 	require.NoError(t, err)
 
 	buf := make([]byte, 16)
-	_, err = vol2.Read(t.Context(), 0, buf)
+	_, err = vol2.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("dirty data here!"), buf)
 }

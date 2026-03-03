@@ -167,18 +167,6 @@ func TestFreezeAlreadyFrozenFails(t *testing.T) {
 	assert.Error(t, layer.Freeze(t.Context()))
 }
 
-func TestFreezeClosedLayerPanics(t *testing.T) {
-	store := NewMemStore()
-	vm := newTestVM(t, store)
-	seedLayer(t, store, "layer-a", defaultLayerState(), nil)
-
-	layer, err := NewLayer(t.Context(), vm, "layer-a")
-	require.NoError(t, err)
-	require.NoError(t, layer.Close(t.Context()))
-
-	assert.Panics(t, func() { _ = layer.Freeze(t.Context()) })
-}
-
 // --- Flush / tombstone tests ---
 
 func TestFlushWritesTombstoneOnlyWhenAncestorOwnsBlock(t *testing.T) {
@@ -200,12 +188,12 @@ func TestFlushWritesTombstoneOnlyWhenAncestorOwnsBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write block 0 (ancestor-owned) to all zeros → should produce a tombstone in S3.
-	require.NoError(t, layer.Write(t.Context(), 0, make([]byte, 64)))
+	require.NoError(t, layer.Write(t.Context(), make([]byte, 64), 0))
 	// Write block 1 (no ancestor) with data, then overwrite with zeros → should delete, not tombstone.
-	require.NoError(t, layer.Write(t.Context(), 64, []byte("data that will be zeroed out, padded to fill block.......pad!")))
+	require.NoError(t, layer.Write(t.Context(), []byte("data that will be zeroed out, padded to fill block.......pad!"), 64))
 	require.NoError(t, layer.Flush(t.Context()))
 	// Now block 1 exists in S3 for this layer.
-	require.NoError(t, layer.Write(t.Context(), 64, make([]byte, 64)))
+	require.NoError(t, layer.Write(t.Context(), make([]byte, 64), 64))
 
 	require.NoError(t, layer.Flush(t.Context()))
 
@@ -253,7 +241,7 @@ func TestPunchHoleAndWriteZerosAreIdentical(t *testing.T) {
 	require.NoError(t, err)
 
 	// Zero out blocks 1 and 2 (block-aligned) via each method.
-	require.NoError(t, writeLayer.Write(t.Context(), 64, make([]byte, 128)))
+	require.NoError(t, writeLayer.Write(t.Context(), make([]byte, 128), 64))
 	require.NoError(t, writeLayer.Flush(t.Context()))
 
 	require.NoError(t, punchLayer.PunchHole(t.Context(), 64, 128))
@@ -270,7 +258,7 @@ func TestPunchHoleAndWriteZerosAreIdentical(t *testing.T) {
 	// Both layers should read back identical data.
 	for _, layer := range []*Layer{writeLayer, punchLayer} {
 		buf := make([]byte, 256)
-		_, err := layer.Read(t.Context(), 0, buf)
+		_, err := layer.Read(t.Context(), buf, 0)
 		require.NoError(t, err)
 		assert.Equal(t, make([]byte, 256), buf, "layer %s should read all zeros", layer.id)
 	}
@@ -547,7 +535,7 @@ func TestCopyFromFullBlockIsCoW(t *testing.T) {
 
 	// Reading through the layer should return the source data.
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, srcData, buf)
 }
@@ -580,7 +568,7 @@ func TestCopyFromPartialBlockCopiesData(t *testing.T) {
 
 	// Read back and verify: bytes 0-15 zeros, bytes 16-47 = "P"s, bytes 48-63 zeros.
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, make([]byte, 16), buf[:16])
 	assert.Equal(t, bytes.Repeat([]byte("P"), 32), buf[16:48])
@@ -616,7 +604,7 @@ func TestCopyFromMultipleBlocks(t *testing.T) {
 
 	// Read all data back.
 	buf := make([]byte, 192)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("A"), 64), buf[0:64])
 	assert.Equal(t, bytes.Repeat([]byte("B"), 64), buf[64:128])
@@ -661,7 +649,7 @@ func TestCopyFromMixedPartialAndFull(t *testing.T) {
 
 	// Read back the full range.
 	buf := make([]byte, 192)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 
 	// bytes 0-31: zeros (not copied)
@@ -690,7 +678,7 @@ func TestCopyFromUnwrittenBlockYieldsZeros(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write some data to dst block 0, then CopyFrom src (which is empty).
-	require.NoError(t, dst.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+	require.NoError(t, dst.Write(t.Context(), bytes.Repeat([]byte("X"), 64), 0))
 
 	n, err := dst.CopyFrom(t.Context(), src, 0, 0, 64)
 	require.NoError(t, err)
@@ -698,7 +686,7 @@ func TestCopyFromUnwrittenBlockYieldsZeros(t *testing.T) {
 
 	// The block should now read as zeros (unwritten src block).
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, make([]byte, 64), buf)
 }
@@ -731,7 +719,7 @@ func TestCopyFromDifferentBlockOffsets(t *testing.T) {
 	assert.True(t, isDirty, "different block offsets require data copy")
 
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 10*64, buf)
+	_, err = dst.Read(t.Context(), buf, 10*64)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("Z"), 64), buf)
 }
@@ -767,7 +755,7 @@ func TestCopyFromReplacesExistingDirtyBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write to dst block 0 first.
-	require.NoError(t, dst.Write(t.Context(), 0, bytes.Repeat([]byte("O"), 64)))
+	require.NoError(t, dst.Write(t.Context(), bytes.Repeat([]byte("O"), 64), 0))
 
 	// Now CoW-copy from src — should replace the dirty block.
 	n, err := dst.CopyFrom(t.Context(), src, 0, 0, 64)
@@ -782,7 +770,7 @@ func TestCopyFromReplacesExistingDirtyBlock(t *testing.T) {
 
 	// Should read the source data.
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("N"), 64), buf)
 }
@@ -816,7 +804,7 @@ func TestCopyFromInheritedBlock(t *testing.T) {
 	assert.Equal(t, "root", dst.refBlockIndex[0])
 
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("R"), 64), buf)
 }
@@ -860,7 +848,7 @@ func TestCopyFromPreservesInCreateChild(t *testing.T) {
 	require.NoError(t, err)
 
 	buf := make([]byte, 64)
-	_, err = grandchild.Read(t.Context(), 0, buf)
+	_, err = grandchild.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("D"), 64), buf)
 }
@@ -879,7 +867,7 @@ func TestCopyFromUnfrozenSourceDirtyBlockDataCopies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write to src without flushing — block is dirty/open, not in S3.
-	require.NoError(t, src.Write(t.Context(), 0, bytes.Repeat([]byte("U"), 64)))
+	require.NoError(t, src.Write(t.Context(), bytes.Repeat([]byte("U"), 64), 0))
 
 	n, err := dst.CopyFrom(t.Context(), src, 0, 0, 64)
 	require.NoError(t, err)
@@ -895,7 +883,7 @@ func TestCopyFromUnfrozenSourceDirtyBlockDataCopies(t *testing.T) {
 
 	// Data should still be correct.
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("U"), 64), buf)
 }
@@ -914,7 +902,7 @@ func TestCopyFromUnfrozenSourceFlushedBlockDataCopies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write and flush — block is in S3 but src is still not frozen.
-	require.NoError(t, src.Write(t.Context(), 0, bytes.Repeat([]byte("F"), 64)))
+	require.NoError(t, src.Write(t.Context(), bytes.Repeat([]byte("F"), 64), 0))
 	require.NoError(t, src.Flush(t.Context()))
 
 	n, err := dst.CopyFrom(t.Context(), src, 0, 0, 64)
@@ -932,7 +920,7 @@ func TestCopyFromUnfrozenSourceFlushedBlockDataCopies(t *testing.T) {
 	assert.Empty(t, refOwner, "must not reference an unfrozen layer")
 
 	buf := make([]byte, 64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("F"), 64), buf)
 }
@@ -959,7 +947,7 @@ func TestCopyFromUnfrozenSourceRefBlockIsCoW(t *testing.T) {
 	require.NoError(t, err)
 
 	// Also write a dirty block to src so it's clearly not frozen.
-	require.NoError(t, src.Write(t.Context(), 2*64, bytes.Repeat([]byte("W"), 64)))
+	require.NoError(t, src.Write(t.Context(), bytes.Repeat([]byte("W"), 64), 2*64))
 
 	// Copy blocks 0 and 1 (from frozen ref) and block 2 (dirty on src).
 	n, err := dst.CopyFrom(t.Context(), src, 0, 0, 3*64)
@@ -980,7 +968,7 @@ func TestCopyFromUnfrozenSourceRefBlockIsCoW(t *testing.T) {
 
 	// Verify all data reads correctly.
 	buf := make([]byte, 3*64)
-	_, err = dst.Read(t.Context(), 0, buf)
+	_, err = dst.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, bytes.Repeat([]byte("G"), 64), buf[0:64])
 	assert.Equal(t, bytes.Repeat([]byte("H"), 64), buf[64:128])

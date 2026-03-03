@@ -13,9 +13,14 @@ lwext4 uses `git diff`/`git apply` for patching (respects .gitignore). Other dep
 
 To modify a third-party dep: edit files in `third_party/<dep>/`, then run `./deps.sh genpatch <dep>` to update the patch file.
 
-## Running tests
+## Building and testing
 
-- `go test ./lwext4/` — lwext4 unit tests (run locally on macOS, no Docker needed)
-- E2E tests require Linux (FUSE). Run in Docker: `docker compose run --rm go bash -c 'go clean -cache && make e2e-lwext4fuse'`
-- When cgo C source changes, run `go clean -cache` before testing (both locally and in Docker) to avoid stale builds
+- **ALWAYS use `make` targets** — they build the lwext4 C static library and set CGO_LDFLAGS automatically. Never run `go build` or `go test` directly.
+- `make build` — build all packages
+- `make test` — run all unit tests
+- `make test RUN=TestName` — run a specific test across all packages
+- `make test-lwext4` — lwext4 unit tests (run locally on macOS, no Docker needed)
+- `make test-lwext4 RUN=TestName` — run a specific lwext4 test
+- `make clean-lwext4 && make test-lwext4` — when cgo C source changes, clean and rebuild to avoid stale builds
+- E2E tests require Linux (FUSE). Run in Docker: `docker compose run --rm go bash -c 'make clean-lwext4 && make e2e-lwext4fuse'`
 

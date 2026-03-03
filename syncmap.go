@@ -2,6 +2,8 @@ package loophole
 
 import "sync"
 
+// XXX: we should probably just use sync.Map directly
+
 // SyncMap is a typed wrapper around sync.Map.
 type SyncMap[K comparable, V any] struct {
 	m sync.Map
@@ -29,7 +31,7 @@ func (m *SyncMap[K, V]) Delete(key K) {
 	m.m.Delete(key)
 }
 
-func (m *SyncMap[K, V]) Range(fn func(key K, value V) bool) {
+func (m *SyncMap[K, V]) Range(fn func(key K, value V) bool) { // XXX: replace with range over func
 	m.m.Range(func(k, v any) bool {
 		return fn(k.(K), v.(V))
 	})

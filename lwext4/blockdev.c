@@ -16,7 +16,7 @@ static int bdev_open(struct ext4_blockdev *bdev) {
 
 static int bdev_bread(struct ext4_blockdev *bdev, void *buf,
                       uint64_t blk_id, uint32_t blk_cnt) {
-    int handle = (int)(uintptr_t)bdev->bdif->p_user;
+    int handle = (int)(uintptr_t)bdev->bdif->p_user; // XXX: why is this casted to an int? why do the goBlockdevOpen etc functions take an int?
     return goBlockdevRead(handle, buf, blk_id, blk_cnt, bdev->bdif->ph_bsize);
 }
 
@@ -45,9 +45,9 @@ struct ext4_blockdev *create_blockdev(int handle, uint32_t ph_bsize, uint64_t ph
     bdif->bread = bdev_bread;
     bdif->bwrite = bdev_bwrite;
     bdif->close = bdev_close;
-    bdif->lock = NULL;
+    bdif->lock = NULL; // XXX: what is this?
     bdif->unlock = NULL;
-    bdif->ph_bsize = ph_bsize;
+    bdif->ph_bsize = ph_bsize; // XXX: validate the values we pass here make sense
     bdif->ph_bcnt = ph_bcnt;
     bdif->ph_bbuf = buf;
     bdif->p_user = (void *)(uintptr_t)handle;

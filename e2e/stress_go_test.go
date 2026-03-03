@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -13,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/client"
 )
 
 // Go reimplementations of the fsx/fio stress tests so they run without
@@ -34,7 +38,7 @@ func stressMountGo(t *testing.T, name string) string {
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, name)
-	require.NoError(t, b.Create(ctx, name))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
 	require.NoError(t, b.Mount(ctx, name, mp))
 	return mp
 }

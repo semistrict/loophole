@@ -9,6 +9,25 @@
 // translation unit. However, this file is a *separate* .c file compiled
 // by CGO. So we need to re-declare the struct and access the global array.
 
+
+// XXX: the real purpose of all this is to expose an inode API to lwext4
+// the reason we need this is that if we just use the path-based API with FUSE
+// we will get invalid semantics like someone opens a file, someone else unlinks
+// the file name, then process A writes to the file.
+
+// The correct behavior is that the write should go to the original file (maybe it is
+// hardlinked somewhere) else for example. But if we just used path names and
+// pretended that paths were inodes then the write would go to the new file with 
+// the same name, which would be very surprising. I'm sure there are other cases.
+
+// Nevermind the performance would suck if we had to do path based lookups on every
+// operation.
+
+// Given all that I think we should probably break this whole thing out into 
+// a separate C library with the desired API surface. It is generally useful.
+
+// We can also have a Go-gettable wrapper for it (by just building a C amalgamation).
+
 #include <ext4_config.h>
 #include <ext4_types.h>
 #include <ext4_errno.h>
@@ -49,6 +68,10 @@
 // by calling a helper right after mount that retrieves it. We use
 // ext4_get_sblock which takes a mount_point string and returns the sblock.
 // From sblock, we can use container_of to get back to ext4_mountpoint.
+
+// XXX: please clean up the above stream of consciousness comment!
+// I do not understand why we are doing these kinds of hacks, we already 
+// maintain patches against the lwext4 source, just modify it!
 
 // Re-declare the mountpoint struct so we can use container_of.
 // This must match the definition in ext4.c exactly.
@@ -123,8 +146,14 @@ int inode_setattr(struct ext4_mountpoint *mp, uint32_t ino,
     if (r != EOK)
         return r;
 
-    if (mask & INODE_ATTR_MODE)
-        ext4_inode_set_mode(&mp->fs.sb, ref.inode, attr->mode);
+    if (mask & INODE_ATTR_MODE) {
+        // Preserve existing file type bits (S_IFMT), only update permission bits.
+        // FUSE SetAttr sends permission-only mode (no S_IFDIR etc.), so blindly
+        // setting it would turn directories into regular files.
+        uint32_t old_mode = ext4_inode_get_mode(&mp->fs.sb, ref.inode);
+        uint32_t new_mode = (old_mode & 0xF000) | (attr->mode & 07777);
+        ext4_inode_set_mode(&mp->fs.sb, ref.inode, new_mode);
+    }
     if (mask & INODE_ATTR_UID)
         ext4_inode_set_uid(ref.inode, attr->uid);
     if (mask & INODE_ATTR_GID)
@@ -750,4 +779,191 @@ int inode_file_open(struct ext4_mountpoint *mp, uint32_t ino,
 
     ext4_fs_put_inode_ref(&ref);
     return EOK;
+}
+
+// --- Orphan inode list ---
+//
+// The ext4 on-disk orphan list is a singly-linked list threaded through
+// the superblock's last_orphan field and each inode's deletion_time field.
+// When an inode has links_count == 0 but is still open, it's added to this
+// list. On crash recovery (mount), the list is walked and all orphans freed.
+
+uint32_t inode_orphan_head(struct ext4_mountpoint *mp) {
+    return ext4_get32(&mp->fs.sb, last_orphan);
+}
+
+int inode_orphan_add(struct ext4_mountpoint *mp, uint32_t ino) {
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(&mp->fs, ino, &ref);
+    if (r != EOK)
+        return r;
+
+    // Read current head of orphan list.
+    uint32_t head = ext4_get32(&mp->fs.sb, last_orphan);
+
+    // Point this inode's deletion_time to current head (forming the link).
+    ext4_inode_set_del_time(ref.inode, head);
+    ref.dirty = true;
+
+    r = ext4_fs_put_inode_ref(&ref);
+    if (r != EOK)
+        return r;
+
+    // Set this inode as the new head.
+    ext4_set32(&mp->fs.sb, last_orphan, ino);
+    return ext4_sb_write(mp->fs.bdev, &mp->fs.sb);
+}
+
+int inode_orphan_remove(struct ext4_mountpoint *mp, uint32_t ino) {
+    uint32_t prev_ino = 0;
+    uint32_t cur = ext4_get32(&mp->fs.sb, last_orphan);
+
+    // Walk the list to find ino and its predecessor.
+    while (cur != 0 && cur != ino) {
+        struct ext4_inode_ref ref;
+        int r = ext4_fs_get_inode_ref(&mp->fs, cur, &ref);
+        if (r != EOK)
+            return r;
+        prev_ino = cur;
+        cur = ext4_inode_get_del_time(ref.inode);
+        ext4_fs_put_inode_ref(&ref);
+    }
+
+    if (cur == 0)
+        return ENOENT; // not in orphan list
+
+    // Get the next pointer from the inode we're removing.
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(&mp->fs, ino, &ref);
+    if (r != EOK)
+        return r;
+    uint32_t next = ext4_inode_get_del_time(ref.inode);
+    ext4_inode_set_del_time(ref.inode, 0);
+    ref.dirty = true;
+    r = ext4_fs_put_inode_ref(&ref);
+    if (r != EOK)
+        return r;
+
+    // Splice it out.
+    if (prev_ino == 0) {
+        // Was the head — update superblock.
+        ext4_set32(&mp->fs.sb, last_orphan, next);
+        return ext4_sb_write(mp->fs.bdev, &mp->fs.sb);
+    } else {
+        // Update predecessor's next pointer.
+        struct ext4_inode_ref prev_ref;
+        r = ext4_fs_get_inode_ref(&mp->fs, prev_ino, &prev_ref);
+        if (r != EOK)
+            return r;
+        ext4_inode_set_del_time(prev_ref.inode, next);
+        prev_ref.dirty = true;
+        return ext4_fs_put_inode_ref(&prev_ref);
+    }
+}
+
+int inode_unlink_orphan(struct ext4_mountpoint *mp, uint32_t parent_ino,
+                        const char *name, uint32_t name_len,
+                        uint32_t *child_ino) {
+    struct ext4_inode_ref parent_ref;
+    int r = ext4_fs_get_inode_ref(&mp->fs, parent_ino, &parent_ref);
+    if (r != EOK)
+        return r;
+
+    // Find the entry to get the child inode.
+    struct ext4_dir_search_result result;
+    r = ext4_dir_find_entry(&result, &parent_ref, name, name_len);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent_ref);
+        return r;
+    }
+
+    *child_ino = ext4_dir_en_get_inode(result.dentry);
+    ext4_dir_destroy_result(&parent_ref, &result);
+
+    struct ext4_inode_ref child_ref;
+    r = ext4_fs_get_inode_ref(&mp->fs, *child_ino, &child_ref);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&parent_ref);
+        return r;
+    }
+
+    // Don't unlink directories with this function.
+    if (ext4_inode_is_type(&mp->fs.sb, child_ref.inode, EXT4_INODE_MODE_DIRECTORY)) {
+        ext4_fs_put_inode_ref(&child_ref);
+        ext4_fs_put_inode_ref(&parent_ref);
+        return EISDIR;
+    }
+
+    // Remove directory entry.
+    r = ext4_dir_remove_entry(&parent_ref, name, name_len);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&child_ref);
+        ext4_fs_put_inode_ref(&parent_ref);
+        return r;
+    }
+
+    // Decrement link count.
+    uint16_t links = ext4_inode_get_links_cnt(child_ref.inode);
+    if (links > 0) {
+        ext4_fs_inode_links_count_dec(&child_ref);
+        child_ref.dirty = true;
+    }
+
+    // If link count reaches 0, add to orphan list instead of freeing.
+    links = ext4_inode_get_links_cnt(child_ref.inode);
+    if (links == 0) {
+        ext4_fs_put_inode_ref(&child_ref);
+        ext4_fs_put_inode_ref(&parent_ref);
+        return inode_orphan_add(mp, *child_ino);
+    }
+
+    ext4_fs_put_inode_ref(&child_ref);
+    ext4_fs_put_inode_ref(&parent_ref);
+    return EOK;
+}
+
+int inode_free_orphan(struct ext4_mountpoint *mp, uint32_t ino) {
+    // Remove from orphan list first.
+    int r = inode_orphan_remove(mp, ino);
+    if (r != EOK)
+        return r;
+
+    // Now truncate and free the inode.
+    struct ext4_inode_ref ref;
+    r = ext4_fs_get_inode_ref(&mp->fs, ino, &ref);
+    if (r != EOK)
+        return r;
+
+    ext4_fs_truncate_inode(&ref, 0);
+    ext4_fs_free_inode(&ref);
+
+    ext4_fs_put_inode_ref(&ref);
+    return EOK;
+}
+
+int inode_orphan_recover(struct ext4_mountpoint *mp) {
+    uint32_t ino = ext4_get32(&mp->fs.sb, last_orphan);
+
+    while (ino != 0) {
+        struct ext4_inode_ref ref;
+        int r = ext4_fs_get_inode_ref(&mp->fs, ino, &ref);
+        if (r != EOK)
+            return r;
+
+        // Save next before we clear it.
+        uint32_t next = ext4_inode_get_del_time(ref.inode);
+
+        // Truncate and free.
+        ext4_inode_set_del_time(ref.inode, 0);
+        ref.dirty = true;
+        ext4_fs_truncate_inode(&ref, 0);
+        ext4_fs_free_inode(&ref);
+        ext4_fs_put_inode_ref(&ref);
+
+        ino = next;
+    }
+
+    // Clear the orphan list head.
+    ext4_set32(&mp->fs.sb, last_orphan, 0);
+    return ext4_sb_write(mp->fs.bdev, &mp->fs.sb);
 }

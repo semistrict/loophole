@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -18,7 +20,7 @@ func TestS3Bench(t *testing.T) {
 	ctx := t.Context()
 
 	inst := uniqueInstance(t)
-	store, err := loophole.NewS3Store(ctx, inst, defaultS3Options())
+	store, err := loophole.NewS3Store(ctx, inst)
 	if err != nil {
 		t.Fatal(err)
 	}

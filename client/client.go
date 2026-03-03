@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,16 +15,19 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/streammux"
 )
 
 // Client talks to a running loophole daemon over its Unix socket.
 type Client struct {
-	Dir  loophole.Dir
-	Inst loophole.Instance
-	Bin  string        // path to loophole binary; empty = find in PATH
-	Sudo bool          // wrap daemon start with sudo
-	Mode loophole.Mode // mode for spawned daemon; empty = use daemon's default
+	Dir     loophole.Dir
+	Inst    loophole.Instance
+	Bin     string // path to loophole binary; empty = find in PATH
+	Sudo    bool   // wrap daemon start with sudo
+	Profile string // profile name; non-empty = pass -p to spawned daemon
 
 	sock string
 	http *http.Client
@@ -31,7 +35,7 @@ type Client struct {
 
 // New creates a client for the given instance.
 func New(dir loophole.Dir, inst loophole.Instance) *Client {
-	sock := dir.Socket(inst)
+	sock := dir.Socket(inst.ProfileName)
 	return &Client{
 		Dir:  dir,
 		Inst: inst,
@@ -70,8 +74,21 @@ func (c *Client) EnsureDaemon() error {
 // --- RPC methods ---
 
 // Create creates a new volume and formats it with ext4.
-func (c *Client) Create(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/create", map[string]string{
+// Size is the volume size in bytes; 0 means use the default.
+type CreateParams struct {
+	Volume   string `json:"volume"`
+	Size     uint64 `json:"size,omitempty"`
+	NoFormat bool   `json:"no_format,omitempty"`
+}
+
+func (c *Client) Create(ctx context.Context, p CreateParams) error {
+	_, err := c.rpc(ctx, "POST", "/create", p)
+	return err
+}
+
+// Delete removes a volume.
+func (c *Client) Delete(ctx context.Context, volume string) error {
+	_, err := c.rpc(ctx, "POST", "/delete", map[string]string{
 		"volume": volume,
 	})
 	return err
@@ -161,6 +178,131 @@ func (c *Client) DeviceClone(ctx context.Context, volume, clone string) (string,
 	return result.Device, nil
 }
 
+// FileResult holds the websocket connection from a file command.
+// Callers must call Demux to consume stdout/stderr and get the exit code,
+// then Close to release the connection.
+type FileResult struct {
+	conn *websocket.Conn
+	mux  *streammux.Reader
+}
+
+// Demux reads all frames, writing stdout/stderr to the given writers.
+// Returns the exit code from the daemon.
+func (fr *FileResult) Demux(stdout, stderr io.Writer) (int32, error) {
+	return fr.mux.Demux(stdout, stderr)
+}
+
+// Close releases the underlying websocket connection.
+func (fr *FileResult) Close() error {
+	return fr.conn.Close()
+}
+
+// File runs a file command (cat, ls, tar, etc.) and returns a FileResult
+// for streaming stdout/stderr. The argv is sent as-is to the server.
+// The server may request files from the client via the bidirectional protocol.
+func (c *Client) File(ctx context.Context, argv []string) (*FileResult, error) {
+	dialer := websocket.Dialer{
+		NetDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", c.sock)
+		},
+	}
+
+	conn, _, err := dialer.DialContext(ctx, "ws://loophole/file", nil)
+	if err != nil {
+		return nil, fmt.Errorf("no daemon running (socket %s): %w", c.sock, err)
+	}
+
+	// Send argv as first text message.
+	argvJSON, _ := json.Marshal(argv)
+	if err := conn.WriteMessage(websocket.TextMessage, argvJSON); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+
+	// The connection is now bidirectional:
+	// - Server sends binary messages: streammux frames (stdout/stderr/exit)
+	// - Server sends text messages: read requests {"read": "path", "id": N}
+	// - Client sends binary messages: file data with 4-byte uint32 id prefix
+
+	// We need a goroutine to read all messages and route them:
+	// binary → streammux pipe, text → file request handler.
+	smuxR, smuxW := io.Pipe()
+
+	go func() {
+		defer func() { _ = smuxW.Close() }()
+		for {
+			msgType, msg, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			switch msgType {
+			case websocket.BinaryMessage:
+				// Streammux frame from server.
+				if _, err := smuxW.Write(msg); err != nil {
+					return
+				}
+			case websocket.TextMessage:
+				// Read request from server.
+				var req struct {
+					Read string `json:"read"`
+					ID   uint32 `json:"id"`
+				}
+				if json.Unmarshal(msg, &req) != nil {
+					continue
+				}
+				go c.serveFileRead(conn, req.Read, req.ID)
+			}
+		}
+	}()
+
+	return &FileResult{
+		conn: conn,
+		mux:  streammux.NewReader(smuxR),
+	}, nil
+}
+
+// serveFileRead opens a file (or stdin for "-") and streams it to the server
+// as binary websocket messages with a 4-byte id prefix.
+func (c *Client) serveFileRead(conn *websocket.Conn, path string, id uint32) {
+	var r io.ReadCloser
+	if path == "-" {
+		r = os.Stdin
+	} else {
+		f, err := os.Open(path)
+		if err != nil {
+			// Send EOF immediately on error.
+			idBuf := make([]byte, 4)
+			binary.BigEndian.PutUint32(idBuf, id)
+			_ = conn.WriteMessage(websocket.BinaryMessage, idBuf)
+			return
+		}
+		r = f
+	}
+	defer func() {
+		if path != "-" {
+			_ = r.Close()
+		}
+	}()
+
+	buf := make([]byte, 64*1024+4)
+	binary.BigEndian.PutUint32(buf[:4], id)
+
+	for {
+		n, err := r.Read(buf[4:])
+		if n > 0 {
+			if wErr := conn.WriteMessage(websocket.BinaryMessage, buf[:4+n]); wErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// Send EOF: just the 4-byte id with no data.
+	_ = conn.WriteMessage(websocket.BinaryMessage, buf[:4])
+}
+
 // ListVolumes returns all volume names from the store (not just open ones).
 func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
 	resp, err := c.rpc(ctx, "GET", "/volumes", nil)
@@ -187,6 +329,27 @@ type StatusResponse struct {
 	Fuse    string            `json:"fuse"`
 	Volumes []string          `json:"volumes"`
 	Mounts  map[string]string `json:"mounts"`
+}
+
+// Metrics returns the raw Prometheus metrics text from the daemon.
+func (c *Client) Metrics(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://loophole/metrics", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("daemon not reachable at %s: %w", c.sock, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("daemon error: %s", data)
+	}
+	return string(data), nil
 }
 
 // Status returns the daemon status.
@@ -224,7 +387,7 @@ func (c *Client) rpc(ctx context.Context, method, path string, body any) (json.R
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("daemon not reachable at %s: %w", c.sock, err)
+		return nil, fmt.Errorf("no daemon running (socket %s)", c.sock)
 	}
 	defer func() {
 		if err := resp.Body.Close(); err != nil {
@@ -284,14 +447,23 @@ func (c *Client) startDaemon() error {
 		}
 	}
 
+	// Build the start command args.
+	var args []string
+	if c.Profile != "" {
+		args = append(args, "-p", c.Profile, "start")
+	} else {
+		args = append(args, "start", c.Inst.URL())
+	}
+
 	var cmd *exec.Cmd
 	if c.Sudo && os.Getuid() != 0 {
-		cmd = exec.Command("sudo", "-E", bin, "start", "--socket-mode", fmt.Sprintf("%d", 0o666), c.Inst.S3URL())
+		args = append([]string{"-E", bin}, args...)
+		if c.Profile == "" {
+			args = append(args, "--socket-mode", fmt.Sprintf("%d", 0o666))
+		}
+		cmd = exec.Command("sudo", args...)
 	} else {
-		cmd = exec.Command(bin, "start", c.Inst.S3URL())
-	}
-	if c.Mode != "" {
-		cmd.Env = append(os.Environ(), "LOOPHOLE_MODE="+string(c.Mode))
+		cmd = exec.Command(bin, args...)
 	}
 	cmd.Stdout = nil
 	cmd.Stderr = nil
@@ -303,11 +475,11 @@ func (c *Client) startDaemon() error {
 		slog.Warn("process release failed", "error", err)
 	}
 
-	for range 50 {
+	for range 300 {
 		time.Sleep(100 * time.Millisecond)
 		if isSocketAlive(c.sock) {
 			return nil
 		}
 	}
-	return fmt.Errorf("daemon did not start within 5s (socket: %s, log: %s)", c.sock, c.Dir.Log(c.Inst))
+	return fmt.Errorf("daemon did not start within 30s (socket: %s, log: %s)", c.sock, c.Dir.Log(c.Inst.ProfileName))
 }

@@ -28,7 +28,7 @@ var _ DevicePather = (*NBDTCPDriver)(nil)
 var _ DeviceConnector = (*NBDTCPDriver)(nil)
 
 // NewNBDTCP creates a Service backed by TCP NBD.
-func NewNBDTCP(vm *loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+func NewNBDTCP(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
 	srv, err := nbdvm.NewTCPServer(vm, opts)
 	if err != nil {
 		return nil, err
@@ -36,7 +36,7 @@ func NewNBDTCP(vm *loophole.VolumeManager, opts *nbdvm.Options) (Service, error)
 	return New[nbdTCPMount](&NBDTCPDriver{nbd: srv}, vm), nil
 }
 
-func (n *NBDTCPDriver) Format(ctx context.Context, vol *loophole.Volume) error {
+func (n *NBDTCPDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	dev, err := n.nbd.Connect(ctx, vol)
 	if err != nil {
 		return err
@@ -44,7 +44,7 @@ func (n *NBDTCPDriver) Format(ctx context.Context, vol *loophole.Volume) error {
 	return ext4.FormatDirect(ctx, dev)
 }
 
-func (n *NBDTCPDriver) Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (nbdTCPMount, error) {
+func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (nbdTCPMount, error) {
 	dev, err := n.nbd.Connect(ctx, vol)
 	if err != nil {
 		return nbdTCPMount{}, err
@@ -83,7 +83,7 @@ func (n *NBDTCPDriver) Close(ctx context.Context) error {
 	return nil
 }
 
-func (n *NBDTCPDriver) ConnectDevice(ctx context.Context, vol *loophole.Volume) (string, error) {
+func (n *NBDTCPDriver) ConnectDevice(ctx context.Context, vol loophole.Volume) (string, error) {
 	return n.nbd.Connect(ctx, vol)
 }
 
@@ -96,5 +96,5 @@ func (n *NBDTCPDriver) DevicePath(volumeName string) string {
 }
 
 func (n *NBDTCPDriver) FS(h nbdTCPMount) (FS, error) {
-	return newOSFS(h.mountpoint), nil
+	return NewOSFS(h.mountpoint), nil
 }

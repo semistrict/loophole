@@ -8,57 +8,39 @@ import (
 	"os"
 	"path/filepath"
 
-	"golang.org/x/sync/semaphore"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/semistrict/loophole/metrics"
 )
 
-// BlockCache is a shared, file-backed block cache. Blocks from frozen
-// (immutable) layers go into an immutable directory that persists across
-// restarts. Blocks from mutable layers go into a mutable directory that
-// is wiped on startup.
+// BlockCache is a shared, file-backed cache for immutable (frozen) layer
+// blocks. Blocks persist across restarts.
 //
 // A zero-length cache file is a tombstone — the block was explicitly zeroed.
 // Writes go to a .tmp file first and are atomically renamed into place.
 //
 // Fetches are deduplicated: concurrent requests for the same uncached
 // block result in a single S3 download.
-type BlockCache struct {
+type BlockCache struct { // XXX: does this need to be exported?
 	layers    ObjectStore // scoped to "layers/"
-	blockSize uint64
+	downloads *BlockDownloader
 
 	immutableDir string
-	mutableDir   string
 
-	flights     singleflight.Group  // deduplicates concurrent S3 fetches
-	downloadSem *semaphore.Weighted // bounds concurrent S3 downloads
+	flights singleflight.Group // deduplicates concurrent S3 fetches XXX - we should probably move this to BlockDownloader
 }
 
-// NewBlockCache creates a BlockCache rooted at dir. It creates the
-// immutable/ and mutable/ subdirectories and wipes mutable/ clean.
-func NewBlockCache(dir string, layers ObjectStore, blockSize uint64, maxDownloads int) (*BlockCache, error) {
+// NewBlockCache creates a BlockCache rooted at dir for immutable layer blocks.
+func NewBlockCache(dir string, layers ObjectStore, downloads *BlockDownloader) (*BlockCache, error) {
 	immutableDir := filepath.Join(dir, "immutable")
-	mutableDir := filepath.Join(dir, "mutable")
-
-	// Wipe mutable cache — may be stale from a previous run.
-	if err := os.RemoveAll(mutableDir); err != nil {
-		slog.Warn("remove all failed", "dir", mutableDir, "error", err)
-	}
-
 	if err := os.MkdirAll(immutableDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create immutable cache dir: %w", err)
-	}
-	if err := os.MkdirAll(mutableDir, 0o755); err != nil {
-		return nil, fmt.Errorf("create mutable cache dir: %w", err)
 	}
 
 	return &BlockCache{
 		layers:       layers,
-		blockSize:    blockSize,
+		downloads:    downloads,
 		immutableDir: immutableDir,
-		mutableDir:   mutableDir,
-		downloadSem:  semaphore.NewWeighted(int64(maxDownloads)),
 	}, nil
 }
 
@@ -94,71 +76,13 @@ func (bc *BlockCache) GetOrFetch(ctx context.Context, layerID string, blockIdx B
 	return f, tombstone, nil
 }
 
-// fetchToCache downloads a block from S3 and streams it directly into
-// the immutable cache file, zero-padding to blockSize.
+// fetchToCache downloads a block from S3 into the immutable cache.
 func (bc *BlockCache) fetchToCache(ctx context.Context, layerID string, blockIdx BlockIdx) error {
-	if err := bc.downloadSem.Acquire(ctx, 1); err != nil {
-		return err
-	}
-	defer bc.downloadSem.Release(1)
-	metrics.InflightDownloads.Inc()
-	defer metrics.InflightDownloads.Dec()
-	t := metrics.NewTimer(metrics.CacheFetchDuration)
-	defer t.ObserveDuration()
-
-	store := bc.layers.At(layerID)
-	key := blockIdx.String()
-	body, _, err := store.Get(ctx, key, 0)
-	if err != nil {
-		return fmt.Errorf("fetch block %s/%d: %w", layerID, blockIdx, err)
-	}
-	defer func() {
-		if err := body.Close(); err != nil {
-			slog.Warn("close failed", "error", err)
-		}
-	}()
-
 	path := bc.immutablePath(layerID, blockIdx)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-
-	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if f != nil {
-			if cerr := f.Close(); cerr != nil {
-				slog.Warn("close failed", "error", cerr)
-			}
-		}
-		if err != nil {
-			if rerr := os.Remove(tmp); rerr != nil {
-				slog.Warn("remove failed", "path", tmp, "error", rerr)
-			}
-		}
-	}()
-
-	n, err := io.Copy(f, body)
-	if err != nil {
-		return fmt.Errorf("stream block %s/%d: %w", layerID, blockIdx, err)
-	}
-
-	// Zero-pad to blockSize.
-	if uint64(n) < bc.blockSize {
-		if err = f.Truncate(int64(bc.blockSize)); err != nil {
-			return err
-		}
-	}
-
-	err = f.Close()
-	f = nil // prevent defer from closing again
-	if err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return bc.downloads.Download(ctx, bc.layers.At(layerID), blockIdx.String(), path)
 }
 
 // get opens a cached immutable block file. Returns the open file,
@@ -179,43 +103,9 @@ func (bc *BlockCache) get(layerID string, blockIdx BlockIdx) (f *os.File, tombst
 	return f, false, true
 }
 
-// OpenMutable opens (or creates) a mutable block cache file. If the file
-// does not exist, it is cloned from src (using reflink if the filesystem
-// supports it), or zero-filled if src is nil. The returned file supports
-// ReadAt/WriteAt (pread/pwrite). Caller retains ownership of src.
-func (bc *BlockCache) OpenMutable(layerID string, blockIdx BlockIdx, src *os.File) (*os.File, error) {
-	path := bc.mutablePath(layerID, blockIdx)
-
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-
-	// Try to open existing file.
-	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
-	if err == nil {
-		return f, nil
-	}
-
-	tmp := path + ".tmp"
-	if src != nil {
-		if err := cloneOrCopyFile(src.Name(), tmp, bc.blockSize); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := createZeroFile(tmp, bc.blockSize); err != nil {
-			return nil, err
-		}
-	}
-
-	if err := os.Rename(tmp, path); err != nil {
-		return nil, err
-	}
-	return os.OpenFile(path, os.O_RDWR, 0o644)
-}
-
 // cloneOrCopyFile tries a reflink clone first, falling back to a
 // streaming copy. The result is truncated/extended to blockSize.
-func cloneOrCopyFile(srcPath, dstPath string, blockSize uint64) error {
+func cloneOrCopyFile(srcPath, dstPath string, blockSize uint64) error { // XXX: why is this func in this file?
 	// Try reflink clone — instant, zero-copy on supported filesystems.
 	if err := cloneFile(srcPath, dstPath); err == nil {
 		// Ensure correct size (extend or truncate to blockSize).
@@ -256,7 +146,9 @@ func cloneOrCopyFile(srcPath, dstPath string, blockSize uint64) error {
 	return nil
 }
 
-func createZeroFile(path string, blockSize uint64) error {
+// XXX: some of the functions in this file do not belong here
+
+func createZeroFile(path string, blockSize uint64) error { // XXX: I do not understand the point of doing this
 	f, err := os.Create(path)
 	if err != nil {
 		return err
@@ -273,12 +165,19 @@ func createZeroFile(path string, blockSize uint64) error {
 	return err
 }
 
-func (bc *BlockCache) immutablePath(layerID string, blockIdx BlockIdx) string {
-	return filepath.Join(bc.immutableDir, layerID, blockIdx.String())
+// Adopt moves a directory of block files into the immutable cache for
+// the given layer. Called when a layer is frozen — its blocks are now
+// truly immutable.
+func (bc *BlockCache) Adopt(layerID string, srcDir string) error {
+	dst := filepath.Join(bc.immutableDir, layerID)
+	if err := os.RemoveAll(dst); err != nil { // XXX: we should fail if the destination dir exists, remove this RemoveAll
+		return err
+	}
+	return os.Rename(srcDir, dst)
 }
 
-func (bc *BlockCache) mutablePath(layerID string, blockIdx BlockIdx) string {
-	return filepath.Join(bc.mutableDir, layerID, blockIdx.String())
+func (bc *BlockCache) immutablePath(layerID string, blockIdx BlockIdx) string {
+	return filepath.Join(bc.immutableDir, layerID, blockIdx.String())
 }
 
 func (bc *BlockCache) flightKey(layerID string, blockIdx BlockIdx) string {

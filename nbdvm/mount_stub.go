@@ -11,21 +11,19 @@ import (
 )
 
 // Options configures the NBD server.
-type Options struct {
-	VolumeSize uint64
-}
+type Options struct{}
 
 // Server manages NBD exports. Only available on Linux.
 type Server struct{}
 
 // NewServer returns an error on non-Linux platforms.
-func NewServer(_ *loophole.VolumeManager, _ *Options) (*Server, error) {
+func NewServer(_ loophole.VolumeManager, _ *Options) (*Server, error) {
 	return nil, fmt.Errorf("NBD server requires Linux (got %s)", runtime.GOOS)
 }
 
 func (s *Server) DevicePath(_ string) string { return "" }
 
-func (s *Server) Connect(_ context.Context, _ *loophole.Volume) (string, error) {
+func (s *Server) Connect(_ context.Context, _ loophole.Volume) (string, error) {
 	return "", fmt.Errorf("NBD server requires Linux (got %s)", runtime.GOOS)
 }
 

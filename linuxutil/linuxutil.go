@@ -16,10 +16,27 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Mount mounts a filesystem at mountpoint.
-func Mount(source, mountpoint, fstype string) error {
-	if err := unix.Mount(source, mountpoint, fstype, 0, ""); err != nil {
-		return fmt.Errorf("mount %s on %s: %w", source, mountpoint, err)
+// MountOpts configures a filesystem mount.
+type MountOpts struct {
+	Source     string
+	Mountpoint string
+	FSType     string
+	NoAtime    bool
+	NoBarrier  bool
+}
+
+// Mount mounts a filesystem with the given options.
+func Mount(opts MountOpts) error {
+	var flags uintptr
+	if opts.NoAtime {
+		flags |= unix.MS_NOATIME
+	}
+	var data string
+	if opts.NoBarrier {
+		data = "nobarrier"
+	}
+	if err := unix.Mount(opts.Source, opts.Mountpoint, opts.FSType, flags, data); err != nil {
+		return fmt.Errorf("mount %s on %s: %w", opts.Source, opts.Mountpoint, err)
 	}
 	return nil
 }
@@ -176,10 +193,15 @@ type LoopDevice struct {
 // LoopAttach finds a free loop device, attaches it to the file at backingPath
 // with O_DIRECT and autoclear, and returns the LoopDevice.
 //
+// optimalIOSize hints the preferred I/O size to the block layer via sysfs
+// (optimal_io_size and minimum_io_size). The logical sector size is always
+// set to 4096 via LOOP_CONFIGURE. Failures to set sysfs tunables are logged
+// as warnings but do not prevent attach.
+//
 // The kernel's GET_FREE and CONFIGURE ioctls are not atomic, so a concurrent
 // caller can grab the same device number. We retry up to 6 times on EBUSY,
 // mirroring the strategy used by util-linux's losetup.
-func LoopAttach(backingPath string) (*LoopDevice, error) {
+func LoopAttach(backingPath string, optimalIOSize int) (*LoopDevice, error) {
 	backingFD, err := unix.Open(backingPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_DIRECT, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open backing file %s: %w", backingPath, err)
@@ -194,7 +216,9 @@ func LoopAttach(backingPath string) (*LoopDevice, error) {
 	for attempt := range maxRetries {
 		devPath, err := loopConfigure1(backingFD)
 		if err == nil {
-			return &LoopDevice{Path: devPath}, nil
+			dev := &LoopDevice{Path: devPath}
+			dev.tuneBlockQueue(optimalIOSize)
+			return dev, nil
 		}
 		if !isEBUSY(err) {
 			return nil, fmt.Errorf("loop attach: %w", err)
@@ -250,7 +274,8 @@ func loopConfigure1(backingFD int) (string, error) {
 	}
 
 	cfg := loopConfig{
-		FD: uint32(backingFD),
+		FD:        uint32(backingFD),
+		BlockSize: 4096,
 		Info: loopInfo64{
 			Flags: loFlagsDirectIO,
 		},
@@ -267,6 +292,23 @@ func loopConfigure1(backingFD int) (string, error) {
 	}
 
 	return devPath, nil
+}
+
+// tuneBlockQueue sets optimal_io_size and minimum_io_size on the loop
+// device's block queue via sysfs. Failures are logged as warnings.
+func (d *LoopDevice) tuneBlockQueue(optimalIOSize int) {
+	if optimalIOSize <= 0 {
+		return
+	}
+	// d.Path is e.g. "/dev/loop5" → sysfs base is "loop5".
+	base := d.Path[len("/dev/"):]
+	val := fmt.Sprintf("%d", optimalIOSize)
+	for _, param := range []string{"optimal_io_size", "minimum_io_size"} {
+		path := fmt.Sprintf("/sys/block/%s/queue/%s", base, param)
+		if err := os.WriteFile(path, []byte(val), 0); err != nil {
+			slog.Warn("failed to set block queue parameter", "path", path, "value", val, "error", err)
+		}
+	}
 }
 
 // Detach detaches the loop device from its backing file.

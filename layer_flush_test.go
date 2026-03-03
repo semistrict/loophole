@@ -27,8 +27,8 @@ func TestFlushRedirtiesOnUploadFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write two blocks.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
-	require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("B"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("A"), 64), 0))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("B"), 64), 64))
 
 	// Make PutReader fail for block 1 only.
 	block1Key := "layers/layer-a/0000000000000001"
@@ -80,7 +80,7 @@ func TestFlushAllZeroBlockBecomesTombstone(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write a full block of zeros.
-	require.NoError(t, layer.Write(t.Context(), 0, make([]byte, 64)))
+	require.NoError(t, layer.Write(t.Context(), make([]byte, 64), 0))
 	require.NoError(t, layer.Flush(t.Context()))
 
 	// Should be a tombstone (zero-length object), not a 64-byte file of zeros.
@@ -90,7 +90,7 @@ func TestFlushAllZeroBlockBecomesTombstone(t *testing.T) {
 
 	// Reading back should return zeros.
 	buf := make([]byte, 64)
-	_, err = layer.Read(t.Context(), 0, buf)
+	_, err = layer.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, make([]byte, 64), buf)
 }
@@ -110,14 +110,14 @@ func TestFlushAllZeroBlockNoAncestorDeletes(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write data first so the block exists in S3.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("D"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("D"), 64), 0))
 	require.NoError(t, layer.Flush(t.Context()))
 
 	_, ok := store.GetObject("layers/layer-a/0000000000000000")
 	require.True(t, ok, "block should exist after first flush")
 
 	// Now overwrite with zeros.
-	require.NoError(t, layer.Write(t.Context(), 0, make([]byte, 64)))
+	require.NoError(t, layer.Write(t.Context(), make([]byte, 64), 0))
 	require.NoError(t, layer.Flush(t.Context()))
 
 	// No ancestor owns this block, so it should be deleted entirely.
@@ -139,13 +139,13 @@ func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write block 0 with initial data.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("A"), 64), 0))
 
 	// Flush to upload the initial data.
 	require.NoError(t, layer.Flush(t.Context()))
 
 	// Now write again — this makes block 0 dirty again.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("B"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("B"), 64), 0))
 
 	// Flush again — after the dirty set is swapped (at the start of Flush),
 	// write new data. The write goes to the NEW dirty set.
@@ -159,12 +159,12 @@ func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 	// Now test the actual dirty-set swap semantics: write, then flush
 	// while also writing. We use the fact that a write after Flush's
 	// swap will land in the new dirty set.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("C"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("C"), 64), 0))
 	require.NoError(t, layer.Flush(t.Context()))
 
 	// Immediately write new data — this is after the flush completed,
 	// so block 0 goes into a fresh dirty set.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("D"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("D"), 64), 0))
 
 	layer.mu.Lock()
 	_, isDirty := layer.dirty[0]
@@ -188,8 +188,8 @@ func TestFlushConcurrentWriteDuringUpload(t *testing.T) {
 // durable in S3. This is a correctness requirement: an fsync that triggers
 // Flush B must not return "success" while blocks are still in-flight.
 //
-// Current behavior (BUG): Flush B sees an empty dirty set (Flush A already
-// swapped it) and returns immediately — before Flush A's uploads complete.
+// Previous behavior (fixed): Flush B would see an empty dirty set (Flush A
+// already swapped it) and return immediately — before Flush A's uploads complete.
 func TestFlushConcurrentDurability(t *testing.T) {
 	store := NewMemStore()
 	vm := newTestVM(t, store)
@@ -204,7 +204,7 @@ func TestFlushConcurrentDurability(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write a block so it's dirty.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("X"), 64), 0))
 
 	// Set up a hook on PutReader: when Flush A starts uploading, it signals
 	// uploadStarted, then blocks until we release it.
@@ -323,7 +323,7 @@ func TestOpenBlockConcurrentSameBlock(t *testing.T) {
 	for i := range n {
 		marker := byte('a' + i)
 		g.Go(func() error {
-			return layer.Write(ctx, 0, bytes.Repeat([]byte{marker}, 64))
+			return layer.Write(ctx, bytes.Repeat([]byte{marker}, 64), 0)
 		})
 	}
 	require.NoError(t, g.Wait())
@@ -347,7 +347,7 @@ func TestCloseFlushesAndReleasesLease(t *testing.T) {
 	require.NoError(t, layer.Mount(t.Context()))
 
 	// Write dirty data.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("C"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("C"), 64), 0))
 
 	// Close should flush then release lease.
 	require.NoError(t, layer.Close(t.Context()))
@@ -379,8 +379,8 @@ func TestFreezeFlushesDirtyBlocks(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write dirty blocks.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("F"), 64)))
-	require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("G"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("F"), 64), 0))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("G"), 64), 64))
 
 	// Freeze — should flush all dirty blocks before writing frozen_at.
 	require.NoError(t, layer.Freeze(t.Context()))
@@ -425,7 +425,7 @@ func TestFlushWhileBackgroundFlushRunning(t *testing.T) {
 		})
 
 		// Write block 0.
-		require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
+		require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("A"), 64), 0))
 
 		// Delay PutReader by 5s so the background flush is mid-upload.
 		store.SetFault(OpPutReader, "", Fault{Delay: 5 * time.Second})
@@ -435,7 +435,7 @@ func TestFlushWhileBackgroundFlushRunning(t *testing.T) {
 		synctest.Wait()
 
 		// Write block 1 while background flush is uploading block 0.
-		require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("B"), 64)))
+		require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("B"), 64), 64))
 
 		// Explicit flush — should wait for background flush then upload block 1.
 		store.ClearFault(OpPutReader, "")
@@ -467,7 +467,7 @@ func TestFlushCoalescingMultipleWaiters(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write a block.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("X"), 64), 0))
 
 	// Slow down uploads so the first flush is still running when others call Flush.
 	uploadStarted := make(chan struct{})
@@ -530,7 +530,7 @@ func TestFlushPicksUpWritesDuringInFlightFlush(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write block 0 (block A).
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("A"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("A"), 64), 0))
 
 	// Slow down Flush A so we can write block 1 while it's uploading.
 	uploadStarted := make(chan struct{})
@@ -552,7 +552,7 @@ func TestFlushPicksUpWritesDuringInFlightFlush(t *testing.T) {
 	<-uploadStarted
 
 	// Write block 1 — this goes into the NEW dirty set.
-	require.NoError(t, layer.Write(t.Context(), 64, bytes.Repeat([]byte("B"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("B"), 64), 64))
 
 	// Release Flush A.
 	close(uploadRelease)
@@ -589,7 +589,7 @@ func TestFlushErrorDoesNotBlockWaiters(t *testing.T) {
 	require.NoError(t, err)
 
 	// Write a block.
-	require.NoError(t, layer.Write(t.Context(), 0, bytes.Repeat([]byte("X"), 64)))
+	require.NoError(t, layer.Write(t.Context(), bytes.Repeat([]byte("X"), 64), 0))
 
 	// Make the first upload fail after signaling.
 	uploadStarted := make(chan struct{})

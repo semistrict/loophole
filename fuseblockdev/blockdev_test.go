@@ -7,6 +7,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/lsm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,8 +20,8 @@ func skipWithoutFuse(t *testing.T) {
 }
 
 type fuseTestEnv struct {
-	vm  *loophole.VolumeManager
-	vol *loophole.Volume
+	vm  loophole.VolumeManager
+	vol loophole.Volume
 	srv *fuseblockdev.Server
 	f   *os.File
 }
@@ -30,15 +31,14 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	skipWithoutFuse(t)
 
 	store := loophole.NewMemStore()
-	_ = loophole.FormatSystem(t.Context(), store, 64)
-	vm, err := loophole.NewVolumeManager(t.Context(), store, t.TempDir(), 20, 200)
-	require.NoError(t, err)
+	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
+	t.Cleanup(func() { vm.Close(t.Context()) })
 
-	vol, err := vm.NewVolume(t.Context(), "testvol")
+	vol, err := vm.NewVolume(t.Context(), "testvol", 4096)
 	require.NoError(t, err)
 
 	mountDir := t.TempDir()
-	srv, err := fuseblockdev.Start(mountDir, &fuseblockdev.Options{VolumeSize: 4096})
+	srv, err := fuseblockdev.Start(mountDir, &fuseblockdev.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() { srv.Unmount() })
 
@@ -64,7 +64,7 @@ func TestFuseReadWrite(t *testing.T) {
 	require.Equal(t, data, buf)
 
 	buf2 := make([]byte, len(data))
-	_, err = env.vol.Read(t.Context(), 0, buf2)
+	_, err = env.vol.Read(t.Context(), buf2, 0)
 	require.NoError(t, err)
 	require.Equal(t, data, buf2)
 }
@@ -176,10 +176,37 @@ func TestFuseChmodFreezesVolume(t *testing.T) {
 	assert.Equal(t, data, buf)
 }
 
+func TestFuseReadOnlyOpenRejected(t *testing.T) {
+	env := setupFuse(t)
+
+	// Write some data, then freeze (make read-only).
+	_, err := env.f.WriteAt([]byte("data"), 0)
+	require.NoError(t, err)
+	env.f.Close()
+
+	err = os.Chmod(env.srv.DevicePath("testvol"), 0o400)
+	require.NoError(t, err)
+	require.True(t, env.vol.ReadOnly())
+
+	// Opening with O_RDWR should fail with EROFS.
+	_, err = os.OpenFile(env.srv.DevicePath("testvol"), os.O_RDWR, 0)
+	require.Error(t, err, "O_RDWR open on read-only volume should fail")
+
+	// Opening with O_RDONLY should succeed.
+	f, err := os.OpenFile(env.srv.DevicePath("testvol"), os.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer f.Close()
+
+	buf := make([]byte, 4)
+	_, err = f.ReadAt(buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, []byte("data"), buf)
+}
+
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	newvol, err := env.vm.NewVolume(t.Context(), "newvol")
+	newvol, err := env.vm.NewVolume(t.Context(), "newvol", 4096)
 	require.NoError(t, err)
 	env.srv.Add("newvol", newvol)
 
@@ -203,7 +230,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
 
-	cloneVol, err := env.vm.NewVolume(t.Context(), "clone")
+	cloneVol, err := env.vm.NewVolume(t.Context(), "clone", 4096)
 	require.NoError(t, err)
 	env.srv.Add("clone", cloneVol)
 
@@ -230,7 +257,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush(t.Context()))
 
-	dstVol, err := env.vm.NewVolume(t.Context(), "refclone")
+	dstVol, err := env.vm.NewVolume(t.Context(), "refclone", 4096)
 	require.NoError(t, err)
 	env.srv.Add("refclone", dstVol)
 

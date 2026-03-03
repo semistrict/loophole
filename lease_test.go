@@ -266,7 +266,6 @@ func TestLeaseLayerMountAfterCrash(t *testing.T) {
 		// Simulate crash: stop background goroutines without unmounting.
 		layer1.stopFlush()
 		<-layer1.flushStopped
-		layer1.closed.Store(true)
 		vm1.lease.mu.Lock()
 		if vm1.lease.stop != nil {
 			vm1.lease.stop()

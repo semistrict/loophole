@@ -3,6 +3,4 @@ go 1.25.2
 use (
 	.
 	./third_party/merovius-nbd
-	./third_party/podman
-	./third_party/container-libs/storage
 )

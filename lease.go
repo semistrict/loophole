@@ -128,7 +128,7 @@ func (lm *LeaseManager) createLease(ctx context.Context) error {
 		return fmt.Errorf("lease token %s already exists", lm.token)
 	}
 	// Read back to get the etag for subsequent CAS renewals.
-	body, etag, err := lm.leases.Get(ctx, lm.token+".json", 0)
+	body, etag, err := lm.leases.Get(ctx, lm.token+".json")
 	if err != nil {
 		return fmt.Errorf("read back lease etag: %w", err)
 	}

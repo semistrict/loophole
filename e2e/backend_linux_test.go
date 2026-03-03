@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -11,7 +13,7 @@ import (
 	"github.com/semistrict/loophole/nbdvm"
 )
 
-func newBackendForMode(t *testing.T, vm *loophole.VolumeManager, inst loophole.Instance) fsbackend.Service {
+func newBackendForMode(t *testing.T, vm loophole.VolumeManager, inst loophole.Instance) fsbackend.Service {
 	t.Helper()
 	switch mode() {
 	case loophole.ModeNBD:
@@ -24,12 +26,12 @@ func newBackendForMode(t *testing.T, vm *loophole.VolumeManager, inst loophole.I
 		return b
 	case loophole.ModeFUSE:
 		dir := loophole.Dir(t.TempDir())
-		b, err := fsbackend.NewFUSE(dir.Fuse(inst), vm, &fuseblockdev.Options{})
+		b, err := fsbackend.NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})
 		require.NoError(t, err)
 		return b
 	case loophole.ModeLwext4FUSE:
-		return fsbackend.NewLwext4FUSE(vm, &fsbackend.Lwext4Options{VolumeSize: defaultVolumeSize})
+		return fsbackend.NewLwext4FUSE(vm)
 	default:
-		return fsbackend.NewLwext4(vm, &fsbackend.Lwext4Options{VolumeSize: defaultVolumeSize})
+		return fsbackend.NewLwext4(vm)
 	}
 }

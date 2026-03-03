@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 )
 
 // Driver is the pluggable interface that backends implement.
@@ -20,8 +21,8 @@ import (
 // no internal mount tracking.
 type Driver[H any] interface {
 	// Format creates a new ext4 filesystem on the volume's block device.
-	Format(ctx context.Context, vol *loophole.Volume) error
-	Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (H, error)
+	Format(ctx context.Context, vol loophole.Volume) error
+	Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (H, error)
 	Unmount(ctx context.Context, handle H) error
 	Freeze(ctx context.Context, handle H) error
 	Thaw(ctx context.Context, handle H) error
@@ -34,7 +35,7 @@ type Driver[H any] interface {
 // Service is the non-generic interface that Backend[H] implements.
 // The daemon and HTTP handlers use this.
 type Service interface {
-	Create(ctx context.Context, volume string) error
+	Create(ctx context.Context, p client.CreateParams) error
 	Mount(ctx context.Context, volume, mountpoint string) error
 	Unmount(ctx context.Context, mountpoint string) error
 	Snapshot(ctx context.Context, mountpoint, name string) error
@@ -42,6 +43,9 @@ type Service interface {
 	Freeze(ctx context.Context, mountpoint string) error
 	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
+	// FSForVolume returns an FS for a volume by name. The volume must
+	// already be mounted.
+	FSForVolume(volume string) (FS, error)
 	DeviceMount(ctx context.Context, volume string) (string, error)
 	DeviceUnmount(ctx context.Context, volume string) error
 	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
@@ -50,7 +54,7 @@ type Service interface {
 	IsMounted(mountpoint string) bool
 	VolumeAt(mountpoint string) string
 	Mounts() map[string]string
-	VM() *loophole.VolumeManager
+	VM() loophole.VolumeManager
 	Close(ctx context.Context) error
 }
 
@@ -63,9 +67,15 @@ type FS interface {
 	MkdirAll(name string, perm fs.FileMode) error
 	Remove(name string) error
 	Stat(name string) (fs.FileInfo, error)
+	Lstat(name string) (fs.FileInfo, error)
 	ReadDir(name string) ([]string, error)
 	Open(name string) (File, error)
 	Create(name string) (File, error)
+	Symlink(target, name string) error
+	Readlink(name string) (string, error)
+	Chmod(name string, mode fs.FileMode) error
+	Lchown(name string, uid, gid int) error
+	Chtimes(name string, mtime int64) error
 }
 
 // File is an open file handle.
@@ -84,7 +94,7 @@ type DevicePather interface {
 // DeviceConnector is optionally implemented by drivers that need to
 // explicitly connect/disconnect a volume to a block device (e.g. NBD).
 type DeviceConnector interface {
-	ConnectDevice(ctx context.Context, vol *loophole.Volume) (string, error)
+	ConnectDevice(ctx context.Context, vol loophole.Volume) (string, error)
 	DisconnectDevice(ctx context.Context, volumeName string) error
 }
 
@@ -92,13 +102,13 @@ type DeviceConnector interface {
 // explicitly registered before their device files become accessible
 // (e.g. FUSE block device server).
 type VolumeRegistrar interface {
-	RegisterVolume(name string, vol *loophole.Volume)
+	RegisterVolume(name string, vol loophole.Volume)
 	UnregisterVolume(name string)
 }
 
 // mountEntry stores the volume name and driver-specific handle for a mount.
 type mountEntry[H any] struct {
-	volume string
+	volume string // XXX: I would have expected to see a *Volume here
 	handle H
 }
 
@@ -107,7 +117,7 @@ type mountEntry[H any] struct {
 // A volume may only be mounted once; mounting the same volume at the same
 // mountpoint is idempotent.
 type Backend[H any] struct {
-	vm     *loophole.VolumeManager
+	vm     loophole.VolumeManager
 	driver Driver[H]
 	vr     VolumeRegistrar // nil if driver doesn't implement it
 
@@ -116,7 +126,7 @@ type Backend[H any] struct {
 }
 
 // New creates a Backend with the given driver and volume manager.
-func New[H any](driver Driver[H], vm *loophole.VolumeManager) *Backend[H] {
+func New[H any](driver Driver[H], vm loophole.VolumeManager) *Backend[H] {
 	vr, _ := any(driver).(VolumeRegistrar)
 	return &Backend[H]{
 		vm:     vm,
@@ -127,23 +137,30 @@ func New[H any](driver Driver[H], vm *loophole.VolumeManager) *Backend[H] {
 }
 
 // VM returns the underlying VolumeManager.
-func (b *Backend[H]) VM() *loophole.VolumeManager { return b.vm }
+func (b *Backend[H]) VM() loophole.VolumeManager { return b.vm }
 
 // Create creates a new volume and formats it with ext4.
-func (b *Backend[H]) Create(ctx context.Context, volume string) error {
-	vol, err := b.vm.NewVolume(ctx, volume)
+// Size is the volume size in bytes; 0 means use the default.
+func (b *Backend[H]) Create(ctx context.Context, p client.CreateParams) error {
+	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size)
+	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size)
 	if err != nil {
 		return err
 	}
 	if b.vr != nil {
-		b.vr.RegisterVolume(volume, vol)
+		slog.Info("backend: registering volume", "volume", p.Volume)
+		b.vr.RegisterVolume(p.Volume, vol)
 	}
-	if err := b.driver.Format(ctx, vol); err != nil {
-		if b.vr != nil {
-			b.vr.UnregisterVolume(volume)
+	if !p.NoFormat {
+		slog.Info("backend: formatting volume", "volume", p.Volume)
+		if err := b.driver.Format(ctx, vol); err != nil {
+			if b.vr != nil {
+				b.vr.UnregisterVolume(p.Volume)
+			}
+			return fmt.Errorf("format: %w", err)
 		}
-		return fmt.Errorf("format: %w", err)
 	}
+	slog.Info("backend: create done", "volume", p.Volume)
 	return nil
 }
 
@@ -152,6 +169,7 @@ func (b *Backend[H]) Create(ctx context.Context, volume string) error {
 // Idempotent: if the volume is already mounted at this mountpoint, returns nil.
 // Returns an error if the volume is mounted at a different mountpoint.
 func (b *Backend[H]) Mount(ctx context.Context, volume string, mountpoint string) error {
+	slog.Info("backend: opening volume for mount", "volume", volume, "mountpoint", mountpoint)
 	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
 		return err
@@ -183,7 +201,7 @@ func (b *Backend[H]) Unmount(ctx context.Context, mountpoint string) error {
 
 	vol := b.vm.GetVolume(entry.volume)
 	if vol != nil {
-		return vol.Close(ctx)
+		return vol.ReleaseRef(ctx)
 	}
 	return nil
 }
@@ -210,25 +228,31 @@ func (b *Backend[H]) Snapshot(ctx context.Context, mountpoint string, name strin
 
 // Clone freezes the filesystem, clones the volume, thaws, and mounts the clone.
 func (b *Backend[H]) Clone(ctx context.Context, mountpoint string, cloneName string, cloneMountpoint string) error {
+	slog.Info("backend: clone start", "mountpoint", mountpoint, "clone", cloneName)
 	vol, handle, err := b.volumeAndHandle(mountpoint)
 	if err != nil {
 		return err
 	}
 
+	slog.Info("backend: freezing for clone", "mountpoint", mountpoint)
 	if err := b.driver.Freeze(ctx, handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
+	slog.Info("backend: frozen, cloning volume", "clone", cloneName)
 	cloneVol, err := vol.Clone(ctx, cloneName)
+	slog.Info("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
 	if thawErr := b.driver.Thaw(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
 			err = thawErr
 		}
 	}
+	slog.Info("backend: thawed", "mountpoint", mountpoint)
 	if err != nil {
 		return err
 	}
 
+	slog.Info("backend: mounting clone", "clone", cloneName, "mountpoint", cloneMountpoint)
 	return b.mountVolume(ctx, cloneVol, cloneMountpoint)
 }
 
@@ -261,11 +285,26 @@ func (b *Backend[H]) FS(mountpoint string) (FS, error) {
 	return b.driver.FS(entry.handle)
 }
 
+// FSForVolume returns an FS for a volume by name. The volume must already
+// be mounted.
+func (b *Backend[H]) FSForVolume(volume string) (FS, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, entry := range b.mounts {
+		if entry.volume == volume {
+			return b.driver.FS(entry.handle)
+		}
+	}
+	return nil, fmt.Errorf("volume %q is not mounted", volume)
+}
+
 // --- Device-level operations (raw block device access) ---
 
 // DeviceMount opens an existing volume and returns its block device path.
 // No filesystem is mounted — the caller manages the raw device.
 func (b *Backend[H]) DeviceMount(ctx context.Context, volume string) (string, error) {
+	// XXX: I don't like calling this "mount", we should consider renaming this operation to Connect
+	// but it needs to be done consistently like in Volume
 	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
 		return "", err
@@ -297,7 +336,7 @@ func (b *Backend[H]) DeviceUnmount(ctx context.Context, volume string) error {
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
 	}
-	return vol.Close(ctx)
+	return vol.ReleaseRef(ctx)
 }
 
 // DeviceSnapshot takes a snapshot of a volume by name (no freeze/thaw).
@@ -413,7 +452,8 @@ func (b *Backend[H]) mountpointFor(volume string) string {
 }
 
 // mountVolume mounts an already-open *Volume. Used by Mount and Clone.
-func (b *Backend[H]) mountVolume(ctx context.Context, vol *loophole.Volume, mountpoint string) error {
+func (b *Backend[H]) mountVolume(ctx context.Context, vol loophole.Volume, mountpoint string) error {
+	slog.Info("backend: mountVolume start", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
 	if mp := b.mountpointFor(vol.Name()); mp != "" {
 		b.mu.Unlock()
@@ -425,16 +465,20 @@ func (b *Backend[H]) mountVolume(ctx context.Context, vol *loophole.Volume, moun
 	b.mu.Unlock()
 
 	if b.vr != nil {
+		slog.Info("backend: registering volume for mount", "volume", vol.Name())
 		b.vr.RegisterVolume(vol.Name(), vol)
 	}
+	slog.Info("backend: calling driver.Mount", "volume", vol.Name(), "mountpoint", mountpoint)
 	handle, err := b.driver.Mount(ctx, vol, mountpoint)
 	if err != nil {
+		slog.Info("backend: driver.Mount failed", "volume", vol.Name(), "error", err)
 		if b.vr != nil {
 			b.vr.UnregisterVolume(vol.Name())
 		}
 		return err
 	}
 
+	slog.Info("backend: mountVolume done", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
 	b.mounts[mountpoint] = mountEntry[H]{volume: vol.Name(), handle: handle}
 	b.mu.Unlock()
@@ -442,7 +486,7 @@ func (b *Backend[H]) mountVolume(ctx context.Context, vol *loophole.Volume, moun
 }
 
 // volumeAndHandle returns the volume and mount handle for a mountpoint.
-func (b *Backend[H]) volumeAndHandle(mountpoint string) (*loophole.Volume, H, error) {
+func (b *Backend[H]) volumeAndHandle(mountpoint string) (loophole.Volume, H, error) {
 	b.mu.Lock()
 	entry, ok := b.mounts[mountpoint]
 	b.mu.Unlock()

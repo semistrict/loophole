@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -15,15 +17,20 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/lsm"
 )
 
 // mode returns the LOOPHOLE_MODE for tests, using DefaultMode() as fallback.
 func mode() loophole.Mode {
 	return loophole.DefaultMode()
 }
+
+const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 
 // needsRoot returns true if the mode requires root privileges.
 func needsRoot() bool {
@@ -48,14 +55,6 @@ func needsKernelExt4() bool {
 		return true
 	default:
 		return false
-	}
-}
-
-func defaultS3Options() *loophole.S3Options {
-	return &loophole.S3Options{
-		AccessKey: envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
-		SecretKey: envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
-		Region:    envOrDefault("AWS_REGION", "us-east-1"),
 	}
 }
 
@@ -84,8 +83,6 @@ func skipKernelOnly(t *testing.T) {
 	}
 }
 
-const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
-
 // ---------- Backend creation ----------
 
 // newBackend creates a fsbackend.Service for the current mode.
@@ -96,13 +93,12 @@ func newBackend(t *testing.T) fsbackend.Service {
 	inst := uniqueInstance(t)
 	ctx := t.Context()
 
-	store, err := loophole.NewS3Store(ctx, inst, defaultS3Options())
+	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
 	_ = loophole.FormatSystem(ctx, store, 4*1024*1024)
 
-	vm, err := loophole.NewVolumeManager(ctx, store, t.TempDir(), 20, 200)
-	require.NoError(t, err)
+	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
 
 	backend := newBackendForMode(t, vm, inst)
 	t.Cleanup(func() {
@@ -117,14 +113,15 @@ func newBackend(t *testing.T) fsbackend.Service {
 
 // testFS wraps fsbackend.FS for test convenience methods.
 type testFS struct {
-	fs fsbackend.FS
+	fs         fsbackend.FS
+	mountpoint string
 }
 
 func newTestFS(t *testing.T, b fsbackend.Service, mountpoint string) testFS {
 	t.Helper()
 	f, err := b.FS(mountpoint)
 	require.NoError(t, err)
-	return testFS{fs: f}
+	return testFS{fs: f, mountpoint: mountpoint}
 }
 
 func (f testFS) WriteFile(t *testing.T, name string, data []byte) {
@@ -192,11 +189,15 @@ func uniqueInstance(t *testing.T) loophole.Instance {
 		bucket = "testbucket"
 	}
 	prefix := fmt.Sprintf("test-%s", uuid.NewString()[:8])
-	raw := fmt.Sprintf("s3://%s/%s", bucket, prefix)
-	inst, err := loophole.ParseInstance(raw)
-	require.NoError(t, err)
-	inst.Endpoint = defaultEndpoint()
-	return inst
+	return loophole.Instance{
+		ProfileName: "test",
+		Bucket:      bucket,
+		Prefix:      prefix,
+		Endpoint:    defaultEndpoint(),
+		AccessKey:   envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
+		SecretKey:   envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
+		Region:      envOrDefault("AWS_REGION", ""),
+	}
 }
 
 // writeTestFiles writes a standard set of test files.
@@ -220,7 +221,7 @@ func writeTestFiles(t *testing.T, tfs testFS) string {
 	tfs.WriteFile(t, "numbers.txt", []byte(buf.String()))
 
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	return tfs.MD5(t, "random.bin")
@@ -239,10 +240,15 @@ func verifyTestFiles(t *testing.T, tfs testFS, randomMD5 string) {
 	require.Equal(t, 1000, len(lines))
 }
 
-// syncFS calls sync to flush filesystem buffers (kernel ext4 mode only).
-func syncFS(t *testing.T) {
+// syncFS flushes the filesystem at the given mountpoint using syncfs(2).
+// Unlike the global sync command, this only syncs the target filesystem,
+// avoiding hangs when a FUSE blockdev mount is also present.
+func syncFS(t *testing.T, mountpoint string) {
 	t.Helper()
-	err := exec.Command("sync").Run()
+	fd, err := unix.Open(mountpoint, unix.O_RDONLY, 0)
+	require.NoError(t, err)
+	defer unix.Close(fd)
+	err = unix.Syncfs(fd)
 	require.NoError(t, err)
 }
 
@@ -268,7 +274,7 @@ func mountVolume(t *testing.T, name string) (testFS, fsbackend.Service) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, name)
+	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 256 * 1024 * 1024}) // 256MB — 8GB is too slow through FUSE
 	require.NoError(t, err)
 
 	mp := mountpoint(t, name)

@@ -1,9 +1,12 @@
 /target
 /bin/
-/loophole
 __pycache__/
 tests/*.state
 .claude/
-third_party/
 /e2e/*.state
 build/
+*.img
+*.tar
+vmlinuz
+/boot/
+/old/

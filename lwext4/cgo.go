@@ -1,5 +1,9 @@
 package lwext4
 
+// #cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../build/darwin-arm64/lwext4
+// #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../build/linux-arm64/lwext4
+// #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../build/linux-amd64/lwext4
+// #cgo LDFLAGS: -llwext4
 // #cgo CFLAGS: -DCONFIG_USE_DEFAULT_CFG=1
 // #cgo CFLAGS: -DCONFIG_EXT4_BLOCKDEVS_COUNT=16
 // #cgo CFLAGS: -DCONFIG_EXT4_MOUNTPOINTS_COUNT=16
@@ -12,7 +16,7 @@ package lwext4
 // #include "blockdev.h"
 import "C"
 import (
-	"io"
+	"context"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -21,8 +25,8 @@ import (
 // BlockDevice is the backing store for an ext4 filesystem.
 // Implementations must be safe for concurrent use.
 type BlockDevice interface {
-	io.ReaderAt
-	io.WriterAt
+	Read(ctx context.Context, buf []byte, offset uint64) (int, error)
+	Write(ctx context.Context, data []byte, offset uint64) error
 }
 
 // handle map: Go ↔ C callback bridge
@@ -61,11 +65,11 @@ func goBlockdevRead(handle C.int, buf unsafe.Pointer, blkID C.uint64_t, blkCnt C
 		return -1
 	}
 
-	offset := int64(blkID) * int64(blkSize)
+	offset := uint64(blkID) * uint64(blkSize)
 	size := int(blkCnt) * int(blkSize)
 	goBuf := unsafe.Slice((*byte)(buf), size)
 
-	_, err := dev.ReadAt(goBuf, offset)
+	_, err := dev.Read(context.Background(), goBuf, offset)
 	if err != nil {
 		return -1
 	}
@@ -79,11 +83,11 @@ func goBlockdevWrite(handle C.int, buf unsafe.Pointer, blkID C.uint64_t, blkCnt 
 		return -1
 	}
 
-	offset := int64(blkID) * int64(blkSize)
+	offset := uint64(blkID) * uint64(blkSize)
 	size := int(blkCnt) * int(blkSize)
 	goBuf := unsafe.Slice((*byte)(buf), size)
 
-	_, err := dev.WriteAt(goBuf, offset)
+	err := dev.Write(context.Background(), goBuf, offset)
 	if err != nil {
 		return -1
 	}

@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/semistrict/loophole/lwext4"
@@ -34,14 +35,60 @@ func splitPath(name string) []string {
 }
 
 // resolve walks from root to the named path, returning the inode.
+// It follows symlinks at every component (like the kernel).
 func (f *lwext4FSImpl) resolve(name string) (lwext4.Ino, error) {
+	return f.doResolve(name, true, 0)
+}
+
+// resolveLstat is like resolve but does not follow the final symlink.
+func (f *lwext4FSImpl) resolveLstat(name string) (lwext4.Ino, error) {
+	return f.doResolve(name, false, 0)
+}
+
+const maxSymlinks = 40
+
+func (f *lwext4FSImpl) doResolve(name string, followLast bool, depth int) (lwext4.Ino, error) {
+	if depth > maxSymlinks {
+		return 0, fmt.Errorf("%s: too many symlinks", name)
+	}
+
 	parts := splitPath(name)
 	ino := lwext4.RootIno
-	for _, part := range parts {
+
+	for i, part := range parts {
 		child, err := f.ext4.Lookup(ino, part)
 		if err != nil {
 			return 0, fmt.Errorf("%s: %w", name, err)
 		}
+
+		// Check if this component is a symlink.
+		isLast := i == len(parts)-1
+		if !isLast || followLast {
+			attr, err := f.ext4.GetAttr(child)
+			if err != nil {
+				return 0, fmt.Errorf("%s: %w", name, err)
+			}
+			if attr.Mode&syscall.S_IFMT == syscall.S_IFLNK {
+				target, err := f.ext4.Readlink(child)
+				if err != nil {
+					return 0, fmt.Errorf("%s: readlink: %w", name, err)
+				}
+				// Build the full remaining path through the symlink.
+				var resolvedPath string
+				remaining := strings.Join(parts[i+1:], "/")
+				if path.IsAbs(target) {
+					resolvedPath = target
+				} else {
+					parentPath := "/" + strings.Join(parts[:i], "/")
+					resolvedPath = path.Join(parentPath, target)
+				}
+				if remaining != "" {
+					resolvedPath = resolvedPath + "/" + remaining
+				}
+				return f.doResolve(resolvedPath, followLast, depth+1)
+			}
+		}
+
 		ino = child
 	}
 	return ino, nil
@@ -203,6 +250,70 @@ func (f *lwext4FSImpl) Open(name string) (File, error) {
 	return f.ext4.Open(ino)
 }
 
+func (f *lwext4FSImpl) Lstat(name string) (fs.FileInfo, error) {
+	ino, err := f.resolveLstat(name)
+	if err != nil {
+		return nil, err
+	}
+	attr, err := f.ext4.GetAttr(ino)
+	if err != nil {
+		return nil, err
+	}
+
+	parts := splitPath(name)
+	baseName := "/"
+	if len(parts) > 0 {
+		baseName = parts[len(parts)-1]
+	}
+
+	return &lwext4FileInfo{
+		name: baseName,
+		attr: attr,
+	}, nil
+}
+
+func (f *lwext4FSImpl) Symlink(target, name string) error {
+	parentIno, baseName, err := f.resolveParent(name)
+	if err != nil {
+		return err
+	}
+	_, err = f.ext4.Symlink(parentIno, baseName, target)
+	return err
+}
+
+func (f *lwext4FSImpl) Readlink(name string) (string, error) {
+	ino, err := f.resolve(name)
+	if err != nil {
+		return "", err
+	}
+	return f.ext4.Readlink(ino)
+}
+
+func (f *lwext4FSImpl) Chmod(name string, mode fs.FileMode) error {
+	ino, err := f.resolve(name)
+	if err != nil {
+		return err
+	}
+	return f.ext4.SetAttr(ino, &lwext4.Attr{Mode: uint32(mode & 0o7777)}, lwext4.AttrMode)
+}
+
+func (f *lwext4FSImpl) Lchown(name string, uid, gid int) error {
+	// Use resolveLstat so we don't follow the final symlink.
+	ino, err := f.resolveLstat(name)
+	if err != nil {
+		return err
+	}
+	return f.ext4.SetAttr(ino, &lwext4.Attr{Uid: uint32(uid), Gid: uint32(gid)}, lwext4.AttrUid|lwext4.AttrGid)
+}
+
+func (f *lwext4FSImpl) Chtimes(name string, mtime int64) error {
+	ino, err := f.resolve(name)
+	if err != nil {
+		return err
+	}
+	return f.ext4.SetAttr(ino, &lwext4.Attr{Mtime: uint32(mtime)}, lwext4.AttrMtime)
+}
+
 func (f *lwext4FSImpl) Create(name string) (File, error) {
 	parentIno, baseName, err := f.resolveParent(name)
 	if err != nil {
@@ -240,7 +351,34 @@ type lwext4FileInfo struct {
 
 func (fi *lwext4FileInfo) Name() string       { return fi.name }
 func (fi *lwext4FileInfo) Size() int64        { return int64(fi.attr.Size) }
-func (fi *lwext4FileInfo) Mode() fs.FileMode  { return fs.FileMode(fi.attr.Mode) & 0o7777 }
 func (fi *lwext4FileInfo) ModTime() time.Time { return time.Unix(int64(fi.attr.Mtime), 0) }
 func (fi *lwext4FileInfo) IsDir() bool        { return fi.attr.Mode&0o40000 != 0 }
 func (fi *lwext4FileInfo) Sys() any           { return fi.attr }
+
+func (fi *lwext4FileInfo) Mode() fs.FileMode {
+	perm := fs.FileMode(fi.attr.Mode) & 0o7777
+	switch fi.attr.Mode & syscall.S_IFMT {
+	case syscall.S_IFDIR:
+		perm |= fs.ModeDir
+	case syscall.S_IFLNK:
+		perm |= fs.ModeSymlink
+	case syscall.S_IFCHR:
+		perm |= fs.ModeDevice | fs.ModeCharDevice
+	case syscall.S_IFBLK:
+		perm |= fs.ModeDevice
+	case syscall.S_IFIFO:
+		perm |= fs.ModeNamedPipe
+	case syscall.S_IFSOCK:
+		perm |= fs.ModeSocket
+	}
+	if fi.attr.Mode&syscall.S_ISUID != 0 {
+		perm |= fs.ModeSetuid
+	}
+	if fi.attr.Mode&syscall.S_ISGID != 0 {
+		perm |= fs.ModeSetgid
+	}
+	if fi.attr.Mode&syscall.S_ISVTX != 0 {
+		perm |= fs.ModeSticky
+	}
+	return perm
+}

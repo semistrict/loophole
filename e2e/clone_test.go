@@ -1,9 +1,13 @@
+//go:build linux
+
 package e2e
 
 import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/client"
 )
 
 func TestE2E_ClonePreservesData(t *testing.T) {
@@ -11,7 +15,7 @@ func TestE2E_ClonePreservesData(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cln-parent")
 
-	require.NoError(t, b.Create(ctx, "cln-parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cln-parent"}))
 	err := b.Mount(ctx, "cln-parent", parentMP)
 	require.NoError(t, err)
 
@@ -33,14 +37,14 @@ func TestE2E_CloneBranchesAreIndependent(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cln-ind-parent")
 
-	require.NoError(t, b.Create(ctx, "cln-ind-parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cln-ind-parent"}))
 	err := b.Mount(ctx, "cln-ind-parent", parentMP)
 	require.NoError(t, err)
 
 	parentFS := newTestFS(t, b, parentMP)
 	parentFS.WriteFile(t, "shared.txt", []byte("from parent\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, parentMP)
 	}
 
 	cloneMP := mountpoint(t, "cln-ind-clone")

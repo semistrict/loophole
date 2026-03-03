@@ -10,14 +10,14 @@ import (
 // Each file is allocated a fixed-size region of the volume. No directories,
 // no growing files — just named byte ranges.
 type SimpleFS struct {
-	vol      *Volume
+	vol      Volume
 	slotSize uint64
 	mu       sync.Mutex
 	files    map[string]uint64 // name → slot index
 	nextSlot uint64
 }
 
-func NewSimpleFS(vol *Volume, slotSize uint64) *SimpleFS {
+func NewSimpleFS(vol Volume, slotSize uint64) *SimpleFS {
 	return &SimpleFS{
 		vol:      vol,
 		slotSize: slotSize,
@@ -56,7 +56,7 @@ func (fs *SimpleFS) WriteFile(ctx context.Context, name string, off uint64, data
 	if off+uint64(len(data)) > fs.slotSize {
 		return fmt.Errorf("write exceeds file slot size")
 	}
-	return fs.vol.Write(ctx, base+off, data)
+	return fs.vol.Write(ctx, data, base+off)
 }
 
 // ReadFile reads data at the given offset within the file's region.
@@ -68,5 +68,5 @@ func (fs *SimpleFS) ReadFile(ctx context.Context, name string, off uint64, buf [
 	if off+uint64(len(buf)) > fs.slotSize {
 		return 0, fmt.Errorf("read exceeds file slot size")
 	}
-	return fs.vol.Read(ctx, base+off, buf)
+	return fs.vol.Read(ctx, buf, base+off)
 }

@@ -11,6 +11,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 )
 
 // Fallocate tests are Linux-only: they need FUSE + fallocate syscall.
@@ -39,7 +40,7 @@ func TestE2E_PunchHoleZerosData(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, "punch-zeros")
-	require.NoError(t, b.Create(ctx, "punch-zeros"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-zeros"}))
 	err := b.Mount(ctx, "punch-zeros", mp)
 	require.NoError(t, err)
 
@@ -50,14 +51,14 @@ func TestE2E_PunchHoleZerosData(t *testing.T) {
 	}
 	err = os.WriteFile(mp+"/testfile", data, 0o644)
 	require.NoError(t, err)
-	syncFS(t)
+	syncFS(t, mp)
 
 	// Punch hole in second half.
 	fd, err := unix.Open(mp+"/testfile", unix.O_RDWR, 0)
 	require.NoError(t, err)
 	punchHole(t, fd, 4096, 4096)
 	unix.Close(fd)
-	syncFS(t)
+	syncFS(t, mp)
 
 	content, err := os.ReadFile(mp + "/testfile")
 	require.NoError(t, err)
@@ -77,7 +78,7 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	ctx := t.Context()
 
 	// Write to parent, clone, punch in child.
-	require.NoError(t, b.Create(ctx, "tomb-parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "tomb-parent"}))
 	parentDev, err := b.DeviceMount(ctx, "tomb-parent")
 	require.NoError(t, err)
 
@@ -90,7 +91,7 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	_, err = f.WriteAt(xData, 0)
 	require.NoError(t, err)
 	f.Close()
-	syncFS(t)
+	syncFS(t, parentDev)
 
 	childDev, err := b.DeviceClone(t.Context(), "tomb-parent", "tomb-child")
 	require.NoError(t, err)
@@ -99,7 +100,7 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	require.NoError(t, err)
 	punchHole(t, fd, 0, 4096)
 	unix.Close(fd)
-	syncFS(t)
+	syncFS(t, childDev)
 
 	// Read back: should be zeros.
 	f, err = os.OpenFile(childDev, os.O_RDONLY, 0)
@@ -116,7 +117,7 @@ func TestE2E_PunchHoleSnapshotIsReadOnly(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, "tomb-ro-parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "tomb-ro-parent"}))
 	parentDev, err := b.DeviceMount(ctx, "tomb-ro-parent")
 	require.NoError(t, err)
 
@@ -129,7 +130,7 @@ func TestE2E_PunchHoleSnapshotIsReadOnly(t *testing.T) {
 	_, err = f.WriteAt(data, 0)
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
-	syncFS(t)
+	syncFS(t, parentDev)
 
 	require.NoError(t, b.DeviceSnapshot(ctx, "tomb-ro-parent", "tomb-ro-snap"))
 
@@ -152,7 +153,7 @@ func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, "punch-del"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-del"}))
 	dev, err := b.DeviceMount(ctx, "punch-del")
 	require.NoError(t, err)
 
@@ -165,13 +166,13 @@ func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 	_, err = f.WriteAt(yData, 0)
 	require.NoError(t, err)
 	f.Close()
-	syncFS(t)
+	syncFS(t, dev)
 
 	fd, err := unix.Open(dev, unix.O_RDWR, 0)
 	require.NoError(t, err)
 	punchHole(t, fd, 0, 4096)
 	unix.Close(fd)
-	syncFS(t)
+	syncFS(t, dev)
 
 	// Read back: should be zeros.
 	f, err = os.OpenFile(dev, os.O_RDONLY, 0)
@@ -191,7 +192,7 @@ func TestE2E_PunchHolePartialBlock(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, "punch-partial"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-partial"}))
 	dev, err := b.DeviceMount(ctx, "punch-partial")
 	require.NoError(t, err)
 
@@ -204,13 +205,13 @@ func TestE2E_PunchHolePartialBlock(t *testing.T) {
 	_, err = f.WriteAt(zData, 0)
 	require.NoError(t, err)
 	f.Close()
-	syncFS(t)
+	syncFS(t, dev)
 
 	fd, err := unix.Open(dev, unix.O_RDWR, 0)
 	require.NoError(t, err)
 	punchHole(t, fd, 1024, 2048)
 	unix.Close(fd)
-	syncFS(t)
+	syncFS(t, dev)
 
 	f, err = os.OpenFile(dev, os.O_RDONLY, 0)
 	require.NoError(t, err)

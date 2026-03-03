@@ -21,26 +21,17 @@ type lwext4FUSEMount struct {
 
 // Lwext4FUSEDriver implements Driver using FUSE + in-process lwext4.
 // No root required — uses fusermount3 for unprivileged FUSE mounts.
-type Lwext4FUSEDriver struct {
-	volumeSize int64
-}
+type Lwext4FUSEDriver struct{}
 
 var _ Driver[lwext4FUSEMount] = (*Lwext4FUSEDriver)(nil)
 
 // NewLwext4FUSE creates a Service backed by FUSE + lwext4.
-func NewLwext4FUSE(vm *loophole.VolumeManager, opts *Lwext4Options) Service {
-	volumeSize := int64(defaultVolumeSize)
-	if opts != nil && opts.VolumeSize > 0 {
-		volumeSize = opts.VolumeSize
-	}
-	return New[lwext4FUSEMount](&Lwext4FUSEDriver{
-		volumeSize: volumeSize,
-	}, vm)
+func NewLwext4FUSE(vm loophole.VolumeManager) Service {
+	return New[lwext4FUSEMount](&Lwext4FUSEDriver{}, vm)
 }
 
-func (d *Lwext4FUSEDriver) Format(ctx context.Context, vol *loophole.Volume) error {
-	vio := vol.IO(ctx)
-	fs, err := lwext4.Format(vio, d.volumeSize, &lwext4.FormatOptions{
+func (d *Lwext4FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
+	fs, err := lwext4.Format(vol, int64(vol.Size()), &lwext4.FormatOptions{
 		Uid: uint32(os.Getuid()),
 		Gid: uint32(os.Getgid()),
 	})
@@ -50,9 +41,8 @@ func (d *Lwext4FUSEDriver) Format(ctx context.Context, vol *loophole.Volume) err
 	return fs.Close()
 }
 
-func (d *Lwext4FUSEDriver) Mount(ctx context.Context, vol *loophole.Volume, mountpoint string) (lwext4FUSEMount, error) {
-	vio := vol.IO(ctx)
-	ext4fs, err := lwext4.Mount(vio, d.volumeSize)
+func (d *Lwext4FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (lwext4FUSEMount, error) {
+	ext4fs, err := lwext4.Mount(vol, int64(vol.Size()))
 	if err != nil {
 		return lwext4FUSEMount{}, fmt.Errorf("lwext4: mount: %w", err)
 	}
@@ -98,5 +88,5 @@ func (d *Lwext4FUSEDriver) Close(_ context.Context) error {
 }
 
 func (d *Lwext4FUSEDriver) FS(h lwext4FUSEMount) (FS, error) {
-	return newOSFS(h.mountpoint), nil
+	return NewOSFS(h.mountpoint), nil
 }

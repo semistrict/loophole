@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -14,6 +16,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/linuxutil"
 )
 
@@ -22,7 +25,7 @@ func TestE2E_FormatCreatesMountableExt4(t *testing.T) {
 
 	tfs.WriteFile(t, "hello.txt", []byte("formatted via high-level\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "formatted via high-level\n", string(tfs.ReadFile(t, "hello.txt")))
@@ -33,7 +36,7 @@ func TestE2E_SmallTextFile(t *testing.T) {
 
 	tfs.WriteFile(t, "greeting.txt", []byte("hello from loophole\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "hello from loophole\n", string(tfs.ReadFile(t, "greeting.txt")))
@@ -48,7 +51,7 @@ func TestE2E_BinaryFileIntegrity(t *testing.T) {
 
 	tfs.WriteFile(t, "random.bin", randomData)
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	checksum := tfs.MD5(t, "random.bin")
@@ -61,7 +64,7 @@ func TestE2E_NestedDirectories(t *testing.T) {
 	tfs.MkdirAll(t, "subdir/nested")
 	tfs.WriteFile(t, "subdir/nested/deep.txt", []byte("nested file\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "nested file\n", string(tfs.ReadFile(t, "subdir/nested/deep.txt")))
@@ -76,7 +79,7 @@ func TestE2E_LargeSequentialFile(t *testing.T) {
 	}
 	tfs.WriteFile(t, "numbers.txt", []byte(buf.String()))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	data := tfs.ReadFile(t, "numbers.txt")
@@ -89,11 +92,11 @@ func TestE2E_OverwriteFile(t *testing.T) {
 
 	tfs.WriteFile(t, "overwrite.txt", []byte("version 1\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 	tfs.WriteFile(t, "overwrite.txt", []byte("version 2\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "version 2\n", string(tfs.ReadFile(t, "overwrite.txt")))
@@ -104,7 +107,7 @@ func TestE2E_DeleteAndRecreate(t *testing.T) {
 
 	tfs.WriteFile(t, "ephemeral.txt", []byte("exists\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	tfs.Remove(t, "ephemeral.txt")
@@ -112,7 +115,7 @@ func TestE2E_DeleteAndRecreate(t *testing.T) {
 
 	tfs.WriteFile(t, "ephemeral.txt", []byte("back again\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "back again\n", string(tfs.ReadFile(t, "ephemeral.txt")))
@@ -124,7 +127,7 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 	vol := "remount-empty"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, vol))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
 
 	err := b.Mount(ctx, vol, mp)
 	require.NoError(t, err)
@@ -133,10 +136,8 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 	info := tfs.Stat(t, ".")
 	require.True(t, info.IsDir())
 
-	logKernelDebug(t, mp, vol)
 	err = b.Unmount(ctx, mp)
 	require.NoError(t, err)
-	logKernelDebug(t, mp, vol)
 
 	err = b.Mount(ctx, vol, mp)
 	if err != nil {
@@ -151,7 +152,7 @@ func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "persist")
 
-	require.NoError(t, b.Create(ctx, "persist"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "persist"}))
 
 	// Phase 1: mount, write, unmount.
 	err := b.Mount(ctx, "persist", mp)
@@ -162,7 +163,7 @@ func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	require.NoError(t, err)
 	tfs.WriteFile(t, "random.bin", randomData)
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, mp)
 	}
 	checksum := tfs.MD5(t, "random.bin")
 	err = b.Unmount(ctx, mp)
@@ -186,7 +187,7 @@ func TestE2E_NestedDirsAndLargeFile(t *testing.T) {
 	require.NoError(t, err)
 	tfs.WriteFile(t, "a/big.bin", bigData)
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, tfs.mountpoint)
 	}
 
 	require.Equal(t, "deep nested\n", string(tfs.ReadFile(t, "a/b/c/deep.txt")))
@@ -199,7 +200,7 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "survive")
 
-	require.NoError(t, b.Create(ctx, "survive"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "survive"}))
 
 	// Phase 1: write.
 	err := b.Mount(ctx, "survive", mp)
@@ -238,7 +239,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 			volName := fmt.Sprintf("concurrent-%d", i)
 			mp := mountpoint(t, volName)
 
-			if err := b.Create(ctx, volName); err != nil {
+			if err := b.Create(ctx, client.CreateParams{Volume: volName}); err != nil {
 				return fmt.Errorf("worker %d create: %w", i, err)
 			}
 
@@ -250,7 +251,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 			tfs := newTestFS(t, b, mp)
 			expected := fmt.Sprintf("worker %d\n", i)
 			tfs.WriteFile(t, "test.txt", []byte(expected))
-			syncFS(t)
+			syncFS(t, mp)
 
 			data := tfs.ReadFile(t, "test.txt")
 			if string(data) != expected {
@@ -283,15 +284,17 @@ func TestE2E_NBDDeviceExclOpen(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	// Connect 5 devices concurrently (same as ConcurrentMountCycles)
-	nDevices := 5
+	// Connect 2 devices concurrently — kept low to avoid exhausting
+	// available NBD devices (nbds_max may be as low as 4, and other
+	// tests or prior killed runs may have leaked connected devices).
+	nDevices := 2
 	vols := make([]string, nDevices)
 	devs := make([]string, nDevices)
 
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range nDevices {
 		vols[i] = fmt.Sprintf("excl-%d", i)
-		require.NoError(t, b.Create(gctx, vols[i]))
+		require.NoError(t, b.Create(gctx, client.CreateParams{Volume: vols[i]}))
 	}
 
 	// Now connect all at once

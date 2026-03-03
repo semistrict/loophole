@@ -3,12 +3,16 @@ package loophole
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/semistrict/loophole/metrics"
 )
+
+// ErrNotFound is returned by ObjectStore.Get when the object does not exist.
+var ErrNotFound = errors.New("not found")
 
 // ObjectStore abstracts access to an S3-compatible object store.
 // It is rooted at a specific bucket and prefix — all keys are relative
@@ -17,9 +21,13 @@ type ObjectStore interface {
 	// At returns a new ObjectStore rooted at the given sub-path.
 	At(path string) ObjectStore
 
-	// Get returns a streaming reader for the object starting at offset,
+	// Get returns a streaming reader for the entire object, along with
+	// the object's ETag.
+	Get(ctx context.Context, key string) (body io.ReadCloser, etag string, err error)
+
+	// GetRange returns a bounded range of bytes [offset, offset+length),
 	// along with the object's ETag.
-	Get(ctx context.Context, key string, offset int64) (body io.ReadCloser, etag string, err error)
+	GetRange(ctx context.Context, key string, offset, length int64) (body io.ReadCloser, etag string, err error)
 
 	// PutBytesCAS writes data with If-Match on the given ETag. Returns the new ETag.
 	PutBytesCAS(ctx context.Context, key string, data []byte, etag string) (newEtag string, err error)
@@ -41,7 +49,7 @@ type ObjectInfo struct {
 // Returns the decoded value and the ETag (for CAS operations).
 func ReadJSON[T any](ctx context.Context, objects ObjectStore, key string) (T, string, error) {
 	var zero T
-	body, etag, err := objects.Get(ctx, key, 0)
+	body, etag, err := objects.Get(ctx, key)
 	if err != nil {
 		return zero, "", err
 	}

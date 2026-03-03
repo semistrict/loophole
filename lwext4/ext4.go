@@ -353,6 +353,40 @@ func (fs *FS) Unlink(parent Ino, name string) error {
 	return nil
 }
 
+// UnlinkOrphan removes a directory entry but, if the inode's link count drops
+// to zero, adds it to the on-disk orphan list instead of freeing it. Returns
+// the child inode number so the caller can track open handles.
+func (fs *FS) UnlinkOrphan(parent Ino, name string) (Ino, error) {
+	cName := C.CString(name)
+	defer C.free(unsafe.Pointer(cName))
+	var child C.uint32_t
+	rc := C.inode_unlink_orphan(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)), &child)
+	if rc != 0 {
+		return 0, fmt.Errorf("lwext4: unlink_orphan(%d, %s): %d", parent, name, rc)
+	}
+	return Ino(child), nil
+}
+
+// FreeOrphan removes an inode from the orphan list and frees its data and inode.
+// Call when the last open file handle for an orphaned inode is closed.
+func (fs *FS) FreeOrphan(ino Ino) error {
+	rc := C.inode_free_orphan(fs.mp, C.uint32_t(ino))
+	if rc != 0 {
+		return fmt.Errorf("lwext4: free_orphan(%d): %d", ino, rc)
+	}
+	return nil
+}
+
+// OrphanRecover walks the on-disk orphan list and frees all orphaned inodes.
+// Call once at mount time to clean up after crashes.
+func (fs *FS) OrphanRecover() error {
+	rc := C.inode_orphan_recover(fs.mp)
+	if rc != 0 {
+		return fmt.Errorf("lwext4: orphan_recover: %d", rc)
+	}
+	return nil
+}
+
 // Rmdir removes an empty directory from a parent directory.
 func (fs *FS) Rmdir(parent Ino, name string) error {
 	cName := C.CString(name)

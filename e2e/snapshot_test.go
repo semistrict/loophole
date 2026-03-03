@@ -1,3 +1,5 @@
+//go:build linux
+
 package e2e
 
 import (
@@ -5,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/client"
 )
 
 func TestE2E_SnapshotPreservesData(t *testing.T) {
@@ -12,7 +16,7 @@ func TestE2E_SnapshotPreservesData(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "parent")
 
-	require.NoError(t, b.Create(ctx, "parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "parent"}))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
 
@@ -34,14 +38,14 @@ func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "parent")
 
-	require.NoError(t, b.Create(ctx, "parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "parent"}))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
 
 	parentFS := newTestFS(t, b, parentMP)
 	parentFS.WriteFile(t, "parent.txt", []byte("from parent\n"))
 	if needsKernelExt4() {
-		syncFS(t)
+		syncFS(t, parentMP)
 	}
 
 	childMP := mountpoint(t, "child")
@@ -63,7 +67,7 @@ func TestE2E_DeviceSnapshotParentStaysWritable(t *testing.T) {
 
 	b := newBackend(t)
 	ctx := t.Context()
-	require.NoError(t, b.Create(ctx, "frozen-parent"))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "frozen-parent"}))
 	parentDev, err := b.DeviceMount(ctx, "frozen-parent")
 	require.NoError(t, err)
 

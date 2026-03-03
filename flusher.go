@@ -9,8 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/errgroup"
-
 	"github.com/semistrict/loophole/metrics"
 )
 
@@ -45,15 +43,27 @@ func (l *Layer) Flush(ctx context.Context) error {
 	l.flushing = true
 	l.flushMu.Unlock()
 
-	// Swap the dirty set atomically.
+	// Snapshot dirty keys into a local slice. New writes during
+	// upload go into dirty and are picked up by the next flush.
 	l.mu.Lock()
-	dirty := l.dirty
-	l.dirty = make(map[BlockIdx]struct{})
+	items := make([]flushItem, 0, len(l.dirty))
+	for blockIdx := range l.dirty {
+		f := l.openBlocks[blockIdx]
+		if f == nil {
+			l.mu.Unlock()
+			return fmt.Errorf("dirty block %d has no open file handle", blockIdx)
+		}
+		items = append(items, flushItem{
+			blockIdx: blockIdx,
+			key:      blockIdx.String(),
+			file:     f,
+		})
+	}
 	l.mu.Unlock()
 
 	var err error
-	if len(dirty) > 0 {
-		err = l.flushDirty(ctx, dirty)
+	if len(items) > 0 {
+		err = l.flushItems(ctx, items)
 	}
 
 	// Release the flush slot and wake waiters.
@@ -65,45 +75,43 @@ func (l *Layer) Flush(ctx context.Context) error {
 	return err
 }
 
-// flushDirty uploads the given set of dirty blocks concurrently.
-func (l *Layer) flushDirty(ctx context.Context, dirty map[BlockIdx]struct{}) error {
-	// Build the upload list: just block index + file path, no data read.
-	items := make([]flushItem, 0, len(dirty))
-	for blockIdx := range dirty {
-		l.mu.Lock()
-		f := l.openBlocks[blockIdx]
-		l.mu.Unlock()
-
-		if f == nil {
-			return fmt.Errorf("dirty block %d has no open file handle", blockIdx)
-		}
-
-		info, err := f.Stat()
+// flushItems uploads the given blocks concurrently. Each block is removed
+// from dirty before upload (releasing backpressure) and re-added on failure.
+func (l *Layer) flushItems(ctx context.Context, items []flushItem) error {
+	// Stat all files to detect tombstones.
+	for i := range items {
+		info, err := items[i].file.Stat()
 		if err != nil {
-			return fmt.Errorf("stat open block %d: %w", blockIdx, err)
+			return fmt.Errorf("stat open block %d: %w", items[i].blockIdx, err)
 		}
-
-		items = append(items, flushItem{
-			blockIdx:  blockIdx,
-			key:       blockIdx.String(),
-			file:      f,
-			tombstone: info.Size() == 0,
-		})
+		items[i].tombstone = info.Size() == 0
 	}
 
-	// Upload all blocks concurrently.
-	var failMu sync.Mutex
-	var failed []BlockIdx
-
-	var g errgroup.Group
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
 	for _, item := range items {
-		g.Go(func() error {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			// Remove from dirty before upload — frees backpressure capacity.
+			l.mu.Lock()
+			delete(l.dirty, item.blockIdx)
+			l.mu.Unlock()
+			l.dirtyCond.Broadcast()
+
 			if err := l.vm.uploadSem.Acquire(ctx, 1); err != nil {
 				metrics.FlushErrors.Inc()
-				failMu.Lock()
-				failed = append(failed, item.blockIdx)
-				failMu.Unlock()
-				return err
+				l.mu.Lock()
+				l.dirty[item.blockIdx] = struct{}{}
+				l.mu.Unlock()
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				return
 			}
 			metrics.InflightUploads.Inc()
 			err := l.flushOne(ctx, item)
@@ -111,29 +119,23 @@ func (l *Layer) flushDirty(ctx context.Context, dirty map[BlockIdx]struct{}) err
 			l.vm.uploadSem.Release(1)
 			if err != nil {
 				metrics.FlushErrors.Inc()
-				failMu.Lock()
-				failed = append(failed, item.blockIdx)
-				failMu.Unlock()
-				return err
+				l.mu.Lock()
+				l.dirty[item.blockIdx] = struct{}{}
+				l.mu.Unlock()
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				return
 			}
 			metrics.FlushBlocks.Inc()
 			if item.tombstone {
 				metrics.FlushTombstones.Inc()
 			}
-			return nil
-		})
+		}()
 	}
-
-	err := g.Wait()
-
-	// Re-dirty any blocks that failed to upload.
-	if len(failed) > 0 {
-		l.mu.Lock()
-		for _, blockIdx := range failed {
-			l.dirty[blockIdx] = struct{}{}
-		}
-		l.mu.Unlock()
-	}
+	wg.Wait()
 
 	// Update gauges.
 	l.mu.Lock()
@@ -141,7 +143,7 @@ func (l *Layer) flushDirty(ctx context.Context, dirty map[BlockIdx]struct{}) err
 	metrics.OpenBlocks.Set(float64(len(l.openBlocks)))
 	l.mu.Unlock()
 
-	return err
+	return firstErr
 }
 
 func (l *Layer) flushOne(ctx context.Context, item flushItem) error {
@@ -228,16 +230,16 @@ const backgroundFlushInterval = 30 * time.Second
 
 func (l *Layer) backgroundFlush(ctx context.Context) {
 	defer close(l.flushStopped)
-	ticker := time.NewTicker(backgroundFlushInterval)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			if err := l.Flush(ctx); err != nil {
-				slog.Error("background flush failed", "layer", l.id, "error", err)
-			}
+		case <-time.After(backgroundFlushInterval):
+		case <-l.flushTrigger:
+			metrics.EarlyFlushes.Inc()
+		}
+		if err := l.Flush(ctx); err != nil {
+			slog.Error("background flush failed", "layer", l.id, "error", err)
 		}
 	}
 }
