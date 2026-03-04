@@ -14,7 +14,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: ./deps.sh setup
       - run: make build
 
   test:
@@ -24,7 +23,6 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: ./deps.sh setup
       - run: make test
 
   check:
@@ -35,7 +33,6 @@ jobs:
         with:
           go-version-file: go.mod
       - uses: golangci/golangci-lint-action@v7
-      - run: ./deps.sh setup
       - run: make check
 
   e2e-tests:
@@ -45,4 +42,4 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker compose build
       - run: docker compose up -d s3
-      - run: docker compose run --rm go sh -c './deps.sh setup && make e2e'
+      - run: docker compose run --rm go make e2e
