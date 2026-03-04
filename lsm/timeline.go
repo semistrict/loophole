@@ -131,11 +131,6 @@ func openTimeline(ctx context.Context, store, timelinesRoot loophole.ObjectStore
 		return nil, fmt.Errorf("create memlayer: %w", err)
 	}
 
-	// Start periodic flush goroutine.
-	if config.FlushInterval > 0 {
-		tl.startPeriodicFlush()
-	}
-
 	return tl, nil
 }
 
@@ -201,16 +196,11 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 
 	copy(page[pageOff:], chunk)
 
-	// Backpressure: if frozen layers are at capacity, flush before writing.
-	tl.frozenMu.Lock()
-	nfrozen := len(tl.frozenLayers)
-	tl.frozenMu.Unlock()
-	if nfrozen >= tl.config.MaxFrozenLayers {
-		if err := tl.flushFrozenLayers(ctx); err != nil {
-			return err
-		}
-	}
-
+	// Write to the memLayer FIRST, before any flush attempts. This
+	// guarantees the data is recorded even if a subsequent flush fails.
+	// Callers depend on this: a Write error means "data is in the
+	// memLayer (or frozen layer) but couldn't be persisted to S3 yet"
+	// — a later Flush will persist it.
 	seq := tl.nextSeq.Add(1) - 1
 	tl.mu.RLock()
 	ml := tl.memLayer
@@ -218,6 +208,16 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 	tl.mu.RUnlock()
 	if err != nil {
 		return err
+	}
+
+	// Backpressure: if frozen layers are at capacity, flush them now.
+	tl.frozenMu.Lock()
+	nfrozen := len(tl.frozenLayers)
+	tl.frozenMu.Unlock()
+	if nfrozen >= tl.config.MaxFrozenLayers {
+		if err := tl.flushFrozenLayers(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Check if memLayer needs freezing (safe: ml pointer captured under lock).

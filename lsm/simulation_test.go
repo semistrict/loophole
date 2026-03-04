@@ -100,12 +100,6 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 		sim.nodes = append(sim.nodes, node)
 	}
 
-	t.Cleanup(func() {
-		for _, m := range sim.allManagers {
-			m.Close(t.Context())
-		}
-	})
-
 	return sim
 }
 
@@ -734,6 +728,11 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 	if !ok {
 		return
 	}
+	actualTL := vol.timeline.id
+	oracleTL := sim.volumeTimelines[name]
+	if actualTL != oracleTL {
+		sim.t.Fatalf("TIMELINE MISMATCH on open: vol=%s oracle=%s actual=%s", name, oracleTL[:8], actualTL[:8])
+	}
 	vol.timeline.debugLog = func(msg string) {
 		sim.t.Logf("[%s/%s] %s", node.id, name, msg)
 	}
@@ -794,6 +793,7 @@ func (sim *Simulation) FullScan() {
 		NewSimLocalFS(),
 		RealClock{},
 	)
+	sim.allManagers = append(sim.allManagers, m)
 
 	// Verify ListAllVolumes contains every tracked volume.
 	// Note: S3 may also contain partially-created volumes from faulted
@@ -821,6 +821,16 @@ func (sim *Simulation) FullScan() {
 
 	var scanned int
 	for volName, timelineID := range sim.volumeTimelines {
+		// Verify that the oracle's timeline ID matches what's actually in S3.
+		ref, refErr := sim.getVolRef(ctx, volName)
+		if refErr != nil {
+			sim.t.Logf("full scan: cannot read vol ref for %s: %v", volName, refErr)
+			continue
+		}
+		if ref.TimelineID != timelineID {
+			sim.t.Fatalf("full scan: vol %s timeline mismatch: oracle=%s s3=%s", volName, timelineID, ref.TimelineID)
+		}
+
 		v, err := m.OpenVolume(ctx, volName)
 		if err != nil {
 			// Volume may have been created during a fault window and
@@ -892,6 +902,15 @@ func TestSimulation(t *testing.T) {
 				GetFailRate: 0.02,
 			},
 		})
+		// Defer cleanup so periodic flush goroutines are stopped even if
+		// t.FailNow()/t.Fatalf() exits the goroutine via runtime.Goexit().
+		// Without this, synctest detects leaked goroutines and panics with
+		// "deadlock: main bubble goroutine has exited but blocked goroutines remain".
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close(context.Background())
+			}
+		}()
 		sim.Run()
 		sim.FullScan()
 	})

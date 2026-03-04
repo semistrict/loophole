@@ -229,6 +229,11 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*
 		return nil, fmt.Errorf("open timeline %q: %w", ref.TimelineID, err)
 	}
 
+	// Start periodic flush for this top-level timeline only (not ancestors).
+	if m.config.FlushInterval > 0 {
+		tl.startPeriodicFlush()
+	}
+
 	// Acquire write lease if lease manager is configured.
 	if m.lease != nil {
 		if err := m.lease.EnsureStarted(ctx); err != nil {

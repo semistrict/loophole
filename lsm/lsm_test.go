@@ -3269,3 +3269,85 @@ func TestCompactMetaReadFail(t *testing.T) {
 		t.Fatalf("expected compact meta read failure, got: %v", err)
 	}
 }
+
+// TestWriteBackpressurePreservesData verifies that when a backpressure flush
+// fails (S3 fault), the write still lands in the memLayer. This is critical
+// because callers (like the simulation oracle) record writes unconditionally
+// and expect data to be in the memLayer even when Write returns an error from
+// an internal flush.
+func TestWriteBackpressurePreservesData(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  PageSize, // freeze after every write
+		MaxFrozenLayers: 1,
+		PageCacheBytes:  PageSize,
+		FlushInterval:   -1, // disable periodic flush
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: Write page 0 — succeeds and gets flushed.
+	page0 := make([]byte, PageSize)
+	for i := range page0 {
+		page0[i] = 0xAA
+	}
+	if err := v.Write(ctx, page0, 0); err != nil {
+		t.Fatalf("write page 0: %v", err)
+	}
+
+	// Step 2: Write page 1 — this triggers freeze+flush; inject fault so
+	// the flush fails. The data should still be in a frozen layer.
+	page1 := make([]byte, PageSize)
+	for i := range page1 {
+		page1[i] = 0xBB
+	}
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("simulated S3 fault"),
+	})
+	// Write returns error from auto-flush, but data should be in frozen layer.
+	_ = v.Write(ctx, page1, PageSize)
+
+	// Step 3: Write page 2 — frozen layers are at capacity, so backpressure
+	// flush kicks in. With the fault still active, this flush fails. The bug
+	// was that this prevented the write from entering the memLayer at all.
+	page2 := make([]byte, PageSize)
+	for i := range page2 {
+		page2[i] = 0xCC
+	}
+	_ = v.Write(ctx, page2, 2*PageSize)
+
+	// Step 4: Clear faults and flush everything.
+	store.ClearAllFaults()
+	if err := v.Flush(ctx); err != nil {
+		t.Fatalf("flush: %v", err)
+	}
+
+	// Step 5: Verify all three pages are readable with correct data.
+	buf := make([]byte, PageSize)
+
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatalf("read page 0: %v", err)
+	}
+	if !bytes.Equal(buf, page0) {
+		t.Fatalf("page 0: expected 0xAA, got %x...", buf[:4])
+	}
+
+	if _, err := v.Read(ctx, buf, PageSize); err != nil {
+		t.Fatalf("read page 1: %v", err)
+	}
+	if !bytes.Equal(buf, page1) {
+		t.Fatalf("page 1: expected 0xBB, got %x...", buf[:4])
+	}
+
+	if _, err := v.Read(ctx, buf, 2*PageSize); err != nil {
+		t.Fatalf("read page 2: %v", err)
+	}
+	if !bytes.Equal(buf, page2) {
+		t.Fatalf("page 2: expected 0xCC, got %x...", buf[:4])
+	}
+}

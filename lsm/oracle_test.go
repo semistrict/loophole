@@ -311,6 +311,21 @@ func (o *Oracle) flushedOrZero(timelineID string, pageAddr uint64) []byte {
 	return make([]byte, PageSize)
 }
 
+// FlushedPages returns a copy of all known-flushed pages for a timeline.
+func (o *Oracle) FlushedPages(timelineID string) map[uint64][]byte {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	result := make(map[uint64][]byte)
+	if tlPages := o.flushed[timelineID]; tlPages != nil {
+		for addr, data := range tlPages {
+			cp := make([]byte, len(data))
+			copy(cp, data)
+			result[addr] = cp
+		}
+	}
+	return result
+}
+
 func isZeroPage(b []byte) bool {
 	for _, v := range b {
 		if v != 0 {
