@@ -118,7 +118,7 @@ func Loopback(ctx context.Context, d Device, size uint64, opts ...LoopbackOption
 	exp := Export{
 		Size:       size,
 		Device:     d,
-		BlockSizes: &BlockSizeConstraints{Min: 1, Preferred: uint32(cfg.blockSize), Max: 0xffffffff},
+		BlockSizes: &BlockSizeConstraints{Min: 512, Preferred: uint32(cfg.blockSize), Max: 0xffffffff},
 		Flags:      uint16(cfg.serverFlags),
 	}
 
