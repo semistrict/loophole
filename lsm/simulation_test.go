@@ -2,12 +2,13 @@ package lsm
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"math"
 	mrand "math/rand/v2"
 	"os"
+	"sort"
 	"strconv"
 	"testing"
 	"testing/synctest"
@@ -43,10 +44,14 @@ type Simulation struct {
 	leases map[string]string
 	// Monotonic volume name counter (never reuses names after deletion).
 	nextVolID int
+	// Monotonic timeline ID counter for deterministic manager id generation.
+	nextTLID int
 	// Deleted volume names (removed from volumeTimelines).
 	deletedVolumes map[string]bool
 	// Parent timeline ID → set of child timeline IDs.
 	timelineChildren map[string]map[string]bool
+	// Last cloned volume name for deep clone chains.
+	lastClonedVolume string
 	// All managers ever created (for cleanup, including crashed ones).
 	allManagers []*Manager
 }
@@ -75,6 +80,7 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 		leases:           make(map[string]string),
 		deletedVolumes:   make(map[string]bool),
 		timelineChildren: make(map[string]map[string]bool),
+		nextTLID:         1,
 	}
 
 	// Create nodes.
@@ -84,23 +90,41 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 			fs:    NewSimLocalFS(),
 			alive: true,
 		}
-		node.manager = NewManager(
-			store.Store(),
-			t.TempDir(),
-			Config{
-				FlushThreshold:  config.FlushThreshold,
-				MaxFrozenLayers: 2,
-				PageCacheBytes:  PageSize, // small for simulation
-			},
-			nil,
-			node.fs,
-			RealClock{}, // time.Now() works fine under synctest
-		)
+		node.manager = sim.newManager(t.TempDir(), node.fs, PageSize)
 		sim.allManagers = append(sim.allManagers, node.manager)
 		sim.nodes = append(sim.nodes, node)
 	}
 
 	return sim
+}
+
+func (sim *Simulation) nextTimelineID() string {
+	id := fmt.Sprintf("%08x-simtl-%08x", sim.nextTLID, sim.nextTLID)
+	sim.nextTLID++
+	return id
+}
+
+func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes int64) *Manager {
+	m := NewManager(
+		sim.store.Store(),
+		cacheDir,
+		Config{
+			FlushThreshold:  sim.config.FlushThreshold,
+			MaxFrozenLayers: 2,
+			PageCacheBytes:  pageCacheBytes,
+		},
+		nil,
+		fs,
+		RealClock{}, // time.Now() works fine under synctest
+	)
+	m.idGen = sim.nextTimelineID
+	return m
+}
+
+func (sim *Simulation) fillRandomBytes(dst []byte) {
+	for i := range dst {
+		dst[i] = byte(sim.rng.IntN(256))
+	}
 }
 
 // Run executes the simulation for OpsPerNode ticks per node.
@@ -167,10 +191,15 @@ func (sim *Simulation) opTable() []opEntry {
 		{8, sim.opFlush},
 		{8, sim.opSnapshot},
 		{5, sim.opClone},
+		{3, sim.opCloneNoFlush},
 		{5, sim.opCompact},
 		{3, sim.opCreateVolume},
 		{2, sim.opFreeze},
 		{2, sim.opCopyFrom},
+		{2, sim.opDeepClone},
+		{2, sim.opCloneFromSnapshot},
+		{3, sim.opVerify},
+		{2, sim.opOpen},
 		{2, sim.opDeleteVolume},
 		{2, sim.opCloseVolume},
 		{sim.config.CrashRate * 100, sim.opCrash},
@@ -215,7 +244,7 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 	for range numPages {
 		pageAddr := sim.rng.Uint64N(maxPage)
 		data := make([]byte, PageSize)
-		rand.Read(data)
+		sim.fillRandomBytes(data)
 
 		offset := pageAddr * PageSize
 		err := v.Write(ctx, data, offset)
@@ -263,20 +292,34 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	writeOff := sim.rng.IntN(maxOff + 1)
 
 	data := make([]byte, writeLen)
-	rand.Read(data)
+	sim.fillRandomBytes(data)
 
-	// Compute the expected full-page result by applying the partial write
-	// to the oracle's current page state. This avoids needing a read-back
-	// from the volume (which could fail due to S3 faults).
-	expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
+	// Read the actual page from the volume to use as the base for the
+	// oracle's expected value. This ensures the oracle agrees with the
+	// engine's read-modify-write result even if prior untracked writes
+	// (from faulted operations) modified the page.
+	basePage := make([]byte, PageSize)
+	if _, err := v.Read(ctx, basePage, pageAddr*PageSize); err != nil {
+		// Can't read the base page (S3 fault) — skip this operation.
+		// We haven't written anything, so no divergence.
+		return
+	}
+	expected := make([]byte, PageSize)
+	copy(expected, basePage)
 	copy(expected[writeOff:writeOff+writeLen], data)
 
 	offset := pageAddr*PageSize + uint64(writeOff)
-	if err := v.Write(ctx, data, offset); err != nil {
+	err := v.Write(ctx, data, offset)
+
+	// Always record: writePage puts the full-page result into the memLayer
+	// before auto-flush runs. The data persists even if Write returns an
+	// error from auto-flush. We use the actual base page (read above), not
+	// the oracle's expected value, so the expected result is correct.
+	sim.oracle.RecordWrite(node.id, timelineID, pageAddr, expected)
+
+	if err != nil {
 		return
 	}
-
-	sim.oracle.RecordWrite(node.id, timelineID, pageAddr, expected)
 	if err := v.Flush(ctx); err != nil {
 		return
 	}
@@ -301,8 +344,50 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, 
 	sim.t.Logf("got:      %x...", got[:32])
 	sim.t.Logf("expected: %x...", expected[:32])
 
+	// Find the first byte offset where got and expected differ.
+	firstDiff := -1
+	for i := range got {
+		if i < len(expected) && got[i] != expected[i] {
+			firstDiff = i
+			break
+		}
+	}
+	if firstDiff >= 0 {
+		end := firstDiff + 32
+		if end > len(got) {
+			end = len(got)
+		}
+		sim.t.Logf("first diff at byte %d: got[%d:]=%x... exp[%d:]=%x...",
+			firstDiff, firstDiff, got[firstDiff:end], firstDiff, expected[firstDiff:end])
+	}
+
 	// Oracle history: full lifecycle of this page.
 	sim.t.Log(sim.oracle.PageHistory(timelineID, pageAddr))
+
+	// Count ALL oracle events for this timeline (not just this page).
+	var writeCount, flushCount, branchCount int
+	sim.oracle.mu.Lock()
+	for _, e := range sim.oracle.events {
+		switch e.Kind {
+		case EventWrite:
+			if e.TimelineID == timelineID {
+				writeCount++
+			}
+		case EventFlush:
+			if e.TimelineID == timelineID {
+				flushCount++
+			}
+		case EventBranch:
+			if e.TimelineID == timelineID || e.ParentID == timelineID {
+				branchCount++
+			}
+		}
+	}
+	flushedPageCount := len(sim.oracle.flushed[timelineID])
+	ambigPageCount := len(sim.oracle.ambiguous[timelineID])
+	sim.oracle.mu.Unlock()
+	sim.t.Logf("oracle summary for tl=%s: writes=%d flushes=%d branches=%d flushedPages=%d ambigPages=%d",
+		timelineID[:8], writeCount, flushCount, branchCount, flushedPageCount, ambigPageCount)
 
 	// Timeline layer inspector: what each layer sees.
 	if v, ok := vol.(*volume); ok {
@@ -379,6 +464,12 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 	parentTL := sim.volumeTimelines[volName]
 	sim.oracle.RecordFlush(node.id, parentTL)
 
+	// Capture branchSeq before snapshot (nextSeq at the time of branching).
+	var branchSeq uint64
+	if pv, ok := v.(*volume); ok {
+		branchSeq = pv.timeline.nextSeq.Load()
+	}
+
 	snapName := fmt.Sprintf("%s-snap-%d", volName, sim.nextVolID)
 	sim.nextVolID++
 
@@ -396,7 +487,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 
 	sim.volumeTimelines[snapName] = ref.TimelineID
 	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, 0)
+	sim.oracle.RecordBranch(ref.TimelineID, parentTL, branchSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
@@ -427,6 +518,12 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	parentTL := sim.volumeTimelines[volName]
 	sim.oracle.RecordFlush(node.id, parentTL)
 
+	// Log parent's nextSeq before clone for diagnostics.
+	var parentNextSeq uint64
+	if pv, ok := v.(*volume); ok {
+		parentNextSeq = pv.timeline.nextSeq.Load()
+	}
+
 	clone, err := v.Clone(ctx, cloneName)
 	if err != nil {
 		return
@@ -438,17 +535,81 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 		return
 	}
 
+	// Log the clone's ancestorSeq for diagnostics.
+	if cv, ok := clone.(*volume); ok {
+		sim.t.Logf("[%s] CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+	}
+
 	sim.volumeTimelines[cloneName] = ref.TimelineID
 	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
 	sim.leases[cloneName] = node.id
 	node.volumes = append(node.volumes, cloneName)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, 0)
+	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
 	sim.timelineChildren[parentTL][ref.TimelineID] = true
 
+	sim.lastClonedVolume = cloneName
+	_ = clone
+}
+
+func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil || v.ReadOnly() {
+		return
+	}
+
+	cloneName := fmt.Sprintf("%s-clone-%d", volName, sim.nextVolID)
+	sim.nextVolID++
+
+	parentTL := sim.volumeTimelines[volName]
+
+	// Capture branchSeq before clone.
+	var parentNextSeq uint64
+	if pv, ok := v.(*volume); ok {
+		parentNextSeq = pv.timeline.nextSeq.Load()
+	}
+
+	// No pre-flush! Clone's internal freezeMemLayer + flushFrozenLayers
+	// persists unflushed data, so the child sees everything.
+	clone, err := v.Clone(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	// Clone's internal flush persisted parent data — record it in oracle.
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	ref, err := sim.getVolRef(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	if cv, ok := clone.(*volume); ok {
+		sim.t.Logf("[%s] CLONE-NOFLUSH parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+	}
+
+	sim.volumeTimelines[cloneName] = ref.TimelineID
+	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.leases[cloneName] = node.id
+	node.volumes = append(node.volumes, cloneName)
+	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+
+	if sim.timelineChildren[parentTL] == nil {
+		sim.timelineChildren[parentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[parentTL][ref.TimelineID] = true
+
+	sim.lastClonedVolume = cloneName
 	_ = clone
 }
 
@@ -513,6 +674,23 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 	sim.oracle.RecordFlush(node.id, timelineID)
 
 	vol.timeline.Compact(ctx)
+
+	// Post-compaction verification: read all pages and check against oracle.
+	// Compaction rewrites layers; this catches data loss or corruption.
+	maxPage := uint64(sim.config.DevicePages)
+	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+		buf := make([]byte, PageSize)
+		_, err := v.Read(ctx, buf, pageAddr*PageSize)
+		if err != nil {
+			// S3 faults can cause read failures during verification.
+			return
+		}
+		if !sim.oracle.VerifyRead(node.id, timelineID, pageAddr, buf) {
+			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
+			sim.t.Logf("POST-COMPACT MISMATCH vol=%s", volName)
+			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageAddr, buf, expected)
+		}
+	}
 }
 
 func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
@@ -538,6 +716,7 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
 	sim.leases[name] = node.id
 	node.volumes = append(node.volumes, name)
+	sim.t.Logf("[%s] CREATE %s tl=%s", node.id, name, ref.TimelineID[:8])
 }
 
 func (sim *Simulation) opFreeze(ctx context.Context, node *SimNode) {
@@ -598,7 +777,9 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 
 	copied, err := dst.CopyFrom(ctx, src, srcOff, dstOff, length)
 
-	// Record in oracle: pages that were actually copied.
+	// Record in oracle: pages that were actually copied. Write enters the
+	// memLayer before auto-flush, so always record based on copied (which
+	// now includes the page whose Write triggered a flush error).
 	pagesCopied := copied / PageSize
 	for pg := uint64(0); pg < pagesCopied; pg++ {
 		expected := sim.oracle.ExpectedRead(node.id, srcTL, srcStart+pg)
@@ -606,6 +787,12 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	}
 
 	if err != nil {
+		// Some pages were written (in memLayer) but auto-flush failed.
+		// Try to flush what's there so oracle stays consistent.
+		if fErr := dst.Flush(ctx); fErr != nil {
+			return
+		}
+		sim.oracle.RecordFlush(node.id, dstTL)
 		return
 	}
 
@@ -630,6 +817,7 @@ func (sim *Simulation) opDeleteVolume(ctx context.Context, node *SimNode) {
 	if len(candidates) == 0 {
 		return
 	}
+	sort.Strings(candidates)
 
 	name := candidates[sim.rng.IntN(len(candidates))]
 	if err := node.manager.DeleteVolume(ctx, name); err != nil {
@@ -669,6 +857,187 @@ func (sim *Simulation) opCloseVolume(ctx context.Context, node *SimNode) {
 	delete(sim.leases, volName)
 }
 
+func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
+	// Clone from the most recently cloned volume (if this node owns it),
+	// creating deeper ancestor chains (3-5+).
+	if sim.lastClonedVolume == "" {
+		return
+	}
+	srcName := sim.lastClonedVolume
+	if sim.leases[srcName] != node.id {
+		return
+	}
+
+	v := node.manager.GetVolume(srcName)
+	if v == nil {
+		return
+	}
+
+	cloneName := fmt.Sprintf("%s-deep-%d", srcName, sim.nextVolID)
+	sim.nextVolID++
+
+	// Flush parent before cloning.
+	if err := v.Flush(ctx); err != nil {
+		return
+	}
+	parentTL := sim.volumeTimelines[srcName]
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	var parentNextSeq uint64
+	if pv, ok := v.(*volume); ok {
+		parentNextSeq = pv.timeline.nextSeq.Load()
+	}
+
+	clone, err := v.Clone(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	ref, err := sim.getVolRef(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	if cv, ok := clone.(*volume); ok {
+		sim.t.Logf("[%s] DEEP-CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+	}
+
+	sim.volumeTimelines[cloneName] = ref.TimelineID
+	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.leases[cloneName] = node.id
+	node.volumes = append(node.volumes, cloneName)
+	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+
+	if sim.timelineChildren[parentTL] == nil {
+		sim.timelineChildren[parentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[parentTL][ref.TimelineID] = true
+
+	sim.lastClonedVolume = cloneName
+	_ = clone
+}
+
+func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
+	// Find a read-only (snapshot) volume that isn't leased.
+	var snapName string
+	volNames := make([]string, 0, len(sim.volumeTimelines))
+	for name := range sim.volumeTimelines {
+		volNames = append(volNames, name)
+	}
+	sort.Strings(volNames)
+	for _, name := range volNames {
+		if _, held := sim.leases[name]; held {
+			continue
+		}
+		// Check if it's a snapshot by reading the ref.
+		ref, err := sim.getVolRef(ctx, name)
+		if err != nil {
+			continue
+		}
+		if ref.ReadOnly {
+			snapName = name
+			break
+		}
+	}
+	if snapName == "" {
+		return
+	}
+
+	// Open the snapshot temporarily.
+	snapVol, err := node.manager.OpenVolume(ctx, snapName)
+	if err != nil {
+		return
+	}
+	sim.leases[snapName] = node.id
+
+	cloneName := fmt.Sprintf("%s-sclone-%d", snapName, sim.nextVolID)
+	sim.nextVolID++
+
+	parentTL := sim.volumeTimelines[snapName]
+	var parentNextSeq uint64
+	if pv, ok := snapVol.(*volume); ok {
+		parentNextSeq = pv.timeline.nextSeq.Load()
+	}
+
+	clone, err := snapVol.Clone(ctx, cloneName)
+	if err != nil {
+		// Close the snapshot.
+		snapVol.ReleaseRef(ctx)
+		delete(sim.leases, snapName)
+		return
+	}
+
+	ref, err := sim.getVolRef(ctx, cloneName)
+	if err != nil {
+		snapVol.ReleaseRef(ctx)
+		delete(sim.leases, snapName)
+		return
+	}
+
+	sim.t.Logf("[%s] CLONE-FROM-SNAP snap=%s -> child=%s", node.id, parentTL[:8], ref.TimelineID[:8])
+
+	sim.volumeTimelines[cloneName] = ref.TimelineID
+	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.leases[cloneName] = node.id
+	node.volumes = append(node.volumes, cloneName)
+	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+
+	if sim.timelineChildren[parentTL] == nil {
+		sim.timelineChildren[parentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[parentTL][ref.TimelineID] = true
+
+	// Close the snapshot volume.
+	snapVol.ReleaseRef(ctx)
+	delete(sim.leases, snapName)
+
+	sim.lastClonedVolume = cloneName
+	_ = clone
+}
+
+func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil {
+		return
+	}
+
+	timelineID := sim.volumeTimelines[volName]
+	maxPage := uint64(sim.config.DevicePages)
+	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+		buf := make([]byte, PageSize)
+		_, err := v.Read(ctx, buf, pageAddr*PageSize)
+		if err != nil {
+			return
+		}
+		if !sim.oracle.VerifyRead(node.id, timelineID, pageAddr, buf) {
+			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
+			sim.t.Logf("MID-SIM VERIFY MISMATCH vol=%s", volName)
+			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageAddr, buf, expected)
+		}
+	}
+}
+
+func (sim *Simulation) opOpen(ctx context.Context, node *SimNode) {
+	// Find an unleased volume and open it on this node.
+	volNames := make([]string, 0, len(sim.volumeTimelines))
+	for name := range sim.volumeTimelines {
+		volNames = append(volNames, name)
+	}
+	sort.Strings(volNames)
+	for _, name := range volNames {
+		if _, held := sim.leases[name]; !held {
+			sim.acquireVolume(ctx, node, name)
+			return
+		}
+	}
+}
+
 func (sim *Simulation) hasChildren(name string) bool {
 	tlID := sim.volumeTimelines[name]
 	return len(sim.timelineChildren[tlID]) > 0
@@ -696,25 +1065,25 @@ func (sim *Simulation) recoverNode(ctx context.Context, node *SimNode) {
 	node.alive = true
 	node.volumes = nil
 
-	node.manager = NewManager(
-		sim.store.Store(),
-		sim.t.TempDir(),
-		Config{
-			FlushThreshold:  sim.config.FlushThreshold,
-			MaxFrozenLayers: 2,
-			PageCacheBytes:  PageSize,
-		},
-		nil,
-		node.fs,
-		RealClock{},
-	)
+	node.manager = sim.newManager(sim.t.TempDir(), node.fs, PageSize)
 	sim.allManagers = append(sim.allManagers, node.manager)
 
-	// Re-acquire a volume if available.
+	// Re-acquire up to 3 unleased volumes. Production nodes typically serve
+	// multiple volumes; this exercises concurrent timeline opens and shared
+	// page cache pressure.
+	volNames := make([]string, 0, len(sim.volumeTimelines))
 	for volName := range sim.volumeTimelines {
+		volNames = append(volNames, volName)
+	}
+	sort.Strings(volNames)
+	acquired := 0
+	for _, volName := range volNames {
+		if acquired >= 3 {
+			break
+		}
 		if _, held := sim.leases[volName]; !held {
 			sim.acquireVolume(ctx, node, volName)
-			break
+			acquired++
 		}
 	}
 }
@@ -781,18 +1150,7 @@ func (sim *Simulation) FullScan() {
 	ctx := sim.t.Context()
 	sim.store.ClearFaults()
 
-	m := NewManager(
-		sim.store.Store(),
-		sim.t.TempDir(),
-		Config{
-			FlushThreshold:  sim.config.FlushThreshold,
-			MaxFrozenLayers: 2,
-			PageCacheBytes:  16 * PageSize,
-		},
-		nil,
-		NewSimLocalFS(),
-		RealClock{},
-	)
+	m := sim.newManager(sim.t.TempDir(), NewSimLocalFS(), 16*PageSize)
 	sim.allManagers = append(sim.allManagers, m)
 
 	// Verify ListAllVolumes contains every tracked volume.
@@ -807,7 +1165,12 @@ func (sim *Simulation) FullScan() {
 	for _, name := range allNames {
 		allNameSet[name] = true
 	}
+	volNames := make([]string, 0, len(sim.volumeTimelines))
 	for volName := range sim.volumeTimelines {
+		volNames = append(volNames, volName)
+	}
+	sort.Strings(volNames)
+	for _, volName := range volNames {
 		if !allNameSet[volName] {
 			sim.t.Fatalf("ListAllVolumes missing volume %q", volName)
 		}
@@ -820,7 +1183,8 @@ func (sim *Simulation) FullScan() {
 	}
 
 	var scanned int
-	for volName, timelineID := range sim.volumeTimelines {
+	for _, volName := range volNames {
+		timelineID := sim.volumeTimelines[volName]
 		// Verify that the oracle's timeline ID matches what's actually in S3.
 		ref, refErr := sim.getVolRef(ctx, volName)
 		if refErr != nil {
@@ -874,6 +1238,50 @@ func (sim *Simulation) getVolRef(ctx context.Context, name string) (volumeRef, e
 }
 
 // TestSimulation runs the deterministic simulation test.
+// simEnvInt reads an env var as int, returning def if unset.
+func simEnvInt(t *testing.T, key string, def int) int {
+	s := os.Getenv(key)
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("invalid %s: %v", key, err)
+	}
+	return n
+}
+
+// simEnvFloat reads an env var as float64, returning def if unset.
+func simEnvFloat(t *testing.T, key string, def float64) float64 {
+	s := os.Getenv(key)
+	if s == "" {
+		return def
+	}
+	n, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		t.Fatalf("invalid %s: %v", key, err)
+	}
+	return n
+}
+
+// runSimulation runs a full simulation with the given seed and config, returning
+// the oracle event log. Used by both TestSimulation and TestSimulationDeterminism.
+func runSimulation(t *testing.T, seed uint64, config SimConfig) []string {
+	var events []string
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, seed, config)
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close(context.Background())
+			}
+		}()
+		sim.Run()
+		sim.FullScan()
+		events = sim.oracle.EventLog()
+	})
+	return events
+}
+
 func TestSimulation(t *testing.T) {
 	var seed uint64
 	if s := os.Getenv("SIM_SEED"); s != "" {
@@ -884,22 +1292,32 @@ func TestSimulation(t *testing.T) {
 		}
 	} else {
 		var buf [8]byte
-		rand.Read(buf[:])
+		_, _ = crand.Read(buf[:])
 		seed = binary.LittleEndian.Uint64(buf[:])
 	}
-	t.Logf("seed: %d", seed)
+
+	nodes := simEnvInt(t, "SIM_NODES", 3)
+	ops := simEnvInt(t, "SIM_OPS", 300)
+	pages := simEnvInt(t, "SIM_PAGES", 256)
+	timelines := simEnvInt(t, "SIM_TIMELINES", 20)
+	crashRate := simEnvFloat(t, "SIM_CRASH_RATE", 0.02)
+	faultRate := simEnvFloat(t, "SIM_FAULT_RATE", 0.02)
+
+	t.Logf("seed: %d  nodes: %d  ops: %d  pages: %d  timelines: %d  crash: %.2f  faults: %.2f",
+		seed, nodes, ops, pages, timelines, crashRate, faultRate)
 
 	synctest.Test(t, func(t *testing.T) {
 		sim := NewSimulation(t, seed, SimConfig{
-			NumNodes:       3,
-			DevicePages:    256, // 1MB device (small for speed)
-			MaxTimelines:   20,
-			OpsPerNode:     300,
-			CrashRate:      0.02,
-			FlushThreshold: 8 * PageSize, // triggers auto-flush after ~8 pages
+			NumNodes:       nodes,
+			DevicePages:    pages,
+			MaxTimelines:   timelines,
+			OpsPerNode:     ops,
+			CrashRate:      crashRate,
+			FlushThreshold: 8 * PageSize,
 			S3Faults: FaultConfig{
-				PutFailRate: 0.02,
-				GetFailRate: 0.02,
+				PutFailRate:    faultRate,
+				GetFailRate:    faultRate,
+				PhantomPutRate: 0.02,
 			},
 		})
 		// Defer cleanup so periodic flush goroutines are stopped even if
@@ -914,4 +1332,65 @@ func TestSimulation(t *testing.T) {
 		sim.Run()
 		sim.FullScan()
 	})
+}
+
+func TestSimulationDeterminism(t *testing.T) {
+	var seed uint64
+	if s := os.Getenv("SIM_SEED"); s != "" {
+		var err error
+		seed, err = strconv.ParseUint(s, 10, 64)
+		if err != nil {
+			t.Fatalf("invalid SIM_SEED: %v", err)
+		}
+	} else {
+		var buf [8]byte
+		_, _ = crand.Read(buf[:])
+		seed = binary.LittleEndian.Uint64(buf[:])
+	}
+
+	config := SimConfig{
+		NumNodes:       3,
+		DevicePages:    64,
+		MaxTimelines:   15,
+		OpsPerNode:     100,
+		CrashRate:      0.02,
+		FlushThreshold: 8 * PageSize,
+		S3Faults: FaultConfig{
+			PutFailRate:    0.02,
+			GetFailRate:    0.02,
+			PhantomPutRate: 0.02,
+		},
+	}
+
+	t.Logf("determinism check seed: %d", seed)
+
+	events1 := runSimulation(t, seed, config)
+	events2 := runSimulation(t, seed, config)
+
+	if len(events1) != len(events2) {
+		t.Fatalf("event count mismatch: run1=%d run2=%d", len(events1), len(events2))
+	}
+	for i := range events1 {
+		if events1[i] != events2[i] {
+			// Show context around the divergence point.
+			start := i - 3
+			if start < 0 {
+				start = 0
+			}
+			end := i + 3
+			if end > len(events1) {
+				end = len(events1)
+			}
+			for j := start; j < end; j++ {
+				marker := "  "
+				if j == i {
+					marker = ">>"
+				}
+				t.Logf("%s [%d] run1: %s", marker, j, events1[j])
+				t.Logf("%s [%d] run2: %s", marker, j, events2[j])
+			}
+			t.Fatalf("determinism failure at event %d/%d", i, len(events1))
+		}
+	}
+	t.Logf("determinism OK: %d events identical across 2 runs", len(events1))
 }

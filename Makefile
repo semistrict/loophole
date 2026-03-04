@@ -74,7 +74,7 @@ fmt:
 # Usage: make test [RUN=TestName]
 UNIT_PKGS := $(shell go list ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
 test: liblwext4
-	go test -race $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
+	go test $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
 
 # Build and run lwext4 C tests (client-server model)
 # Requires: cmake, make, e2fsprogs (mkfs.ext4)

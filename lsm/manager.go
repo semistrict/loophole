@@ -33,6 +33,7 @@ type Manager struct {
 	lease     *loophole.LeaseManager // nil disables lease enforcement
 	fs        LocalFS
 	clock     Clock
+	idGen     func() string
 
 	timelines loophole.ObjectStore // store.At("timelines")
 	volRefs   loophole.ObjectStore // store.At("volumes")
@@ -65,7 +66,7 @@ func NewManager(store loophole.ObjectStore, cacheDir string, config Config, leas
 		lease:     lease,
 		fs:        fs,
 		clock:     clock,
-
+		idGen:     uuid.NewString,
 		timelines: store.At("timelines"),
 		volRefs:   store.At("volumes"),
 		volumes:   make(map[string]*volume),
@@ -78,7 +79,7 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64) (loop
 		size = DefaultVolumeSize
 	}
 
-	timelineID := uuid.NewString()
+	timelineID := m.idGen()
 
 	// Write timeline meta.json.
 	meta := TimelineMeta{

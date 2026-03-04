@@ -3330,8 +3330,8 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	// Step 5: Verify all three pages are readable with correct data.
 	buf := make([]byte, PageSize)
 
-	if _, err := v.Read(ctx, buf, 0); err != nil {
-		t.Fatalf("read page 0: %v", err)
+	if n, err := v.Read(ctx, buf, 0); err != nil || n != PageSize {
+		t.Fatalf("read page 0: n=%d err=%v", n, err)
 	}
 	if !bytes.Equal(buf, page0) {
 		t.Fatalf("page 0: expected 0xAA, got %x...", buf[:4])
@@ -3350,4 +3350,331 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	if !bytes.Equal(buf, page2) {
 		t.Fatalf("page 2: expected 0xCC, got %x...", buf[:4])
 	}
+}
+
+// TestCopyFromAutoFlushFault verifies that CopyFrom data is readable even
+// when an auto-flush fails mid-copy due to an S3 fault.
+//
+// This reproduces a bug where CopyFrom's Write succeeds (data enters the
+// memLayer) but auto-flush fails and returns an error. CopyFrom returns
+// `copied` without counting the last page, so callers (and the simulation
+// oracle) miss it. But the data IS in the memLayer and survives a later Flush.
+func TestCopyFromAutoFlushFault(t *testing.T) {
+	store := loophole.NewMemStore()
+
+	// Very low flush threshold: 2 pages triggers auto-flush.
+	cfg := Config{
+		FlushThreshold:  2 * PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	// Create source volume with 4 pages of known data.
+	src, err := m.NewVolume(ctx, "src", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srcPages := make([][]byte, 4)
+	for i := range srcPages {
+		srcPages[i] = bytes.Repeat([]byte{byte(0xA0 + i)}, PageSize)
+		if err := src.Write(ctx, srcPages[i], uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := src.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create destination volume.
+	dst, err := m.NewVolume(ctx, "dst", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject PUT fault so auto-flush during CopyFrom fails.
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("injected S3 PUT failure"),
+	})
+
+	// CopyFrom 4 pages. The first 1-2 writes go into memLayer without
+	// triggering flush. When the memLayer crosses FlushThreshold, the
+	// auto-flush fires and hits the PUT fault. CopyFrom returns an error
+	// with `copied` not counting the page whose Write triggered the flush.
+	copied, err := dst.CopyFrom(ctx, src, 0, 0, 4*PageSize)
+	if err == nil {
+		t.Fatal("expected CopyFrom to fail due to S3 fault")
+	}
+
+	// BUG: CopyFrom reports fewer bytes than actually written to memLayer.
+	// The Write that triggered auto-flush DID put the page in the memLayer
+	// (the put() call succeeds before the flush), but copied doesn't count it.
+	//
+	// We expect copied to be at least 2*PageSize (the first 2 pages fit
+	// without triggering flush), but the 3rd page's Write succeeds in the
+	// memLayer, then auto-flush fails. copied should include the 3rd page
+	// but currently doesn't.
+	pagesReported := copied / PageSize
+	t.Logf("CopyFrom reported %d bytes copied (%d pages), err: %v", copied, pagesReported, err)
+
+	// Clear faults and flush — the data in the memLayer/frozen layers
+	// should now persist to S3.
+	store.ClearAllFaults()
+	if err := dst.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read ALL pages from dst. Pages that were actually written to the
+	// memLayer should be readable even if CopyFrom's `copied` didn't count them.
+	var pagesActuallyWritten uint64
+	buf := make([]byte, PageSize)
+	for i := 0; i < 4; i++ {
+		if _, err := dst.Read(ctx, buf, uint64(i)*PageSize); err != nil {
+			t.Fatalf("read page %d: %v", i, err)
+		}
+		if bytes.Equal(buf, srcPages[i]) {
+			pagesActuallyWritten++
+		}
+	}
+
+	t.Logf("pages reported by CopyFrom: %d, pages actually written: %d", pagesReported, pagesActuallyWritten)
+
+	// The bug: pagesActuallyWritten > pagesReported.
+	// CopyFrom wrote more pages than it reported, which causes the
+	// simulation oracle to miss tracking those pages.
+	if pagesActuallyWritten > pagesReported {
+		t.Fatalf("CopyFrom under-reported: reported %d pages but %d were actually written to memLayer",
+			pagesReported, pagesActuallyWritten)
+	}
+}
+
+// TestCopyFromOracleConsistency is the simulation-level reproduction:
+// after CopyFrom + flush failure + later successful flush + reopen,
+// the data must match what the oracle would track.
+//
+// This simulates the exact sequence that caused the sim failure:
+//  1. Source has data, destination branches from a timeline with different data
+//  2. CopyFrom writes source pages to destination
+//  3. Auto-flush fails mid-copy (S3 fault)
+//  4. CopyFrom returns `copied` not counting the faulted page
+//  5. A later Flush succeeds, persisting all memLayer data
+//  6. On reopen, the page has the CopyFrom'd value (zeros from source)
+//     but an oracle tracking only `copied` pages would expect the branch-inherited value
+func TestCopyFromOracleConsistency(t *testing.T) {
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  2 * PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	// Create a "parent" volume and write distinct data to pages 0-3.
+	parent, err := m.NewVolume(ctx, "parent", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentData := bytes.Repeat([]byte{0xDD}, PageSize)
+	for i := 0; i < 4; i++ {
+		if err := parent.Write(ctx, parentData, uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := parent.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clone parent → dst. dst inherits parent's data for pages 0-3.
+	dst, err := parent.Clone(ctx, "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a separate source volume with zeros on pages 0-3
+	// (never written, so they're zeros).
+	src, err := m.NewVolume(ctx, "src", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject PUT fault.
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("injected S3 PUT failure"),
+	})
+
+	// CopyFrom zeros (src) over dst's inherited data.
+	copied, copyErr := dst.CopyFrom(ctx, src, 0, 0, 4*PageSize)
+	pagesReported := copied / PageSize
+	t.Logf("CopyFrom: copied=%d (%d pages), err=%v", copied, pagesReported, copyErr)
+
+	// Clear faults, flush dst to persist everything in memLayer.
+	store.ClearAllFaults()
+	if err := dst.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close and reopen dst on a fresh manager (simulates different node).
+	m.Close(ctx)
+	m2 := newTestManager(t, store, cfg)
+	dst2, err := m2.OpenVolume(ctx, "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate what the oracle would track: only `pagesReported` pages
+	// are known to have been overwritten. The rest should still have
+	// parent's data (0xDD).
+	oracle := NewOracle()
+	parentTL := "parent-tl" // placeholder
+	dstTL := "dst-tl"
+
+	// Oracle: parent wrote pages 0-3 with 0xDD.
+	for i := 0; i < 4; i++ {
+		oracle.RecordWrite("node", parentTL, uint64(i), parentData)
+	}
+	oracle.RecordFlush("node", parentTL)
+
+	// Oracle: branch dst from parent.
+	oracle.RecordBranch(dstTL, parentTL, 0)
+
+	// Oracle: record only the pages CopyFrom reported (the bug).
+	zeroPage := make([]byte, PageSize)
+	for pg := uint64(0); pg < pagesReported; pg++ {
+		oracle.RecordWrite("node", dstTL, pg, zeroPage)
+	}
+	oracle.RecordFlush("node", dstTL)
+
+	// Now verify: read each page from dst and check against oracle.
+	buf := make([]byte, PageSize)
+	for i := 0; i < 4; i++ {
+		if _, err := dst2.Read(ctx, buf, uint64(i)*PageSize); err != nil {
+			t.Fatalf("read page %d: %v", i, err)
+		}
+		expected := oracle.ExpectedRead("node2", dstTL, uint64(i))
+		if !bytes.Equal(buf, expected) {
+			t.Fatalf("page %d: oracle expected %x... but got %x... (CopyFrom reported %d pages, page %d was not tracked)",
+				i, expected[:4], buf[:4], pagesReported, i)
+		}
+	}
+}
+
+// TestPartialWriteAutoFlushFault demonstrates that a sub-page write puts data
+// into the memLayer even when auto-flush fails. If the oracle doesn't record
+// the write (because Write returned an error), a later successful flush will
+// persist data the oracle doesn't know about.
+//
+// Sequence:
+//  1. Create a volume, page 5 starts as zeros
+//  2. Set FlushThreshold low so writes trigger auto-flush
+//  3. Write a full page to fill up the memLayer near threshold
+//  4. Inject PUT fault
+//  5. Do a sub-page write to page 5 (which was zeros)
+//     -> writePage does read-modify-write: reads zeros, applies partial data, puts in memLayer
+//     -> auto-flush fails -> Write returns error
+//  6. Clear fault, flush successfully
+//  7. Reopen and read page 5: it has non-zero data from the partial write
+//     but an oracle that skipped RecordWrite on error would expect zeros
+func TestPartialWriteAutoFlushFault(t *testing.T) {
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  2 * PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "test", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a full page to page 0 to put some data in memLayer.
+	fullPage := bytes.Repeat([]byte{0xAA}, PageSize)
+	if err := v.Write(ctx, fullPage, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now write page 1 to get near the flush threshold.
+	if err := v.Write(ctx, fullPage, PageSize); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject PUT fault so auto-flush fails.
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("injected S3 PUT failure"),
+	})
+
+	// Sub-page write to page 5 at offset 100, length 200.
+	// Page 5 has never been written, so it's zeros.
+	// writePage will: read zeros, copy partialData at offset 100, put full page in memLayer.
+	// Then auto-flush fails -> Write returns error.
+	partialData := bytes.Repeat([]byte{0xBB}, 200)
+	writeErr := v.Write(ctx, partialData, 5*PageSize+100)
+	t.Logf("partial write err: %v", writeErr)
+
+	// The data IS in memLayer despite the error.
+	// Clear faults and flush.
+	store.ClearAllFaults()
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Close and reopen.
+	m.Close(ctx)
+	m2 := newTestManager(t, store, cfg)
+	v2, err := m2.OpenVolume(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read page 5. It should have the partial write data.
+	buf := make([]byte, PageSize)
+	if _, err := v2.Read(ctx, buf, 5*PageSize); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build expected page: zeros with partialData at offset 100.
+	expectedPage := make([]byte, PageSize)
+	copy(expectedPage[100:], partialData)
+
+	if !bytes.Equal(buf, expectedPage) {
+		t.Fatalf("page 5 mismatch after partial write + auto-flush fault:\n  got[100:104]=%x\n  exp[100:104]=%x\n  got is all zeros: %v",
+			buf[100:104], expectedPage[100:104], bytes.Equal(buf, make([]byte, PageSize)))
+	}
+
+	// Now simulate the oracle bug: if opPartialWrite skips RecordWrite on error,
+	// the oracle would still think page 5 is zeros.
+	oracle := NewOracle()
+	tlID := "test-tl"
+
+	// Oracle: page 0 was written with 0xAA.
+	oracle.RecordWrite("node", tlID, 0, fullPage)
+	oracle.RecordFlush("node", tlID)
+
+	// Oracle: page 1 was written with 0xAA (always recorded, like opWrite).
+	oracle.RecordWrite("node", tlID, 1, fullPage)
+
+	// BUG: partial write to page 5 returned error -> oracle does NOT record it.
+	// (We intentionally skip RecordWrite here to demonstrate the bug.)
+
+	// Flush is recorded.
+	oracle.RecordFlush("node", tlID)
+
+	// Oracle expects page 5 is zeros (unwritten).
+	oracleExpected := oracle.ExpectedRead("node2", tlID, 5)
+	if bytes.Equal(oracleExpected, buf) {
+		t.Fatal("expected oracle to DISAGREE with actual data (demonstrating the bug)")
+	}
+	t.Logf("oracle expects zeros for page 5 but actual has partial write data — confirms the sim bug")
 }

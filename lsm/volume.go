@@ -8,8 +8,6 @@ import (
 
 	"encoding/json"
 
-	"github.com/google/uuid"
-
 	"github.com/semistrict/loophole"
 )
 
@@ -102,7 +100,7 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 		return fmt.Errorf("flush for snapshot: %w", err)
 	}
 
-	childID := uuid.NewString()
+	childID := v.manager.idGen()
 	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
 		return fmt.Errorf("create snapshot child: %w", err)
 	}
@@ -138,7 +136,7 @@ func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, 
 		return nil, fmt.Errorf("flush for clone: %w", err)
 	}
 
-	childID := uuid.NewString()
+	childID := v.manager.idGen()
 	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
 		return nil, fmt.Errorf("create clone child: %w", err)
 	}
@@ -166,7 +164,9 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 			return copied, err
 		}
 		if err := v.Write(ctx, buf[:n], dstOff+copied); err != nil {
-			return copied, err
+			// Write puts data into the memLayer before auto-flush runs.
+			// Count it as copied so callers know the data exists.
+			return copied + uint64(n), err
 		}
 		copied += uint64(n)
 	}

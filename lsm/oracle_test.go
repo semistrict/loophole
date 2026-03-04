@@ -3,6 +3,7 @@ package lsm
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -164,11 +165,12 @@ func (o *Oracle) RecordFlush(nodeID, timelineID string) {
 		return
 	}
 
-	// Record which pages are being flushed.
+	// Record which pages are being flushed (sorted for determinism).
 	var flushedPages []uint64
 	for addr := range pages {
 		flushedPages = append(flushedPages, addr)
 	}
+	slices.Sort(flushedPages)
 	o.logEvent(OracleEvent{Kind: EventFlush, NodeID: nodeID, TimelineID: timelineID, Pages: flushedPages})
 
 	if o.flushed[timelineID] == nil {
@@ -405,4 +407,17 @@ func (o *Oracle) PageHistory(timelineID string, pageAddr uint64) string {
 	}
 
 	return sb.String()
+}
+
+// EventLog returns all oracle events as a deterministic string sequence.
+// Used to verify simulation determinism: two runs with the same seed must
+// produce identical event logs.
+func (o *Oracle) EventLog() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	log := make([]string, len(o.events))
+	for i, e := range o.events {
+		log[i] = e.String()
+	}
+	return log
 }

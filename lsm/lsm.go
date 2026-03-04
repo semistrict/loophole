@@ -31,9 +31,12 @@ var zeroPage [PageSize]byte
 
 // zstdDecoderPool reuses zstd decoders across page reads to avoid the
 // significant allocation cost of zstd.NewReader per decompression.
+// WithDecoderConcurrency(1) makes DecodeAll run synchronously — no internal
+// goroutine pool. This avoids synctest "receive on channel from outside bubble"
+// panics and is actually faster for small (4KB page) decompressions.
 var zstdDecoderPool = sync.Pool{
 	New: func() any {
-		d, err := zstd.NewReader(nil)
+		d, err := zstd.NewReader(nil, zstd.WithDecoderConcurrency(1))
 		if err != nil {
 			panic("zstd.NewReader: " + err.Error())
 		}
