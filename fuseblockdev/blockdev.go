@@ -399,6 +399,7 @@ func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, 
 		end = d.vol.Size()
 	}
 
+	slog.Debug("blockdev: fallocate", "op", opName, "off", off, "end", end, "len", end-off)
 	if err := d.vol.PunchHole(ctx, off, end-off); err != nil {
 		done(syscall.EIO)
 		return syscall.EIO

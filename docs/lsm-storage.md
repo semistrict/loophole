@@ -53,16 +53,10 @@ an ordered set of layers plus an optional ancestor pointer. Each volume has one
 active timeline. Snapshots and clones create new timelines that reference their
 parent as an ancestor, forming a tree:
 
-```go
-type Timeline struct {
-    id          string
-    ancestor    *Timeline  // nil for root timelines
-    ancestorSeq uint64     // read from ancestor only at seq <= this value
-    layers      *LayerMap  // tracks all delta and image layers
-    memLayer    *MemLayer  // active in-memory write buffer
-    nextSeq     uint64     // monotonic write counter
-}
-```
+A Timeline holds an ID, an optional ancestor pointer (nil for root timelines),
+an `ancestorSeq` (read from ancestor only at seq <= this value), a LayerMap
+(tracks all delta and image layers), the active MemLayer write buffer, and a
+monotonic `nextSeq` write counter. See `lsm/timeline.go`.
 
 **Snapshot**: a read-only point-in-time copy of the block device. The result is
 a new timeline that sees the exact contents of the parent at the moment of the
@@ -116,29 +110,21 @@ Write(offset uint64, data []byte):
         pageCache.Put(pageAddr, pageData)    // write-through to local cache
 ```
 
-The in-memory layer is backed by an append-only local file (like Neon's
-EphemeralFile). Metadata is in memory:
+The in-memory layer (see `lsm/memlayer.go`) is backed by a fixed-size
+memory-mapped file. Page data lives in the mmap region (off-heap, zero GC
+pressure). An in-memory index maps page addresses to fixed-size slots within
+the mmap. A bump allocator (`nextSlot`) assigns slots; if a page already exists,
+its slot is reused (in-place overwrite, no size growth).
 
-```go
-type MemLayer struct {
-    file     *os.File                         // append-only data file
-    index    map[uint64]memEntry              // pageAddr → latest entry
-    startSeq uint64
-    size     uint64                           // bytes written to file
-}
+Writes are a `copy()` into the mmap region — no syscalls. This eliminates the
+append-only amplification where repeated writes to the same page each appended
+another 64KB copy. Reads return a direct slice into the mmap region — zero
+allocation, zero syscalls.
 
-type memEntry struct {
-    seq       uint64
-    offset    uint64  // offset in file where the 4KB page data starts
-    tombstone bool    // true = page was punched (PunchHole), read as zeros
-}
-```
-
-Writes are fast: append 4KB to the file, update the in-memory map. The index
-stores only the latest entry per pageAddr — if a page is written multiple times
-within one memLayer's lifetime, intermediate versions are discarded. This is
-safe because branching freezes the memLayer, so no branch point can fall inside
-an active memLayer's seq range.
+The index stores only the latest entry per pageAddr — if a page is written
+multiple times within one memLayer's lifetime, intermediate versions are
+discarded. This is safe because branching freezes the memLayer, so no branch
+point can fall inside an active memLayer's seq range.
 
 When `memLayer.size` exceeds a threshold (e.g. 256MB), freeze it and start a
 new one. The frozen in-memory layer is then flushed to S3 as a delta layer.
@@ -152,7 +138,7 @@ new one. The frozen in-memory layer is then flushed to S3 as a delta layer.
 4. Serialize: header + per-page zstd-compressed values + uncompressed index
 5. Upload as single S3 object: deltas/<startSeq>-<endSeq>
 6. Update the in-memory layer map (add delta, remove frozen memLayer)
-7. Delete the local ephemeral file
+7. Cleanup: munmap + close + delete the backing file
 ```
 
 Multiple frozen memLayers may upload concurrently, but the in-memory layer map
@@ -283,30 +269,9 @@ A simpler approach for our case: since we have far fewer layers than Neon
 layers with binary search on seq ranges is likely sufficient. If needed,
 an interval tree or R-tree can be added later.
 
-```go
-type LayerMap struct {
-    // Sorted by startSeq descending (newest first) for search.
-    deltas []DeltaLayerMeta
-    images []ImageLayerMeta
-
-    // Open and frozen in-memory layers.
-    memLayer       *MemLayer
-    frozenMemLayers []*MemLayer
-}
-
-type DeltaLayerMeta struct {
-    startSeq  uint64
-    endSeq    uint64
-    pageRange [2]uint64   // min, max pageAddr
-    s3Key     string
-}
-
-type ImageLayerMeta struct {
-    seq       uint64
-    pageRange [2]uint64
-    s3Key     string
-}
-```
+The LayerMap (see `lsm/layer.go`) stores delta layers sorted by startSeq
+descending (newest first) and image layers similarly. Each delta has a
+(startSeq, endSeq, pageRange, s3Key); each image has a (seq, pageRange, s3Key).
 
 ## Compaction
 
@@ -372,8 +337,8 @@ All local disk usage is bounded by a configurable budget. Data on local disk
 falls into two categories:
 
 **Pinned** (cannot be evicted — not yet on S3):
-- Active memLayer ephemeral file: up to `flushThreshold` (e.g. 256MB)
-- Frozen memLayer ephemeral files awaiting upload: up to
+- Active memLayer mmap file: up to `flushThreshold` (e.g. 256MB)
+- Frozen memLayer mmap files awaiting upload: up to
   `maxFrozenLayers × flushThreshold`
 
 **Evictable** (recoverable from S3 layers):
@@ -410,15 +375,9 @@ freeze and writes never block.
 Fixed-size LRU on local disk, replacing `openBlocks`. Stores individual 4KB
 pages keyed by (timeline, pageAddr).
 
-```go
-type PageCache struct {
-    dir      string
-    maxBytes uint64
-    // In-memory index: (timelineID, pageAddr) → offset in cache file
-    index    map[pageCacheKey]uint64
-    lru      *list.List
-}
-```
+The PageCache (see `lsm/pagecache.go`) is a fixed-size mmap'd file divided
+into PageSize slots. An in-memory index maps `(timelineID, pageAddr)` to slot
+numbers. Random eviction reuses slots when full.
 
 - Writes update the cache (write-through), so subsequent reads are local.
 - Any cache entry can be evicted — the data is always recoverable from layers.
@@ -433,8 +392,8 @@ one operation.
 ```
 <cache_dir>/
     mem/
-        <startSeq>.ephemeral                    # active memLayer append-only data file
-        <startSeq>.ephemeral                    # frozen memLayer(s) awaiting upload
+        <startSeq>-<rand>.ephemeral             # active memLayer mmap backing file
+        <startSeq>-<rand>.ephemeral             # frozen memLayer(s) awaiting upload
     pages.cache                                 # page cache: fixed-size file of 4KB slots
     layers/
         <timelineID>/
@@ -444,8 +403,9 @@ one operation.
             images/<seq>__<pStart>-<pEnd>.data   # full image layer (optional)
 ```
 
-**`mem/`**: pinned, cannot be evicted. One file per memLayer (active + frozen).
-Deleted after successful flush to S3.
+**`mem/`**: pinned, cannot be evicted. One mmap backing file per memLayer
+(active + frozen). Each file is `maxPages × PageSize` bytes, pre-allocated via
+`Truncate`. Cleaned up (munmap + close + remove) after successful flush to S3.
 
 **`pages.cache`**: a fixed-size file divided into 4KB slots. The in-memory
 index maps `(timelineID, pageAddr)` to a slot number. LRU eviction reuses
@@ -593,7 +553,7 @@ PunchHole(offset, length):
 ```
 
 **Representation**: in the memLayer, a tombstone is a `memEntry` with
-`tombstone = true` and no data written to the ephemeral file. In the delta
+`tombstone = true` and no data written to the mmap. In the delta
 layer on S3, a tombstone has `valueLen = 0` in the index entry — no compressed
 page data is stored. This avoids wasting 4KB per punched page.
 
@@ -627,7 +587,7 @@ as a delta layer to S3. Returns when the S3 PUT completes. Same guarantee as
 today, one S3 PUT instead of N.
 
 **Writes between flushes**: acknowledged immediately but only stored in the
-local memLayer ephemeral file. If the process crashes, these writes are lost.
+local memLayer mmap. If the process crashes, these writes are lost.
 This matches the current behavior — the block device provides write-back
 semantics, not write-through.
 
@@ -652,60 +612,22 @@ fault injection and crash simulation in fully reproducible tests.
 
 ### Injected interfaces
 
-The timeline engine depends on three interfaces, all injected at construction:
+The timeline engine depends on two interfaces, both injected at construction:
 
-```go
-// S3-compatible object store.
-type ObjectStore interface {
-    Get(key string) ([]byte, error)
-    GetRange(key string, offset, length int64) ([]byte, error)
-    Put(key string, data []byte) error
-    List(prefix string) ([]string, error)
-    Delete(key string) error
-}
+- **ObjectStore** (`object_store.go`): S3-compatible object store with
+  Get/GetRange/Put/List/Delete operations.
+- **LocalFS** (`lsm/localfs.go`): local filesystem for delta/image layer cache
+  files (Remove, MkdirAll, ReadFile, WriteFile). MemLayer uses real OS files +
+  mmap directly, not through this interface.
 
-// Local filesystem for ephemeral files and caches.
-type LocalFS interface {
-    Create(path string) (File, error)
-    Open(path string) (File, error)
-    Remove(path string) error
-    ReadDir(path string) ([]string, error)
-}
-
-// Clock for timers and timeouts (satisfied by synctest's fake clock).
-type Clock interface {
-    Now() time.Time
-    After(d time.Duration) <-chan time.Time
-}
-```
-
-Production uses real S3/disk/time. Tests inject simulation implementations.
+Production uses real S3 and OS filesystem. Tests inject simulation
+implementations.
 
 ### SimObjectStore
 
-In-memory S3 simulation with configurable fault injection:
-
-```go
-type SimObjectStore struct {
-    objects  map[string][]byte
-    mu       sync.Mutex
-
-    // Fault injection, checked on every operation.
-    faults   FaultConfig
-}
-
-type FaultConfig struct {
-    // Per-operation failure probability (0.0 - 1.0).
-    putFailRate    float64
-    getFailRate    float64
-    // Per-operation latency (advanced via synctest's fake clock).
-    putLatency     time.Duration
-    getLatency     time.Duration
-    // Simulate partial writes: Put succeeds in S3 but returns error to caller.
-    // The object exists but the caller thinks it failed.
-    phantomPutRate float64
-}
-```
+In-memory S3 simulation with configurable fault injection (see
+`lsm/simstore_test.go`). Supports per-operation failure probabilities, latency
+injection, and phantom puts (S3 succeeds but caller sees an error).
 
 Latency is implemented via `time.Sleep` — under synctest, this advances fake
 time instantly when all goroutines are blocked, so tests run fast while still
@@ -716,19 +638,16 @@ is logged on failure for replay.
 
 ### SimLocalFS
 
-In-memory filesystem that supports crash simulation:
+In-memory filesystem that supports crash simulation (see `lsm/simfs_test.go`).
+Only used for delta/image layer cache files — MemLayer uses real OS files + mmap
+via `t.TempDir()`.
 
-```go
-type SimLocalFS struct {
-    files    map[string][]byte
-    mu       sync.Mutex
-}
-```
-
-**Crash simulation**: `SimLocalFS.Crash()` discards all files in `mem/` and
-`pages.cache` (simulating the crash recovery procedure). Files in `layers/`
-survive. After crash, the timeline engine is reconstructed from
-`SimObjectStore` state — same as real crash recovery.
+`Crash()` discards all files under paths containing `/mem/` or ending with
+`.ephemeral`. Delta/image layer caches are also discarded since they're just
+caches of S3 data. After crash, the timeline engine is reconstructed from
+`SimObjectStore` state — same as real crash recovery. MemLayer mmap files are
+real OS files in `t.TempDir()` and become orphans cleaned up by test temp dir
+cleanup.
 
 ### Simulation test
 
@@ -738,43 +657,12 @@ random operations (writes, reads, flushes, snapshots, clones, compaction, GC)
 and randomly crash and recover. All behavior is driven by a deterministic PRNG
 seeded from a single seed, logged on failure for exact replay.
 
-```go
-func TestSimulation(t *testing.T) {
-    seed := time.Now().UnixNano()
-    t.Logf("seed: %d", seed)
-
-    synctest.Run(func() {
-        sim := NewSimulation(seed, SimConfig{
-            NumNodes:       5,
-            DevicePages:    16384,       // 64MB device
-            MaxTimelines:   20,
-            OpsPerNode:     1000,
-            CrashRate:      0.02,        // 2% chance of crash per tick
-            S3Faults:       FaultConfig{ ... },
-        })
-        sim.Run()
-    })
-}
-```
-
-**Simulation structure**:
-
-```go
-type Simulation struct {
-    rng       *rand.Rand           // deterministic PRNG from seed
-    store     *SimObjectStore      // shared S3, all nodes see the same objects
-    nodes     []*SimNode           // independent instances
-    oracle    *Oracle              // tracks expected state for verification
-}
-
-type SimNode struct {
-    id        string
-    fs        *SimLocalFS          // node-local filesystem, lost on crash
-    timelines map[string]*Timeline // active timelines on this node
-    leases    map[string]bool      // timelines this node holds leases for
-    alive     bool                 // false after crash, until recover
-}
-```
+The test (see `lsm/simulation_test.go`) runs inside `synctest.Run` with a
+configurable number of nodes, device size, operation count, crash rate, and S3
+fault parameters. A Simulation holds a deterministic PRNG, a shared
+SimObjectStore, a list of SimNodes, and an Oracle for verification. Each SimNode
+has its own SimLocalFS (lost on crash), a set of active timelines, and lease
+tracking.
 
 **Operation selection**: each tick, each alive node picks a random operation
 weighted by the PRNG:
@@ -791,25 +679,11 @@ weighted by the PRNG:
 | Crash | 2% | Crash this node (lose local state) |
 | Recover | 2% | Recover a crashed node from S3 |
 
-**Oracle**: the oracle is a simple reference model that tracks what each
-timeline should contain at each point. It records every flushed write (page
-address → data) per timeline, respecting ancestor chains. After every read, the
-simulation verifies the result matches the oracle. The oracle does not track
-unflushed writes — after a crash, it reflects the last flushed state.
-
-```go
-type Oracle struct {
-    // Per-timeline: pageAddr → expected data (after last flush).
-    // Unflushed writes are tracked separately and discarded on crash.
-    flushed   map[string]map[uint64][]byte   // timelineID → pageAddr → data
-    unflushed map[string]map[uint64][]byte   // timelineID → pageAddr → data
-    ancestors map[string]AncestorRef         // timelineID → (parentID, seq)
-}
-
-// Expected read result: search timeline's flushed pages, then ancestor chain.
-// If the node hasn't crashed since writing, also check unflushed pages.
-func (o *Oracle) ExpectedRead(timelineID string, pageAddr uint64, alive bool) []byte
-```
+**Oracle** (see `lsm/oracle_test.go`): a simple reference model that tracks
+what each timeline should contain at each point. It records every flushed write
+(page address → data) per timeline, respecting ancestor chains. After every
+read, the simulation verifies the result matches the oracle. Unflushed writes
+are tracked separately and discarded on crash.
 
 **Crash and recovery**: when a node crashes, its `SimLocalFS` discards
 ephemeral files and page cache. Its in-memory timeline state is destroyed. The

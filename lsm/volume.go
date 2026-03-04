@@ -69,6 +69,15 @@ func (v *volume) PunchHole(ctx context.Context, offset, length uint64) error {
 	return v.timeline.PunchHole(ctx, offset, length)
 }
 
+func (v *volume) ZeroRange(ctx context.Context, offset, length uint64) error {
+	if v.readOnly.Load() {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.timeline.PunchHole(ctx, offset, length)
+}
+
 func (v *volume) Flush(ctx context.Context) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

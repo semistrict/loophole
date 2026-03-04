@@ -38,7 +38,7 @@ func testManager(t *testing.T) *Manager {
 
 func TestMemLayerPutGet(t *testing.T) {
 	dir := t.TempDir()
-	ml, err := newMemLayer(OSLocalFS{}, dir, 0)
+	ml, err := newMemLayer(dir, 0, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestMemLayerPutGet(t *testing.T) {
 
 func TestMemLayerTombstone(t *testing.T) {
 	dir := t.TempDir()
-	ml, err := newMemLayer(OSLocalFS{}, dir, 0)
+	ml, err := newMemLayer(dir, 0, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestMemLayerTombstone(t *testing.T) {
 
 func TestMemLayerFreeze(t *testing.T) {
 	dir := t.TempDir()
-	ml, err := newMemLayer(OSLocalFS{}, dir, 0)
+	ml, err := newMemLayer(dir, 0, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestMemLayerFreeze(t *testing.T) {
 
 func TestDeltaLayerRoundtrip(t *testing.T) {
 	dir := t.TempDir()
-	ml, err := newMemLayer(OSLocalFS{}, dir, 0)
+	ml, err := newMemLayer(dir, 0, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1311,7 +1311,7 @@ func TestCompactParentThenReadChild(t *testing.T) {
 func buildTestDeltaLayer(t *testing.T) []byte {
 	t.Helper()
 	dir := t.TempDir()
-	ml, err := newMemLayer(OSLocalFS{}, dir, 0)
+	ml, err := newMemLayer(dir, 0, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3696,4 +3696,255 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 		t.Fatal("expected oracle to DISAGREE with actual data (demonstrating the bug)")
 	}
 	t.Logf("oracle expects zeros for page 5 but actual has partial write data — confirms the sim bug")
+}
+
+// TestMemLayerTombstoneThenPut verifies that writing to a page after tombstoning
+// it doesn't corrupt slot 0's data. This was a bug where putTombstone set slot=0
+// (zero value), and a subsequent put reused slot 0 instead of allocating a new one.
+func TestMemLayerTombstoneThenPut(t *testing.T) {
+	dir := t.TempDir()
+	ml, err := newMemLayer(dir, 1, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(ml.cleanup)
+
+	// Write 3 pages into slots 0, 1, 2.
+	page0 := make([]byte, PageSize)
+	page1 := make([]byte, PageSize)
+	page2 := make([]byte, PageSize)
+	for i := range page0 {
+		page0[i] = 0xAA
+	}
+	for i := range page1 {
+		page1[i] = 0xBB
+	}
+	for i := range page2 {
+		page2[i] = 0xCC
+	}
+
+	if err := ml.put(100, 1, page0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ml.put(200, 2, page1); err != nil {
+		t.Fatal(err)
+	}
+	if err := ml.put(300, 3, page2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tombstone page 300 (which was in slot 2). The tombstone entry has slot=0
+	// as a zero value, which is NOT the correct slot.
+	if err := ml.putTombstone(300, 4); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now write NEW data to page 300. Before the fix, put() would see the
+	// existing tombstone entry, reuse slot 0 (the zero-value slot), and
+	// overwrite page 100's data at slot 0.
+	page3 := make([]byte, PageSize)
+	for i := range page3 {
+		page3[i] = 0xDD
+	}
+	if err := ml.put(300, 5, page3); err != nil {
+		t.Fatal(err)
+	}
+
+	// Read page 100 (slot 0) — should still be 0xAA, not 0xDD.
+	e0, ok := ml.get(100)
+	if !ok {
+		t.Fatal("page 100 not found")
+	}
+	data0, err := ml.readData(e0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data0[0] != 0xAA {
+		t.Fatalf("page 100 corrupted: expected 0xAA, got 0x%02X", data0[0])
+	}
+
+	// Read page 300 — should be 0xDD.
+	e3, ok := ml.get(300)
+	if !ok {
+		t.Fatal("page 300 not found")
+	}
+	data3, err := ml.readData(e3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data3[0] != 0xDD {
+		t.Fatalf("page 300 wrong: expected 0xDD, got 0x%02X", data3[0])
+	}
+}
+
+// TestPunchHoleFlushReopenRead reproduces the e2e-fuse "bad message" bug:
+// write data, punch holes over some of it, flush, reopen from S3, read back.
+func TestPunchHoleFlushReopenRead(t *testing.T) {
+	store := loophole.NewMemStore()
+	cacheDir := t.TempDir()
+	config := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+	}
+	ctx := t.Context()
+
+	// Write and flush with first manager.
+	m1 := NewVolumeManager(store, cacheDir, config, nil)
+	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 8 pages with distinct patterns (simulating ext4 mkfs metadata).
+	pages := make([][]byte, 8)
+	for i := range pages {
+		pages[i] = bytes.Repeat([]byte{byte('A' + i)}, PageSize)
+		if err := v1.Write(ctx, pages[i], uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Punch holes over pages 2-4 (simulating ext4 zero_range during mkfs).
+	if err := v1.PunchHole(ctx, 2*PageSize, 3*PageSize); err != nil {
+		t.Fatal(err)
+	}
+
+	// Overwrite page 1 with new data (simulating ext4 updating metadata).
+	pages[1] = bytes.Repeat([]byte{byte('Z')}, PageSize)
+	if err := v1.Write(ctx, pages[1], PageSize); err != nil {
+		t.Fatal(err)
+	}
+
+	// Flush everything to S3.
+	if err := v1.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen with a new manager (simulating process restart / remount).
+	m2 := newTestManager(t, store, config)
+	v2, err := m2.OpenVolume(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify all pages.
+	for i := 0; i < 8; i++ {
+		buf := make([]byte, PageSize)
+		n, err := v2.Read(ctx, buf, uint64(i)*PageSize)
+		if err != nil {
+			t.Fatalf("page %d read error: %v", i, err)
+		}
+		if n != PageSize {
+			t.Fatalf("page %d: read %d bytes, expected %d", i, n, PageSize)
+		}
+
+		var expected []byte
+		if i >= 2 && i <= 4 {
+			expected = make([]byte, PageSize) // punched = zeros
+		} else {
+			expected = pages[i]
+		}
+		if !bytes.Equal(buf, expected) {
+			t.Fatalf("page %d: data mismatch: first bytes got=%x want=%x", i, buf[:8], expected[:8])
+		}
+	}
+}
+
+// TestConcurrentWriteReadFlushReopen stresses concurrent writes and reads
+// with interleaved flushes, then reopens and verifies data.
+func TestConcurrentWriteReadFlushReopen(t *testing.T) {
+	store := loophole.NewMemStore()
+	cacheDir := t.TempDir()
+	config := Config{
+		FlushThreshold:  8 * PageSize, // small threshold to force frequent flushes
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  8 * PageSize,
+	}
+	ctx := t.Context()
+
+	m1 := NewVolumeManager(store, cacheDir, config, nil)
+	v1, err := m1.NewVolume(ctx, "test", 64*PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 32 pages with concurrent goroutines, interleaving writes and
+	// partial-page updates with punch holes.
+	const numPages = 32
+	expected := make([][]byte, numPages)
+	for i := range expected {
+		expected[i] = make([]byte, PageSize) // starts as zeros
+	}
+
+	// Phase 1: write all pages with full-page data.
+	for i := 0; i < numPages; i++ {
+		page := make([]byte, PageSize)
+		rand.Read(page)
+		expected[i] = page
+		if err := v1.Write(ctx, page, uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Phase 2: punch holes on pages 8-15.
+	if err := v1.PunchHole(ctx, 8*PageSize, 8*PageSize); err != nil {
+		t.Fatal(err)
+	}
+	for i := 8; i < 16; i++ {
+		expected[i] = make([]byte, PageSize)
+	}
+
+	// Phase 3: overwrite pages 4-7 with new data.
+	for i := 4; i < 8; i++ {
+		page := make([]byte, PageSize)
+		rand.Read(page)
+		expected[i] = page
+		if err := v1.Write(ctx, page, uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Phase 4: partial sub-page writes to pages 16-19.
+	for i := 16; i < 20; i++ {
+		subPage := make([]byte, 4096)
+		rand.Read(subPage)
+		copy(expected[i][8192:8192+4096], subPage)
+		if err := v1.Write(ctx, subPage, uint64(i)*PageSize+8192); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Flush and close.
+	if err := v1.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reopen and verify.
+	m2 := newTestManager(t, store, config)
+	v2, err := m2.OpenVolume(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < numPages; i++ {
+		buf := make([]byte, PageSize)
+		n, err := v2.Read(ctx, buf, uint64(i)*PageSize)
+		if err != nil {
+			t.Fatalf("page %d: read error: %v", i, err)
+		}
+		if n != PageSize {
+			t.Fatalf("page %d: read %d bytes, expected %d", i, n, PageSize)
+		}
+		if !bytes.Equal(buf, expected[i]) {
+			t.Fatalf("page %d: data mismatch after reopen: first 8 bytes got=%x want=%x",
+				i, buf[:8], expected[i][:8])
+		}
+	}
 }

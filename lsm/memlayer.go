@@ -3,22 +3,32 @@ package lsm
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 	"sync/atomic"
+
+	"golang.org/x/sys/unix"
 )
 
-// MemLayer is the in-memory write buffer backed by an append-only local file.
-// Writes append 4KB pages to the file and update an in-memory index.
-// Only the latest entry per page is kept — intermediate versions are discarded.
+var errMemLayerCleanedUp = errors.New("memlayer already cleaned up")
+
+// MemLayer is the in-memory write buffer backed by a memory-mapped file.
+// Pages are stored in fixed-size slots within the mmap region, and an
+// in-memory index maps page addresses to slots. Overwrites to the same
+// page reuse the existing slot (in-place update), avoiding the append-only
+// amplification of the previous file-based design.
 type MemLayer struct {
 	mu       sync.RWMutex
-	file     File
+	data     []byte   // mmap'd region (maxPages * PageSize)
+	file     *os.File // backing file (kept open for mmap lifetime)
 	path     string
-	fs       LocalFS
 	index    map[uint64]memEntry // pageAddr → latest entry
+	nextSlot int                 // bump allocator for slots
+	maxPages int
 	startSeq uint64
 	endSeq   uint64 // set when frozen
 	size     atomic.Int64
@@ -28,31 +38,48 @@ type MemLayer struct {
 // memEntry is an index entry for a single page in the memLayer.
 type memEntry struct {
 	seq       uint64
-	offset    int64 // byte offset in the ephemeral file
-	tombstone bool  // true = PunchHole, read as zeros
+	slot      int  // index into mmap slab
+	tombstone bool // true = PunchHole, read as zeros
 }
 
-// newMemLayer creates a new memLayer with a fresh ephemeral file.
-// The filename includes a random suffix to prevent collisions when the same
-// timeline is opened multiple times (e.g., parent + child's ancestor reference).
-func newMemLayer(fs LocalFS, dir string, startSeq uint64) (*MemLayer, error) {
+// newMemLayer creates a new memLayer backed by a memory-mapped file.
+// maxPages is the maximum number of unique pages that can be stored.
+func newMemLayer(dir string, startSeq uint64, maxPages int) (*MemLayer, error) {
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	path := filepath.Join(dir, fmt.Sprintf("%016x-%s.ephemeral", startSeq, hex.EncodeToString(rnd[:])))
-	f, err := fs.Create(path)
+
+	f, err := os.Create(path)
 	if err != nil {
 		return nil, err
 	}
+
+	size := int64(maxPages) * PageSize
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+
+	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("mmap memlayer: %w", err)
+	}
+
 	return &MemLayer{
+		data:     data,
 		file:     f,
 		path:     path,
-		fs:       fs,
 		index:    make(map[uint64]memEntry),
+		maxPages: maxPages,
 		startSeq: startSeq,
 	}, nil
 }
 
-// put appends a 4KB page to the ephemeral file and updates the index.
+// put writes a page into the mmap region and updates the index.
+// If the page already exists, its slot is reused (in-place overwrite).
 func (ml *MemLayer) put(pageAddr, seq uint64, data []byte) error {
 	if len(data) != PageSize {
 		return fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(data))
@@ -65,16 +92,24 @@ func (ml *MemLayer) put(pageAddr, seq uint64, data []byte) error {
 		return fmt.Errorf("memlayer is frozen")
 	}
 
-	offset, err := ml.file.Seek(0, 2) // seek to end
-	if err != nil {
-		return err
-	}
-	if _, err := ml.file.Write(data); err != nil {
-		return err
+	var slot int
+	if existing, ok := ml.index[pageAddr]; ok && !existing.tombstone {
+		// Reuse existing slot — in-place overwrite, no size growth.
+		slot = existing.slot
+	} else {
+		// Allocate a new slot.
+		if ml.nextSlot >= ml.maxPages {
+			return fmt.Errorf("memlayer full: %d/%d slots used", ml.nextSlot, ml.maxPages)
+		}
+		slot = ml.nextSlot
+		ml.nextSlot++
+		ml.size.Add(PageSize)
 	}
 
-	ml.index[pageAddr] = memEntry{seq: seq, offset: offset}
-	ml.size.Add(PageSize)
+	off := slot * PageSize
+	copy(ml.data[off:off+PageSize], data)
+
+	ml.index[pageAddr] = memEntry{seq: seq, slot: slot}
 	return nil
 }
 
@@ -106,19 +141,24 @@ func (ml *MemLayer) get(pageAddr uint64) (memEntry, bool) {
 	return e, ok
 }
 
-// readData reads the page data for an entry from the ephemeral file.
+// readData returns a copy of the page data for an entry from the mmap region.
+// The copy is made under the read lock to prevent torn reads from concurrent put() calls
+// that reuse the same slot for in-place overwrites.
 func (ml *MemLayer) readData(e memEntry) ([]byte, error) {
 	if e.tombstone {
 		return zeroPage[:], nil
 	}
 
-	buf := make([]byte, PageSize)
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
-	_, err := ml.file.ReadAt(buf, e.offset)
-	if err != nil {
-		return nil, fmt.Errorf("read ephemeral at %d: %w", e.offset, err)
+
+	if ml.data == nil {
+		return nil, errMemLayerCleanedUp
 	}
+
+	off := e.slot * PageSize
+	buf := make([]byte, PageSize)
+	copy(buf, ml.data[off:off+PageSize])
 	return buf, nil
 }
 
@@ -154,10 +194,12 @@ func (ml *MemLayer) entries() []sortedEntry {
 	return out
 }
 
-// cleanup removes the ephemeral file.
+// cleanup unmaps the mmap region, closes the backing file, and removes it.
 func (ml *MemLayer) cleanup() {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
+	_ = unix.Munmap(ml.data)
+	ml.data = nil
 	_ = ml.file.Close()
-	_ = ml.fs.Remove(ml.path)
+	_ = os.Remove(ml.path)
 }

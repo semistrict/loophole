@@ -27,6 +27,9 @@ import (
 type BlockDevice interface {
 	Read(ctx context.Context, buf []byte, offset uint64) (int, error)
 	Write(ctx context.Context, data []byte, offset uint64) error
+	// ZeroRange zeros the given byte range. Implementations may use
+	// punch-hole or similar mechanisms to avoid materializing zeros.
+	ZeroRange(ctx context.Context, offset, length uint64) error
 }
 
 // handle map: Go ↔ C callback bridge

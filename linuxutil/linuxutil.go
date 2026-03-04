@@ -343,7 +343,7 @@ func LoopDetachPath(devPath string) error {
 		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 			return nil
 		}
-		unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil) // 1ms
+		_ = unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil) // 1ms
 	}
 	return nil
 }

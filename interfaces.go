@@ -22,6 +22,7 @@ type Volume interface {
 	Read(ctx context.Context, buf []byte, offset uint64) (int, error)
 	Write(ctx context.Context, data []byte, offset uint64) error
 	PunchHole(ctx context.Context, offset, length uint64) error
+	ZeroRange(ctx context.Context, offset, length uint64) error
 	Flush(ctx context.Context) error
 	Snapshot(ctx context.Context, snapshotName string) error
 	Clone(ctx context.Context, cloneName string) (Volume, error)

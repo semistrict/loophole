@@ -32,6 +32,11 @@ func (m *memDev) Write(_ context.Context, data []byte, offset uint64) error {
 	return nil
 }
 
+func (m *memDev) ZeroRange(_ context.Context, offset, length uint64) error {
+	clear(m.data[offset : offset+length])
+	return nil
+}
+
 const testDevSize = 128 * 1024 * 1024 // 128 MB
 
 func newTestFS(t *testing.T) *FS {

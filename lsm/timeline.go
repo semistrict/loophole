@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -117,14 +118,24 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 		return nil, fmt.Errorf("load layer map: %w", err)
 	}
 
-	// Create local dirs.
+	// Create local dirs. Use os.MkdirAll directly because mmap needs a
+	// real OS path, even when tl.fs is a SimLocalFS in tests.
 	memDir := filepath.Join(tl.cacheDir, "mem")
-	if err := tl.fs.MkdirAll(memDir, 0o755); err != nil {
+	if err := os.MkdirAll(memDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create mem dir: %w", err)
 	}
 
-	// Start fresh memLayer.
-	tl.memLayer, err = newMemLayer(tl.fs, memDir, tl.nextSeq.Load())
+	// Start fresh memLayer. Cap at 16384 slots (1GB) to avoid absurd
+	// file sizes when FlushThreshold is set very high (e.g., in tests).
+	maxPages := int(tl.config.FlushThreshold / PageSize)
+	if maxPages < 1 {
+		maxPages = 1
+	}
+	const maxMemLayerSlots = 16384
+	if maxPages > maxMemLayerSlots {
+		maxPages = maxMemLayerSlots
+	}
+	tl.memLayer, err = newMemLayer(memDir, tl.nextSeq.Load(), maxPages)
 	if err != nil {
 		return nil, fmt.Errorf("create memlayer: %w", err)
 	}
@@ -328,7 +339,13 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 			if entry.tombstone {
 				return zeroPage[:], nil
 			}
-			return frozen[i].readData(entry)
+			data, err := frozen[i].readData(entry)
+			if err == nil {
+				return data, nil
+			}
+			// Frozen layer was cleaned up during flush. The data is now
+			// in a delta layer, so fall through to the delta layer search.
+			break
 		}
 	}
 
@@ -401,7 +418,15 @@ func (tl *Timeline) freezeMemLayer() error {
 	defer tl.mu.Unlock()
 
 	memDir := filepath.Join(tl.cacheDir, "mem")
-	ml, err := newMemLayer(tl.fs, memDir, tl.nextSeq.Load())
+	maxPages := int(tl.config.FlushThreshold / PageSize)
+	if maxPages < 1 {
+		maxPages = 1
+	}
+	const maxMemLayerSlots = 16384
+	if maxPages > maxMemLayerSlots {
+		maxPages = maxMemLayerSlots
+	}
+	ml, err := newMemLayer(memDir, tl.nextSeq.Load(), maxPages)
 	if err != nil {
 		return fmt.Errorf("create new memlayer: %w", err)
 	}
@@ -449,6 +474,10 @@ func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 		tl.frozenMu.Lock()
 		tl.frozenLayers = tl.frozenLayers[1:]
 		tl.frozenMu.Unlock()
+
+		// Clean up after removal from the list so concurrent readPage
+		// callers that snapshot frozenLayers can't see a cleaned-up layer.
+		ml.cleanup()
 	}
 }
 
@@ -511,10 +540,6 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 	}
 	tl.compactLog("FLUSH saveLayerMap OK tl=%s total_deltas=%d total_images=%d",
 		tl.id[:8], len(tl.layers.Deltas), len(tl.layers.Images))
-
-	// Delete ephemeral file only after checkpoint succeeds, so that
-	// a retry of the frozen layer can rebuild the delta.
-	ml.cleanup()
 
 	return nil
 }
