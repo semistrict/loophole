@@ -6,9 +6,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
+	mathrand "math/rand/v2"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/klauspost/compress/zstd"
@@ -4448,4 +4450,84 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 			t.Fatalf("page %d: expected marker %d, got %d", i, i, got)
 		}
 	}
+}
+
+// TestConcurrentReadsAndFlushes hammers concurrent reads and flushes to
+// catch data races in the lock-free read path.
+func TestConcurrentReadsAndFlushes(t *testing.T) {
+	store := loophole.NewMemStore()
+	config := Config{
+		FlushThreshold: 64 * PageSize,
+		PageCacheBytes: 4 * PageSize,
+	}
+	m := newTestManager(t, store, config)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write initial data across several pages and flush.
+	const numPages = 8
+	for i := range numPages {
+		page := make([]byte, PageSize)
+		binary.LittleEndian.PutUint32(page, uint32(i))
+		if err := v.Write(ctx, page, uint64(i)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run concurrent readers and writers+flushers.
+	var wg sync.WaitGroup
+	const nReaders = 4
+	const nWriters = 2
+	const iterations = 50
+
+	for range nReaders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, PageSize)
+			for range iterations {
+				pageIdx := mathrand.IntN(numPages)
+				n, err := v.Read(ctx, buf, uint64(pageIdx)*PageSize)
+				if err != nil {
+					t.Errorf("read page %d: %v", pageIdx, err)
+					return
+				}
+				if n != PageSize {
+					t.Errorf("read %d bytes, expected %d", n, PageSize)
+					return
+				}
+			}
+		}()
+	}
+
+	for w := range nWriters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range iterations {
+				page := make([]byte, PageSize)
+				binary.LittleEndian.PutUint32(page, uint32(1000*w+i))
+				pageIdx := mathrand.IntN(numPages)
+				if err := v.Write(ctx, page, uint64(pageIdx)*PageSize); err != nil {
+					t.Errorf("write: %v", err)
+					return
+				}
+				if i%10 == 0 {
+					if err := v.Flush(ctx); err != nil {
+						t.Errorf("flush: %v", err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }

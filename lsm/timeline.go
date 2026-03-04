@@ -218,7 +218,7 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 
 	// Backpressure: if the memlayer is full (all slots used), freeze it
 	// and flush to make room, then retry the write on the new memlayer.
-	if errors.Is(err, ErrMemLayerFull) {
+	for errors.Is(err, ErrMemLayerFull) {
 		if err := tl.maybeFreezeAndFlush(ctx); err != nil {
 			return err
 		}
@@ -322,15 +322,21 @@ func (tl *Timeline) Flush(ctx context.Context) error {
 // readPage searches layers for the given page. Only entries with seq < beforeSeq
 // are visible (exclusive upper bound).
 func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([]byte, error) {
+	// Snapshot mutable state under the lock, then release before S3 I/O.
 	tl.mu.RLock()
-	defer tl.mu.RUnlock()
+	memLayer := tl.memLayer
+	deltas := tl.layers.Deltas
+	images := tl.layers.Images
+	ancestor := tl.ancestor
+	ancestorSeq := tl.ancestorSeq
+	tl.mu.RUnlock()
 
 	// 1. Active memLayer.
-	if entry, ok := tl.memLayer.get(pageAddr); ok && entry.seq < beforeSeq {
+	if entry, ok := memLayer.get(pageAddr); ok && entry.seq < beforeSeq {
 		if entry.tombstone {
 			return zeroPage[:], nil
 		}
-		return tl.memLayer.readData(entry)
+		return memLayer.readData(entry)
 	}
 
 	// 2. Frozen memLayers (newest first).
@@ -366,9 +372,9 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 		}
 	}
 
-	// 4. Delta layers (newest first).
-	for i := len(tl.layers.Deltas) - 1; i >= 0; i-- {
-		dl := &tl.layers.Deltas[i]
+	// 4. Delta layers (newest first). Uses snapshot — no lock held during S3 I/O.
+	for i := len(deltas) - 1; i >= 0; i-- {
+		dl := &deltas[i]
 		if dl.StartSeq >= beforeSeq {
 			continue
 		}
@@ -388,8 +394,8 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 	}
 
 	// 5. Image layers.
-	for i := len(tl.layers.Images) - 1; i >= 0; i-- {
-		il := &tl.layers.Images[i]
+	for i := len(images) - 1; i >= 0; i-- {
+		il := &images[i]
 		if il.Seq > beforeSeq {
 			continue
 		}
@@ -409,8 +415,8 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 	}
 
 	// 6. Ancestor timeline.
-	if tl.ancestor != nil {
-		return tl.ancestor.readPage(ctx, pageAddr, tl.ancestorSeq)
+	if ancestor != nil {
+		return ancestor.readPage(ctx, pageAddr, ancestorSeq)
 	}
 
 	// 7. Page never written — return zeros.
