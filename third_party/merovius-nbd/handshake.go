@@ -468,11 +468,12 @@ func (e *encoder) read(b []byte) {
 func (e *encoder) discard(n uint32) {
 	buf := make([]byte, 512)
 	for n > 0 {
-		if n > uint32(len(buf)) {
-			buf = buf[:n]
+		chunk := buf
+		if n < uint32(len(chunk)) {
+			chunk = chunk[:n]
 		}
-		e.read(buf)
-		n -= uint32(len(buf))
+		e.read(chunk)
+		n -= uint32(len(chunk))
 	}
 }
 

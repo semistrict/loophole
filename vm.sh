@@ -90,8 +90,8 @@ cmd_run() {
   # Ensure daemon is running.
   $LP start -d
 
-  # Start NBD server inside the daemon; prints socket path.
-  NBD_SOCK=$($LP serve-nbd)
+  # Get NBD socket path from daemon status.
+  NBD_SOCK=$($LP status | jq -r .nbd_sock)
 
   set -x
   qemu-system-aarch64 \

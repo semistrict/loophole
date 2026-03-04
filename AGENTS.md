@@ -15,3 +15,7 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make clean-lwext4 && make test-lwext4` — when cgo C source changes, clean and rebuild to avoid stale builds
 - E2E tests require Linux (FUSE). Run in Docker: `docker compose run --rm go bash -c 'make clean-lwext4 && make e2e-lwext4fuse'`
 
+## Utilities
+
+- Use `util.SafeClose(c, msg)` from `internal/util` for `defer` closing `io.Closer` values instead of `defer func() { _ = c.Close() }()`
+

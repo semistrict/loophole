@@ -39,10 +39,11 @@ func (s *Server) FindExport(ctx context.Context, name string) (nbd.Export, error
 	}
 	dev := volumeNBD{vol: vol}
 	return nbd.Export{
-		Name:   name,
-		Size:   vol.Size(),
-		Flags:  nbd.ExportFlags(dev, vol.ReadOnly()),
-		Device: dev,
+		Name:       name,
+		Size:       vol.Size(),
+		Flags:      nbd.ExportFlags(dev, vol.ReadOnly()),
+		Device:     dev,
+		BlockSizes: &nbd.BlockSizeConstraints{Min: 1, Preferred: 4096, Max: 4 << 20},
 	}, nil
 }
 
@@ -92,15 +93,20 @@ type volumeNBD struct {
 	vol loophole.Volume
 }
 
-func (d volumeNBD) ReadAt(p []byte, off int64) (int, error) {
-	return d.vol.Read(context.Background(), p, uint64(off))
-}
-
 func (d volumeNBD) WriteAt(p []byte, off int64) (int, error) {
 	if err := d.vol.Write(context.Background(), p, uint64(off)); err != nil {
+		slog.Error("volumeNBD.WriteAt failed", "volume", d.vol.Name(), "offset", off, "len", len(p), "error", err)
 		return 0, err
 	}
 	return len(p), nil
+}
+
+func (d volumeNBD) ReadAt(p []byte, off int64) (int, error) {
+	n, err := d.vol.Read(context.Background(), p, uint64(off))
+	if err != nil {
+		slog.Error("volumeNBD.ReadAt failed", "volume", d.vol.Name(), "offset", off, "len", len(p), "error", err)
+	}
+	return n, err
 }
 
 func (d volumeNBD) Sync() error {

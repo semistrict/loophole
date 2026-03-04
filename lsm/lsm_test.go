@@ -4392,3 +4392,60 @@ func TestCompactMergeTombstones(t *testing.T) {
 		t.Fatalf("page 5: expected marker byte 0x06, got 0x%02x", buf[0])
 	}
 }
+
+// TestMemLayerFullBackpressure verifies that when the memlayer runs out of
+// slots, writes backpressure (freeze+flush) instead of returning errors.
+// This reproduces the bug where heavy sequential writes through NBD caused
+// EIO because the memlayer slot cap was hit before FlushThreshold.
+func TestMemLayerFullBackpressure(t *testing.T) {
+	store := loophole.NewMemStore()
+	cacheDir := t.TempDir()
+
+	// Set FlushThreshold very high so the size-based flush check never triggers.
+	// The memlayer slot cap (maxMemLayerSlots=16384) will be hit first.
+	// We use a smaller volume to keep the test fast — write maxMemLayerSlots+100
+	// unique pages. Without backpressure, write 16385 would fail with
+	// "memlayer full".
+	config := Config{
+		FlushThreshold:  1 << 62, // effectively infinite
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+	}
+	ctx := t.Context()
+
+	m := NewVolumeManager(store, cacheDir, config, nil)
+	defer m.Close(ctx)
+
+	// maxMemLayerSlots is 16384, so volume needs to be larger than that.
+	const numPages = maxMemLayerSlots + 100
+	v, err := m.NewVolume(ctx, "backpressure-test", uint64(numPages+10)*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range numPages {
+		var page [PageSize]byte
+		// Store page index as a 4-byte little-endian value.
+		binary.LittleEndian.PutUint32(page[:4], uint32(i))
+		if err := v.Write(ctx, page[:], uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+
+	// Flush and verify a sample of pages can be read back correctly.
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check first page, last page, and a few around the memlayer boundary.
+	checkPages := []int{0, 1, maxMemLayerSlots - 1, maxMemLayerSlots, maxMemLayerSlots + 1, numPages - 1}
+	for _, i := range checkPages {
+		buf := make([]byte, PageSize)
+		if _, err := v.Read(ctx, buf, uint64(i)*PageSize); err != nil {
+			t.Fatalf("read page %d: %v", i, err)
+		}
+		got := binary.LittleEndian.Uint32(buf[:4])
+		if got != uint32(i) {
+			t.Fatalf("page %d: expected marker %d, got %d", i, i, got)
+		}
+	}
+}

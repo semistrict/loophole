@@ -16,6 +16,10 @@ import (
 
 var errMemLayerCleanedUp = errors.New("memlayer already cleaned up")
 
+// ErrMemLayerFull is returned when all memlayer slots are exhausted.
+// Callers should freeze the current memlayer and retry.
+var ErrMemLayerFull = errors.New("memlayer full")
+
 // MemLayer is the in-memory write buffer backed by a memory-mapped file.
 // Pages are stored in fixed-size slots within the mmap region, and an
 // in-memory index maps page addresses to slots. Overwrites to the same
@@ -99,7 +103,7 @@ func (ml *MemLayer) put(pageAddr, seq uint64, data []byte) error {
 	} else {
 		// Allocate a new slot.
 		if ml.nextSlot >= ml.maxPages {
-			return fmt.Errorf("memlayer full: %d/%d slots used", ml.nextSlot, ml.maxPages)
+			return ErrMemLayerFull
 		}
 		slot = ml.nextSlot
 		ml.nextSlot++

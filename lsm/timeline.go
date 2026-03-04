@@ -22,6 +22,10 @@ import (
 	"github.com/semistrict/loophole"
 )
 
+// maxMemLayerSlots caps the number of unique page slots in a memlayer.
+// This prevents absurd mmap file sizes when FlushThreshold is set very high.
+const maxMemLayerSlots = 16384
+
 // TimelineMeta is the S3-persisted metadata for a timeline.
 type TimelineMeta struct {
 	Ancestor     string        `json:"ancestor,omitempty"`
@@ -132,7 +136,6 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 	if maxPages < 1 {
 		maxPages = 1
 	}
-	const maxMemLayerSlots = 16384
 	if maxPages > maxMemLayerSlots {
 		maxPages = maxMemLayerSlots
 	}
@@ -223,6 +226,17 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 
 	pageLock.Unlock()
 
+	// Backpressure: if the memlayer is full (all slots used), freeze it
+	// and flush to make room, then retry the write on the new memlayer.
+	if errors.Is(err, ErrMemLayerFull) {
+		if err := tl.maybeFreezeAndFlush(ctx); err != nil {
+			return err
+		}
+		tl.mu.RLock()
+		ml = tl.memLayer
+		err = ml.put(pageAddr, seq, page[:])
+		tl.mu.RUnlock()
+	}
 	if err != nil {
 		return err
 	}
@@ -423,7 +437,6 @@ func (tl *Timeline) freezeMemLayer() error {
 	if maxPages < 1 {
 		maxPages = 1
 	}
-	const maxMemLayerSlots = 16384
 	if maxPages > maxMemLayerSlots {
 		maxPages = maxMemLayerSlots
 	}
