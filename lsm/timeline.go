@@ -62,11 +62,9 @@ type Timeline struct {
 	nextSeq atomic.Uint64
 
 	// Layer caches: parsed layers keyed by S3 key.
-	deltaIndexMu    sync.Mutex
-	deltaIndexCache map[string]*parsedDeltaLayer
-	imageIndexMu    sync.Mutex
-	imageIndexCache map[string]*parsedImageLayer
-	layerFlight     singleflight.Group // deduplicates concurrent layer downloads
+	deltaCache  layerCache[parsedDeltaLayer]
+	imageCache  layerCache[parsedImageLayer]
+	layerFlight singleflight.Group // deduplicates concurrent layer downloads
 
 	frozenMu     sync.Mutex
 	frozenLayers []*MemLayer
@@ -96,15 +94,15 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 	}
 
 	tl := &Timeline{
-		id:              id,
-		store:           store,
-		timelinesRoot:   m.timelines,
-		cacheDir:        filepath.Join(m.cacheDir, "timelines", id),
-		config:          m.config,
-		pageCache:       m.pageCache,
-		fs:              m.fs,
-		deltaIndexCache: make(map[string]*parsedDeltaLayer),
-		imageIndexCache: make(map[string]*parsedImageLayer),
+		id:            id,
+		store:         store,
+		timelinesRoot: m.timelines,
+		cacheDir:      filepath.Join(m.cacheDir, "timelines", id),
+		config:        m.config,
+		pageCache:     m.pageCache,
+		fs:            m.fs,
+		deltaCache:    newLayerCache[parsedDeltaLayer](m.config.MaxLayerCacheEntries),
+		imageCache:    newLayerCache[parsedImageLayer](m.config.MaxLayerCacheEntries),
 	}
 
 	// Load ancestor chain.
@@ -130,16 +128,7 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 		return nil, fmt.Errorf("create mem dir: %w", err)
 	}
 
-	// Start fresh memLayer. Cap at 16384 slots (1GB) to avoid absurd
-	// file sizes when FlushThreshold is set very high (e.g., in tests).
-	maxPages := int(tl.config.FlushThreshold / PageSize)
-	if maxPages < 1 {
-		maxPages = 1
-	}
-	if maxPages > maxMemLayerSlots {
-		maxPages = maxMemLayerSlots
-	}
-	tl.memLayer, err = newMemLayer(memDir, tl.nextSeq.Load(), maxPages)
+	tl.memLayer, err = newMemLayer(memDir, tl.nextSeq.Load(), tl.config.maxMemLayerPages())
 	if err != nil {
 		return nil, fmt.Errorf("create memlayer: %w", err)
 	}
@@ -433,14 +422,7 @@ func (tl *Timeline) freezeMemLayer() error {
 	defer tl.mu.Unlock()
 
 	memDir := filepath.Join(tl.cacheDir, "mem")
-	maxPages := int(tl.config.FlushThreshold / PageSize)
-	if maxPages < 1 {
-		maxPages = 1
-	}
-	if maxPages > maxMemLayerSlots {
-		maxPages = maxMemLayerSlots
-	}
-	ml, err := newMemLayer(memDir, tl.nextSeq.Load(), maxPages)
+	ml, err := newMemLayer(memDir, tl.nextSeq.Load(), tl.config.maxMemLayerPages())
 	if err != nil {
 		return fmt.Errorf("create new memlayer: %w", err)
 	}
@@ -513,18 +495,8 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 		return fmt.Errorf("upload delta layer: %w", err)
 	}
 
-	// Pre-cache the delta layer locally so subsequent reads don't hit S3.
-	// Parse first (before taking tl.mu.Lock) to keep the critical section short.
-	parsed, parseErr := parseDeltaLayer(data)
-	if parseErr == nil {
-		tl.cacheDeltaLayer(meta.Key, parsed)
-	}
-	// Also write to local disk cache so evicted layers can be reloaded without S3.
-	localPath := filepath.Join(tl.cacheDir, meta.Key)
-	if dir := filepath.Dir(localPath); dir != "" {
-		_ = tl.fs.MkdirAll(dir, 0o755)
-	}
-	_ = tl.fs.WriteFile(localPath, data, 0o644)
+	// Pre-cache locally so subsequent reads don't hit S3.
+	tl.cacheDeltaLocally(meta.Key, data)
 
 	// Update layer map and invalidate page cache entries for all pages in
 	// the flushed layer. Both happen under tl.mu.Lock so that readPage
@@ -692,32 +664,71 @@ func (tl *Timeline) readFromDeltaLayer(ctx context.Context, dl *DeltaLayerMeta, 
 	return parsed.findPage(ctx, pageAddr, beforeSeq)
 }
 
-// getDeltaLayer returns a parsed delta layer, downloading and caching it if needed.
-// Checks: in-memory cache → local disk cache → S3.
-// Concurrent requests for the same key are deduplicated via singleflight.
-func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
-	tl.deltaIndexMu.Lock()
-	if cached, ok := tl.deltaIndexCache[key]; ok {
-		tl.deltaIndexMu.Unlock()
+// layerCache is a bounded in-memory cache of parsed layers keyed by S3 key.
+// Used for both delta and image layer caches.
+type layerCache[T any] struct {
+	mu    sync.Mutex
+	items map[string]*T
+	max   int
+}
+
+func newLayerCache[T any](max int) layerCache[T] {
+	return layerCache[T]{items: make(map[string]*T), max: max}
+}
+
+func (lc *layerCache[T]) get(key string) (*T, bool) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	v, ok := lc.items[key]
+	return v, ok
+}
+
+func (lc *layerCache[T]) put(key string, v *T) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	lc.items[key] = v
+	if len(lc.items) > lc.max {
+		for k := range lc.items {
+			if k != key {
+				delete(lc.items, k)
+				break
+			}
+		}
+	}
+}
+
+func (lc *layerCache[T]) evict(key string) {
+	lc.mu.Lock()
+	defer lc.mu.Unlock()
+	delete(lc.items, key)
+}
+
+// getLayer fetches a parsed layer from cache, local disk, or S3 (via index-only
+// range reads). Concurrent requests for the same key are deduplicated.
+func getLayer[T any](
+	ctx context.Context,
+	tl *Timeline,
+	cache *layerCache[T],
+	flightPrefix string,
+	key string,
+	parseBlob func([]byte) (*T, error),
+	parseIndex func(context.Context, loophole.ObjectStore, string) (*T, error),
+) (*T, error) {
+	if cached, ok := cache.get(key); ok {
 		return cached, nil
 	}
-	tl.deltaIndexMu.Unlock()
 
-	v, err, _ := tl.layerFlight.Do("delta:"+key, func() (any, error) {
+	v, err, _ := tl.layerFlight.Do(flightPrefix+key, func() (any, error) {
 		// Double-check cache after winning the flight.
-		tl.deltaIndexMu.Lock()
-		if cached, ok := tl.deltaIndexCache[key]; ok {
-			tl.deltaIndexMu.Unlock()
+		if cached, ok := cache.get(key); ok {
 			return cached, nil
 		}
-		tl.deltaIndexMu.Unlock()
 
 		// Try local disk cache.
 		localPath := filepath.Join(tl.cacheDir, key)
 		if data, err := tl.fs.ReadFile(localPath); err == nil {
-			parsed, err := parseDeltaLayer(data)
-			if err == nil {
-				tl.cacheDeltaLayer(key, parsed)
+			if parsed, err := parseBlob(data); err == nil {
+				cache.put(key, parsed)
 				return parsed, nil
 			}
 			// Corrupted cache file — remove and re-download.
@@ -725,34 +736,26 @@ func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDelta
 		}
 
 		// Index-only download from S3 via range reads.
-		parsed, err := parseDeltaIndex(ctx, tl.store, key)
+		parsed, err := parseIndex(ctx, tl.store, key)
 		if err != nil {
 			return nil, err
 		}
 
-		tl.cacheDeltaLayer(key, parsed)
+		cache.put(key, parsed)
 		return parsed, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return v.(*parsedDeltaLayer), nil
+	return v.(*T), nil
 }
 
-// cacheDeltaLayer adds a parsed layer to the in-memory cache, evicting a
-// random entry if the cache exceeds MaxLayerCacheEntries.
-func (tl *Timeline) cacheDeltaLayer(key string, parsed *parsedDeltaLayer) {
-	tl.deltaIndexMu.Lock()
-	defer tl.deltaIndexMu.Unlock()
-	tl.deltaIndexCache[key] = parsed
-	if len(tl.deltaIndexCache) > tl.config.MaxLayerCacheEntries {
-		for k := range tl.deltaIndexCache {
-			if k != key {
-				delete(tl.deltaIndexCache, k)
-				break
-			}
-		}
-	}
+func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
+	return getLayer(ctx, tl, &tl.deltaCache, "delta:", key, parseDeltaLayer, parseDeltaIndex)
+}
+
+func (tl *Timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
+	return getLayer(ctx, tl, &tl.imageCache, "image:", key, parseImageLayer, parseImageIndex)
 }
 
 // readFromImageLayer reads a page from an image layer on S3.
@@ -764,62 +767,39 @@ func (tl *Timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, 
 	return parsed.findPage(ctx, pageAddr)
 }
 
-func (tl *Timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
-	tl.imageIndexMu.Lock()
-	if cached, ok := tl.imageIndexCache[key]; ok {
-		tl.imageIndexMu.Unlock()
-		return cached, nil
+// cacheLocally writes a layer blob to the local disk cache so that evicted
+// layers can be reloaded without hitting S3. Errors are ignored (best-effort).
+func (tl *Timeline) cacheLocally(key string, data []byte) {
+	localPath := filepath.Join(tl.cacheDir, key)
+	if dir := filepath.Dir(localPath); dir != "" {
+		_ = tl.fs.MkdirAll(dir, 0o755)
 	}
-	tl.imageIndexMu.Unlock()
-
-	v, err, _ := tl.layerFlight.Do("image:"+key, func() (any, error) {
-		// Double-check cache after winning the flight.
-		tl.imageIndexMu.Lock()
-		if cached, ok := tl.imageIndexCache[key]; ok {
-			tl.imageIndexMu.Unlock()
-			return cached, nil
-		}
-		tl.imageIndexMu.Unlock()
-
-		// Try local disk cache.
-		localPath := filepath.Join(tl.cacheDir, key)
-		if data, err := tl.fs.ReadFile(localPath); err == nil {
-			parsed, err := parseImageLayer(data)
-			if err == nil {
-				tl.cacheImageLayer(key, parsed)
-				return parsed, nil
-			}
-			_ = tl.fs.Remove(localPath)
-		}
-
-		// Index-only download from S3 via range reads.
-		parsed, err := parseImageIndex(ctx, tl.store, key)
-		if err != nil {
-			return nil, err
-		}
-
-		tl.cacheImageLayer(key, parsed)
-		return parsed, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.(*parsedImageLayer), nil
+	_ = tl.fs.WriteFile(localPath, data, 0o644)
 }
 
-// cacheImageLayer adds a parsed layer to the in-memory cache, evicting a
-// random entry if the cache exceeds MaxLayerCacheEntries.
-func (tl *Timeline) cacheImageLayer(key string, parsed *parsedImageLayer) {
-	tl.imageIndexMu.Lock()
-	defer tl.imageIndexMu.Unlock()
-	tl.imageIndexCache[key] = parsed
-	if len(tl.imageIndexCache) > tl.config.MaxLayerCacheEntries {
-		for k := range tl.imageIndexCache {
-			if k != key {
-				delete(tl.imageIndexCache, k)
-				break
-			}
-		}
+// cacheDeltaLocally parses a delta layer blob, adds it to the in-memory index
+// cache, and writes it to the local disk cache.
+func (tl *Timeline) cacheDeltaLocally(key string, data []byte) {
+	if parsed, err := parseDeltaLayer(data); err == nil {
+		tl.deltaCache.put(key, parsed)
+	}
+	tl.cacheLocally(key, data)
+}
+
+// cleanupOldLayers deletes replaced layer blobs from S3 (best-effort) and
+// evicts their entries from the in-memory index caches.
+func (tl *Timeline) cleanupOldLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) {
+	for _, dl := range deltas {
+		_ = tl.store.DeleteObject(ctx, dl.Key)
+	}
+	for _, il := range images {
+		_ = tl.store.DeleteObject(ctx, il.Key)
+	}
+	for _, dl := range deltas {
+		tl.deltaCache.evict(dl.Key)
+	}
+	for _, il := range images {
+		tl.imageCache.evict(il.Key)
 	}
 }
 
@@ -953,16 +933,8 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 	tl.compactLog("  merged delta uploaded: %s seq=[%d,%d) pages=[%d,%d]",
 		mergedMeta.Key, mergedMeta.StartSeq, mergedMeta.EndSeq, mergedMeta.PageRange[0], mergedMeta.PageRange[1])
 
-	// Pre-cache the merged layer.
-	mergedParsed, parseErr := parseDeltaLayer(mergedData)
-	if parseErr == nil {
-		tl.cacheDeltaLayer(mergedMeta.Key, mergedParsed)
-	}
-	localPath := filepath.Join(tl.cacheDir, mergedMeta.Key)
-	if dir := filepath.Dir(localPath); dir != "" {
-		_ = tl.fs.MkdirAll(dir, 0o755)
-	}
-	_ = tl.fs.WriteFile(localPath, mergedData, 0o644)
+	// Pre-cache locally so subsequent reads don't hit S3.
+	tl.cacheDeltaLocally(mergedMeta.Key, mergedData)
 
 	// Update layer map: replace compacted deltas with merged + remaining.
 	newDeltas := []DeltaLayerMeta{mergedMeta}
@@ -981,19 +953,8 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 		return fmt.Errorf("save layer map: %w", err)
 	}
 
-	// Delete old deltas from S3 (best-effort).
-	for _, dl := range deltas {
-		_ = tl.store.DeleteObject(ctx, dl.Key)
-	}
-
-	// Clear caches for deleted layers.
-	tl.deltaIndexMu.Lock()
-	for _, dl := range deltas {
-		delete(tl.deltaIndexCache, dl.Key)
-	}
-	tl.deltaIndexMu.Unlock()
-
-	// Invalidate page cache — merged delta may have different data.
+	// Clean up replaced layers and invalidate page cache.
+	tl.cleanupOldLayers(ctx, deltas, nil)
 	if tl.pageCache != nil {
 		for _, p := range parsed {
 			for _, ie := range p.index {
@@ -1026,45 +987,71 @@ func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte,
 		return nil, err
 	}
 
-	// Cache locally.
-	if dir := filepath.Dir(localPath); dir != "" {
-		_ = tl.fs.MkdirAll(dir, 0o755)
-	}
-	_ = tl.fs.WriteFile(localPath, data, 0o644)
-
+	tl.cacheLocally(key, data)
 	return data, nil
 }
 
-// compactToImage builds an image layer from all compactable deltas + existing
-// images. This is the original full-compaction behavior.
-func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta, existingImages []ImageLayerMeta, remainingDeltas []DeltaLayerMeta, compactSeq uint64) error {
-	// Collect all unique pages across all delta layers (and existing images).
+// collectPageAddrs returns all unique page addresses across the given delta and
+// image layers, sorted ascending.
+func (tl *Timeline) collectPageAddrs(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) ([]uint64, error) {
 	pageSet := make(map[uint64]struct{})
 	for _, dl := range deltas {
 		parsed, err := tl.getDeltaLayer(ctx, dl.Key)
 		if err != nil {
-			return fmt.Errorf("get delta layer %s: %w", dl.Key, err)
+			return nil, fmt.Errorf("get delta layer %s: %w", dl.Key, err)
 		}
 		for _, ie := range parsed.index {
 			pageSet[ie.PageAddr] = struct{}{}
 		}
 	}
-	for _, il := range existingImages {
+	for _, il := range images {
 		parsed, err := tl.getImageLayer(ctx, il.Key)
 		if err != nil {
-			return fmt.Errorf("get image layer %s: %w", il.Key, err)
+			return nil, fmt.Errorf("get image layer %s: %w", il.Key, err)
 		}
 		for _, ie := range parsed.index {
 			pageSet[ie.PageAddr] = struct{}{}
 		}
 	}
 
-	// Sort page addresses.
 	addrs := make([]uint64, 0, len(pageSet))
 	for addr := range pageSet {
 		addrs = append(addrs, addr)
 	}
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i] < addrs[j] })
+	return addrs, nil
+}
+
+// compactRemoveAllLayers handles the special case where all pages are zero after
+// compaction: removes all compacted deltas and images from the layer map.
+func (tl *Timeline) compactRemoveAllLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta, remainingDeltas []DeltaLayerMeta) error {
+	tl.compactLog("  ALL ZERO PATH: removing %d compacted deltas, keeping %d remaining", len(deltas), len(remainingDeltas))
+	tl.mu.Lock()
+	oldDeltas := tl.layers.Deltas
+	oldImages := tl.layers.Images
+	tl.layers.Deltas = remainingDeltas
+	tl.layers.Images = nil
+	tl.mu.Unlock()
+	if err := tl.saveLayerMap(ctx); err != nil {
+		tl.mu.Lock()
+		tl.layers.Deltas = oldDeltas
+		tl.layers.Images = oldImages
+		tl.mu.Unlock()
+		tl.compactLog("  ALL ZERO saveLayerMap FAILED (reverted): %v", err)
+		return err
+	}
+	tl.cleanupOldLayers(ctx, deltas, images)
+	tl.compactLog("  ALL ZERO done, final deltas=%d images=%d", len(tl.layers.Deltas), len(tl.layers.Images))
+	return nil
+}
+
+// compactToImage builds an image layer from all compactable deltas + existing
+// images. This is the original full-compaction behavior.
+func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta, existingImages []ImageLayerMeta, remainingDeltas []DeltaLayerMeta, compactSeq uint64) error {
+	addrs, err := tl.collectPageAddrs(ctx, deltas, existingImages)
+	if err != nil {
+		return err
+	}
 	tl.compactLog("  pageSet=%d pages, addrs=%v", len(addrs), addrs)
 
 	// Read the latest value for each page (searching layers at compactSeq).
@@ -1089,44 +1076,21 @@ func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta,
 	tl.compactLog("  non-zero pages=%d", len(pages))
 
 	if len(pages) == 0 {
-		tl.compactLog("  ALL ZERO PATH: removing %d compacted deltas, keeping %d remaining", len(deltas), len(remainingDeltas))
-		tl.mu.Lock()
-		oldDeltas := tl.layers.Deltas
-		oldImages := tl.layers.Images
-		tl.layers.Deltas = remainingDeltas
-		tl.layers.Images = nil
-		tl.mu.Unlock()
-		if err := tl.saveLayerMap(ctx); err != nil {
-			tl.mu.Lock()
-			tl.layers.Deltas = oldDeltas
-			tl.layers.Images = oldImages
-			tl.mu.Unlock()
-			tl.compactLog("  ALL ZERO saveLayerMap FAILED (reverted): %v", err)
-			return err
-		}
-		for _, dl := range deltas {
-			_ = tl.store.DeleteObject(ctx, dl.Key)
-		}
-		for _, il := range existingImages {
-			_ = tl.store.DeleteObject(ctx, il.Key)
-		}
-		tl.compactLog("  ALL ZERO done, final deltas=%d images=%d", len(tl.layers.Deltas), len(tl.layers.Images))
-		return nil
+		return tl.compactRemoveAllLayers(ctx, deltas, existingImages, remainingDeltas)
 	}
 
-	// Build image layer.
+	// Build and upload image layer.
 	imgData, imgMeta, err := buildImageLayer(compactSeq, pages)
 	if err != nil {
 		return fmt.Errorf("build image layer: %w", err)
 	}
-
-	// Upload image layer.
 	if err := tl.store.PutReader(ctx, imgMeta.Key, bytes.NewReader(imgData)); err != nil {
 		tl.compactLog("  image upload FAILED: %v", err)
 		return fmt.Errorf("upload image layer: %w", err)
 	}
 	tl.compactLog("  image uploaded: %s seq=%d pages=[%d,%d]", imgMeta.Key, imgMeta.Seq, imgMeta.PageRange[0], imgMeta.PageRange[1])
 
+	// Update layer map: replace compacted layers with the new image.
 	tl.mu.Lock()
 	oldDeltas := tl.layers.Deltas
 	oldImages := tl.layers.Images
@@ -1144,24 +1108,7 @@ func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta,
 	}
 	tl.compactLog("  saveLayerMap OK, deleting %d old deltas, %d old images", len(deltas), len(existingImages))
 
-	for _, dl := range deltas {
-		_ = tl.store.DeleteObject(ctx, dl.Key)
-	}
-	for _, il := range existingImages {
-		_ = tl.store.DeleteObject(ctx, il.Key)
-	}
-
-	tl.deltaIndexMu.Lock()
-	for _, dl := range deltas {
-		delete(tl.deltaIndexCache, dl.Key)
-	}
-	tl.deltaIndexMu.Unlock()
-
-	tl.imageIndexMu.Lock()
-	for _, il := range existingImages {
-		delete(tl.imageIndexCache, il.Key)
-	}
-	tl.imageIndexMu.Unlock()
+	tl.cleanupOldLayers(ctx, deltas, existingImages)
 
 	tl.compactLog("  DONE tl=%s final deltas=%d images=%d", tl.id[:8], len(tl.layers.Deltas), len(tl.layers.Images))
 	return nil

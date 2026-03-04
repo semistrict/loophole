@@ -46,24 +46,6 @@ func newSQLiteDB(t *testing.T, name string) (*sql.DB, *sqlitevfs.DB) {
 	return sqlDB, db
 }
 
-// openSQLiteDB opens an existing SQLite database volume.
-func openSQLiteDB(t *testing.T, vm loophole.VolumeManager, name, vfsName string) (*sql.DB, *sqlitevfs.DB) {
-	t.Helper()
-	ctx := t.Context()
-
-	db, err := sqlitevfs.Open(ctx, vm, name)
-	require.NoError(t, err)
-	t.Cleanup(func() { db.Close(ctx) })
-
-	vfs.Register(vfsName, db.VFS())
-
-	sqlDB, err := driver.Open("file:main.db?vfs=" + vfsName)
-	require.NoError(t, err)
-	t.Cleanup(func() { sqlDB.Close() })
-
-	return sqlDB, db
-}
-
 func TestE2E_SQLiteCreateInsertQuery(t *testing.T) {
 	sqlDB, _ := newSQLiteDB(t, "basic")
 

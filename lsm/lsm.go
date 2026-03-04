@@ -74,6 +74,19 @@ type Config struct {
 	FlushInterval time.Duration
 }
 
+// maxMemLayerPages returns the number of page slots for a new MemLayer,
+// derived from FlushThreshold but clamped to [1, maxMemLayerSlots].
+func (c *Config) maxMemLayerPages() int {
+	n := int(c.FlushThreshold / PageSize)
+	if n < 1 {
+		n = 1
+	}
+	if n > maxMemLayerSlots {
+		n = maxMemLayerSlots
+	}
+	return n
+}
+
 func (c *Config) setDefaults() {
 	if c.FlushThreshold == 0 {
 		c.FlushThreshold = DefaultFlushThreshold
