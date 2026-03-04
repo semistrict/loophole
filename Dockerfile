@@ -24,6 +24,10 @@ RUN apt-get update && apt-get install -y \
     strace \
     fio \
     cmake \
+    sysstat \
+    procps \
+    iproute2 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx

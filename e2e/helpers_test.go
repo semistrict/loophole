@@ -89,6 +89,7 @@ func skipKernelOnly(t *testing.T) {
 func newBackend(t *testing.T) fsbackend.Service {
 	t.Helper()
 	skipE2E(t)
+	trackMetrics(t)
 
 	inst := uniqueInstance(t)
 	ctx := t.Context()

@@ -470,6 +470,19 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 		return fmt.Errorf("upload delta layer: %w", err)
 	}
 
+	// Pre-cache the delta layer locally so subsequent reads don't hit S3.
+	// Parse first (before taking tl.mu.Lock) to keep the critical section short.
+	parsed, parseErr := parseDeltaLayer(data)
+	if parseErr == nil {
+		tl.cacheDeltaLayer(meta.Key, parsed)
+	}
+	// Also write to local disk cache so evicted layers can be reloaded without S3.
+	localPath := filepath.Join(tl.cacheDir, meta.Key)
+	if dir := filepath.Dir(localPath); dir != "" {
+		_ = tl.fs.MkdirAll(dir, 0o755)
+	}
+	_ = tl.fs.WriteFile(localPath, data, 0o644)
+
 	// Update layer map and invalidate page cache entries for all pages in
 	// the flushed layer. Both happen under tl.mu.Lock so that readPage
 	// (which holds RLock for its entire duration) sees a consistent state:

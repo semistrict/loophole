@@ -2563,7 +2563,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write a full page first, then flush so readPage goes to S3.
+	// Write a full page first, then flush so the data is on S3.
 	page := make([]byte, PageSize)
 	page[0] = 0xAA
 	if err := v.Write(ctx, page, 0); err != nil {
@@ -2573,20 +2573,30 @@ func TestWritePartialPageReadFail(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Close the first manager to release the lease.
+	m.Close(ctx)
+
+	// Open on a fresh manager (empty local cache) so reads must go to S3.
+	m2 := newTestManager(t, store, m.config)
+	v2, err := m2.OpenVolume(ctx, "vol")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Now fault Get — a partial page write needs to read the existing page.
 	store.SetFault(loophole.OpGet, "", loophole.Fault{
 		Err: fmt.Errorf("simulated read failure"),
 	})
 
 	// Write 1 byte at offset 1 — partial page, triggers read-modify-write.
-	err = v.Write(ctx, []byte{0xBB}, 1)
+	err = v2.Write(ctx, []byte{0xBB}, 1)
 	if err == nil || !strings.Contains(err.Error(), "simulated read failure") {
 		t.Fatalf("expected read failure on partial write, got: %v", err)
 	}
 
 	// Clear fault — full page writes should still work (no read needed).
 	store.ClearAllFaults()
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v2.Write(ctx, page, 0); err != nil {
 		t.Fatalf("full page write after clearing fault: %v", err)
 	}
 }

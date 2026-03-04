@@ -314,18 +314,36 @@ func (d *LoopDevice) Detach() error {
 }
 
 // LoopDetachPath detaches the loop device at the given path (e.g. "/dev/loop0").
+//
+// On modern kernels (5.12+), LOOP_CLR_FD schedules cleanup asynchronously via
+// loop_schedule_rundown. We close our fd immediately (so the refcount drops)
+// and then poll the sysfs backing_file to confirm the device is fully released
+// before returning to the caller.
 func LoopDetachPath(devPath string) error {
 	f, err := os.OpenFile(devPath, os.O_RDONLY, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath, err)
 	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			slog.Warn("close failed", "error", err)
-		}
-	}()
-	if err := unix.IoctlSetInt(int(f.Fd()), loopClearFD, 0); err != nil {
+	err = unix.IoctlSetInt(int(f.Fd()), loopClearFD, 0)
+	// Close immediately so the kernel can proceed with async cleanup.
+	if cerr := f.Close(); cerr != nil {
+		slog.Warn("close failed", "error", cerr)
+	}
+	if err != nil {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
+	}
+
+	// Wait for the kernel's async rundown to finish. On modern kernels
+	// LOOP_CLR_FD is asynchronous; we poll the sysfs backing_file which
+	// is cleared once rundown completes. Typically resolves in <1ms.
+	base := devPath[len("/dev/"):]
+	sysPath := fmt.Sprintf("/sys/block/%s/loop/backing_file", base)
+	for range 100 {
+		data, err := os.ReadFile(sysPath)
+		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
+			return nil
+		}
+		unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil) // 1ms
 	}
 	return nil
 }
