@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse liblwext4 clean-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite liblwext4 clean-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -127,6 +127,11 @@ e2e-testnbdtcp: liblwext4
 # Usage: make e2e-lwext4fuse [RUN=TestName]
 e2e-lwext4fuse: liblwext4
 	LOOPHOLE_MODE=lwext4fuse go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+
+# Run SQLite e2e tests (pure Go, no root/FUSE/NBD required)
+# Usage: make e2e-sqlite [RUN=TestName]
+e2e-sqlite: liblwext4
+	go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') -run 'TestE2E_SQLite' ./e2e/
 
 # Run containerstorage integration tests (FUSE mode)
 test-containerstorage: install
