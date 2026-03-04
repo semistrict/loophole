@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/semistrict/loophole"
@@ -906,18 +907,26 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 // compactMergeDeltas merges multiple delta layers into a single merged delta.
 // Cost is O(sum of delta sizes) — does not touch image layers.
 func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerMeta, remainingDeltas []DeltaLayerMeta) error {
-	// Download and parse all delta layers.
+	// Download and parse all delta layers concurrently.
 	parsed := make([]*parsedDeltaLayer, len(deltas))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
 	for i, dl := range deltas {
-		data, err := tl.downloadDeltaLayer(ctx, dl.Key)
-		if err != nil {
-			return fmt.Errorf("download delta layer %s: %w", dl.Key, err)
-		}
-		p, err := parseDeltaLayer(data)
-		if err != nil {
-			return fmt.Errorf("parse delta layer %s: %w", dl.Key, err)
-		}
-		parsed[i] = p
+		g.Go(func() error {
+			data, err := tl.downloadDeltaLayer(gctx, dl.Key)
+			if err != nil {
+				return fmt.Errorf("download delta layer %s: %w", dl.Key, err)
+			}
+			p, err := parseDeltaLayer(data)
+			if err != nil {
+				return fmt.Errorf("parse delta layer %s: %w", dl.Key, err)
+			}
+			parsed[i] = p
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 
 	// Merge.
@@ -1054,24 +1063,39 @@ func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta,
 	}
 	tl.compactLog("  pageSet=%d pages, addrs=%v", len(addrs), addrs)
 
-	// Read the latest value for each page (searching layers at compactSeq).
+	// Read the latest value for each page concurrently (searching layers at compactSeq).
+	type addrData struct {
+		addr uint64
+		data []byte
+	}
+	results := make([]addrData, len(addrs))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8)
+	for i, addr := range addrs {
+		results[i].addr = addr
+		g.Go(func() error {
+			data, err := tl.readPage(gctx, addr, compactSeq)
+			if err != nil {
+				return fmt.Errorf("read page %d: %w", addr, err)
+			}
+			results[i].data = data
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
 	var pages []imagePageInput
-	for _, addr := range addrs {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		data, err := tl.readPage(ctx, addr, compactSeq)
-		if err != nil {
-			return fmt.Errorf("read page %d: %w", addr, err)
-		}
+	for _, r := range results {
 		// Skip zero pages only when there's no ancestor. With an ancestor,
 		// zero pages may be tombstones that mask ancestor data and must be
 		// preserved in the image layer.
-		if bytes.Equal(data, zeroPage[:]) && tl.ancestor == nil {
-			tl.compactLog("  page %d: zero (skipped, root tl)", addr)
+		if bytes.Equal(r.data, zeroPage[:]) && tl.ancestor == nil {
+			tl.compactLog("  page %d: zero (skipped, root tl)", r.addr)
 			continue
 		}
-		pages = append(pages, imagePageInput{PageAddr: addr, Data: data})
+		pages = append(pages, imagePageInput{PageAddr: r.addr, Data: r.data})
 	}
 	tl.compactLog("  non-zero pages=%d", len(pages))
 

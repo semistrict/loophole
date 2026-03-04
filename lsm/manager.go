@@ -47,6 +47,7 @@ type Manager struct {
 // NewVolumeManager creates and initializes an LSM Manager.
 // fs is optional — nil uses OSLocalFS.
 func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs LocalFS) *Manager {
+	store = loophole.NewRetryStore(store)
 	config.setDefaults()
 	if fs == nil {
 		fs = OSLocalFS{}
