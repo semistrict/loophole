@@ -213,6 +213,26 @@ func OpenFollow(ctx context.Context, mgr loophole.VolumeManager, name string, in
 }
 
 func (db *DB) startRefreshLoop(ctx context.Context, interval time.Duration) {
+	db.startTickerLoop(interval, func() {
+		// Re-read layer map from S3 to see new data.
+		_ = db.vol.Refresh(ctx)
+		// Re-read superblock to see updated file sizes.
+		if sb, err := ReadSuperblock(ctx, db.vol); err == nil {
+			db.vfs.mu.Lock()
+			db.vfs.sb = sb
+			db.vfs.mu.Unlock()
+		}
+	})
+}
+
+func (db *DB) startFlushLoop(ctx context.Context, interval time.Duration) {
+	db.startTickerLoop(interval, func() {
+		_ = db.Flush(ctx)
+	})
+}
+
+// startTickerLoop runs fn on a periodic ticker until the DB is closed.
+func (db *DB) startTickerLoop(interval time.Duration, fn func()) {
 	db.flushStop = make(chan struct{})
 	db.flushDone = make(chan struct{})
 	go func() {
@@ -222,14 +242,7 @@ func (db *DB) startRefreshLoop(ctx context.Context, interval time.Duration) {
 		for {
 			select {
 			case <-ticker.C:
-				// Re-read layer map from S3 to see new data.
-				_ = db.vol.Refresh(ctx)
-				// Re-read superblock to see updated file sizes.
-				if sb, err := ReadSuperblock(ctx, db.vol); err == nil {
-					db.vfs.mu.Lock()
-					db.vfs.sb = sb
-					db.vfs.mu.Unlock()
-				}
+				fn()
 			case <-db.flushStop:
 				return
 			}
@@ -237,17 +250,15 @@ func (db *DB) startRefreshLoop(ctx context.Context, interval time.Duration) {
 	}()
 }
 
-// Close flushes, stops the flush goroutine, and releases the volume.
+// Close flushes, stops the background goroutine, and releases the volume.
 func (db *DB) Close(ctx context.Context) error {
 	var closeErr error
 	db.closeOnce.Do(func() {
-		// Stop flush loop first.
 		if db.flushStop != nil {
 			close(db.flushStop)
 			<-db.flushDone
 		}
 
-		// Final flush.
 		if err := db.Flush(ctx); err != nil {
 			closeErr = err
 		}
@@ -262,22 +273,4 @@ func (db *DB) Close(ctx context.Context) error {
 // Volume returns the underlying volume (for advanced operations).
 func (db *DB) Volume() loophole.Volume {
 	return db.vol
-}
-
-func (db *DB) startFlushLoop(ctx context.Context, interval time.Duration) {
-	db.flushStop = make(chan struct{})
-	db.flushDone = make(chan struct{})
-	go func() {
-		defer close(db.flushDone)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				_ = db.Flush(ctx)
-			case <-db.flushStop:
-				return
-			}
-		}
-	}()
 }

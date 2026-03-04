@@ -86,6 +86,30 @@ func (v *volume) Flush(ctx context.Context) error {
 	return v.timeline.Flush(ctx)
 }
 
+// branch freezes the current memLayer (if writable), flushes all frozen layers
+// to S3, and creates a child timeline. Returns the child timeline ID.
+// Caller must hold v.mu.Lock.
+func (v *volume) branch(ctx context.Context) (string, error) {
+	branchSeq := v.timeline.nextSeq.Load()
+	if !v.readOnly.Load() {
+		if err := v.timeline.freezeMemLayer(); err != nil {
+			return "", fmt.Errorf("freeze memlayer: %w", err)
+		}
+	}
+
+	// Flush all frozen layers to S3 so that the child's ancestor view
+	// includes all parent data.
+	if err := v.timeline.flushFrozenLayers(ctx); err != nil {
+		return "", fmt.Errorf("flush for branch: %w", err)
+	}
+
+	childID := v.manager.idGen()
+	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
+		return "", fmt.Errorf("create child timeline: %w", err)
+	}
+	return childID, nil
+}
+
 func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -94,29 +118,11 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 		return fmt.Errorf("cannot snapshot read-only volume %q", v.name)
 	}
 
-	// 1. Record branchSeq = timeline.nextSeq
-	// 2. Freeze current memLayer
-	// 3. Start new memLayer for parent (writes resume immediately)
-	// 4. Create child timeline: ancestor = parent, ancestorSeq = branchSeq
-	// 5. Write child's meta.json to S3
-
-	branchSeq := v.timeline.nextSeq.Load()
-	if err := v.timeline.freezeMemLayer(); err != nil {
-		return fmt.Errorf("freeze memlayer for snapshot: %w", err)
+	childID, err := v.branch(ctx)
+	if err != nil {
+		return fmt.Errorf("snapshot: %w", err)
 	}
 
-	// Flush all frozen layers to S3 so that when the snapshot's child
-	// timeline is opened, its ancestor view includes all parent data.
-	if err := v.timeline.flushFrozenLayers(ctx); err != nil {
-		return fmt.Errorf("flush for snapshot: %w", err)
-	}
-
-	childID := v.manager.idGen()
-	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
-		return fmt.Errorf("create snapshot child: %w", err)
-	}
-
-	// Create the snapshot as a read-only volume ref.
 	if snapshotName != "" {
 		ref := volumeRef{TimelineID: childID, Size: v.size, ReadOnly: true, Type: v.volType}
 		if err := v.manager.putVolumeRef(ctx, snapshotName, ref); err != nil {
@@ -131,25 +137,9 @@ func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, 
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// If writable, freeze + continue (like current freezeAndContinue).
-	// If read-only, the timeline is already frozen; just create a child.
-
-	branchSeq := v.timeline.nextSeq.Load()
-	if !v.readOnly.Load() {
-		if err := v.timeline.freezeMemLayer(); err != nil {
-			return nil, fmt.Errorf("freeze memlayer for clone: %w", err)
-		}
-	}
-
-	// Flush all frozen layers to S3 before opening the child. The child's
-	// ancestor timeline is opened from S3, so unflushed data would be invisible.
-	if err := v.timeline.flushFrozenLayers(ctx); err != nil {
-		return nil, fmt.Errorf("flush for clone: %w", err)
-	}
-
-	childID := v.manager.idGen()
-	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
-		return nil, fmt.Errorf("create clone child: %w", err)
+	childID, err := v.branch(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("clone: %w", err)
 	}
 
 	ref := volumeRef{TimelineID: childID, Size: v.size, Type: v.volType}

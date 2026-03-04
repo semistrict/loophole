@@ -148,11 +148,9 @@ func buildDeltaLayer(ml *MemLayer, entries []sortedEntry) ([]byte, DeltaLayerMet
 	}
 
 	result := buf.Bytes()
-	var hdrBuf bytes.Buffer
-	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
-		return nil, DeltaLayerMeta{}, fmt.Errorf("encode header: %w", err)
+	if err := backfillHeader(result, hdr, deltaLayerHeaderSize); err != nil {
+		return nil, DeltaLayerMeta{}, err
 	}
-	copy(result[:deltaLayerHeaderSize], hdrBuf.Bytes())
 
 	meta := DeltaLayerMeta{
 		StartSeq:  hdr.StartSeq,
@@ -173,6 +171,57 @@ type parsedDeltaLayer struct {
 	index []deltaLayerIndexEntry
 	store loophole.ObjectStore // for range reads; nil when data is set
 	key   string               // S3 key for range reads
+}
+
+// readCompressedPage fetches a compressed page from a layer (blob or S3 range
+// read), verifies CRC, decompresses, and validates size. Shared by both delta
+// and image layer findPage methods.
+func readCompressedPage(ctx context.Context, data []byte, store loophole.ObjectStore, key string, offset uint64, length uint32, crc uint32, pageAddr uint64) ([]byte, error) {
+	var compressed []byte
+	if data != nil {
+		end := offset + uint64(length)
+		if end > uint64(len(data)) {
+			return nil, fmt.Errorf("value extends beyond data: offset=%d len=%d size=%d", offset, length, len(data))
+		}
+		compressed = data[offset:end]
+	} else {
+		body, _, err := store.GetRange(ctx, key, int64(offset), int64(length))
+		if err != nil {
+			return nil, fmt.Errorf("range read page %d: %w", pageAddr, err)
+		}
+		compressed, err = io.ReadAll(body)
+		_ = body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read page %d: %w", pageAddr, err)
+		}
+	}
+
+	if crc32.ChecksumIEEE(compressed) != crc {
+		return nil, fmt.Errorf("CRC mismatch for page %d", pageAddr)
+	}
+
+	decoder := getZstdDecoder()
+	defer putZstdDecoder(decoder)
+
+	decompressed, err := decoder.DecodeAll(compressed, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decompress page %d: %w", pageAddr, err)
+	}
+	if len(decompressed) != PageSize {
+		return nil, fmt.Errorf("decompressed size %d, expected %d", len(decompressed), PageSize)
+	}
+	return decompressed, nil
+}
+
+// backfillHeader encodes a fixed-size struct header and copies it into the
+// reserved space at the start of result. Used by all layer build functions.
+func backfillHeader(result []byte, hdr any, size int) error {
+	var buf bytes.Buffer
+	if err := binary.Write(&buf, binary.LittleEndian, hdr); err != nil {
+		return fmt.Errorf("encode header: %w", err)
+	}
+	copy(result[:size], buf.Bytes())
+	return nil
 }
 
 // parseDeltaLayer parses a complete delta layer blob into its index entries.
@@ -238,42 +287,10 @@ func (p *parsedDeltaLayer) findPage(ctx context.Context, pageAddr, beforeSeq uin
 		return zeroPage[:], true, nil
 	}
 
-	var compressed []byte
-	if p.data != nil {
-		// Full-blob mode: read from in-memory data.
-		end := ie.ValueOffset + uint64(ie.ValueLen)
-		if end > uint64(len(p.data)) {
-			return nil, false, fmt.Errorf("value extends beyond data: offset=%d len=%d size=%d", ie.ValueOffset, ie.ValueLen, len(p.data))
-		}
-		compressed = p.data[ie.ValueOffset:end]
-	} else {
-		// Index-only mode: fetch compressed page via GetRange.
-		body, _, err := p.store.GetRange(ctx, p.key, int64(ie.ValueOffset), int64(ie.ValueLen))
-		if err != nil {
-			return nil, false, fmt.Errorf("range read page %d: %w", pageAddr, err)
-		}
-		compressed, err = io.ReadAll(body)
-		_ = body.Close()
-		if err != nil {
-			return nil, false, fmt.Errorf("read page %d: %w", pageAddr, err)
-		}
-	}
-
-	if crc32.ChecksumIEEE(compressed) != ie.CRC32 {
-		return nil, false, fmt.Errorf("CRC mismatch for page %d seq %d", pageAddr, ie.Seq)
-	}
-
-	decoder := getZstdDecoder()
-	defer putZstdDecoder(decoder)
-
-	decompressed, err := decoder.DecodeAll(compressed, nil)
+	decompressed, err := readCompressedPage(ctx, p.data, p.store, p.key, ie.ValueOffset, ie.ValueLen, ie.CRC32, pageAddr)
 	if err != nil {
-		return nil, false, fmt.Errorf("decompress page %d: %w", pageAddr, err)
+		return nil, false, err
 	}
-	if len(decompressed) != PageSize {
-		return nil, false, fmt.Errorf("decompressed size %d, expected %d", len(decompressed), PageSize)
-	}
-
 	return decompressed, true, nil
 }
 
@@ -472,11 +489,9 @@ func mergeDeltaLayers(ctx context.Context, layers []*parsedDeltaLayer, metas []D
 	}
 
 	result := buf.Bytes()
-	var hdrBuf bytes.Buffer
-	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
-		return nil, DeltaLayerMeta{}, fmt.Errorf("encode header: %w", err)
+	if err := backfillHeader(result, hdr, deltaLayerHeaderSize); err != nil {
+		return nil, DeltaLayerMeta{}, err
 	}
-	copy(result[:deltaLayerHeaderSize], hdrBuf.Bytes())
 
 	meta := DeltaLayerMeta{
 		StartSeq:  startSeq,
@@ -621,11 +636,9 @@ func buildImageLayer(seq uint64, pages []imagePageInput) ([]byte, ImageLayerMeta
 	}
 
 	result := buf.Bytes()
-	var hdrBuf bytes.Buffer
-	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
-		return nil, ImageLayerMeta{}, fmt.Errorf("encode header: %w", err)
+	if err := backfillHeader(result, hdr, imageLayerHeaderSize); err != nil {
+		return nil, ImageLayerMeta{}, err
 	}
-	copy(result[:imageLayerHeaderSize], hdrBuf.Bytes())
 
 	meta := ImageLayerMeta{
 		Seq:       seq,
@@ -689,40 +702,10 @@ func (p *parsedImageLayer) findPage(ctx context.Context, pageAddr uint64) ([]byt
 
 	ie := &p.index[i]
 
-	var compressed []byte
-	if p.data != nil {
-		end := ie.ValueOffset + uint64(ie.ValueLen)
-		if end > uint64(len(p.data)) {
-			return nil, false, fmt.Errorf("value extends beyond data")
-		}
-		compressed = p.data[ie.ValueOffset:end]
-	} else {
-		body, _, err := p.store.GetRange(ctx, p.key, int64(ie.ValueOffset), int64(ie.ValueLen))
-		if err != nil {
-			return nil, false, fmt.Errorf("range read page %d: %w", pageAddr, err)
-		}
-		compressed, err = io.ReadAll(body)
-		_ = body.Close()
-		if err != nil {
-			return nil, false, fmt.Errorf("read page %d: %w", pageAddr, err)
-		}
-	}
-
-	if crc32.ChecksumIEEE(compressed) != ie.CRC32 {
-		return nil, false, fmt.Errorf("CRC mismatch for page %d", pageAddr)
-	}
-
-	decoder := getZstdDecoder()
-	defer putZstdDecoder(decoder)
-
-	decompressed, err := decoder.DecodeAll(compressed, nil)
+	decompressed, err := readCompressedPage(ctx, p.data, p.store, p.key, ie.ValueOffset, ie.ValueLen, ie.CRC32, pageAddr)
 	if err != nil {
-		return nil, false, fmt.Errorf("decompress page %d: %w", pageAddr, err)
+		return nil, false, err
 	}
-	if len(decompressed) != PageSize {
-		return nil, false, fmt.Errorf("decompressed size %d, expected %d", len(decompressed), PageSize)
-	}
-
 	return decompressed, true, nil
 }
 
