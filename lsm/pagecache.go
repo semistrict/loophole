@@ -1,7 +1,6 @@
 package lsm
 
 import (
-	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,16 +18,22 @@ type pageCacheKey struct {
 // Data lives off-heap (zero GC pressure). The backing file is deleted and
 // recreated on every startup — the cache is write-through from S3, so stale
 // data after a crash is unsafe.
+//
+// Eviction uses the CLOCK algorithm (approximate LRU). Each slot has a
+// referenced bit that is set on access. The clock hand sweeps slots: if
+// referenced, the bit is cleared and the hand advances; if not referenced,
+// that slot is evicted.
 type PageCache struct {
-	mu        sync.Mutex
-	maxPages  int
-	data      []byte               // mmap'd region (maxPages * PageSize)
-	file      *os.File             // backing file (kept open)
-	path      string               // backing file path
-	index     map[pageCacheKey]int // key → slot index
-	slots     []pageCacheKey       // slot → key (reverse index for eviction)
-	freeSlots []int                // stack of free slot indices
-	rng       *rand.Rand           // for random eviction
+	mu         sync.Mutex
+	maxPages   int
+	data       []byte               // mmap'd region (maxPages * PageSize)
+	file       *os.File             // backing file (kept open)
+	path       string               // backing file path
+	index      map[pageCacheKey]int // key → slot index
+	slots      []pageCacheKey       // slot → key (reverse index for eviction)
+	referenced []bool               // CLOCK referenced bit per slot
+	clockHand  int                  // current CLOCK sweep position
+	freeSlots  []int                // stack of free slot indices
 }
 
 // NewPageCache creates a page cache backed by a memory-mapped file at path.
@@ -71,14 +76,14 @@ func NewPageCache(path string, maxBytes int64) (*PageCache, error) {
 	}
 
 	return &PageCache{
-		maxPages:  maxPages,
-		data:      data,
-		file:      f,
-		path:      path,
-		index:     make(map[pageCacheKey]int, maxPages),
-		slots:     make([]pageCacheKey, maxPages),
-		freeSlots: freeSlots,
-		rng:       rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
+		maxPages:   maxPages,
+		data:       data,
+		file:       f,
+		path:       path,
+		index:      make(map[pageCacheKey]int, maxPages),
+		slots:      make([]pageCacheKey, maxPages),
+		referenced: make([]bool, maxPages),
+		freeSlots:  freeSlots,
 	}, nil
 }
 
@@ -92,12 +97,13 @@ func (pc *PageCache) Get(timelineID string, pageAddr uint64) []byte {
 	if !ok {
 		return nil
 	}
+	pc.referenced[slot] = true
 	out := make([]byte, PageSize)
 	copy(out, pc.data[slot*PageSize:])
 	return out
 }
 
-// Put inserts or updates a page in the cache, randomly evicting if full.
+// Put inserts or updates a page in the cache, using CLOCK eviction if full.
 func (pc *PageCache) Put(timelineID string, pageAddr uint64, data []byte) {
 	pc.mu.Lock()
 	defer pc.mu.Unlock()
@@ -107,23 +113,39 @@ func (pc *PageCache) Put(timelineID string, pageAddr uint64, data []byte) {
 	// Update in place if already cached.
 	if slot, ok := pc.index[key]; ok {
 		copy(pc.data[slot*PageSize:], data)
+		pc.referenced[slot] = true
 		return
 	}
 
-	// Get a free slot, or randomly evict one.
+	// Get a free slot, or evict using CLOCK.
 	var slot int
 	if n := len(pc.freeSlots); n > 0 {
 		slot = pc.freeSlots[n-1]
 		pc.freeSlots = pc.freeSlots[:n-1]
 	} else {
-		slot = pc.rng.IntN(pc.maxPages)
-		evictedKey := pc.slots[slot]
-		delete(pc.index, evictedKey)
+		slot = pc.clockEvict()
 	}
 
 	copy(pc.data[slot*PageSize:], data)
 	pc.index[key] = slot
 	pc.slots[slot] = key
+	pc.referenced[slot] = true
+}
+
+// clockEvict finds a slot to evict using the CLOCK algorithm.
+// Caller must hold pc.mu.
+func (pc *PageCache) clockEvict() int {
+	for {
+		slot := pc.clockHand
+		pc.clockHand = (pc.clockHand + 1) % pc.maxPages
+		if pc.referenced[slot] {
+			pc.referenced[slot] = false
+			continue
+		}
+		evictedKey := pc.slots[slot]
+		delete(pc.index, evictedKey)
+		return slot
+	}
 }
 
 // Delete removes a page from the cache if present.
@@ -138,6 +160,7 @@ func (pc *PageCache) Delete(timelineID string, pageAddr uint64) {
 	}
 	delete(pc.index, key)
 	pc.slots[slot] = pageCacheKey{}
+	pc.referenced[slot] = false
 	pc.freeSlots = append(pc.freeSlots, slot)
 }
 
