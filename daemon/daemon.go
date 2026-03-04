@@ -24,6 +24,7 @@ import (
 	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
+	"github.com/semistrict/loophole/sqlitevfs"
 )
 
 // Daemon serves the loophole HTTP API over a Unix socket.
@@ -128,11 +129,14 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		log:     logger,
 	}
 
-	// Auto-start NBD server if configured.
-	if inst.NBDSocket != "" {
-		if err := d.startNBD(inst.NBDSocket); err != nil {
-			return nil, fmt.Errorf("start NBD server: %w", err)
-		}
+	// Always start an NBD server for db commands.
+	// Use explicit nbd_socket config if set, otherwise derive from profile.
+	nbdSock := inst.NBDSocket
+	if nbdSock == "" {
+		nbdSock = dir.NBD(inst.ProfileName)
+	}
+	if err := d.startNBD(nbdSock); err != nil {
+		return nil, fmt.Errorf("start NBD server: %w", err)
 	}
 
 	return d, nil
@@ -186,6 +190,12 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
 	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
+
+	mux.HandleFunc("POST /db/create", d.handleDBCreate)
+	mux.HandleFunc("POST /db/snapshot", d.handleDBSnapshot)
+	mux.HandleFunc("POST /db/branch", d.handleDBBranch)
+	mux.HandleFunc("POST /db/flush", d.handleDBFlush)
+	mux.HandleFunc("GET /db/ls", d.handleDBList)
 
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /delete", d.handleDelete)
@@ -457,6 +467,128 @@ func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"device": device})
 }
 
+// --- DB handlers ---
+
+func (d *Daemon) handleDBCreate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume string `json:"volume"`
+		Size   uint64 `json:"size,omitempty"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("db/create", "volume", req.Volume, "size", req.Size)
+
+	var opts []sqlitevfs.Option
+	if req.Size > 0 {
+		opts = append(opts, sqlitevfs.WithSize(req.Size))
+	}
+
+	db, err := sqlitevfs.Create(r.Context(), d.backend.VM(), req.Volume, opts...)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	if err := db.Close(r.Context()); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleDBSnapshot(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume   string `json:"volume"`
+		Snapshot string `json:"snapshot"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("db/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
+
+	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	defer func() { _ = db.Close(r.Context()) }()
+
+	if err := db.Snapshot(r.Context(), req.Snapshot); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleDBBranch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume string `json:"volume"`
+		Branch string `json:"branch"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("db/branch", "volume", req.Volume, "branch", req.Branch)
+
+	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	defer func() { _ = db.Close(r.Context()) }()
+
+	branch, err := db.Branch(r.Context(), req.Branch)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	if err := branch.Close(r.Context()); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleDBFlush(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume string `json:"volume"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("db/flush", "volume", req.Volume)
+
+	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	defer func() { _ = db.Close(r.Context()) }()
+
+	if err := db.Flush(r.Context()); err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleDBList(w http.ResponseWriter, r *http.Request) {
+	volumes, err := d.backend.VM().ListVolumesByType(r.Context(), loophole.VolumeTypeSQLite)
+	if err != nil {
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]any{"volumes": volumes})
+}
+
 // --- NBD ---
 
 func (d *Daemon) startNBD(sockPath string) error {
@@ -492,12 +624,13 @@ func (d *Daemon) startNBD(sockPath string) error {
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{
-		"s3":      d.inst.URL(),
-		"mode":    string(d.inst.Mode),
-		"socket":  d.dir.Socket(d.inst.ProfileName),
-		"log":     d.dir.Log(d.inst.ProfileName),
-		"volumes": d.backend.VM().Volumes(),
-		"mounts":  d.backend.Mounts(),
+		"s3":       d.inst.URL(),
+		"mode":     string(d.inst.Mode),
+		"socket":   d.dir.Socket(d.inst.ProfileName),
+		"nbd_sock": d.nbdSock,
+		"log":      d.dir.Log(d.inst.ProfileName),
+		"volumes":  d.backend.VM().Volumes(),
+		"mounts":   d.backend.Mounts(),
 	})
 }
 

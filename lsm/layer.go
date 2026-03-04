@@ -330,6 +330,165 @@ func parseDeltaIndex(ctx context.Context, store loophole.ObjectStore, key string
 	}, nil
 }
 
+// mergeDeltaLayers merges N parsed delta layers into a single delta layer.
+// For each unique pageAddr, only the entry with the highest seq is kept.
+// Tombstones are preserved. The merged delta's StartSeq = min of all inputs,
+// EndSeq = max of all inputs.
+func mergeDeltaLayers(ctx context.Context, layers []*parsedDeltaLayer, metas []DeltaLayerMeta) ([]byte, DeltaLayerMeta, error) {
+	if len(layers) == 0 {
+		return nil, DeltaLayerMeta{}, fmt.Errorf("no layers to merge")
+	}
+
+	// Collect all index entries, keeping track of which layer they came from.
+	type sourceEntry struct {
+		ie       deltaLayerIndexEntry
+		layerIdx int
+	}
+	var all []sourceEntry
+	for li, layer := range layers {
+		for _, ie := range layer.index {
+			all = append(all, sourceEntry{ie: ie, layerIdx: li})
+		}
+	}
+
+	// For each unique pageAddr, keep the entry with the highest seq.
+	best := make(map[uint64]sourceEntry)
+	for _, se := range all {
+		existing, ok := best[se.ie.PageAddr]
+		if !ok || se.ie.Seq > existing.ie.Seq {
+			best[se.ie.PageAddr] = se
+		}
+	}
+
+	// Sort by pageAddr for deterministic output.
+	addrs := make([]uint64, 0, len(best))
+	for addr := range best {
+		addrs = append(addrs, addr)
+	}
+	sort.Slice(addrs, func(i, j int) bool { return addrs[i] < addrs[j] })
+
+	if len(addrs) == 0 {
+		return nil, DeltaLayerMeta{}, fmt.Errorf("no entries after merge")
+	}
+
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
+	if err != nil {
+		return nil, DeltaLayerMeta{}, err
+	}
+	defer func() { _ = encoder.Close() }()
+
+	decoder := getZstdDecoder()
+	defer putZstdDecoder(decoder)
+
+	var buf bytes.Buffer
+	buf.Write(make([]byte, deltaLayerHeaderSize)) // reserve header
+
+	indexEntries := make([]deltaLayerIndexEntry, 0, len(addrs))
+	minPage := addrs[0]
+	maxPage := addrs[len(addrs)-1]
+
+	for _, addr := range addrs {
+		se := best[addr]
+		srcLayer := layers[se.layerIdx]
+
+		ie := deltaLayerIndexEntry{
+			PageAddr:    addr,
+			Seq:         se.ie.Seq,
+			ValueOffset: uint64(buf.Len()),
+		}
+
+		if se.ie.ValueLen == 0 {
+			// Tombstone: emit with ValueLen=0.
+			ie.ValueLen = 0
+			ie.CRC32 = 0
+		} else {
+			// Read compressed data from source layer and decompress.
+			var srcCompressed []byte
+			if srcLayer.data != nil {
+				end := se.ie.ValueOffset + uint64(se.ie.ValueLen)
+				if end > uint64(len(srcLayer.data)) {
+					return nil, DeltaLayerMeta{}, fmt.Errorf("source value extends beyond data for page %d", addr)
+				}
+				srcCompressed = srcLayer.data[se.ie.ValueOffset:end]
+			} else {
+				body, _, err := srcLayer.store.GetRange(ctx, srcLayer.key, int64(se.ie.ValueOffset), int64(se.ie.ValueLen))
+				if err != nil {
+					return nil, DeltaLayerMeta{}, fmt.Errorf("range read page %d: %w", addr, err)
+				}
+				srcCompressed, err = io.ReadAll(body)
+				_ = body.Close()
+				if err != nil {
+					return nil, DeltaLayerMeta{}, fmt.Errorf("read page %d: %w", addr, err)
+				}
+			}
+
+			if crc32.ChecksumIEEE(srcCompressed) != se.ie.CRC32 {
+				return nil, DeltaLayerMeta{}, fmt.Errorf("CRC mismatch for page %d seq %d", addr, se.ie.Seq)
+			}
+
+			decompressed, err := decoder.DecodeAll(srcCompressed, nil)
+			if err != nil {
+				return nil, DeltaLayerMeta{}, fmt.Errorf("decompress page %d: %w", addr, err)
+			}
+
+			compressed := encoder.EncodeAll(decompressed, nil)
+			ie.ValueLen = uint32(len(compressed))
+			ie.CRC32 = crc32.ChecksumIEEE(compressed)
+			buf.Write(compressed)
+		}
+
+		indexEntries = append(indexEntries, ie)
+	}
+
+	// Write index section.
+	indexOffset := uint64(buf.Len())
+	for _, ie := range indexEntries {
+		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
+			return nil, DeltaLayerMeta{}, fmt.Errorf("write index entry: %w", err)
+		}
+	}
+
+	// Compute seq range from metas.
+	startSeq := metas[0].StartSeq
+	endSeq := metas[0].EndSeq
+	for _, m := range metas[1:] {
+		if m.StartSeq < startSeq {
+			startSeq = m.StartSeq
+		}
+		if m.EndSeq > endSeq {
+			endSeq = m.EndSeq
+		}
+	}
+
+	// Write header.
+	hdr := deltaLayerHeader{
+		Magic:       deltaLayerMagic,
+		Version:     deltaLayerVersion,
+		StartSeq:    startSeq,
+		EndSeq:      endSeq,
+		PageRange:   [2]uint64{minPage, maxPage},
+		NumEntries:  uint32(len(indexEntries)),
+		IndexOffset: indexOffset,
+	}
+
+	result := buf.Bytes()
+	var hdrBuf bytes.Buffer
+	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
+		return nil, DeltaLayerMeta{}, fmt.Errorf("encode header: %w", err)
+	}
+	copy(result[:deltaLayerHeaderSize], hdrBuf.Bytes())
+
+	meta := DeltaLayerMeta{
+		StartSeq:  startSeq,
+		EndSeq:    endSeq,
+		PageRange: [2]uint64{minPage, maxPage},
+		Key:       fmt.Sprintf("deltas/%016x-%016x", startSeq, endSeq),
+		Size:      int64(len(result)),
+	}
+
+	return result, meta, nil
+}
+
 // parseDeltaKey parses a delta layer key like "deltas/0000000000000000-0000000000000005"
 // into a DeltaLayerMeta. PageRange is left as zero — it will be filled when
 // the layer is actually downloaded and parsed.

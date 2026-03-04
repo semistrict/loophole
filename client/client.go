@@ -326,6 +326,7 @@ type StatusResponse struct {
 	S3      string            `json:"s3"`
 	Mode    string            `json:"mode"`
 	Socket  string            `json:"socket"`
+	NBDSock string            `json:"nbd_sock"`
 	Fuse    string            `json:"fuse"`
 	Volumes []string          `json:"volumes"`
 	Mounts  map[string]string `json:"mounts"`
@@ -363,6 +364,71 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 		return nil, err
 	}
 	return &status, nil
+}
+
+// --- DB methods ---
+
+// DBCreateParams are the parameters for creating a SQLite database volume.
+type DBCreateParams struct {
+	Volume string `json:"volume"`
+	Size   uint64 `json:"size,omitempty"`
+}
+
+// DBCreate creates a new SQLite database volume.
+func (c *Client) DBCreate(ctx context.Context, p DBCreateParams) error {
+	_, err := c.rpc(ctx, "POST", "/db/create", p)
+	return err
+}
+
+// DBSnapshot creates a snapshot of a SQLite database volume.
+func (c *Client) DBSnapshot(ctx context.Context, volume, snapshot string) error {
+	_, err := c.rpc(ctx, "POST", "/db/snapshot", map[string]string{
+		"volume":   volume,
+		"snapshot": snapshot,
+	})
+	return err
+}
+
+// DBBranch creates a writable branch of a SQLite database volume.
+func (c *Client) DBBranch(ctx context.Context, volume, branch string) error {
+	_, err := c.rpc(ctx, "POST", "/db/branch", map[string]string{
+		"volume": volume,
+		"branch": branch,
+	})
+	return err
+}
+
+// DBFlush flushes a SQLite database volume to S3.
+func (c *Client) DBFlush(ctx context.Context, volume string) error {
+	_, err := c.rpc(ctx, "POST", "/db/flush", map[string]string{
+		"volume": volume,
+	})
+	return err
+}
+
+// DBList returns all SQLite database volumes.
+func (c *Client) DBList(ctx context.Context) ([]string, error) {
+	resp, err := c.rpc(ctx, "GET", "/db/ls", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result struct{ Volumes []string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Volumes, nil
+}
+
+// NBDSock returns the NBD socket path from the daemon status.
+func (c *Client) NBDSock(ctx context.Context) (string, error) {
+	status, err := c.Status(ctx)
+	if err != nil {
+		return "", err
+	}
+	if status.NBDSock == "" {
+		return "", fmt.Errorf("daemon has no NBD server running")
+	}
+	return status.NBDSock, nil
 }
 
 // --- internal ---

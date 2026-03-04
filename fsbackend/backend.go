@@ -143,7 +143,7 @@ func (b *Backend[H]) VM() loophole.VolumeManager { return b.vm }
 // Size is the volume size in bytes; 0 means use the default.
 func (b *Backend[H]) Create(ctx context.Context, p client.CreateParams) error {
 	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size)
-	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size)
+	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size, loophole.VolumeTypeExt4)
 	if err != nil {
 		return err
 	}

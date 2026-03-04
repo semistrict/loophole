@@ -29,7 +29,7 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 	defer vm.Close(ctx)
 
-	vol, err := vm.NewVolume(ctx, "big", 0)
+	vol, err := vm.NewVolume(ctx, "big", 0, "")
 	require.NoError(t, err)
 
 	fs, err := lwext4.Format(vol, daemonVolumeSize, nil)

@@ -1,6 +1,6 @@
 // Package lsm implements an LSM-inspired storage layer for loophole volumes.
 //
-// The block device is treated as a flat array of 4KB pages. Writes are
+// The block device is treated as a flat array of 64KB pages. Writes are
 // appended to an in-memory layer and periodically flushed as batch objects
 // to S3. Branching and snapshots are instant metadata operations.
 //

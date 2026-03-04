@@ -7,28 +7,28 @@ Scattered small writes (ext4 metadata, inode tables, bitmaps, journal) dirty
 many blocks, causing:
 
 - High S3 PUT count (cost-dominant)
-- Massive write amplification (4KB write → 4MB upload)
+- Massive write amplification (64KB write → 4MB upload)
 - Freeze/snapshot blocks on uploading all dirty blocks
 
 ## Proposal
 
 Replace the per-block storage with an LSM-inspired approach adapted from Neon's
-pageserver. The block device is treated as a flat array of 4KB pages. Writes are
+pageserver. The block device is treated as a flat array of 64KB pages. Writes are
 appended to an in-memory layer and periodically flushed as batch objects to S3.
 Branching and snapshots become instant metadata operations.
 
 ## Data model
 
 ```
-Page address = device byte offset / 4096
+Page address = device byte offset / 65536
 Seq          = monotonically increasing write counter (uint64)
-Value        = 4096 bytes (always a full page, never a diff)
+Value        = 65536 bytes (always a full page, never a diff)
 ```
 
 The storage for each timeline consists of layers. Each layer covers a rectangle
 in (page address, seq) space. Two types:
 
-**Delta layer** — a sparse set of (page addr, seq, 4KB data) entries. Contains
+**Delta layer** — a sparse set of (page addr, seq, 64KB data) entries. Contains
 only pages that were actually written during the seq range it covers. Stored as
 a single S3 object with an index for point lookups.
 
@@ -42,7 +42,7 @@ Neon stores WAL records (diffs) and must replay them against a base image to
 reconstruct a page. This requires a "will_init" flag, multi-record
 reconstruction, and a WAL redo process.
 
-Our block device always stores full 4KB page images. Reading a page means
+Our block device always stores full 64KB page images. Reading a page means
 finding the newest entry — no reconstruction, no replay. This eliminates Neon's
 most complex code path.
 
@@ -66,18 +66,16 @@ Steps:
 
 1. Record `branchSeq = timeline.nextSeq`
 2. Freeze the parent's current memLayer (mark read-only, O(1))
-3. Start a new empty memLayer for the parent — writes resume immediately
-4. Create a child timeline: `ancestor = parent, ancestorSeq = branchSeq`
-5. Write the child's `meta.json` to S3
+3. Start a new empty memLayer for the parent
+4. Flush all frozen memLayers to S3 as delta layers (synchronous)
+5. Create a child timeline: `ancestor = parent, ancestorSeq = branchSeq`
+6. Write the child's `meta.json` to S3
 
-The child timeline has zero layers of its own. All reads go through the
-ancestor pointer into the parent's existing layers (frozen memLayers, deltas,
-images). No data is copied or uploaded synchronously — the frozen memLayer is
-flushed to S3 in the background like any other frozen memLayer.
-
-In the current design, snapshot must upload every dirty block before completing
-(blocking). Here, the snapshot returns as soon as `meta.json` is written. The
-parent's writes are unblocked at step 3.
+The flush in step 4 is synchronous because the child opens the parent as an
+ancestor from S3. If frozen layers were not uploaded first, the child would
+be unable to see that data. After the flush completes, the child timeline has
+zero layers of its own — all reads go through the ancestor pointer into the
+parent's layers on S3.
 
 **Clone**: same as snapshot but the child timeline is writable. The child's
 `nextSeq` starts at 0 — each timeline has its own independent seq space. The
@@ -88,7 +86,8 @@ timeline, same as today's `freezeAndContinue`).
 requires holding the parent's lease. This serializes child creation with GC
 on the parent — without it, a GC running on a frozen timeline could delete a
 layer while a concurrent child creation establishes an `ancestorSeq` that
-depends on it. Lease acquisition is one S3 conditional write.
+depends on it. Lease acquisition is a read-modify-CAS-write cycle on `meta.json`
+(via `ModifyJSON`).
 
 **Reading across branches**: search the child's layers first. If the page isn't
 found, search the ancestor's layers restricted to `seq <= ancestorSeq`. Recurse
@@ -101,13 +100,12 @@ on A, which is fixed at branch time.
 
 ```
 Write(offset uint64, data []byte):
-    for each 4KB page overlapping [offset, offset+len):
+    for each 64KB page overlapping [offset, offset+len):
         seq := timeline.nextSeq++
-        pageAddr := pageStart / 4096
-        pageData := extract or pad the 4KB page
+        pageAddr := pageStart / 65536
+        pageData := extract or pad the 64KB page
 
         timeline.memLayer.Put(pageAddr, seq, pageData)
-        pageCache.Put(pageAddr, pageData)    // write-through to local cache
 ```
 
 The in-memory layer (see `lsm/memlayer.go`) is backed by a fixed-size
@@ -125,6 +123,12 @@ The index stores only the latest entry per pageAddr — if a page is written
 multiple times within one memLayer's lifetime, intermediate versions are
 discarded. This is safe because branching freezes the memLayer, so no branch
 point can fall inside an active memLayer's seq range.
+
+Sub-page writes (e.g. the kernel sending 4KB writes for a 64KB page) require
+a read-modify-write cycle. A striped lock array `pageLocks [256]sync.Mutex`
+serializes concurrent writes to the same page, preventing lost updates where
+two writers each read the old page, apply their chunk, and the last writer
+silently drops the other's data. The lock is indexed by `pageAddr % 256`.
 
 When `memLayer.size` exceeds a threshold (e.g. 256MB), freeze it and start a
 new one. The frozen in-memory layer is then flushed to S3 as a delta layer.
@@ -144,11 +148,11 @@ new one. The frozen in-memory layer is then flushed to S3 as a delta layer.
 Multiple frozen memLayers may upload concurrently, but the in-memory layer map
 update in step 6 is serialized — a delta layer is added to the layer map only
 after all older frozen memLayers have been added. This prevents seq gaps in
-the layer map. `layers.json` is written periodically as a checkpoint, not on
-every flush.
+the layer map. `layers.json` is written after every successful delta layer
+upload.
 
 One S3 PUT per flush, regardless of how many pages were written. 300 scattered
-4KB metadata writes = one ~1.2MB object, compressed to ~100-200KB.
+64KB metadata writes = one ~1.2MB object, compressed to ~100-200KB.
 
 ### Delta layer S3 format
 
@@ -166,7 +170,7 @@ Header (fixed size, uncompressed):
     indexOffset: uint64       // byte offset where index starts
 
 Values section (variable):
-    For each entry, a zstd-compressed 4KB page (variable length).
+    For each entry, a zstd-compressed 64KB page (variable length).
     Entries ordered by (pageAddr, seq).
 
 Index section (uncompressed):
@@ -182,58 +186,49 @@ The header and index are uncompressed.
 
 ### Layer index caching
 
-On first access to a layer, download the header + index (not the values) and
-cache to local disk as `layers/<timelineID>/deltas/<name>.index`. The index
-for a 64K-entry delta layer is ~2MB. Since layers are immutable once written
-to S3, cached indexes never need invalidation — they are deleted only when GC
-deletes the layer itself.
+On first access to a layer, the full blob is downloaded and cached to local
+disk at `<cacheDir>/<key>` (e.g. `<cacheDir>/deltas/0000...0100-0000...0500`).
+Since layers are immutable once written to S3, cached files never need
+invalidation — they are deleted only when GC deletes the layer itself.
 
-With cached indexes, reading a page from a delta layer is:
-
-- **Index cached locally**: local disk read + binary search. If page not found,
-  zero S3 calls. If found, one S3 range GET for the compressed page data.
-- **Index not cached (first access)**: 2 S3 range GETs (header + index), cached
-  to disk. Then one more S3 GET if the page is found.
-
-Without index caching, every layer probe costs 2 S3 GETs just to discover the
-page isn't there. On a read that traverses an ancestor chain with many delta
-layers, this compounds to dozens of S3 round trips for a single 4KB page.
-
-For bulk reads, fetch the entire layer in one GET and decompress pages as
-needed.
+With a cached layer, reading a page is a local disk read + binary search on
+the index section. If the page isn't found, zero S3 calls. Without caching,
+every layer probe costs S3 GETs. On a read that traverses an ancestor chain
+with many delta layers, this compounds to dozens of S3 round trips for a
+single 64KB page.
 
 ## Read path
 
 ```
 Read(offset uint64, buf []byte):
-    for each 4KB page overlapping [offset, offset+len):
-        pageAddr := pageStart / 4096
+    for each 64KB page overlapping [offset, offset+len):
+        pageAddr := pageStart / 65536
         data := ReadPage(timeline, pageAddr, MaxUint64)
         copy data into buf
 
-ReadPage(timeline, pageAddr, maxSeq) → []byte:
+ReadPage(timeline, pageAddr, beforeSeq) → []byte:
     // 1. Local page cache (fast path, only for unbounded reads)
-    if maxSeq == MaxUint64:
+    if beforeSeq == MaxUint64:
         if page := pageCache.Get(timeline.id, pageAddr); page != nil:
             return page
 
-    // 2. In-memory layer (skip if maxSeq bounds us before it)
-    if entry := timeline.memLayer.Get(pageAddr); entry != nil && entry.seq <= maxSeq:
+    // 2. In-memory layer (skip if beforeSeq bounds us before it)
+    if entry := timeline.memLayer.Get(pageAddr); entry != nil && entry.seq < beforeSeq:
         return entry.data
 
     // 3. Frozen in-memory layers (newest first)
     for each frozen memLayer (newest → oldest):
-        if entry := frozen.Get(pageAddr); entry != nil && entry.seq <= maxSeq:
+        if entry := frozen.Get(pageAddr); entry != nil && entry.seq < beforeSeq:
             return entry.data
 
-    // 4. Delta layers (newest first, skip layers with startSeq > maxSeq)
-    for each delta layer where startSeq <= maxSeq (newest → oldest):
-        if entry := delta.Get(pageAddr, maxSeq); entry != nil:
+    // 4. Delta layers (newest first, skip layers with startSeq >= beforeSeq)
+    for each delta layer where startSeq < beforeSeq (newest → oldest):
+        if entry := delta.Get(pageAddr, beforeSeq); entry != nil:
             pageCache.Put(timeline.id, pageAddr, entry.data)
             return entry.data
 
-    // 5. Image layers (skip layers with seq > maxSeq)
-    for each image layer covering pageAddr where seq <= maxSeq:
+    // 5. Image layers (skip layers with seq >= beforeSeq)
+    for each image layer covering pageAddr where seq < beforeSeq:
         if entry := image.Get(pageAddr); entry != nil:
             pageCache.Put(timeline.id, pageAddr, entry.data)
             return entry.data
@@ -246,14 +241,14 @@ ReadPage(timeline, pageAddr, maxSeq) → []byte:
     return zeroPage
 ```
 
-The `maxSeq` parameter threads through every layer search. For direct reads
-(not through an ancestor), `maxSeq = MaxUint64` imposes no filtering. For
-ancestor reads, `maxSeq = ancestorSeq` ensures the child only sees pages
-written before the branch point. Branching freezes the parent's memLayer, so
-all entries at `seq <= ancestorSeq` are in frozen or flushed layers, never in
-the ancestor's active memLayer.
+The `beforeSeq` parameter threads through every layer search as an exclusive
+upper bound. For direct reads (not through an ancestor), `beforeSeq = MaxUint64`
+imposes no filtering. For ancestor reads, `beforeSeq = ancestorSeq` ensures
+the child only sees pages written before the branch point. Branching freezes
+the parent's memLayer, so all entries at `seq < ancestorSeq` are in frozen or
+flushed layers, never in the ancestor's active memLayer.
 
-Since every entry is a full 4KB page (not a diff), the first match is the final
+Since every entry is a full 64KB page (not a diff), the first match is the final
 answer. No reconstruction needed. This is simpler than Neon's read path.
 
 ### Layer map
@@ -270,8 +265,9 @@ layers with binary search on seq ranges is likely sufficient. If needed,
 an interval tree or R-tree can be added later.
 
 The LayerMap (see `lsm/layer.go`) stores delta layers sorted by startSeq
-descending (newest first) and image layers similarly. Each delta has a
-(startSeq, endSeq, pageRange, s3Key); each image has a (seq, pageRange, s3Key).
+ascending. The read path iterates in reverse for newest-first traversal.
+Each delta has a (startSeq, endSeq, pageRange, s3Key); each image has a
+(seq, pageRange, s3Key).
 
 ## Compaction
 
@@ -308,7 +304,7 @@ searching existing layers.
 2. Choose a page range (e.g. 0..65536, covering 256MB)
 3. For each pageAddr in range:
      Read the value at seq <= imageSeq by searching layers
-4. Write as image layer to S3: images/<imageSeq>__<pageStart>-<pageEnd>
+4. Write as image layer to S3: images/<imageSeq>
 5. Update layer map
 6. Delta layers covering this page range with ALL entries at seq < imageSeq
    (and not needed by any branch point) can now be garbage collected
@@ -342,26 +338,27 @@ falls into two categories:
   `maxFrozenLayers × flushThreshold`
 
 **Evictable** (recoverable from S3 layers):
-- Page cache: individual 4KB pages, LRU eviction
-- Delta/image layer cache: recently downloaded layers for read misses, LRU
+- Page cache: individual 64KB pages, random eviction
+- Delta/image layer cache: recently downloaded layers for read misses, random eviction
 
 Total local disk = pinned budget + evictable cache budget. Both are bounded by
-configuration. When the evictable cache is full, the oldest entry is evicted
+configuration. When the evictable cache is full, a random entry is evicted
 before inserting a new one.
 
 ### Write backpressure
 
 The number of frozen memLayers is capped (e.g. `maxFrozenLayers = 2`). When
-the active memLayer hits the flush threshold and needs to freeze, but all
-frozen slots are occupied (uploads in progress), writes block until a flush
-completes and frees a slot.
+the frozen layer count reaches the cap, the write path flushes them inline
+before proceeding:
 
 ```
 Write(offset, data):
     ...
+    // Backpressure: if frozen layers are at capacity, flush them now.
+    if len(frozenMemLayers) >= maxFrozenLayers:
+        flushFrozenLayers()
+
     if memLayer.size >= flushThreshold:
-        while len(frozenMemLayers) >= maxFrozenLayers:
-            wait on flushComplete
         freeze current memLayer, start new one
 ```
 
@@ -372,14 +369,15 @@ freeze and writes never block.
 
 ### Page cache
 
-Fixed-size LRU on local disk, replacing `openBlocks`. Stores individual 4KB
+Fixed-size on local disk, replacing `openBlocks`. Stores individual 64KB
 pages keyed by (timeline, pageAddr).
 
 The PageCache (see `lsm/pagecache.go`) is a fixed-size mmap'd file divided
 into PageSize slots. An in-memory index maps `(timelineID, pageAddr)` to slot
 numbers. Random eviction reuses slots when full.
 
-- Writes update the cache (write-through), so subsequent reads are local.
+- Populated on reads from delta/image layers (not on writes). Writes go only
+  to memLayer. `flushFrozenLayers` invalidates cache entries for flushed pages.
 - Any cache entry can be evicted — the data is always recoverable from layers.
 - Bounded by configuration. No unbounded growth like the current `openBlocks`.
 
@@ -390,38 +388,30 @@ one operation.
 ### Local cache directory layout
 
 ```
-<cache_dir>/
+<dataDir>/
     mem/
         <startSeq>-<rand>.ephemeral             # active memLayer mmap backing file
         <startSeq>-<rand>.ephemeral             # frozen memLayer(s) awaiting upload
-    pages.cache                                 # page cache: fixed-size file of 4KB slots
-    layers/
-        <timelineID>/
-            deltas/<startSeq>-<endSeq>.index    # layer index (header + index section)
-            deltas/<startSeq>-<endSeq>.data     # full layer data (optional, for bulk reads)
-            images/<seq>__<pStart>-<pEnd>.index  # image layer index
-            images/<seq>__<pStart>-<pEnd>.data   # full image layer (optional)
+    pages.cache                                 # page cache: fixed-size file of 64KB slots
+<cacheDir>/
+    deltas/<startSeq>-<endSeq>                  # cached full delta layer blob
+    images/<seq>                                # cached full image layer blob
 ```
 
 **`mem/`**: pinned, cannot be evicted. One mmap backing file per memLayer
 (active + frozen). Each file is `maxPages × PageSize` bytes, pre-allocated via
 `Truncate`. Cleaned up (munmap + close + remove) after successful flush to S3.
 
-**`pages.cache`**: a fixed-size file divided into 4KB slots. The in-memory
-index maps `(timelineID, pageAddr)` to a slot number. LRU eviction reuses
+**`pages.cache`**: a fixed-size file divided into 64KB slots. The in-memory
+index maps `(timelineID, pageAddr)` to a slot number. Random eviction reuses
 slots. Size bounded by `PageCache.maxBytes`.
 
-**`layers/*.index`**: layer indexes cached on disk. Downloaded on first access
-to a layer (2 S3 GETs: header + index). Immutable — never invalidated, evictable
-under disk pressure (re-downloaded on next access). Small (~2MB per 64K-entry
-layer). Cleaned up when GC deletes the layer: the lease holder deletes local
-cached files when it removes a layer from the layer map. A non-lease-holder node
-with a stale cached index will get a 404 on the next S3 range read, at which
-point it deletes the stale cache entry and refreshes its layer map from S3.
-
-**`layers/*.data`**: full layer data cached for read performance. LRU eviction
-deletes files when the cache budget is exceeded. Any cached layer can be
-re-downloaded from S3 on eviction.
+**`<cacheDir>/`**: full layer blobs cached on disk at `<cacheDir>/<key>`.
+Immutable — never invalidated, evictable under disk pressure (re-downloaded on
+next access). Cleaned up when GC deletes the layer. A non-lease-holder node
+with a stale cached file will get a 404 on the next S3 read, at which point
+it deletes the stale cache entry and refreshes its layer map from S3. Random
+eviction when the in-memory cache exceeds `MaxLayerCacheEntries`.
 
 ## Garbage collection
 
@@ -454,7 +444,7 @@ timelines/<id>/
     meta.json                                              # timeline metadata
     layers.json                                            # layer map (list of all layers)
     deltas/<startSeq>-<endSeq>                             # delta layer
-    images/<seq>__<pageStart>-<pageEnd>                     # image layer
+    images/<seq>                                            # image layer
 ```
 
 `meta.json`:
@@ -498,7 +488,7 @@ leaves old layer objects in S3 — cleaned up on next compaction or startup.
         {"start_seq": 100, "end_seq": 500, "pages": [0, 65535], "key": "deltas/0000000000000100-0000000000000500", "size": 1048576}
     ],
     "images": [
-        {"seq": 500, "pages": [0, 65535], "key": "images/0000000000000500__0000000000000000-000000000000FFFF", "size": 4194304}
+        {"seq": 500, "pages": [0, 65535], "key": "images/00000000000001f4", "size": 4194304}
     ]
 }
 ```
@@ -507,13 +497,13 @@ leaves old layer objects in S3 — cleaned up on next compaction or startup.
 
 | Aspect | Current | LSM |
 |---|---|---|
-| S3 PUTs for 300 scattered 4KB writes | 300 (one per block) | 1 (one delta layer) |
+| S3 PUTs for 300 scattered 64KB writes | 300 (one per block) | 1 (one delta layer) |
 | Upload volume for above | 300 × 1MB = 300MB | ~100KB compressed |
-| Snapshot/freeze | Upload all dirty blocks, blocking | Instant: freeze memLayer + write meta.json (flush is async) |
+| Snapshot/freeze | Upload all dirty blocks, blocking | Freeze memLayer + flush frozen layers + write meta.json |
 | Clone | Copy refBlockIndex, create child layer | Pointer to ancestor + seq |
 | Read path (warm) | pread on local block file | Page cache hit |
 | Read path (cold) | Download full block from S3 | 3 small S3 range reads (header, index, page) |
-| Local disk usage | Unbounded (openBlocks) | Bounded (pinned memLayers + LRU cache) |
+| Local disk usage | Unbounded (openBlocks) | Bounded (pinned memLayers + page cache) |
 | Branching model | refBlockIndex + layer chain | Ancestor pointer + seq |
 
 ## Mapping to current design
@@ -528,8 +518,8 @@ of a `*Layer`.
 Snapshot and clone create new timelines instead of freezing layers and creating
 children.
 
-**BlockCache → PageCache**: fixed-size LRU of 4KB pages instead of immutable
-block file cache.
+**BlockCache → PageCache**: fixed-size cache of 64KB pages (random eviction)
+instead of immutable block file cache.
 
 **Flusher → delta layer writer**: instead of uploading individual blocks, the
 flusher serializes frozen in-memory layers into delta layer objects.
@@ -541,21 +531,32 @@ container storage interfaces are unaffected.
 ## PunchHole
 
 PunchHole (FUSE fallocate with punch mode) zeroes a range of the block device.
-Instead of writing 4KB of zeros for each page, a tombstone is recorded:
+Partial pages at the start and end of the range are handled by zero-filling
+via `tl.Write` (read-modify-write under the per-page lock). Only fully-covered
+interior pages get tombstones, avoiding a full 64KB write:
 
 ```
 PunchHole(offset, length):
-    for each 4KB page fully covered by [offset, offset+length):
+    // Partial page at start: zero-fill via tl.Write
+    if offset is not page-aligned:
+        tl.Write(zeros for remainder of start page)
+
+    // Partial page at end: zero-fill via tl.Write
+    if end is not page-aligned:
+        tl.Write(zeros for beginning of end page)
+
+    // Tombstone fully-covered interior pages
+    for each 64KB page fully covered by [offset, offset+length):
         seq := timeline.nextSeq++
-        pageAddr := pageStart / 4096
+        pageAddr := pageStart / 65536
         timeline.memLayer.PutTombstone(pageAddr, seq)
-        pageCache.Put(timeline.id, pageAddr, zeroPage)
+        pageCache.Delete(timeline.id, pageAddr)
 ```
 
 **Representation**: in the memLayer, a tombstone is a `memEntry` with
 `tombstone = true` and no data written to the mmap. In the delta
 layer on S3, a tombstone has `valueLen = 0` in the index entry — no compressed
-page data is stored. This avoids wasting 4KB per punched page.
+page data is stored. This avoids wasting 64KB per punched page.
 
 **Read path**: when the first match for a page is a tombstone, return zeros
 immediately. Do not continue searching older layers — the tombstone explicitly
@@ -571,6 +572,11 @@ pages in an image layer are zero).
 **GC**: once an image layer at seq S supersedes the tombstone (S > tombstone's
 seq), the tombstone can be garbage collected — the image layer already records
 the page as zero.
+
+## ZeroRange
+
+ZeroRange (FUSE fallocate with zero mode) delegates to PunchHole. Both
+operations produce the same result: the affected range reads back as zeros.
 
 ## CopyFrom (CoW)
 
@@ -642,12 +648,12 @@ In-memory filesystem that supports crash simulation (see `lsm/simfs_test.go`).
 Only used for delta/image layer cache files — MemLayer uses real OS files + mmap
 via `t.TempDir()`.
 
-`Crash()` discards all files under paths containing `/mem/` or ending with
-`.ephemeral`. Delta/image layer caches are also discarded since they're just
-caches of S3 data. After crash, the timeline engine is reconstructed from
-`SimObjectStore` state — same as real crash recovery. MemLayer mmap files are
-real OS files in `t.TempDir()` and become orphans cleaned up by test temp dir
-cleanup.
+`Crash()` discards only files matching `/mem/` in the path or ending with
+`.ephemeral` — these are the memLayer backing files. Delta/image layer caches
+are retained (they are immutable copies of S3 data). After crash, the timeline
+engine is reconstructed from `SimObjectStore` state — same as real crash
+recovery. MemLayer mmap files are real OS files in `t.TempDir()` and become
+orphans cleaned up by test temp dir cleanup.
 
 ### Simulation test
 
@@ -685,9 +691,9 @@ what each timeline should contain at each point. It records every flushed write
 read, the simulation verifies the result matches the oracle. Unflushed writes
 are tracked separately and discarded on crash.
 
-**Crash and recovery**: when a node crashes, its `SimLocalFS` discards
-ephemeral files and page cache. Its in-memory timeline state is destroyed. The
-oracle discards that node's unflushed writes. On recovery, the node
+**Crash and recovery**: when a node crashes, its `SimLocalFS` discards files
+matching `/mem/` or `.ephemeral`. Its in-memory timeline state is destroyed.
+The oracle discards that node's unflushed writes. On recovery, the node
 reconstructs timelines from `SimObjectStore` and the oracle verifies all
 flushed data is still readable.
 

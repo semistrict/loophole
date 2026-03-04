@@ -27,7 +27,7 @@ func TestStalePageCacheAfterFlush(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
 
-	vol, err := m.NewVolume(ctx, "stale-flush", 0)
+	vol, err := m.NewVolume(ctx, "stale-flush", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

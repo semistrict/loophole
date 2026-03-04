@@ -40,7 +40,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+		v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -68,7 +68,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+		v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -102,7 +102,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+		v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -134,7 +134,7 @@ func BenchmarkS3Ops(b *testing.B) {
 			m := newBenchManager(b, store, defaultBenchConfig)
 			ctx := context.Background()
 
-			v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+			v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -171,7 +171,7 @@ func BenchmarkS3Ops(b *testing.B) {
 			})
 			ctx := context.Background()
 
-			v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+			v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -231,7 +231,7 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 
 	// Write the data once.
 	m := newBenchManager(b, store, defaultBenchConfig)
-	v, err := m.NewVolume(ctx, "vol", totalPages*PageSize)
+	v, err := m.NewVolume(ctx, "vol", totalPages*PageSize, "")
 	if err != nil {
 		b.Fatal(err)
 	}

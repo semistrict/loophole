@@ -2,11 +2,10 @@ package lsm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"sync/atomic"
-
-	"encoding/json"
 
 	"github.com/semistrict/loophole"
 )
@@ -18,6 +17,7 @@ var _ loophole.Volume = (*volume)(nil)
 type volume struct {
 	name     string
 	size     uint64
+	volType  string
 	readOnly atomic.Bool
 	refs     atomic.Int32
 
@@ -27,13 +27,14 @@ type volume struct {
 	manager *Manager
 }
 
-func newVolume(name string, size uint64, tl *Timeline, m *Manager) *volume {
+func newVolume(name string, size uint64, volType string, tl *Timeline, m *Manager) *volume {
 	if size == 0 {
 		size = DefaultVolumeSize
 	}
 	v := &volume{
 		name:     name,
 		size:     size,
+		volType:  volType,
 		timeline: tl,
 		manager:  m,
 	}
@@ -41,9 +42,10 @@ func newVolume(name string, size uint64, tl *Timeline, m *Manager) *volume {
 	return v
 }
 
-func (v *volume) Name() string   { return v.name }
-func (v *volume) Size() uint64   { return v.size }
-func (v *volume) ReadOnly() bool { return v.readOnly.Load() }
+func (v *volume) Name() string       { return v.name }
+func (v *volume) Size() uint64       { return v.size }
+func (v *volume) ReadOnly() bool     { return v.readOnly.Load() }
+func (v *volume) VolumeType() string { return v.volType }
 
 func (v *volume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
 	v.mu.RLock()
@@ -116,7 +118,7 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 
 	// Create the snapshot as a read-only volume ref.
 	if snapshotName != "" {
-		ref := volumeRef{TimelineID: childID, Size: v.size, ReadOnly: true}
+		ref := volumeRef{TimelineID: childID, Size: v.size, ReadOnly: true, Type: v.volType}
 		if err := v.manager.putVolumeRef(ctx, snapshotName, ref); err != nil {
 			return fmt.Errorf("create snapshot ref: %w", err)
 		}
@@ -150,7 +152,7 @@ func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, 
 		return nil, fmt.Errorf("create clone child: %w", err)
 	}
 
-	ref := volumeRef{TimelineID: childID, Size: v.size}
+	ref := volumeRef{TimelineID: childID, Size: v.size, Type: v.volType}
 	if err := v.manager.putVolumeRef(ctx, cloneName, ref); err != nil {
 		return nil, fmt.Errorf("create clone ref: %w", err)
 	}
@@ -180,6 +182,12 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 		copied += uint64(n)
 	}
 	return copied, nil
+}
+
+func (v *volume) Refresh(ctx context.Context) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.timeline.Refresh(ctx)
 }
 
 func (v *volume) Freeze(ctx context.Context) error {

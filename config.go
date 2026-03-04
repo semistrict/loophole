@@ -24,6 +24,7 @@ type Profile struct {
 	Mode      string `toml:"mode"`
 	NBDSocket string `toml:"nbd_socket"`
 	LogLevel  string `toml:"log_level"`
+	LocalDir  string `toml:"local_dir"`
 }
 
 // LoadConfig reads ~/.loophole/config.toml. Returns an empty Config (not an
@@ -54,14 +55,15 @@ func (c *Config) Resolve(name string) (Instance, error) {
 		}
 		return Instance{}, fmt.Errorf("unknown profile %q (available: %v)", name, names)
 	}
-	if p.Bucket == "" {
-		return Instance{}, fmt.Errorf("profile %q: bucket is required", name)
+	if p.Bucket == "" && p.LocalDir == "" {
+		return Instance{}, fmt.Errorf("profile %q: bucket or local_dir is required", name)
 	}
 	return Instance{
 		ProfileName: name,
 		Bucket:      p.Bucket,
 		Prefix:      p.Prefix,
 		Endpoint:    p.Endpoint,
+		LocalDir:    p.LocalDir,
 		AccessKey:   p.AccessKey,
 		SecretKey:   p.SecretKey,
 		Region:      p.Region,

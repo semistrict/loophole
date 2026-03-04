@@ -22,6 +22,7 @@ type volumeRef struct {
 	TimelineID string `json:"timeline_id"`
 	Size       uint64 `json:"size,omitempty"`      // 0 = default
 	ReadOnly   bool   `json:"read_only,omitempty"` // true for snapshots
+	Type       string `json:"type,omitempty"`      // "ext4", "sqlite", or "" (unknown)
 }
 
 // Manager implements IVolumeManager using the LSM storage layer.
@@ -69,7 +70,7 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 	return m
 }
 
-func (m *Manager) NewVolume(ctx context.Context, name string, size uint64) (loophole.Volume, error) {
+func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volType string) (loophole.Volume, error) {
 	if size == 0 {
 		size = DefaultVolumeSize
 	}
@@ -89,7 +90,7 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64) (loop
 	}
 
 	// Write volume ref.
-	ref := volumeRef{TimelineID: timelineID, Size: size}
+	ref := volumeRef{TimelineID: timelineID, Size: size, Type: volType}
 	refData, err := json.Marshal(ref)
 	if err != nil {
 		return nil, err
@@ -163,6 +164,24 @@ func (m *Manager) ListAllVolumes(ctx context.Context) ([]string, error) {
 	names := make([]string, len(objects))
 	for i, obj := range objects {
 		names[i] = obj.Key
+	}
+	return names, nil
+}
+
+func (m *Manager) ListVolumesByType(ctx context.Context, volType string) ([]string, error) {
+	objects, err := m.volRefs.ListKeys(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, obj := range objects {
+		ref, _, err := loophole.ReadJSON[volumeRef](ctx, m.volRefs, obj.Key)
+		if err != nil {
+			continue
+		}
+		if ref.Type == volType {
+			names = append(names, obj.Key)
+		}
 	}
 	return names, nil
 }
@@ -242,7 +261,7 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*
 		}
 	}
 
-	v := newVolume(name, ref.Size, tl, m)
+	v := newVolume(name, ref.Size, ref.Type, tl, m)
 	if ref.ReadOnly {
 		v.readOnly.Store(true)
 	}

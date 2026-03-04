@@ -715,7 +715,7 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 	name := fmt.Sprintf("vol-%d", sim.nextVolID)
 	sim.nextVolID++
 
-	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize)
+	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize, "")
 	if err != nil {
 		return // S3 faults can cause creation failures
 	}
@@ -1237,7 +1237,7 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 }
 
 func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name string) {
-	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize)
+	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize, "")
 	if err != nil {
 		sim.t.Fatalf("create volume %s: %v", name, err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -643,6 +644,14 @@ func (tl *Timeline) loadLayerMap(ctx context.Context) error {
 	return nil
 }
 
+// Refresh re-reads the layer map from S3 to pick up new layers written by
+// another writer. This is used for read-only "follow" mode.
+func (tl *Timeline) Refresh(ctx context.Context) error {
+	tl.mu.Lock()
+	defer tl.mu.Unlock()
+	return tl.loadLayerMap(ctx)
+}
+
 // saveLayerMap writes the current layer map as layers.json.
 func (tl *Timeline) saveLayerMap(ctx context.Context) error {
 	tl.mu.RLock()
@@ -807,9 +816,12 @@ func (tl *Timeline) compactLog(format string, args ...any) {
 	}
 }
 
-// Compact merges all delta layers into a single image layer and removes the
-// compacted deltas. This reduces read amplification and reclaims space from
-// overwritten/tombstoned pages.
+// Compact merges delta layers, choosing between a lightweight delta merge
+// and a full image promotion based on relative sizes:
+//   - If there are fewer than 2 deltas, nothing to do.
+//   - If no image exists yet, or total delta size > 50% of image size,
+//     do a full image promotion (compactToImage).
+//   - Otherwise, merge all compactable deltas into one (compactMergeDeltas).
 func (tl *Timeline) Compact(ctx context.Context) error {
 	tl.compactMu.Lock()
 	defer tl.compactMu.Unlock()
@@ -820,8 +832,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	}
 
 	// Read branch points to determine the safe compaction boundary.
-	// We can only compact up to the minimum branch seq — data at or before
-	// that seq must remain readable to child timelines via ancestor reads.
 	parentMeta, _, err := loophole.ReadJSON[TimelineMeta](ctx, tl.store, "meta.json")
 	if err != nil {
 		return fmt.Errorf("read meta for compact: %w", err)
@@ -847,14 +857,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 		tl.compactLog("  image[%d]: %s seq=%d pages=[%d,%d]", i, il.Key, il.Seq, il.PageRange[0], il.PageRange[1])
 	}
 
-	// Determine the seq range to compact.
-	compactSeq := deltas[len(deltas)-1].EndSeq
-
-	// If there are branch points, we can only safely compact delta layers
-	// whose EndSeq is <= the minimum branch seq. Layers that span branch
-	// points contain entries visible to children (via ancestorSeq) and
-	// can't be replaced by a single image layer without losing per-entry
-	// seq filtering.
+	// Split deltas into compactable vs remaining based on branch points.
 	var remainingDeltas []DeltaLayerMeta
 	if len(parentMeta.BranchPoints) > 0 {
 		minBranch := parentMeta.BranchPoints[0].Seq
@@ -864,7 +867,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 			}
 		}
 		tl.compactLog("  minBranch=%d", minBranch)
-		// Only compact deltas whose entire range is before the earliest branch.
 		var compactable []DeltaLayerMeta
 		for _, dl := range deltas {
 			if dl.EndSeq <= minBranch {
@@ -875,16 +877,155 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 		}
 		if len(compactable) == 0 {
 			tl.compactLog("  nothing safe to compact")
-			return nil // nothing safe to compact
+			return nil
 		}
 		tl.compactLog("  compactable=%d remaining=%d", len(compactable), len(remainingDeltas))
 		deltas = compactable
-		compactSeq = deltas[len(deltas)-1].EndSeq
 	}
-	tl.compactLog("  compactSeq=%d", compactSeq)
 
+	// Decide: delta merge vs image promotion.
+	var totalDeltaSize int64
+	for _, dl := range deltas {
+		totalDeltaSize += dl.Size
+	}
+	var totalImageSize int64
+	for _, il := range existingImages {
+		totalImageSize += il.Size
+	}
+
+	compactSeq := deltas[len(deltas)-1].EndSeq
+	tl.compactLog("  compactSeq=%d totalDeltaSize=%d totalImageSize=%d", compactSeq, totalDeltaSize, totalImageSize)
+
+	if totalImageSize == 0 || totalDeltaSize > totalImageSize/2 {
+		tl.compactLog("  -> image promotion (no image or deltas > 50%% of image)")
+		return tl.compactToImage(ctx, deltas, existingImages, remainingDeltas, compactSeq)
+	}
+
+	if len(deltas) < 2 {
+		tl.compactLog("  fewer than 2 compactable deltas, nothing to merge")
+		return nil
+	}
+
+	tl.compactLog("  -> delta merge")
+	return tl.compactMergeDeltas(ctx, deltas, remainingDeltas)
+}
+
+// compactMergeDeltas merges multiple delta layers into a single merged delta.
+// Cost is O(sum of delta sizes) — does not touch image layers.
+func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerMeta, remainingDeltas []DeltaLayerMeta) error {
+	// Download and parse all delta layers.
+	parsed := make([]*parsedDeltaLayer, len(deltas))
+	for i, dl := range deltas {
+		data, err := tl.downloadDeltaLayer(ctx, dl.Key)
+		if err != nil {
+			return fmt.Errorf("download delta layer %s: %w", dl.Key, err)
+		}
+		p, err := parseDeltaLayer(data)
+		if err != nil {
+			return fmt.Errorf("parse delta layer %s: %w", dl.Key, err)
+		}
+		parsed[i] = p
+	}
+
+	// Merge.
+	mergedData, mergedMeta, err := mergeDeltaLayers(ctx, parsed, deltas)
+	if err != nil {
+		return fmt.Errorf("merge delta layers: %w", err)
+	}
+
+	// Upload merged delta to S3.
+	if err := tl.store.PutReader(ctx, mergedMeta.Key, bytes.NewReader(mergedData)); err != nil {
+		return fmt.Errorf("upload merged delta: %w", err)
+	}
+	tl.compactLog("  merged delta uploaded: %s seq=[%d,%d) pages=[%d,%d]",
+		mergedMeta.Key, mergedMeta.StartSeq, mergedMeta.EndSeq, mergedMeta.PageRange[0], mergedMeta.PageRange[1])
+
+	// Pre-cache the merged layer.
+	mergedParsed, parseErr := parseDeltaLayer(mergedData)
+	if parseErr == nil {
+		tl.cacheDeltaLayer(mergedMeta.Key, mergedParsed)
+	}
+	localPath := filepath.Join(tl.cacheDir, mergedMeta.Key)
+	if dir := filepath.Dir(localPath); dir != "" {
+		_ = tl.fs.MkdirAll(dir, 0o755)
+	}
+	_ = tl.fs.WriteFile(localPath, mergedData, 0o644)
+
+	// Update layer map: replace compacted deltas with merged + remaining.
+	newDeltas := []DeltaLayerMeta{mergedMeta}
+	newDeltas = append(newDeltas, remainingDeltas...)
+
+	tl.mu.Lock()
+	oldDeltas := tl.layers.Deltas
+	tl.layers.Deltas = newDeltas
+	tl.mu.Unlock()
+
+	if err := tl.saveLayerMap(ctx); err != nil {
+		tl.mu.Lock()
+		tl.layers.Deltas = oldDeltas
+		tl.mu.Unlock()
+		tl.compactLog("  saveLayerMap FAILED (reverted): %v", err)
+		return fmt.Errorf("save layer map: %w", err)
+	}
+
+	// Delete old deltas from S3 (best-effort).
+	for _, dl := range deltas {
+		_ = tl.store.DeleteObject(ctx, dl.Key)
+	}
+
+	// Clear caches for deleted layers.
+	tl.deltaIndexMu.Lock()
+	for _, dl := range deltas {
+		delete(tl.deltaIndexCache, dl.Key)
+	}
+	tl.deltaIndexMu.Unlock()
+
+	// Invalidate page cache — merged delta may have different data.
+	if tl.pageCache != nil {
+		for _, p := range parsed {
+			for _, ie := range p.index {
+				tl.pageCache.Delete(tl.id, ie.PageAddr)
+			}
+		}
+	}
+
+	tl.compactLog("  DONE (delta merge) tl=%s final deltas=%d images=%d",
+		tl.id[:8], len(tl.layers.Deltas), len(tl.layers.Images))
+	return nil
+}
+
+// downloadDeltaLayer downloads a complete delta layer blob from S3 or local cache.
+func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte, error) {
+	// Try local disk cache first.
+	localPath := filepath.Join(tl.cacheDir, key)
+	if data, err := tl.fs.ReadFile(localPath); err == nil {
+		return data, nil
+	}
+
+	// Download from S3.
+	body, _, err := tl.store.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache locally.
+	if dir := filepath.Dir(localPath); dir != "" {
+		_ = tl.fs.MkdirAll(dir, 0o755)
+	}
+	_ = tl.fs.WriteFile(localPath, data, 0o644)
+
+	return data, nil
+}
+
+// compactToImage builds an image layer from all compactable deltas + existing
+// images. This is the original full-compaction behavior.
+func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta, existingImages []ImageLayerMeta, remainingDeltas []DeltaLayerMeta, compactSeq uint64) error {
 	// Collect all unique pages across all delta layers (and existing images).
-	// For each page, read its latest value up to compactSeq.
 	pageSet := make(map[uint64]struct{})
 	for _, dl := range deltas {
 		parsed, err := tl.getDeltaLayer(ctx, dl.Key)
@@ -936,8 +1077,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 
 	if len(pages) == 0 {
 		tl.compactLog("  ALL ZERO PATH: removing %d compacted deltas, keeping %d remaining", len(deltas), len(remainingDeltas))
-		// All compacted pages were zeros — remove compacted deltas only,
-		// keeping remaining deltas that weren't compacted.
 		tl.mu.Lock()
 		oldDeltas := tl.layers.Deltas
 		oldImages := tl.layers.Images
@@ -945,7 +1084,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 		tl.layers.Images = nil
 		tl.mu.Unlock()
 		if err := tl.saveLayerMap(ctx); err != nil {
-			// Revert in-memory state.
 			tl.mu.Lock()
 			tl.layers.Deltas = oldDeltas
 			tl.layers.Images = oldImages
@@ -953,7 +1091,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 			tl.compactLog("  ALL ZERO saveLayerMap FAILED (reverted): %v", err)
 			return err
 		}
-		// Delete compacted layers from S3 (best-effort, after successful save).
 		for _, dl := range deltas {
 			_ = tl.store.DeleteObject(ctx, dl.Key)
 		}
@@ -977,11 +1114,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	}
 	tl.compactLog("  image uploaded: %s seq=%d pages=[%d,%d]", imgMeta.Key, imgMeta.Seq, imgMeta.PageRange[0], imgMeta.PageRange[1])
 
-	// Update layer map: replace compacted deltas and old images with the new image,
-	// keeping any deltas that weren't compacted (those past branch points).
-	// Save checkpoint FIRST, then update in-memory state. If saveLayerMap
-	// fails, the in-memory state remains unchanged and the uploaded image
-	// becomes an orphan (acceptable — no data loss).
 	tl.mu.Lock()
 	oldDeltas := tl.layers.Deltas
 	oldImages := tl.layers.Images
@@ -989,9 +1121,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	tl.layers.Images = []ImageLayerMeta{imgMeta}
 	tl.mu.Unlock()
 
-	// Save checkpoint.
 	if err := tl.saveLayerMap(ctx); err != nil {
-		// Revert in-memory state since S3 still has the old layer map.
 		tl.mu.Lock()
 		tl.layers.Deltas = oldDeltas
 		tl.layers.Images = oldImages
@@ -1001,7 +1131,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	}
 	tl.compactLog("  saveLayerMap OK, deleting %d old deltas, %d old images", len(deltas), len(existingImages))
 
-	// Delete old layers from S3 (best-effort).
 	for _, dl := range deltas {
 		_ = tl.store.DeleteObject(ctx, dl.Key)
 	}
@@ -1009,7 +1138,6 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 		_ = tl.store.DeleteObject(ctx, il.Key)
 	}
 
-	// Clear in-memory caches for deleted layers.
 	tl.deltaIndexMu.Lock()
 	for _, dl := range deltas {
 		delete(tl.deltaIndexCache, dl.Key)

@@ -34,6 +34,7 @@ func addCommands(root *cobra.Command) {
 		statsCmd(),
 		deviceCmd(),
 		fileCmd(),
+		dbCmd(),
 	)
 }
 

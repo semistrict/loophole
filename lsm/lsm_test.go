@@ -204,7 +204,7 @@ func TestWriteFlushRead(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,7 +261,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	// Write and flush with first manager.
 	m1 := NewVolumeManager(store, cacheDir, config, nil)
 	t.Cleanup(func() { m1.Close(t.Context()) })
-	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
+	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestCloseFlushesWithoutExplicitFlush(t *testing.T) {
 
 	// Write data and close WITHOUT calling Flush.
 	m1 := NewVolumeManager(store, t.TempDir(), config, nil)
-	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
+	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestPartialPageWrite(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +398,7 @@ func TestPunchHole(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestPunchHoleSubPage(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +485,7 @@ func TestPunchHoleFlushBetweenWriteAndPunch(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestPunchHoleAfterFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +568,7 @@ func TestSnapshotThenFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +675,7 @@ func TestMultipleFlushes(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +720,7 @@ func TestSnapshot(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -757,7 +757,7 @@ func TestClone(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -861,7 +861,7 @@ func TestCompaction(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -942,7 +942,7 @@ func TestOverwriteAfterFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 1024*1024)
+	v, err := m.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,7 +990,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 
 	// Node A: create volume, write data, flush, snapshot.
 	mA := newTestManager(t, store, cfg)
-	v, err := mA.NewVolume(ctx, "parent", 1024*1024)
+	v, err := mA.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1038,7 +1038,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 
 	// Create volume, write, flush.
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1115,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 
 	m := newTestManager(t, store, cfg)
 
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1192,7 +1192,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 
 	// Node A: create, write, flush, snapshot.
 	mA := newTestManager(t, store, cfg)
-	v, err := mA.NewVolume(ctx, "parent", 1024*1024)
+	v, err := mA.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1243,7 +1243,7 @@ func TestCompactParentThenReadChild(t *testing.T) {
 
 	m := newTestManager(t, store, cfg)
 
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1541,11 +1541,11 @@ func TestVolumeReadOnlyGuards(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := m.NewVolume(ctx, "src", 1024*1024)
+	src, err := m.NewVolume(ctx, "src", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1611,10 +1611,10 @@ func TestNewVolumeDuplicateName(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, "vol", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "vol", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.NewVolume(ctx, "vol", 1024*1024)
+	_, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected 'already exists' error, got: %v", err)
 	}
@@ -1624,7 +1624,7 @@ func TestNewVolumeDefaultSize(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 0)
+	v, err := m.NewVolume(ctx, "vol", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1637,7 +1637,7 @@ func TestOpenVolumeCacheHit(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v1, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v1, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1665,7 +1665,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, "vol", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "vol", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
 	err := m.DeleteVolume(ctx, "vol")
@@ -1684,7 +1684,7 @@ func TestDeleteVolumeThenList(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1712,10 +1712,10 @@ func TestVolumesAndGetVolume(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, "a", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "a", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, "b", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "b", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1737,10 +1737,10 @@ func TestManagerClose(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, "v1", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "v1", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, "v2", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "v2", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1758,7 +1758,7 @@ func TestCompactAllZeroPages(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1817,7 +1817,7 @@ func TestCompactWithBranchPoints(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1893,7 +1893,7 @@ func TestCompactNoDeltas(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1917,7 +1917,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1966,7 +1966,7 @@ func TestFlushSaveLayerMapFail(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2021,7 +2021,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 
 	// Create, write, flush, compact (to create an image layer).
 	m1 := newTestManager(t, store, cfg)
-	v, err := m1.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m1.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2095,7 +2095,7 @@ func TestLoadLayerMapCorruptJSON(t *testing.T) {
 
 	// Create, write, flush.
 	m1 := newTestManager(t, store, cfg)
-	v, err := m1.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m1.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2133,10 +2133,10 @@ func TestListAllVolumes(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, "alpha", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "alpha", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, "beta", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "beta", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2173,7 +2173,7 @@ func TestAcquireRefAndRelease(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2376,7 +2376,7 @@ func TestOpenVolumeConcurrentRace(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	if _, err := m.NewVolume(ctx, "vol", 1024*1024); err != nil {
+	if _, err := m.NewVolume(ctx, "vol", 1024*1024, ""); err != nil {
 		t.Fatal(err)
 	}
 	// Close it so we can reopen concurrently.
@@ -2429,7 +2429,7 @@ func TestNewVolumeMetaFail(t *testing.T) {
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated meta.json failure"),
 	})
-	_, err := m.NewVolume(ctx, "vol", 1024*1024)
+	_, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err == nil || !strings.Contains(err.Error(), "simulated meta.json failure") {
 		t.Fatalf("expected meta.json failure, got: %v", err)
 	}
@@ -2447,7 +2447,7 @@ func TestNewVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated volume ref failure"),
 	})
 
-	_, err := m.NewVolume(ctx, "vol", 1024*1024)
+	_, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err == nil || !strings.Contains(err.Error(), "simulated volume ref failure") {
 		t.Fatalf("expected volume ref failure, got: %v", err)
 	}
@@ -2459,7 +2459,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2504,7 +2504,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 	ctx := t.Context()
 
 	// Create a volume successfully.
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2529,7 +2529,7 @@ func TestOpenTimelineMetaFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2558,7 +2558,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2607,7 +2607,7 @@ func TestGetDeltaLayerFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2660,7 +2660,7 @@ func TestGetImageLayerFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2718,7 +2718,7 @@ func TestCompactFlushFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2753,7 +2753,7 @@ func TestCompactGetDeltaFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2801,7 +2801,7 @@ func TestCompactImageUploadFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2850,7 +2850,7 @@ func TestCompactSaveLayerMapFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2905,7 +2905,7 @@ func TestCompactAllZeroSaveLayerMapFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2966,7 +2966,7 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3002,7 +3002,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3034,7 +3034,7 @@ func TestCreateChildUpdateParentMetaFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3066,7 +3066,7 @@ func TestCloneCreateChildFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3095,7 +3095,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3125,7 +3125,7 @@ func TestFreezeFlushFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3165,7 +3165,7 @@ func TestOpenAncestorFail(t *testing.T) {
 	ctx := t.Context()
 
 	// Create parent, write, flush, snapshot.
-	v, err := m.NewVolume(ctx, "parent", 1024*1024)
+	v, err := m.NewVolume(ctx, "parent", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3210,7 +3210,7 @@ func TestLoadLayerMapListKeysFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3263,7 +3263,7 @@ func TestCompactMetaReadFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 256*PageSize)
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3305,7 +3305,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "vol", 1024*1024)
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3392,7 +3392,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	ctx := t.Context()
 
 	// Create source volume with 4 pages of known data.
-	src, err := m.NewVolume(ctx, "src", 64*PageSize)
+	src, err := m.NewVolume(ctx, "src", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3408,7 +3408,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	}
 
 	// Create destination volume.
-	dst, err := m.NewVolume(ctx, "dst", 64*PageSize)
+	dst, err := m.NewVolume(ctx, "dst", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3494,7 +3494,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	ctx := t.Context()
 
 	// Create a "parent" volume and write distinct data to pages 0-3.
-	parent, err := m.NewVolume(ctx, "parent", 64*PageSize)
+	parent, err := m.NewVolume(ctx, "parent", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3516,7 +3516,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 
 	// Create a separate source volume with zeros on pages 0-3
 	// (never written, so they're zeros).
-	src, err := m.NewVolume(ctx, "src", 64*PageSize)
+	src, err := m.NewVolume(ctx, "src", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3610,7 +3610,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, "test", 64*PageSize)
+	v, err := m.NewVolume(ctx, "test", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3791,7 +3791,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 
 	// Write and flush with first manager.
 	m1 := NewVolumeManager(store, cacheDir, config, nil)
-	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
+	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3867,7 +3867,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	ctx := t.Context()
 
 	m1 := NewVolumeManager(store, cacheDir, config, nil)
-	v1, err := m1.NewVolume(ctx, "test", 64*PageSize)
+	v1, err := m1.NewVolume(ctx, "test", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3946,5 +3946,449 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 			t.Fatalf("page %d: data mismatch after reopen: first 8 bytes got=%x want=%x",
 				i, buf[:8], expected[i][:8])
 		}
+	}
+}
+
+// TestCompactMergeDeltasOnly verifies that when an image exists and delta size
+// is small relative to image size, compact merges deltas into one delta instead
+// of rebuilding the image.
+func TestCompactMergeDeltasOnly(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := v.(*volume)
+
+	// Write many pages to create a substantial image.
+	for i := uint64(0); i < 20; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(i + 1)
+		if err := v.Write(ctx, page, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// First compact produces an image (no image exists yet).
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+	vol.mu.RLock()
+	numImages := len(vol.timeline.layers.Images)
+	numDeltas := len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+	if numImages != 1 {
+		t.Fatalf("expected 1 image after first compact, got %d", numImages)
+	}
+	if numDeltas != 0 {
+		t.Fatalf("expected 0 deltas after first compact, got %d", numDeltas)
+	}
+
+	// Now write 3 small deltas (touching only 1 page each).
+	for i := 0; i < 3; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(0xA0 + i)
+		if err := v.Write(ctx, page, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	vol.mu.RLock()
+	numDeltas = len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+	if numDeltas != 3 {
+		t.Fatalf("expected 3 deltas before merge, got %d", numDeltas)
+	}
+
+	// Compact should merge deltas (not promote to image), because delta size
+	// is small relative to image size.
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	vol.mu.RLock()
+	numDeltas = len(vol.timeline.layers.Deltas)
+	numImages = len(vol.timeline.layers.Images)
+	vol.mu.RUnlock()
+
+	// Should have 1 merged delta + 1 existing image.
+	if numDeltas != 1 {
+		t.Fatalf("expected 1 merged delta, got %d", numDeltas)
+	}
+	if numImages != 1 {
+		t.Fatalf("expected 1 image (unchanged), got %d", numImages)
+	}
+
+	// Verify data: page 0 should have the last write (0xA2).
+	buf := make([]byte, PageSize)
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xA2 {
+		t.Fatalf("page 0: expected 0xA2, got 0x%02x", buf[0])
+	}
+
+	// Other pages should still be readable from the image.
+	if _, err := v.Read(ctx, buf, 5*PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 6 {
+		t.Fatalf("page 5: expected 0x06, got 0x%02x", buf[0])
+	}
+}
+
+// TestCompactPromotesToImage verifies that when delta size exceeds 50% of
+// image size, compact does a full image promotion.
+func TestCompactPromotesToImage(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := v.(*volume)
+
+	// Write 2 pages and compact to create an image.
+	for i := uint64(0); i < 2; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(i + 1)
+		if err := v.Write(ctx, page, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now write 2 more deltas with 2 pages each — delta size > 50% of small image.
+	for i := 0; i < 2; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(0xB0 + i)
+		if err := v.Write(ctx, page, uint64(i+2)*PageSize); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	vol.mu.RLock()
+	numDeltas := len(vol.timeline.layers.Deltas)
+	numImages := len(vol.timeline.layers.Images)
+	vol.mu.RUnlock()
+
+	// Full image promotion: 0 deltas, 1 image.
+	if numDeltas != 0 {
+		t.Fatalf("expected 0 deltas after promotion, got %d", numDeltas)
+	}
+	if numImages != 1 {
+		t.Fatalf("expected 1 image after promotion, got %d", numImages)
+	}
+
+	// Verify all data.
+	buf := make([]byte, PageSize)
+	for i := uint64(0); i < 4; i++ {
+		if _, err := v.Read(ctx, buf, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+		var expected byte
+		if i < 2 {
+			expected = byte(i + 1)
+		} else {
+			expected = byte(0xB0 + i - 2)
+		}
+		if buf[0] != expected {
+			t.Fatalf("page %d: expected 0x%02x, got 0x%02x", i, expected, buf[0])
+		}
+	}
+}
+
+// TestCompactMergeWithBranchPoints verifies that delta merge respects branch
+// point boundaries — only deltas before the earliest branch are merged.
+func TestCompactMergeWithBranchPoints(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := v.(*volume)
+
+	// Write many pages to create a large image.
+	for i := uint64(0); i < 20; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(i + 1)
+		if err := v.Write(ctx, page, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 3 deltas before the branch point.
+	for i := 0; i < 3; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(0xC0 + i)
+		if err := v.Write(ctx, page, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Create a branch (snapshot).
+	if err := v.Snapshot(ctx, "snap"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 2 more deltas after the branch point.
+	for i := 0; i < 2; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(0xD0 + i)
+		if err := v.Write(ctx, page, PageSize); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	vol.mu.RLock()
+	totalDeltasBefore := len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+
+	// Compact should merge the 3 pre-branch deltas, leave the 2 post-branch.
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	vol.mu.RLock()
+	totalDeltasAfter := len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+
+	// 3 pre-branch → 1 merged + 2 post-branch = 3
+	if totalDeltasAfter != 3 {
+		t.Fatalf("expected 3 deltas after merge (1 merged + 2 remaining), got %d (was %d before)", totalDeltasAfter, totalDeltasBefore)
+	}
+
+	// Verify data.
+	buf := make([]byte, PageSize)
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xC2 {
+		t.Fatalf("page 0: expected 0xC2, got 0x%02x", buf[0])
+	}
+	if _, err := v.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xD1 {
+		t.Fatalf("page 1: expected 0xD1, got 0x%02x", buf[0])
+	}
+
+	// Verify snapshot is still readable.
+	store := vol.manager.store
+	m2 := newTestManager(t, store, m.config)
+	snap, err := m2.OpenVolume(ctx, "snap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snap.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xC2 {
+		t.Fatalf("snapshot page 0: expected 0xC2, got 0x%02x", buf[0])
+	}
+}
+
+// TestCompactMergeDeduplicatesPages verifies that when the same page appears in
+// multiple deltas, the merged delta keeps only the latest version.
+func TestCompactMergeDeduplicatesPages(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := v.(*volume)
+
+	// Create an image with many pages (use random data so it doesn't compress
+	// down to almost nothing — we need the image to be large enough that
+	// 3 small deltas are < 50% of image size).
+	for i := uint64(0); i < 50; i++ {
+		page := make([]byte, PageSize)
+		rand.Read(page)
+		page[0] = byte(i + 1) // keep a marker
+		if err := v.Write(ctx, page, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write page 0 three times in separate deltas.
+	for i := 0; i < 3; i++ {
+		page := make([]byte, PageSize)
+		page[0] = byte(0xE0 + i)
+		if err := v.Write(ctx, page, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := v.Flush(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	vol.mu.RLock()
+	numDeltas := len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+
+	if numDeltas != 1 {
+		t.Fatalf("expected 1 merged delta, got %d", numDeltas)
+	}
+
+	// The merged delta should have exactly 1 entry (page 0 with latest value).
+	data, err := vol.timeline.downloadDeltaLayer(ctx, vol.timeline.layers.Deltas[0].Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parseDeltaLayer(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed.index) != 1 {
+		t.Fatalf("expected 1 entry in merged delta, got %d", len(parsed.index))
+	}
+
+	// Read page 0 — should be the latest write (0xE2).
+	buf := make([]byte, PageSize)
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xE2 {
+		t.Fatalf("page 0: expected 0xE2, got 0x%02x", buf[0])
+	}
+}
+
+// TestCompactMergeTombstones verifies that tombstones survive delta merge and
+// continue to mask older data.
+func TestCompactMergeTombstones(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 256*PageSize, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol := v.(*volume)
+
+	// Create an image with many pages (random data so image is large).
+	for i := uint64(0); i < 50; i++ {
+		page := make([]byte, PageSize)
+		rand.Read(page)
+		page[0] = byte(i + 1)
+		if err := v.Write(ctx, page, i*PageSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write page 0 in delta 1.
+	page := make([]byte, PageSize)
+	page[0] = 0xF0
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Punch hole on page 0 (creates tombstone) in delta 2.
+	if err := v.PunchHole(ctx, 0, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write page 1 in delta 3 (so we have 3 deltas for merge).
+	page[0] = 0xF1
+	if err := v.Write(ctx, page, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Compact should merge deltas (small relative to image).
+	if err := vol.timeline.Compact(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	vol.mu.RLock()
+	numDeltas := len(vol.timeline.layers.Deltas)
+	vol.mu.RUnlock()
+	if numDeltas != 1 {
+		t.Fatalf("expected 1 merged delta, got %d", numDeltas)
+	}
+
+	// Page 0 should read as zeros (tombstone masks the image data).
+	buf := make([]byte, PageSize)
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0 {
+		t.Fatalf("page 0: expected 0x00 (tombstone), got 0x%02x", buf[0])
+	}
+
+	// Page 1 should have the new value from delta 3.
+	if _, err := v.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xF1 {
+		t.Fatalf("page 1: expected 0xF1, got 0x%02x", buf[0])
+	}
+
+	// Page 5 should still be readable from the image (non-zero random data).
+	if _, err := v.Read(ctx, buf, 5*PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 6 {
+		t.Fatalf("page 5: expected marker byte 0x06, got 0x%02x", buf[0])
 	}
 }
