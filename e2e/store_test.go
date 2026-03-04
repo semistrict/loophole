@@ -20,7 +20,7 @@ func TestE2E_VolumeFileExists(t *testing.T) {
 	err := b.Create(ctx, client.CreateParams{Volume: "testvolume"})
 	require.NoError(t, err)
 
-	device, err := b.DeviceMount(ctx, "testvolume")
+	device, err := b.DeviceAttach(ctx, "testvolume")
 	require.NoError(t, err)
 	require.FileExists(t, device)
 }

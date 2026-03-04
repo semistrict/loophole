@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/sync/singleflight"
@@ -30,9 +31,8 @@ type Manager struct {
 	cacheDir  string
 	config    Config
 	pageCache *PageCache
-	lease     *loophole.LeaseManager // nil disables lease enforcement
+	lease     *loophole.LeaseManager
 	fs        LocalFS
-	clock     Clock
 	idGen     func() string
 
 	timelines loophole.ObjectStore // store.At("timelines")
@@ -43,16 +43,12 @@ type Manager struct {
 	openFlight singleflight.Group // deduplicates concurrent OpenVolume calls
 }
 
-// NewManager creates and initializes an LSM Manager.
-// lease, fs, and clock are optional — nil disables lease enforcement / uses
-// production defaults (OSLocalFS, RealClock).
-func NewManager(store loophole.ObjectStore, cacheDir string, config Config, lease *loophole.LeaseManager, fs LocalFS, clock Clock) *Manager {
+// NewVolumeManager creates and initializes an LSM Manager.
+// fs is optional — nil uses OSLocalFS.
+func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs LocalFS) *Manager {
 	config.setDefaults()
 	if fs == nil {
 		fs = OSLocalFS{}
-	}
-	if clock == nil {
-		clock = RealClock{}
 	}
 	pc, err := NewPageCache(filepath.Join(cacheDir, "pages.cache"), config.PageCacheBytes)
 	if err != nil {
@@ -63,9 +59,8 @@ func NewManager(store loophole.ObjectStore, cacheDir string, config Config, leas
 		cacheDir:  cacheDir,
 		config:    config,
 		pageCache: pc,
-		lease:     lease,
+		lease:     loophole.NewLeaseManager(store.At("leases")),
 		fs:        fs,
-		clock:     clock,
 		idGen:     uuid.NewString,
 		timelines: store.At("timelines"),
 		volRefs:   store.At("volumes"),
@@ -83,7 +78,7 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64) (loop
 
 	// Write timeline meta.json.
 	meta := TimelineMeta{
-		CreatedAt: m.clock.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
+		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 	metaData, err := json.Marshal(meta)
 	if err != nil {
@@ -225,7 +220,7 @@ func (m *Manager) getVolumeRef(ctx context.Context, name string) (volumeRef, err
 }
 
 func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*volume, error) {
-	tl, err := openTimeline(ctx, m.timelines.At(ref.TimelineID), m.timelines, ref.TimelineID, m.cacheDir, m.config, m.pageCache, m.fs, m.clock)
+	tl, err := m.openTimeline(ctx, m.timelines.At(ref.TimelineID), ref.TimelineID)
 	if err != nil {
 		return nil, fmt.Errorf("open timeline %q: %w", ref.TimelineID, err)
 	}

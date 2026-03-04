@@ -3,7 +3,6 @@ package lsm
 import (
 	"io"
 	"os"
-	"time"
 )
 
 // LocalFS abstracts local filesystem operations for testability.
@@ -24,12 +23,6 @@ type File interface {
 	Seek(offset int64, whence int) (int64, error)
 }
 
-// Clock abstracts time for testability. Under synctest, time.Sleep
-// advances the fake clock when all goroutines are blocked.
-type Clock interface {
-	Now() time.Time
-}
-
 // --- Production implementations ---
 
 // OSLocalFS delegates to the real os package.
@@ -44,8 +37,3 @@ func (OSLocalFS) ReadFile(path string) ([]byte, error) { return os.ReadFile(path
 func (OSLocalFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	return os.WriteFile(path, data, perm)
 }
-
-// RealClock uses the real time package.
-type RealClock struct{}
-
-func (RealClock) Now() time.Time { return time.Now() }

@@ -18,7 +18,7 @@ import (
 // newTestManager creates a Manager and registers cleanup to close it when the test finishes.
 func newTestManager(t *testing.T, store loophole.ObjectStore, config Config) *Manager {
 	t.Helper()
-	m := NewManager(store, t.TempDir(), config, nil, nil, nil)
+	m := NewVolumeManager(store, t.TempDir(), config, nil)
 	t.Cleanup(func() { m.Close(t.Context()) })
 	return m
 }
@@ -259,7 +259,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := NewManager(store, cacheDir, config, nil, nil, nil)
+	m1 := NewVolumeManager(store, cacheDir, config, nil)
 	t.Cleanup(func() { m1.Close(t.Context()) })
 	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
 	if err != nil {
@@ -312,7 +312,7 @@ func TestCloseFlushesWithoutExplicitFlush(t *testing.T) {
 	ctx := t.Context()
 
 	// Write data and close WITHOUT calling Flush.
-	m1 := NewManager(store, t.TempDir(), config, nil, nil, nil)
+	m1 := NewVolumeManager(store, t.TempDir(), config, nil)
 	v1, err := m1.NewVolume(ctx, "test", 1024*1024)
 	if err != nil {
 		t.Fatal(err)
@@ -2154,7 +2154,7 @@ func TestListAllVolumes(t *testing.T) {
 
 func TestConfigDefaults(t *testing.T) {
 	store := loophole.NewMemStore()
-	m := NewManager(store, t.TempDir(), Config{}, nil, nil, nil)
+	m := NewVolumeManager(store, t.TempDir(), Config{}, nil)
 	t.Cleanup(func() { m.Close(t.Context()) })
 	if m.config.FlushThreshold != DefaultFlushThreshold {
 		t.Fatalf("expected FlushThreshold=%d, got %d", DefaultFlushThreshold, m.config.FlushThreshold)
@@ -2611,6 +2611,9 @@ func TestGetDeltaLayerFail(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Close first manager to release the lease before opening a fresh one.
+	m.Close(ctx)
+
 	// Open on a fresh manager (empty local cache) so reads must go to S3.
 	m2 := newTestManager(t, store, m.config)
 	v2, err := m2.OpenVolume(ctx, "vol")
@@ -2665,6 +2668,9 @@ func TestGetImageLayerFail(t *testing.T) {
 	if err := vol.timeline.Compact(ctx); err != nil {
 		t.Fatal(err)
 	}
+
+	// Close first manager to release the lease before opening a fresh one.
+	m.Close(ctx)
 
 	// Open on fresh manager.
 	m2 := newTestManager(t, store, m.config)
@@ -2750,6 +2756,9 @@ func TestCompactGetDeltaFail(t *testing.T) {
 	if err := v.Flush(ctx); err != nil {
 		t.Fatal(err)
 	}
+
+	// Close first manager to release the lease before opening a fresh one.
+	m.Close(ctx)
 
 	// Open on a fresh manager so delta layers aren't in memory cache.
 	m2 := newTestManager(t, store, m.config)

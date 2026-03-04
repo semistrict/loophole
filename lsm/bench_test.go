@@ -21,7 +21,7 @@ func randomPage(rng *rand.Rand, buf []byte) {
 
 func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Manager {
 	b.Helper()
-	m := NewManager(store, b.TempDir(), config, nil, NewSimLocalFS(), RealClock{})
+	m := NewVolumeManager(store, b.TempDir(), config, NewSimLocalFS())
 	b.Cleanup(func() { m.Close(b.Context()) })
 	return m
 }

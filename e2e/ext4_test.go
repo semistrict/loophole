@@ -300,7 +300,7 @@ func TestE2E_NBDDeviceExclOpen(t *testing.T) {
 	// Now connect all at once
 	for i := range nDevices {
 		g.Go(func() error {
-			dev, err := b.DeviceMount(gctx, vols[i])
+			dev, err := b.DeviceAttach(gctx, vols[i])
 			if err != nil {
 				return fmt.Errorf("connect %d: %w", i, err)
 			}

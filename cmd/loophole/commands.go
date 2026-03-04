@@ -391,8 +391,8 @@ func deviceCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		deviceStartCmd(),
-		deviceMountCmd(),
-		deviceUnmountCmd(),
+		deviceAttachCmd(),
+		deviceDetachCmd(),
 		deviceSnapshotCmd(),
 		deviceCloneCmd(),
 	)
@@ -408,17 +408,17 @@ func deviceStartCmd() *cobra.Command {
 	return cmd
 }
 
-func deviceMountCmd() *cobra.Command {
+func deviceAttachCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "mount <volume>",
-		Short: "Open a volume device",
+		Use:   "attach <volume>",
+		Short: "Attach a volume device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := resolveClient()
 			if err != nil {
 				return err
 			}
-			device, err := c.DeviceMount(cmd.Context(), args[0])
+			device, err := c.DeviceAttach(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -428,17 +428,17 @@ func deviceMountCmd() *cobra.Command {
 	}
 }
 
-func deviceUnmountCmd() *cobra.Command {
+func deviceDetachCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unmount <volume>",
-		Short: "Close a volume device",
+		Use:   "detach <volume>",
+		Short: "Detach a volume device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := resolveClient()
 			if err != nil {
 				return err
 			}
-			return c.DeviceUnmount(cmd.Context(), args[0])
+			return c.DeviceDetach(cmd.Context(), args[0])
 		},
 	}
 }

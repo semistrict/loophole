@@ -45,7 +45,6 @@ type Timeline struct {
 	config        Config
 	pageCache     *PageCache
 	fs            LocalFS
-	clock         Clock
 
 	ancestor    *Timeline // nil for root timelines
 	ancestorSeq uint64    // read from ancestor only at seq <= this value
@@ -84,7 +83,7 @@ type Timeline struct {
 }
 
 // openTimeline loads a timeline from S3 and initializes its local state.
-func openTimeline(ctx context.Context, store, timelinesRoot loophole.ObjectStore, id, cacheDir string, config Config, pageCache *PageCache, fs LocalFS, clock Clock) (*Timeline, error) {
+func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, id string) (*Timeline, error) {
 	meta, _, err := loophole.ReadJSON[TimelineMeta](ctx, store, "meta.json")
 	if err != nil {
 		return nil, fmt.Errorf("read timeline meta: %w", err)
@@ -93,12 +92,11 @@ func openTimeline(ctx context.Context, store, timelinesRoot loophole.ObjectStore
 	tl := &Timeline{
 		id:              id,
 		store:           store,
-		timelinesRoot:   timelinesRoot,
-		cacheDir:        filepath.Join(cacheDir, "timelines", id),
-		config:          config,
-		pageCache:       pageCache,
-		fs:              fs,
-		clock:           clock,
+		timelinesRoot:   m.timelines,
+		cacheDir:        filepath.Join(m.cacheDir, "timelines", id),
+		config:          m.config,
+		pageCache:       m.pageCache,
+		fs:              m.fs,
 		deltaIndexCache: make(map[string]*parsedDeltaLayer),
 		imageIndexCache: make(map[string]*parsedImageLayer),
 	}
@@ -106,8 +104,8 @@ func openTimeline(ctx context.Context, store, timelinesRoot loophole.ObjectStore
 	// Load ancestor chain.
 	if meta.Ancestor != "" {
 		tl.ancestorSeq = meta.AncestorSeq
-		ancestorStore := timelinesRoot.At(meta.Ancestor)
-		ancestor, err := openTimeline(ctx, ancestorStore, timelinesRoot, meta.Ancestor, cacheDir, config, pageCache, fs, clock)
+		ancestorStore := m.timelines.At(meta.Ancestor)
+		ancestor, err := m.openTimeline(ctx, ancestorStore, meta.Ancestor)
 		if err != nil {
 			return nil, fmt.Errorf("open ancestor %s: %w", meta.Ancestor, err)
 		}
@@ -121,12 +119,12 @@ func openTimeline(ctx context.Context, store, timelinesRoot loophole.ObjectStore
 
 	// Create local dirs.
 	memDir := filepath.Join(tl.cacheDir, "mem")
-	if err := fs.MkdirAll(memDir, 0o755); err != nil {
+	if err := tl.fs.MkdirAll(memDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create mem dir: %w", err)
 	}
 
 	// Start fresh memLayer.
-	tl.memLayer, err = newMemLayer(fs, memDir, tl.nextSeq.Load())
+	tl.memLayer, err = newMemLayer(tl.fs, memDir, tl.nextSeq.Load())
 	if err != nil {
 		return nil, fmt.Errorf("create memlayer: %w", err)
 	}
@@ -515,7 +513,7 @@ func (tl *Timeline) createChild(ctx context.Context, childID string, branchSeq u
 	meta := TimelineMeta{
 		Ancestor:    tl.id,
 		AncestorSeq: branchSeq,
-		CreatedAt:   tl.clock.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
+		CreatedAt:   time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 	data, err := json.Marshal(meta)
 	if err != nil {

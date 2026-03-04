@@ -17,7 +17,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/nbdserve"
 )
 
 // TCPServer manages NBD exports using TCP NBD servers instead of kernel
@@ -399,9 +398,4 @@ func (p *singleVolumeProvider) FindExport(_ context.Context, name string) (nbd.E
 
 func (p *singleVolumeProvider) ListExports(_ context.Context) ([]nbd.Export, error) {
 	return []nbd.Export{{Name: p.name}}, nil
-}
-
-// NewNBDTCPBackend creates an nbdserve.Server for use with --nbd flag.
-func NewNBDTCPBackend(vm loophole.VolumeManager) *nbdserve.Server {
-	return nbdserve.NewServer(vm)
 }

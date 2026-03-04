@@ -112,7 +112,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes in
 	if flushInterval == 0 {
 		flushInterval = 5 * time.Millisecond // small interval so periodic flush fires under synctest
 	}
-	m := NewManager(
+	m := NewVolumeManager(
 		sim.store.Store(),
 		cacheDir,
 		Config{
@@ -121,9 +121,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes in
 			PageCacheBytes:  pageCacheBytes,
 			FlushInterval:   flushInterval,
 		},
-		nil,
 		fs,
-		RealClock{}, // time.Now() works fine under synctest
 	)
 	m.idGen = sim.nextTimelineID
 	return m

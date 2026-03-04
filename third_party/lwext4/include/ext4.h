@@ -65,6 +65,44 @@ struct ext4_lock {
 	void (*unlock)(void);
 };
 
+/********************************MOUNT POINT DESCRIPTOR**********************/
+
+#include <ext4_fs.h>
+#include <ext4_bcache.h>
+#include <ext4_journal.h>
+
+/**@brief   Mount point descriptor.*/
+struct ext4_mountpoint {
+
+	/**@brief   Mount done flag.*/
+	bool mounted;
+
+	/**@brief   Mount point name (@ref ext4_mount)*/
+	char name[CONFIG_EXT4_MAX_MP_NAME + 1];
+
+	/**@brief   OS dependent lock/unlock functions.*/
+	const struct ext4_lock *os_locks;
+
+	/**@brief   Ext4 filesystem internals.*/
+	struct ext4_fs fs;
+
+	/**@brief   JBD fs.*/
+	struct jbd_fs jbd_fs;
+
+	/**@brief   Journal.*/
+	struct jbd_journal jbd_journal;
+
+	/**@brief   Block cache.*/
+	struct ext4_bcache bc;
+};
+
+/**@brief   Get mount point for a given path.
+ *
+ * @param   path Mount point path.
+ *
+ * @return  Mount point descriptor, or NULL if not found.*/
+struct ext4_mountpoint *ext4_get_mount(const char *path);
+
 /********************************FILE DESCRIPTOR*****************************/
 
 /**@brief   File descriptor. */

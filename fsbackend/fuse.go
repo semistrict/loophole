@@ -7,8 +7,8 @@ import (
 	"log/slog"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/ext4"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/linuxutil"
 )
 
 // fuseMount is the per-mount handle for FUSEDriver.
@@ -40,7 +40,7 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Info("fuse: formatting", "volume", vol.Name(), "device", devPath, "pageSize", f.pageSize)
-	err := ext4.Format(ctx, devPath, f.pageSize)
+	err := linuxutil.Ext4Format(ctx, devPath, f.pageSize)
 	slog.Info("fuse: format done", "volume", vol.Name(), "error", err)
 	return err
 }
@@ -48,7 +48,7 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Info("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
-	loopDev, err := ext4.Mount(ctx, devPath, mountpoint, f.pageSize)
+	loopDev, err := linuxutil.Ext4Mount(ctx, devPath, mountpoint, f.pageSize)
 	if err != nil {
 		slog.Info("fuse: mount failed", "volume", vol.Name(), "error", err)
 		return fuseMount{}, err
@@ -59,11 +59,13 @@ func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 
 func (f *FUSEDriver) Unmount(ctx context.Context, h fuseMount) error {
 	slog.Info("fuse: unmounting", "mountpoint", h.mountpoint)
-	if err := ext4.Unmount(ctx, h.mountpoint); err != nil {
+	if err := linuxutil.Ext4Unmount(ctx, h.mountpoint); err != nil {
 		return err
 	}
 	if h.loopDev != "" {
-		ext4.LosetupDetach(ctx, h.loopDev)
+		if err := linuxutil.LoopDetachPath(h.loopDev); err != nil {
+			slog.Warn("loop detach failed", "device", h.loopDev, "error", err)
+		}
 	}
 	slog.Info("fuse: unmount done", "mountpoint", h.mountpoint)
 	return nil
@@ -75,14 +77,14 @@ func (f *FUSEDriver) Close(ctx context.Context) error {
 
 func (f *FUSEDriver) Freeze(ctx context.Context, h fuseMount) error {
 	slog.Info("fuse: freezing", "mountpoint", h.mountpoint)
-	err := ext4.Freeze(ctx, h.mountpoint)
+	err := linuxutil.Freeze(h.mountpoint)
 	slog.Info("fuse: freeze done", "mountpoint", h.mountpoint, "error", err)
 	return err
 }
 
 func (f *FUSEDriver) Thaw(ctx context.Context, h fuseMount) error {
 	slog.Info("fuse: thawing", "mountpoint", h.mountpoint)
-	err := ext4.Thaw(ctx, h.mountpoint)
+	err := linuxutil.Thaw(h.mountpoint)
 	slog.Info("fuse: thaw done", "mountpoint", h.mountpoint, "error", err)
 	return err
 }

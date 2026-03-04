@@ -68,7 +68,7 @@ func TestE2E_DeviceSnapshotParentStaysWritable(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "frozen-parent"}))
-	parentDev, err := b.DeviceMount(ctx, "frozen-parent")
+	parentDev, err := b.DeviceAttach(ctx, "frozen-parent")
 	require.NoError(t, err)
 
 	err = b.DeviceSnapshot(t.Context(), "frozen-parent", "frozen-child")
@@ -83,7 +83,7 @@ func TestE2E_DeviceSnapshotParentStaysWritable(t *testing.T) {
 	require.NoError(t, err, "write to parent after snapshot should succeed")
 
 	// Snapshot target should be read-only.
-	childDev, err := b.DeviceMount(t.Context(), "frozen-child")
+	childDev, err := b.DeviceAttach(t.Context(), "frozen-child")
 	require.NoError(t, err)
 	child, err := os.OpenFile(childDev, os.O_RDWR, 0)
 	if err == nil {

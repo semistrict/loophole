@@ -8,7 +8,7 @@ import (
 	"log/slog"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/ext4"
+	"github.com/semistrict/loophole/linuxutil"
 	"github.com/semistrict/loophole/nbdvm"
 )
 
@@ -41,7 +41,7 @@ func (n *NBDTCPDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	if err != nil {
 		return err
 	}
-	return ext4.FormatDirect(ctx, dev)
+	return linuxutil.Ext4FormatDirect(ctx, dev)
 }
 
 func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (nbdTCPMount, error) {
@@ -49,7 +49,7 @@ func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoin
 	if err != nil {
 		return nbdTCPMount{}, err
 	}
-	if err := ext4.MountDirect(ctx, dev, mountpoint); err != nil {
+	if err := linuxutil.Ext4MountDirect(ctx, dev, mountpoint); err != nil {
 		if disconnErr := n.nbd.Disconnect(ctx, vol.Name()); disconnErr != nil {
 			slog.Warn("nbd tcp disconnect error during mount cleanup", "error", disconnErr)
 		}
@@ -59,7 +59,7 @@ func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoin
 }
 
 func (n *NBDTCPDriver) Unmount(ctx context.Context, h nbdTCPMount) error {
-	if err := ext4.UnmountDirect(ctx, h.mountpoint); err != nil {
+	if err := linuxutil.Unmount(h.mountpoint); err != nil {
 		return err
 	}
 	if h.volumeName != "" {
@@ -71,11 +71,11 @@ func (n *NBDTCPDriver) Unmount(ctx context.Context, h nbdTCPMount) error {
 }
 
 func (n *NBDTCPDriver) Freeze(ctx context.Context, h nbdTCPMount) error {
-	return ext4.Freeze(ctx, h.mountpoint)
+	return linuxutil.Freeze(h.mountpoint)
 }
 
 func (n *NBDTCPDriver) Thaw(ctx context.Context, h nbdTCPMount) error {
-	return ext4.Thaw(ctx, h.mountpoint)
+	return linuxutil.Thaw(h.mountpoint)
 }
 
 func (n *NBDTCPDriver) Close(ctx context.Context) error {

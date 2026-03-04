@@ -26,7 +26,7 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
+	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 	defer vm.Close(ctx)
 
 	vol, err := vm.NewVolume(ctx, "big", 0)

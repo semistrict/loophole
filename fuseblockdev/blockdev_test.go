@@ -31,7 +31,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	skipWithoutFuse(t)
 
 	store := loophole.NewMemStore()
-	vm := lsm.NewManager(store, t.TempDir(), lsm.Config{}, nil, nil, nil)
+	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 	t.Cleanup(func() { vm.Close(t.Context()) })
 
 	vol, err := vm.NewVolume(t.Context(), "testvol", 4096)

@@ -1,32 +1,9 @@
-// inode_ops.c — inode-level operations using lwext4 internals.
+// inode_ops.c — inode-level ext4 operations for lwext4.
 //
-// This file is #include'd from a CGO compilation unit that already
-// compiles ext4.c (via lwext4_src.go). We must NOT re-include ext4.c
-// here. Instead we forward-declare/access the private statics we need.
-//
-// Because lwext4_src.go does `#include "../third_party/lwext4/src/ext4.c"`,
-// all static functions and the s_mp[] array are available within the same
-// translation unit. However, this file is a *separate* .c file compiled
-// by CGO. So we need to re-declare the struct and access the global array.
-
-
-// XXX: the real purpose of all this is to expose an inode API to lwext4
-// the reason we need this is that if we just use the path-based API with FUSE
-// we will get invalid semantics like someone opens a file, someone else unlinks
-// the file name, then process A writes to the file.
-
-// The correct behavior is that the write should go to the original file (maybe it is
-// hardlinked somewhere) else for example. But if we just used path names and
-// pretended that paths were inodes then the write would go to the new file with 
-// the same name, which would be very surprising. I'm sure there are other cases.
-
-// Nevermind the performance would suck if we had to do path based lookups on every
-// operation.
-
-// Given all that I think we should probably break this whole thing out into 
-// a separate C library with the desired API surface. It is generally useful.
-
-// We can also have a Go-gettable wrapper for it (by just building a C amalgamation).
+// lwext4's public API is path-based, but FUSE requires inode-level semantics
+// (e.g. unlink while a file is open must not affect the open handle). This
+// file provides inode-level operations by calling lwext4's internal fs
+// functions directly.
 
 #include <ext4_config.h>
 #include <ext4_types.h>
@@ -37,65 +14,15 @@
 #include <ext4_dir.h>
 #include <ext4_dir_idx.h>
 #include <ext4_inode.h>
-#include <ext4_super.h>
-#include <ext4_bcache.h>
-#include <ext4_journal.h>
 #include <ext4.h>
 #include <ext4_trans.h>
 
 #include <string.h>
-#include <stdlib.h>
 
 #include "inode_ops.h"
 
-// --- Access to lwext4 private structures ---
-// These are defined as static in ext4.c, but since ext4.c is compiled
-// via #include in lwext4_src.go (same translation unit), we can't access
-// them from this separate .c file. We re-declare the struct and array
-// as extern, relying on the fact that ext4.c's static is actually a
-// global symbol in the CGO compilation model (all .c files in a package
-// are compiled into one object).
-//
-// Actually, statics in ext4.c are NOT visible here. We need a different
-// approach: use the public ext4_get_sblock() to get the superblock, and
-// from that derive the mountpoint via container_of. Or, we use the public
-// ext4_mount_point_stats / ext4_get_sblock APIs.
-//
-// Best approach: we know ext4_file.mp is a struct ext4_mountpoint*.
-// We can get it by opening a dummy path. But that's circular.
-//
-// Simplest correct approach: We store the mp pointer in the Go FS struct
-// by calling a helper right after mount that retrieves it. We use
-// ext4_get_sblock which takes a mount_point string and returns the sblock.
-// From sblock, we can use container_of to get back to ext4_mountpoint.
-
-// XXX: please clean up the above stream of consciousness comment!
-// I do not understand why we are doing these kinds of hacks, we already 
-// maintain patches against the lwext4 source, just modify it!
-
-// Re-declare the mountpoint struct so we can use container_of.
-// This must match the definition in ext4.c exactly.
-struct ext4_mountpoint {
-    bool mounted;
-    char name[CONFIG_EXT4_MAX_MP_NAME + 1];
-    const struct ext4_lock *os_locks;
-    struct ext4_fs fs;
-    struct jbd_fs jbd_fs;
-    struct jbd_journal jbd_journal;
-    struct ext4_bcache bc;
-};
-
-// Use ext4_get_sblock to find the sblock, then container_of to get mp.
 struct ext4_mountpoint *inode_get_mp(const char *mount_point) {
-    struct ext4_sblock *sb = NULL;
-    int r = ext4_get_sblock(mount_point, &sb);
-    if (r != EOK || !sb)
-        return NULL;
-    // sb is at offset of .fs.sb within ext4_mountpoint.
-    // mp->fs.sb is the sblock. So mp = container_of(sb, struct ext4_mountpoint, fs.sb)
-    char *p = (char *)sb;
-    p -= offsetof(struct ext4_mountpoint, fs) + offsetof(struct ext4_fs, sb);
-    return (struct ext4_mountpoint *)p;
+    return ext4_get_mount(mount_point);
 }
 
 int inode_lookup(struct ext4_mountpoint *mp, uint32_t parent_ino,

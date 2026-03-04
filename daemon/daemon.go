@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -18,8 +17,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/fatih/color"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
@@ -95,7 +92,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 
 	// Create LSM volume manager
 	cacheDir := dir.Cache(inst.ProfileName)
-	vm := lsm.NewManager(store, cacheDir, lsm.Config{}, nil, nil, nil)
+	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil)
 
 	backend, err := createBackend(vm, inst, dir)
 	if err != nil {
@@ -185,8 +182,8 @@ func (d *Daemon) Serve(ctx context.Context) error {
 func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /device/mount", d.handleDeviceMount)
-	mux.HandleFunc("POST /device/unmount", d.handleDeviceUnmount)
+	mux.HandleFunc("POST /device/attach", d.handleDeviceAttach)
+	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
 	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 
@@ -225,7 +222,7 @@ func (d *Daemon) instrument(next http.Handler) http.Handler {
 		}
 
 		start := time.Now()
-		rw := &statusRecorder{ResponseWriter: w, code: 200} // XXX - there is a proper way to wrap this so that e.g. Hijacker etc still work
+		rw := &statusRecorder{ResponseWriter: w, code: 200}
 		next.ServeHTTP(rw, r)
 		dur := time.Since(start)
 
@@ -252,11 +249,10 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
-func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	if h, ok := r.ResponseWriter.(http.Hijacker); ok {
-		return h.Hijack()
-	}
-	return nil, nil, fmt.Errorf("underlying ResponseWriter does not support Hijack")
+// Unwrap returns the underlying ResponseWriter so that http.ResponseController
+// can discover optional interfaces (Flusher, Hijacker, etc.) automatically.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 // --- High-level handlers ---
@@ -385,7 +381,7 @@ func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
 
 // --- Device handlers ---
 
-func (d *Daemon) handleDeviceMount(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) handleDeviceAttach(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -394,17 +390,17 @@ func (d *Daemon) handleDeviceMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/mount", "volume", req.Volume)
-	device, err := d.backend.DeviceMount(r.Context(), req.Volume)
+	d.log.Info("device/attach", "volume", req.Volume)
+	device, err := d.backend.DeviceAttach(r.Context(), req.Volume)
 	if err != nil {
-		d.log.Error("device/mount failed", "err", err)
+		d.log.Error("device/attach failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
 	writeJSON(w, map[string]string{"device": device})
 }
 
-func (d *Daemon) handleDeviceUnmount(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) handleDeviceDetach(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -413,9 +409,9 @@ func (d *Daemon) handleDeviceUnmount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/unmount", "volume", req.Volume)
-	if err := d.backend.DeviceUnmount(r.Context(), req.Volume); err != nil {
-		d.log.Error("device/unmount failed", "err", err)
+	d.log.Info("device/detach", "volume", req.Volume)
+	if err := d.backend.DeviceDetach(r.Context(), req.Volume); err != nil {
+		d.log.Error("device/detach failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -551,111 +547,4 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 	if err := os.Symlink(d.dir.Socket(d.inst.ProfileName), symPath); err != nil {
 		d.log.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}
-}
-
-// consoleHandler writes human-friendly log lines to stderr.
-type consoleHandler struct {
-	level slog.Level
-	attrs []slog.Attr
-}
-
-func (h *consoleHandler) Enabled(_ context.Context, l slog.Level) bool {
-	return l >= h.level
-}
-
-// XXX - move this logger stuff to a different file
-var (
-	colorTime  = color.New(color.FgHiBlack)
-	colorDebug = color.New(color.FgHiBlack)
-	colorInfo  = color.New(color.FgCyan)
-	colorWarn  = color.New(color.FgYellow)
-	colorError = color.New(color.FgRed, color.Bold)
-	colorKey   = color.New(color.FgHiBlack)
-	colorMsg   = color.New(color.FgWhite, color.Bold)
-)
-
-func levelColor(l slog.Level) *color.Color {
-	switch {
-	case l >= slog.LevelError:
-		return colorError
-	case l >= slog.LevelWarn:
-		return colorWarn
-	case l >= slog.LevelInfo:
-		return colorInfo
-	default:
-		return colorDebug
-	}
-}
-
-func (h *consoleHandler) Handle(_ context.Context, r slog.Record) error {
-	var buf []byte
-	buf = append(buf, colorTime.Sprint(r.Time.Format("15:04:05"))...)
-	buf = append(buf, ' ')
-	lc := levelColor(r.Level)
-	buf = append(buf, lc.Sprintf("%-5s", r.Level.String())...)
-	buf = append(buf, ' ')
-	buf = append(buf, colorMsg.Sprint(r.Message)...)
-	appendAttr := func(a slog.Attr) {
-		buf = append(buf, ' ')
-		buf = append(buf, colorKey.Sprint(a.Key)...)
-		buf = append(buf, '=')
-		buf = append(buf, a.Value.String()...)
-	}
-	for _, a := range h.attrs {
-		appendAttr(a)
-	}
-	r.Attrs(func(a slog.Attr) bool {
-		appendAttr(a)
-		return true
-	})
-	buf = append(buf, '\n')
-	_, err := os.Stderr.Write(buf)
-	return err
-}
-
-func (h *consoleHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &consoleHandler{level: h.level, attrs: append(h.attrs[:len(h.attrs):len(h.attrs)], attrs...)}
-}
-
-func (h *consoleHandler) WithGroup(_ string) slog.Handler {
-	return h
-}
-
-// multiHandler fans out log records to multiple handlers.
-type multiHandler []slog.Handler
-
-func (m multiHandler) Enabled(_ context.Context, l slog.Level) bool {
-	for _, h := range m {
-		if h.Enabled(context.Background(), l) {
-			return true
-		}
-	}
-	return false
-}
-
-func (m multiHandler) Handle(ctx context.Context, r slog.Record) error {
-	for _, h := range m {
-		if h.Enabled(ctx, r.Level) {
-			if err := h.Handle(ctx, r.Clone()); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (m multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	handlers := make(multiHandler, len(m))
-	for i, h := range m {
-		handlers[i] = h.WithAttrs(attrs)
-	}
-	return handlers
-}
-
-func (m multiHandler) WithGroup(name string) slog.Handler {
-	handlers := make(multiHandler, len(m))
-	for i, h := range m {
-		handlers[i] = h.WithGroup(name)
-	}
-	return handlers
 }

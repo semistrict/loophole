@@ -7,9 +7,12 @@ package linuxutil
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"strings"
 	"unsafe"
 
@@ -81,12 +84,6 @@ func FindMount(mountpoint string) (string, error) {
 		}
 	}
 	return "", scanner.Err()
-}
-
-// IsMounted checks if path is an active mount point.
-func IsMounted(path string) bool {
-	source, _ := FindMount(path)
-	return source != ""
 }
 
 const (
@@ -329,6 +326,102 @@ func LoopDetachPath(devPath string) error {
 	}()
 	if err := unix.IoctlSetInt(int(f.Fd()), loopClearFD, 0); err != nil {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
+	}
+	return nil
+}
+
+// ext4 filesystem helpers.
+
+// mkfsFeatures is the pinned set of ext4 features for mkfs.ext4.
+// Pinning avoids surprises when mkfs.ext4 defaults change across distro versions.
+// These match Debian bookworm e2fsprogs 1.47 defaults and are all supported by lwext4.
+const mkfsFeatures = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
+	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
+	"dir_nlink,extra_isize,metadata_csum"
+
+// Ext4Format creates an ext4 filesystem on a block device via a loop device.
+func Ext4Format(ctx context.Context, devicePath string, optimalIOSize int) error {
+	dev, err := LoopAttach(devicePath, optimalIOSize)
+	if err != nil {
+		return fmt.Errorf("loop attach: %w", err)
+	}
+	defer func() {
+		if err := dev.Detach(); err != nil {
+			slog.Warn("loop detach failed", "error", err)
+		}
+	}()
+
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", dev.Path); err != nil {
+		return fmt.Errorf("mkfs.ext4: %w", err)
+	}
+	return nil
+}
+
+// Ext4FormatDirect creates an ext4 filesystem directly on a block device
+// (e.g. /dev/nbdN) without loop device setup.
+func Ext4FormatDirect(ctx context.Context, blockDev string) error {
+	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", blockDev); err != nil {
+		return fmt.Errorf("mkfs.ext4: %w", err)
+	}
+	return nil
+}
+
+// Ext4Mount attaches a loop device to devicePath and mounts ext4 at mountpoint.
+// Returns the loop device path for cleanup.
+func Ext4Mount(ctx context.Context, devicePath, mountpoint string, optimalIOSize int) (loopDevice string, err error) {
+	dev, err := LoopAttach(devicePath, optimalIOSize)
+	if err != nil {
+		return "", fmt.Errorf("loop attach: %w", err)
+	}
+
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		if derr := dev.Detach(); derr != nil {
+			slog.Warn("loop detach failed", "error", derr)
+		}
+		return "", err
+	}
+
+	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true}); err != nil {
+		if derr := dev.Detach(); derr != nil {
+			slog.Warn("loop detach failed", "error", derr)
+		}
+		return "", err
+	}
+	return dev.Path, nil
+}
+
+// Ext4MountDirect mounts ext4 directly on a block device (e.g. /dev/nbdN).
+func Ext4MountDirect(ctx context.Context, blockDev, mountpoint string) error {
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		return err
+	}
+	return Mount(MountOpts{Source: blockDev, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true})
+}
+
+// Ext4Unmount unmounts the filesystem and detaches the loop device.
+func Ext4Unmount(ctx context.Context, mountpoint string) error {
+	loopDev, _ := FindMount(mountpoint)
+
+	slog.Info("ext4: unmount start", "mountpoint", mountpoint, "loopDev", loopDev)
+	if err := Unmount(mountpoint); err != nil {
+		slog.Info("ext4: unmount failed", "mountpoint", mountpoint, "error", err)
+		return err
+	}
+	slog.Info("ext4: unmount done", "mountpoint", mountpoint)
+
+	if loopDev != "" {
+		if err := LoopDetachPath(loopDev); err != nil {
+			slog.Warn("loop detach failed", "device", loopDev, "error", err)
+		}
+	}
+	return nil
+}
+
+func run(ctx context.Context, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, bytes.TrimSpace(out))
 	}
 	return nil
 }

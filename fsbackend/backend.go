@@ -46,8 +46,8 @@ type Service interface {
 	// FSForVolume returns an FS for a volume by name. The volume must
 	// already be mounted.
 	FSForVolume(volume string) (FS, error)
-	DeviceMount(ctx context.Context, volume string) (string, error)
-	DeviceUnmount(ctx context.Context, volume string) error
+	DeviceAttach(ctx context.Context, volume string) (string, error)
+	DeviceDetach(ctx context.Context, volume string) error
 	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
 	DeviceClone(ctx context.Context, volume, clone string) (string, error)
 	DevicePath(volume string) (string, error)
@@ -106,9 +106,9 @@ type VolumeRegistrar interface {
 	UnregisterVolume(name string)
 }
 
-// mountEntry stores the volume name and driver-specific handle for a mount.
+// mountEntry stores the volume and driver-specific handle for a mount.
 type mountEntry[H any] struct {
-	volume string // XXX: I would have expected to see a *Volume here
+	vol    loophole.Volume
 	handle H
 }
 
@@ -196,14 +196,10 @@ func (b *Backend[H]) Unmount(ctx context.Context, mountpoint string) error {
 	b.mu.Unlock()
 
 	if b.vr != nil {
-		b.vr.UnregisterVolume(entry.volume)
+		b.vr.UnregisterVolume(entry.vol.Name())
 	}
 
-	vol := b.vm.GetVolume(entry.volume)
-	if vol != nil {
-		return vol.ReleaseRef(ctx)
-	}
-	return nil
+	return entry.vol.ReleaseRef(ctx)
 }
 
 // Snapshot freezes the filesystem, takes a snapshot, and thaws.
@@ -291,7 +287,7 @@ func (b *Backend[H]) FSForVolume(volume string) (FS, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, entry := range b.mounts {
-		if entry.volume == volume {
+		if entry.vol.Name() == volume {
 			return b.driver.FS(entry.handle)
 		}
 	}
@@ -300,11 +296,9 @@ func (b *Backend[H]) FSForVolume(volume string) (FS, error) {
 
 // --- Device-level operations (raw block device access) ---
 
-// DeviceMount opens an existing volume and returns its block device path.
+// DeviceAttach opens an existing volume and returns its block device path.
 // No filesystem is mounted — the caller manages the raw device.
-func (b *Backend[H]) DeviceMount(ctx context.Context, volume string) (string, error) {
-	// XXX: I don't like calling this "mount", we should consider renaming this operation to Connect
-	// but it needs to be done consistently like in Volume
+func (b *Backend[H]) DeviceAttach(ctx context.Context, volume string) (string, error) {
 	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
 		return "", err
@@ -322,8 +316,8 @@ func (b *Backend[H]) DeviceMount(ctx context.Context, volume string) (string, er
 	return b.DevicePath(volume)
 }
 
-// DeviceUnmount disconnects the block device and closes a volume opened via DeviceMount.
-func (b *Backend[H]) DeviceUnmount(ctx context.Context, volume string) error {
+// DeviceDetach disconnects the block device and closes a volume opened via DeviceAttach.
+func (b *Backend[H]) DeviceDetach(ctx context.Context, volume string) error {
 	if dc, ok := any(b.driver).(DeviceConnector); ok {
 		if err := dc.DisconnectDevice(ctx, volume); err != nil {
 			return err
@@ -398,7 +392,11 @@ func (b *Backend[H]) IsMounted(mountpoint string) bool {
 func (b *Backend[H]) VolumeAt(mountpoint string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.mounts[mountpoint].volume
+	entry, ok := b.mounts[mountpoint]
+	if !ok {
+		return ""
+	}
+	return entry.vol.Name()
 }
 
 // Mounts returns a snapshot of all active mountpoint → volume name mappings.
@@ -407,7 +405,7 @@ func (b *Backend[H]) Mounts() map[string]string {
 	defer b.mu.Unlock()
 	cp := make(map[string]string, len(b.mounts))
 	for k, v := range b.mounts {
-		cp[k] = v.volume
+		cp[k] = v.vol.Name()
 	}
 	return cp
 }
@@ -444,7 +442,7 @@ func (b *Backend[H]) Close(ctx context.Context) error {
 // Caller must hold b.mu.
 func (b *Backend[H]) mountpointFor(volume string) string {
 	for mp, entry := range b.mounts {
-		if entry.volume == volume {
+		if entry.vol.Name() == volume {
 			return mp
 		}
 	}
@@ -480,7 +478,7 @@ func (b *Backend[H]) mountVolume(ctx context.Context, vol loophole.Volume, mount
 
 	slog.Info("backend: mountVolume done", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
-	b.mounts[mountpoint] = mountEntry[H]{volume: vol.Name(), handle: handle}
+	b.mounts[mountpoint] = mountEntry[H]{vol: vol, handle: handle}
 	b.mu.Unlock()
 	return nil
 }
@@ -494,10 +492,5 @@ func (b *Backend[H]) volumeAndHandle(mountpoint string) (loophole.Volume, H, err
 		var zero H
 		return nil, zero, fmt.Errorf("mountpoint %q not tracked", mountpoint)
 	}
-	vol := b.vm.GetVolume(entry.volume)
-	if vol == nil {
-		var zero H
-		return nil, zero, fmt.Errorf("volume %q not open", entry.volume)
-	}
-	return vol, entry.handle, nil
+	return entry.vol, entry.handle, nil
 }

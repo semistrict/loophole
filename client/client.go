@@ -130,9 +130,9 @@ func (c *Client) Snapshot(ctx context.Context, mountpoint, name string) error {
 	return err
 }
 
-// DeviceMount opens a volume and returns the FUSE device path.
-func (c *Client) DeviceMount(ctx context.Context, volume string) (string, error) {
-	resp, err := c.rpc(ctx, "POST", "/device/mount", map[string]string{
+// DeviceAttach opens a volume and returns the FUSE device path.
+func (c *Client) DeviceAttach(ctx context.Context, volume string) (string, error) {
+	resp, err := c.rpc(ctx, "POST", "/device/attach", map[string]string{
 		"volume": volume,
 	})
 	if err != nil {
@@ -140,14 +140,14 @@ func (c *Client) DeviceMount(ctx context.Context, volume string) (string, error)
 	}
 	var result struct{ Device string }
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("decode device/mount response: %w", err)
+		return "", fmt.Errorf("decode device/attach response: %w", err)
 	}
 	return result.Device, nil
 }
 
-// DeviceUnmount closes a volume device.
-func (c *Client) DeviceUnmount(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/device/unmount", map[string]string{
+// DeviceDetach closes a volume device.
+func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
+	_, err := c.rpc(ctx, "POST", "/device/detach", map[string]string{
 		"volume": volume,
 	})
 	return err

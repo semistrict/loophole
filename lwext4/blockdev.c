@@ -16,7 +16,9 @@ static int bdev_open(struct ext4_blockdev *bdev) {
 
 static int bdev_bread(struct ext4_blockdev *bdev, void *buf,
                       uint64_t blk_id, uint32_t blk_cnt) {
-    int handle = (int)(uintptr_t)bdev->bdif->p_user; // XXX: why is this casted to an int? why do the goBlockdevOpen etc functions take an int?
+    // p_user stores the Go-side handle as a void* (CGo can't pass Go pointers to C,
+    // so we use an integer handle that indexes into a Go-side map).
+    int handle = (int)(uintptr_t)bdev->bdif->p_user;
     return goBlockdevRead(handle, buf, blk_id, blk_cnt, bdev->bdif->ph_bsize);
 }
 
@@ -45,9 +47,13 @@ struct ext4_blockdev *create_blockdev(int handle, uint32_t ph_bsize, uint64_t ph
     bdif->bread = bdev_bread;
     bdif->bwrite = bdev_bwrite;
     bdif->close = bdev_close;
-    bdif->lock = NULL; // XXX: what is this?
+    bdif->lock = NULL;   // optional mutex callbacks; NULL = no locking (single-threaded)
     bdif->unlock = NULL;
-    bdif->ph_bsize = ph_bsize; // XXX: validate the values we pass here make sense
+    if (ph_bsize == 0 || (ph_bsize & (ph_bsize - 1)) != 0 || ph_bcnt == 0) {
+        free(buf); free(bdif); free(bdev);
+        return NULL;
+    }
+    bdif->ph_bsize = ph_bsize;
     bdif->ph_bcnt = ph_bcnt;
     bdif->ph_bbuf = buf;
     bdif->p_user = (void *)(uintptr_t)handle;

@@ -78,14 +78,12 @@ func (s *Server) ServeListener(ln net.Listener) error {
 			}
 			return err
 		}
-		wg.Add(1) // XXX: can we statically enforce the use of wg.Go ?
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer util.SafeClose(c, "close NBD conn")
-			if err := nbd.ServeDynamic(context.Background(), c, s); err != nil { // XXX: should we cancel this context when the connection goes away?
+			if err := nbd.ServeDynamic(context.Background(), c, s); err != nil {
 				slog.Warn("NBD serve", "error", err)
 			}
-		}()
+		})
 	}
 }
 
