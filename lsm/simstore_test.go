@@ -3,6 +3,7 @@ package lsm
 import (
 	"fmt"
 	"math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/semistrict/loophole"
@@ -21,6 +22,11 @@ type FaultConfig struct {
 	// Simulate partial writes: Put succeeds in S3 but returns error to caller.
 	// The object exists but the caller thinks it failed.
 	PhantomPutRate float64
+
+	// Targeted phantom PUT for layers.json only. Exercises the critical path
+	// where the manifest write "fails" but data actually persisted — on next
+	// open the volume sees different layers than the caller expected.
+	LayersJsonPhantomPutRate float64
 }
 
 // SimObjectStore wraps a MemStore with deterministic fault injection.
@@ -77,6 +83,20 @@ func (s *SimObjectStore) InjectFaults() {
 		})
 		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
+		})
+	}
+
+	if s.faults.LayersJsonPhantomPutRate > 0 && s.rng.Float64() < s.faults.LayersJsonPhantomPutRate {
+		isLayersJSON := func(key string) bool {
+			return strings.HasSuffix(key, "layers.json")
+		}
+		s.inner.SetFault(loophole.OpPutReader, "", loophole.Fault{
+			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
+			ShouldFault: isLayersJSON,
+		})
+		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
+			ShouldFault: isLayersJSON,
 		})
 	}
 

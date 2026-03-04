@@ -10,8 +10,10 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"sync"
 	"testing"
 	"testing/synctest"
+	"time"
 
 	"github.com/semistrict/loophole"
 )
@@ -25,6 +27,7 @@ type SimConfig struct {
 	CrashRate      float64 // probability of crash per tick
 	S3Faults       FaultConfig
 	FlushThreshold int64
+	FlushInterval  time.Duration // periodic auto-flush interval; 0 = default (5ms under synctest)
 }
 
 // Simulation runs a multi-node deterministic simulation.
@@ -105,6 +108,10 @@ func (sim *Simulation) nextTimelineID() string {
 }
 
 func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes int64) *Manager {
+	flushInterval := sim.config.FlushInterval
+	if flushInterval == 0 {
+		flushInterval = 5 * time.Millisecond // small interval so periodic flush fires under synctest
+	}
 	m := NewManager(
 		sim.store.Store(),
 		cacheDir,
@@ -112,6 +119,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes in
 			FlushThreshold:  sim.config.FlushThreshold,
 			MaxFrozenLayers: 2,
 			PageCacheBytes:  pageCacheBytes,
+			FlushInterval:   flushInterval,
 		},
 		nil,
 		fs,
@@ -149,6 +157,12 @@ func (sim *Simulation) Run() {
 			sim.doOperation(ctx, node, tick)
 			sim.store.ClearFaults()
 		}
+
+		// Advance the fake clock to let periodic flush goroutines fire.
+		// This creates a race between periodic auto-flush and explicit
+		// operations — a real production scenario.
+		time.Sleep(1 * time.Millisecond)
+
 		if tick%50 == 0 {
 			sim.t.Logf("tick %d: %d volumes, %d timelines", tick, len(sim.volumeTimelines), len(sim.timelineIDs))
 		}
@@ -202,6 +216,8 @@ func (sim *Simulation) opTable() []opEntry {
 		{2, sim.opOpen},
 		{2, sim.opDeleteVolume},
 		{2, sim.opCloseVolume},
+		{3, sim.opConcurrentWrite},
+		{2, sim.opWriteAllPages},
 		{sim.config.CrashRate * 100, sim.opCrash},
 		// Remaining weight is implicitly a no-op.
 	}
@@ -802,6 +818,113 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	sim.oracle.RecordFlush(node.id, dstTL)
 }
 
+func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil || v.ReadOnly() {
+		return
+	}
+
+	timelineID := sim.volumeTimelines[volName]
+	maxPage := uint64(sim.config.DevicePages)
+
+	// Pre-generate all write data from the sim RNG before spawning goroutines.
+	// The RNG is not safe for concurrent use.
+	type writeOp struct {
+		pageAddr uint64
+		data     []byte
+	}
+	const numWriters = 3
+	writerOps := make([][]writeOp, numWriters)
+	for w := range numWriters {
+		numPages := sim.rng.IntN(5) + 1
+		writerOps[w] = make([]writeOp, numPages)
+		for i := range numPages {
+			writerOps[w][i] = writeOp{
+				pageAddr: sim.rng.Uint64N(maxPage),
+				data:     make([]byte, PageSize),
+			}
+			sim.fillRandomBytes(writerOps[w][i].data)
+		}
+	}
+
+	// Spawn concurrent writers.
+	var wg sync.WaitGroup
+	for w := range numWriters {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for _, op := range writerOps[w] {
+				v.Write(ctx, op.data, op.pageAddr*PageSize)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Record writes in oracle. The order of concurrent writes to the same
+	// page is non-deterministic, so we read back each written page to get
+	// the actual value and record that.
+	writtenPages := make(map[uint64]bool)
+	for _, ops := range writerOps {
+		for _, op := range ops {
+			writtenPages[op.pageAddr] = true
+		}
+	}
+	for pageAddr := range writtenPages {
+		buf := make([]byte, PageSize)
+		if _, err := v.Read(ctx, buf, pageAddr*PageSize); err != nil {
+			continue
+		}
+		sim.oracle.RecordWrite(node.id, timelineID, pageAddr, buf)
+	}
+
+	if err := v.Flush(ctx); err != nil {
+		return
+	}
+	sim.oracle.RecordFlush(node.id, timelineID)
+}
+
+func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil || v.ReadOnly() {
+		return
+	}
+
+	timelineID := sim.volumeTimelines[volName]
+	maxPage := uint64(sim.config.DevicePages)
+
+	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+		data := make([]byte, PageSize)
+		sim.fillRandomBytes(data)
+
+		err := v.Write(ctx, data, pageAddr*PageSize)
+		sim.oracle.RecordWrite(node.id, timelineID, pageAddr, data)
+
+		if err != nil {
+			// Auto-flush error — data is in frozen layer, try to flush.
+			if fErr := v.Flush(ctx); fErr != nil {
+				return
+			}
+			sim.oracle.RecordFlush(node.id, timelineID)
+			return
+		}
+	}
+
+	if err := v.Flush(ctx); err != nil {
+		return
+	}
+	sim.oracle.RecordFlush(node.id, timelineID)
+}
+
 func (sim *Simulation) opDeleteVolume(ctx context.Context, node *SimNode) {
 	// Find volumes not leased by any node and not ancestors of other volumes.
 	var candidates []string
@@ -1086,6 +1209,14 @@ func (sim *Simulation) recoverNode(ctx context.Context, node *SimNode) {
 			acquired++
 		}
 	}
+
+	// Double-crash: 10% chance of crashing again immediately after recovery.
+	// Simulates crash-loop scenarios where the process restarts and dies
+	// again before doing any useful work.
+	if sim.rng.Float64() < 0.10 {
+		sim.t.Logf("[%s] DOUBLE-CRASH: crashing again immediately after recovery", node.id)
+		sim.opCrash(ctx, node)
+	}
 }
 
 func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
@@ -1315,9 +1446,10 @@ func TestSimulation(t *testing.T) {
 			CrashRate:      crashRate,
 			FlushThreshold: 8 * PageSize,
 			S3Faults: FaultConfig{
-				PutFailRate:    faultRate,
-				GetFailRate:    faultRate,
-				PhantomPutRate: 0.02,
+				PutFailRate:              faultRate,
+				GetFailRate:              faultRate,
+				PhantomPutRate:           0.02,
+				LayersJsonPhantomPutRate: 0.03,
 			},
 		})
 		// Defer cleanup so periodic flush goroutines are stopped even if

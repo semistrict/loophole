@@ -32,10 +32,11 @@ const (
 // is returned instead of nil. This simulates "phantom" operations where
 // the data lands in the store but the caller sees an error.
 type Fault struct {
-	Err     error         // return this error (operation does NOT execute)
-	PostErr error         // return this error AFTER the operation succeeds
-	Delay   time.Duration // sleep before executing (works with synctest)
-	Hook    func()        // called before delay/error; use to synchronize with test goroutines
+	Err         error                 // return this error (operation does NOT execute)
+	PostErr     error                 // return this error AFTER the operation succeeds
+	Delay       time.Duration         // sleep before executing (works with synctest)
+	Hook        func()                // called before delay/error; use to synchronize with test goroutines
+	ShouldFault func(key string) bool // when set, fault only applies if this returns true for the key
 }
 
 // faultKey identifies a fault rule: an operation type + optional key pattern.
@@ -132,6 +133,9 @@ func (m *MemStore) checkFault(op OpType, fullKey string) error {
 	if !ok {
 		return nil
 	}
+	if f.ShouldFault != nil && !f.ShouldFault(fullKey) {
+		return nil
+	}
 	if f.Hook != nil {
 		f.Hook()
 	}
@@ -151,6 +155,9 @@ func (m *MemStore) checkPostFault(op OpType, fullKey string) error {
 	}
 	m.shared.faultMu.RUnlock()
 	if ok && f.PostErr != nil {
+		if f.ShouldFault != nil && !f.ShouldFault(fullKey) {
+			return nil
+		}
 		return f.PostErr
 	}
 	return nil
