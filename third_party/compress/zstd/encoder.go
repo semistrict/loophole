@@ -23,10 +23,12 @@ import (
 // Smaller encodes are encouraged to use the EncodeAll function.
 // Use NewWriter to create a new instance.
 type Encoder struct {
-	o        encoderOptions
-	encoders chan encoder
-	state    encoderState
-	init     sync.Once
+	o           encoderOptions
+	encoders    chan encoder
+	singleBlock encoder // non-nil when concurrent==1, avoids channel for synctest compat
+	singleMu    sync.Mutex
+	state       encoderState
+	init        sync.Once
 }
 
 type encoder interface {
@@ -84,10 +86,16 @@ func (e *Encoder) initialize() {
 	if e.o.concurrent == 0 {
 		e.o.setDefault()
 	}
-	e.encoders = make(chan encoder, e.o.concurrent)
-	for i := 0; i < e.o.concurrent; i++ {
-		enc := e.o.encoder()
-		e.encoders <- enc
+	if e.o.concurrent == 1 {
+		// Single-encoder path: use mutex instead of channel to avoid
+		// synctest bubble violations.
+		e.singleBlock = e.o.encoder()
+	} else {
+		e.encoders = make(chan encoder, e.o.concurrent)
+		for i := 0; i < e.o.concurrent; i++ {
+			enc := e.o.encoder()
+			e.encoders <- enc
+		}
 	}
 }
 
@@ -506,10 +514,19 @@ func (e *Encoder) Close() error {
 // using either a stream or DecodeAll.
 func (e *Encoder) EncodeAll(src, dst []byte) []byte {
 	e.init.Do(e.initialize)
-	enc := <-e.encoders
-	defer func() {
-		e.encoders <- enc
-	}()
+	var enc encoder
+	if e.singleBlock != nil {
+		// Single-encoder path: use mutex instead of channel to avoid
+		// synctest bubble violations.
+		e.singleMu.Lock()
+		enc = e.singleBlock
+		defer e.singleMu.Unlock()
+	} else {
+		enc = <-e.encoders
+		defer func() {
+			e.encoders <- enc
+		}()
+	}
 	return e.encodeAll(enc, src, dst)
 }
 

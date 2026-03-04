@@ -53,6 +53,30 @@ func putZstdDecoder(d *zstd.Decoder) {
 	zstdDecoderPool.Put(d)
 }
 
+// zstdEncoderPool reuses zstd encoders across layer builds to avoid the
+// significant allocation cost of zstd.NewWriter per compression.
+var zstdEncoderPool = sync.Pool{
+	New: func() any {
+		e, err := zstd.NewWriter(nil,
+			zstd.WithEncoderLevel(zstd.SpeedDefault),
+			zstd.WithEncoderConcurrency(1),
+		)
+		if err != nil {
+			panic("zstd.NewWriter: " + err.Error())
+		}
+		return e
+	},
+}
+
+func getZstdEncoder() *zstd.Encoder {
+	return zstdEncoderPool.Get().(*zstd.Encoder)
+}
+
+func putZstdEncoder(e *zstd.Encoder) {
+	e.Reset(nil)
+	zstdEncoderPool.Put(e)
+}
+
 // Config controls the LSM engine's resource limits and behavior.
 type Config struct {
 	// FlushThreshold is the memLayer size in bytes that triggers a freeze+flush.

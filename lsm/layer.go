@@ -13,8 +13,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/klauspost/compress/zstd"
-
 	"github.com/semistrict/loophole"
 )
 
@@ -79,11 +77,8 @@ func buildDeltaLayer(ml *MemLayer, entries []sortedEntry) ([]byte, DeltaLayerMet
 		return nil, DeltaLayerMeta{}, fmt.Errorf("no entries")
 	}
 
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
-		return nil, DeltaLayerMeta{}, err
-	}
-	defer func() { _ = encoder.Close() }()
+	encoder := getZstdEncoder()
+	defer putZstdEncoder(encoder)
 
 	var buf bytes.Buffer
 
@@ -388,15 +383,6 @@ func mergeDeltaLayers(ctx context.Context, layers []*parsedDeltaLayer, metas []D
 		return nil, DeltaLayerMeta{}, fmt.Errorf("no entries after merge")
 	}
 
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
-		return nil, DeltaLayerMeta{}, err
-	}
-	defer func() { _ = encoder.Close() }()
-
-	decoder := getZstdDecoder()
-	defer putZstdDecoder(decoder)
-
 	var buf bytes.Buffer
 	buf.Write(make([]byte, deltaLayerHeaderSize)) // reserve header
 
@@ -419,7 +405,8 @@ func mergeDeltaLayers(ctx context.Context, layers []*parsedDeltaLayer, metas []D
 			ie.ValueLen = 0
 			ie.CRC32 = 0
 		} else {
-			// Read compressed data from source layer and decompress.
+			// Read compressed data from source layer and copy through.
+			// CRC validates the compressed bytes; no need to decompress/recompress.
 			var srcCompressed []byte
 			if srcLayer.data != nil {
 				end := se.ie.ValueOffset + uint64(se.ie.ValueLen)
@@ -443,15 +430,9 @@ func mergeDeltaLayers(ctx context.Context, layers []*parsedDeltaLayer, metas []D
 				return nil, DeltaLayerMeta{}, fmt.Errorf("CRC mismatch for page %d seq %d", addr, se.ie.Seq)
 			}
 
-			decompressed, err := decoder.DecodeAll(srcCompressed, nil)
-			if err != nil {
-				return nil, DeltaLayerMeta{}, fmt.Errorf("decompress page %d: %w", addr, err)
-			}
-
-			compressed := encoder.EncodeAll(decompressed, nil)
-			ie.ValueLen = uint32(len(compressed))
-			ie.CRC32 = crc32.ChecksumIEEE(compressed)
-			buf.Write(compressed)
+			ie.ValueLen = se.ie.ValueLen
+			ie.CRC32 = se.ie.CRC32
+			buf.Write(srcCompressed)
 		}
 
 		indexEntries = append(indexEntries, ie)
@@ -587,11 +568,8 @@ func buildImageLayer(seq uint64, pages []imagePageInput) ([]byte, ImageLayerMeta
 		return nil, ImageLayerMeta{}, fmt.Errorf("no pages")
 	}
 
-	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedDefault))
-	if err != nil {
-		return nil, ImageLayerMeta{}, err
-	}
-	defer func() { _ = encoder.Close() }()
+	encoder := getZstdEncoder()
+	defer putZstdEncoder(encoder)
 
 	var buf bytes.Buffer
 	buf.Write(make([]byte, imageLayerHeaderSize)) // reserve header
