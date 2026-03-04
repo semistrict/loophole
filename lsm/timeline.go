@@ -180,8 +180,11 @@ func (tl *Timeline) Write(ctx context.Context, data []byte, offset uint64) error
 // from concurrent sub-page writes.
 func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chunk []byte) error {
 	pageLock := &tl.pageLocks[pageAddr%uint64(len(tl.pageLocks))]
+
+	// Hold the per-page lock only for the read-modify-write + memLayer put.
+	// Release it before any flush work to avoid blocking concurrent PunchHole
+	// or Write calls to the same page while a slow S3 upload runs.
 	pageLock.Lock()
-	defer pageLock.Unlock()
 
 	var page [PageSize]byte
 
@@ -189,6 +192,7 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 	if uint64(len(chunk)) < PageSize {
 		existing, err := tl.readPage(ctx, pageAddr, math.MaxUint64)
 		if err != nil {
+			pageLock.Unlock()
 			return err
 		}
 		copy(page[:], existing)
@@ -206,6 +210,9 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 	ml := tl.memLayer
 	err := ml.put(pageAddr, seq, page[:])
 	tl.mu.RUnlock()
+
+	pageLock.Unlock()
+
 	if err != nil {
 		return err
 	}
