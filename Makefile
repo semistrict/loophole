@@ -106,7 +106,7 @@ deps:
 	./download-deps.sh
 
 # Run all tests: unit tests + all e2e variants
-e2e: test e2e-fuse e2e-testnbdtcp
+e2e: test e2e-fuse e2e-nbd e2e-testnbdtcp
 
 # Run e2e tests (FUSE + losetup + kernel ext4)
 # Usage: make e2e-fuse [RUN=TestName]

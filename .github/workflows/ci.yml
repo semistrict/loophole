@@ -35,11 +35,31 @@ jobs:
       - uses: golangci/golangci-lint-action@v7
       - run: make check
 
-  e2e-tests:
+  e2e-fuse:
     runs-on: ubuntu-latest
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
       - run: docker compose build
       - run: docker compose up -d s3
-      - run: docker compose run --rm go make e2e
+      - run: docker compose run --rm go make e2e-fuse
+
+  e2e-nbd:
+    runs-on: ubuntu-latest
+    needs: [build, test, check]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe nbd nbds_max=16
+      - run: docker compose build
+      - run: docker compose up -d s3
+      - run: docker compose run --rm go make e2e-nbd
+
+  e2e-nbd-tcp:
+    runs-on: ubuntu-latest
+    needs: [build, test, check]
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo modprobe nbd nbds_max=16
+      - run: docker compose build
+      - run: docker compose up -d s3
+      - run: docker compose run --rm go make e2e-testnbdtcp
