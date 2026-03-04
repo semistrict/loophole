@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/metrics"
 )
 
 // maxMemLayerSlots caps the number of unique page slots in a memlayer.
@@ -501,6 +502,7 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 	if err := tl.store.PutReader(ctx, meta.Key, bytes.NewReader(data)); err != nil {
 		return fmt.Errorf("upload delta layer: %w", err)
 	}
+	metrics.FlushBytes.Add(float64(len(data)))
 
 	// Pre-cache locally so subsequent reads don't hit S3.
 	tl.cacheDeltaLocally(meta.Key, data)
