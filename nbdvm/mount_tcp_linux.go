@@ -244,7 +244,7 @@ func (s *TCPServer) Connect(ctx context.Context, vol loophole.Volume) (string, e
 	exp := nbd.Export{
 		Size:       vol.Size(),
 		Flags:      uint16(serverFlags),
-		BlockSizes: &nbd.BlockSizeConstraints{Min: 1, Preferred: 64 * 1024, Max: 0xffffffff},
+		BlockSizes: &nbd.BlockSizeConstraints{Min: 512, Preferred: 64 * 1024, Max: 0xffffffff},
 	}
 	idx, err := nbd.Configure(exp, kernelFDs...)
 	if err != nil {
