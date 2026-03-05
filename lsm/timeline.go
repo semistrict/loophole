@@ -26,7 +26,7 @@ import (
 
 // maxMemLayerSlots caps the number of unique page slots in a memlayer.
 // This prevents absurd mmap file sizes when FlushThreshold is set very high.
-const maxMemLayerSlots = 16384
+const maxMemLayerSlots = 65536
 
 // TimelineMeta is the S3-persisted metadata for a timeline.
 type TimelineMeta struct {

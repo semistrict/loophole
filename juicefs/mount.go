@@ -38,6 +38,7 @@ type juiceFSMount struct {
 
 	vfsName    string // registered sqlite3vfs name (for cleanup)
 	mountpoint string //nolint:unused // only used by FUSE driver (linux)
+	fuseServer any    //nolint:unused // *fuse.Server, only used by FUSE driver (linux)
 	cacheDir   string // temp dir for chunk cache
 }
 
@@ -169,8 +170,8 @@ func closeMount(ctx context.Context, h *juiceFSMount) error {
 	_ = h.metaCl.Shutdown()
 
 	if h.cvfs != nil {
-		if err := h.cvfs.FlushSuperblock(); err != nil {
-			slog.Warn("juicefs: flush superblock error", "error", err)
+		if err := h.cvfs.FlushHeader(); err != nil {
+			slog.Warn("juicefs: flush header error", "error", err)
 		}
 	}
 

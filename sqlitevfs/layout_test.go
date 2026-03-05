@@ -29,118 +29,79 @@ func testVolume(t *testing.T, size uint64) loophole.Volume {
 	return vol
 }
 
-func TestDefaultRegions(t *testing.T) {
-	// 1GB volume.
-	size := uint64(1024 * 1024 * 1024)
-	regions := DefaultRegions(size)
+func TestHeaderRoundTrip(t *testing.T) {
+	vol := testVolume(t, 8*1024*1024) // 8MB
 
-	// Check that regions don't overlap and cover the volume.
-	require.Equal(t, uint64(superblockSize), regions[RegionMainDB].RegionStart)
-
-	for i := range numRegions {
-		require.NotEmpty(t, regions[i].Name)
-		require.True(t, regions[i].RegionCapacity > 0, "region %d has zero capacity", i)
-		end := regions[i].RegionStart + regions[i].RegionCapacity
-		require.True(t, end <= size, "region %d exceeds volume size", i)
-	}
-
-	// SHM is at the very end.
-	require.Equal(t, size-shmRegionSize, regions[RegionSHM].RegionStart)
-	require.Equal(t, uint64(shmRegionSize), regions[RegionSHM].RegionCapacity)
-
-	// WAL and journal each get size/16 = 64MB.
-	require.Equal(t, size/16, regions[RegionWAL].RegionCapacity)
-	require.Equal(t, size/16, regions[RegionJournal].RegionCapacity)
-
-	// MainDB gets the rest.
-	expectedMainDB := size - uint64(superblockSize) - regions[RegionJournal].RegionCapacity - regions[RegionWAL].RegionCapacity - regions[RegionSHM].RegionCapacity
-	require.Equal(t, expectedMainDB, regions[RegionMainDB].RegionCapacity)
-
-	// Check non-overlapping: each region starts where the previous one ends.
-	require.Equal(t, regions[RegionMainDB].RegionStart+regions[RegionMainDB].RegionCapacity, regions[RegionJournal].RegionStart)
-	require.Equal(t, regions[RegionJournal].RegionStart+regions[RegionJournal].RegionCapacity, regions[RegionWAL].RegionStart)
-	require.Equal(t, regions[RegionWAL].RegionStart+regions[RegionWAL].RegionCapacity, regions[RegionSHM].RegionStart)
-	require.Equal(t, regions[RegionSHM].RegionStart+regions[RegionSHM].RegionCapacity, size)
-}
-
-func TestDefaultRegionsMinSize(t *testing.T) {
-	// 256MB — minimum size.
-	size := uint64(MinVolumeSize)
-	regions := DefaultRegions(size)
-
-	// Journal and WAL get minimum 64MB each.
-	require.Equal(t, uint64(minJournalSize), regions[RegionJournal].RegionCapacity)
-	require.Equal(t, uint64(minWALSize), regions[RegionWAL].RegionCapacity)
-
-	// MainDB gets the rest: 256MB - 64KB - 64MB - 64MB - 1MB.
-	expectedMainDB := size - uint64(superblockSize) - uint64(minJournalSize) - uint64(minWALSize) - uint64(shmRegionSize)
-	require.Equal(t, expectedMainDB, regions[RegionMainDB].RegionCapacity)
-}
-
-func TestSuperblockRoundTrip(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024) // 512MB
-
-	sb, err := FormatVolume(t.Context(), vol)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
-	// Read it back.
-	sb2, err := ReadSuperblock(t.Context(), vol)
+	h, err := ReadHeader(t.Context(), vol)
 	require.NoError(t, err)
+	require.Equal(t, uint64(0), h.MainDBSize)
 
-	for i := range numRegions {
-		require.Equal(t, sb.Regions[i].Name, sb2.Regions[i].Name)
-		require.Equal(t, sb.Regions[i].RegionStart, sb2.Regions[i].RegionStart)
-		require.Equal(t, sb.Regions[i].RegionCapacity, sb2.Regions[i].RegionCapacity)
-		require.Equal(t, sb.Regions[i].FileSize, sb2.Regions[i].FileSize)
-		require.Equal(t, sb.Regions[i].Flags, sb2.Regions[i].Flags)
-	}
+	// Update and re-read.
+	h.MainDBSize = 4096
+	require.NoError(t, writeHeader(t.Context(), vol, h))
+
+	h2, err := ReadHeader(t.Context(), vol)
+	require.NoError(t, err)
+	require.Equal(t, uint64(4096), h2.MainDBSize)
 }
 
 func TestFormatVolumeTooSmall(t *testing.T) {
-	vol := testVolume(t, 128*1024*1024) // 128MB — below minimum.
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 2*1024*1024) // 2MB — below 4MB minimum.
+	err := FormatVolume(t.Context(), vol)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "volume too small")
 }
 
-func TestReadSuperblockUnformatted(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
+func TestReadHeaderUnformatted(t *testing.T) {
+	vol := testVolume(t, 8*1024*1024)
 	// Volume is all zeros — should fail with bad magic.
-	_, err := ReadSuperblock(t.Context(), vol)
+	_, err := ReadHeader(t.Context(), vol)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid superblock magic")
+	require.Contains(t, err.Error(), "invalid header magic")
 }
 
-func TestSuperblockFileTableCRUD(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
+func TestMemBuffer(t *testing.T) {
+	var buf memBuffer
 
-	sb, err := FormatVolume(t.Context(), vol)
+	// Not exists initially.
+	require.False(t, buf.isExists())
+	require.Equal(t, int64(0), buf.fileSize())
+
+	// Create and write.
+	buf.setExists()
+	require.True(t, buf.isExists())
+
+	n := buf.writeAt([]byte("hello"), 0)
+	require.Equal(t, 5, n)
+	require.Equal(t, int64(5), buf.fileSize())
+
+	// Read back.
+	p := make([]byte, 5)
+	nn, err := buf.readAt(p, 0)
 	require.NoError(t, err)
+	require.Equal(t, 5, nn)
+	require.Equal(t, []byte("hello"), p)
 
-	// Initially no files exist.
-	for i := range numRegions {
-		require.False(t, sb.Regions[i].Exists())
-		require.Equal(t, uint64(0), sb.Regions[i].FileSize)
-	}
+	// Read past EOF.
+	p2 := make([]byte, 10)
+	nn, err = buf.readAt(p2, 3)
+	require.Error(t, err) // io.EOF
+	require.Equal(t, 2, nn)
+	require.Equal(t, []byte("lo"), p2[:2])
 
-	// Mark main.db as existing with some size.
-	sb.Regions[RegionMainDB].Flags |= flagExists
-	sb.Regions[RegionMainDB].FileSize = 4096
+	// Truncate down.
+	buf.truncate(3)
+	require.Equal(t, int64(3), buf.fileSize())
 
-	require.NoError(t, writeSuperblock(t.Context(), vol, sb))
+	// Truncate up.
+	buf.truncate(10)
+	require.Equal(t, int64(10), buf.fileSize())
 
-	sb2, err := ReadSuperblock(t.Context(), vol)
-	require.NoError(t, err)
-	require.True(t, sb2.Regions[RegionMainDB].Exists())
-	require.Equal(t, uint64(4096), sb2.Regions[RegionMainDB].FileSize)
-	require.False(t, sb2.Regions[RegionJournal].Exists())
-
-	// Clear the main.db entry.
-	sb2.Regions[RegionMainDB].Flags = 0
-	sb2.Regions[RegionMainDB].FileSize = 0
-	require.NoError(t, writeSuperblock(t.Context(), vol, sb2))
-
-	sb3, err := ReadSuperblock(t.Context(), vol)
-	require.NoError(t, err)
-	require.False(t, sb3.Regions[RegionMainDB].Exists())
+	// Reset.
+	buf.reset()
+	require.False(t, buf.isExists())
+	require.Equal(t, int64(0), buf.fileSize())
 }

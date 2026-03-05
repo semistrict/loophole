@@ -223,7 +223,7 @@ func dbFollowCmd() *cobra.Command {
 				return err
 			}
 
-			// Start a goroutine that periodically re-reads the superblock
+			// Start a goroutine that periodically re-reads the header
 			// to see new data flushed by the writer.
 			stopRefresh := make(chan struct{})
 			defer close(stopRefresh)
@@ -233,8 +233,8 @@ func dbFollowCmd() *cobra.Command {
 				for {
 					select {
 					case <-ticker.C:
-						if sb, err := sqlitevfs.ReadSuperblock(cmd.Context(), vol); err == nil {
-							dbVFS.SetSuperblock(sb)
+						if h, err := sqlitevfs.ReadHeader(cmd.Context(), vol); err == nil {
+							dbVFS.SetHeader(h)
 						}
 					case <-stopRefresh:
 						return

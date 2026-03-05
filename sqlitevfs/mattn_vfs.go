@@ -12,53 +12,81 @@ import (
 )
 
 // VolumeVFS implements [sqlite3vfs.VFS] backed by a loophole Volume.
-// Register it with [sqlite3vfs.RegisterVFS] and open databases using that VFS name.
+// The main database lives on the volume; WAL, journal, and SHM are in memory.
 type VolumeVFS struct {
 	mu       sync.Mutex
 	vol      loophole.Volume
-	sb       *Superblock
+	header   *Header
 	syncMode SyncMode
 	dirty    bool
-	ctx      context.Context
+
+	mainDBExists bool
+	wal          memBuffer
+	journal      memBuffer
+	shm          memBuffer
 }
 
-// Compile-time check that VolumeVFS satisfies the psanford VFS interface.
 var _ sqlite3vfs.VFS = (*VolumeVFS)(nil)
 
 // NewVolumeVFS opens a VFS on a volume. The volume must already be formatted
-// with FormatVolume. Use ctx for background operations (superblock writes).
+// with FormatVolume.
 func NewVolumeVFS(ctx context.Context, vol loophole.Volume, syncMode SyncMode) (*VolumeVFS, error) {
-	sb, err := ReadSuperblock(ctx, vol)
+	h, err := ReadHeader(ctx, vol)
 	if err != nil {
 		return nil, fmt.Errorf("open VFS: %w", err)
 	}
-	return &VolumeVFS{
-		vol:      vol,
-		sb:       sb,
-		syncMode: syncMode,
-		ctx:      ctx,
-	}, nil
+	v := &VolumeVFS{
+		vol:          vol,
+		header:       h,
+		syncMode:     syncMode,
+		mainDBExists: h.MainDBSize > 0,
+	}
+	// Restore WAL from volume if present (persisted by a previous flush).
+	if h.WALSize > 0 {
+		walData := make([]byte, h.WALSize)
+		if _, err := vol.Read(ctx, walData, vol.Size()-h.WALSize); err != nil {
+			return nil, fmt.Errorf("read WAL from volume: %w", err)
+		}
+		v.wal.restore(walData)
+	}
+	return v, nil
+}
+
+func (v *VolumeVFS) memBuf(k fileKind) *memBuffer {
+	switch k {
+	case fileWAL:
+		return &v.wal
+	case fileJournal:
+		return &v.journal
+	case fileSHM:
+		return &v.shm
+	default:
+		return nil
+	}
 }
 
 func (v *VolumeVFS) Open(name string, flags sqlite3vfs.OpenFlag) (sqlite3vfs.File, sqlite3vfs.OpenFlag, error) {
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		return nil, 0, fmt.Errorf("unknown file %q", name)
 	}
 
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	entry := &v.sb.Regions[idx]
-
-	if flags&sqlite3vfs.OpenCreate != 0 {
-		if !entry.Exists() {
-			entry.Flags |= flagExists
-			entry.FileSize = 0
-			v.dirty = true
+	if kind == fileMainDB {
+		v.mu.Lock()
+		if flags&sqlite3vfs.OpenCreate != 0 {
+			v.mainDBExists = true
+		} else if !v.mainDBExists {
+			v.mu.Unlock()
+			return nil, 0, fmt.Errorf("file %q does not exist", name)
 		}
-	} else if !entry.Exists() {
-		return nil, 0, fmt.Errorf("file %q does not exist", name)
+		v.mu.Unlock()
+	} else {
+		buf := v.memBuf(kind)
+		if flags&sqlite3vfs.OpenCreate != 0 {
+			buf.setExists()
+		} else if !buf.isExists() {
+			return nil, 0, fmt.Errorf("file %q does not exist", name)
+		}
 	}
 
 	outFlags := sqlite3vfs.OpenFlag(0)
@@ -70,55 +98,62 @@ func (v *VolumeVFS) Open(name string, flags sqlite3vfs.OpenFlag) (sqlite3vfs.Fil
 
 	f := &volumeFile{
 		vfs:       v,
-		regionIdx: idx,
+		kind:      kind,
 		lockLevel: sqlite3vfs.LockNone,
 	}
 	return f, outFlags, nil
 }
 
 func (v *VolumeVFS) Delete(name string, dirSync bool) error {
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		return fmt.Errorf("unknown file %q", name)
 	}
 
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	if kind == fileMainDB {
+		v.mu.Lock()
+		defer v.mu.Unlock()
 
-	entry := &v.sb.Regions[idx]
-	if !entry.Exists() {
+		if !v.mainDBExists {
+			return nil
+		}
+		if v.header.MainDBSize > 0 {
+			if err := v.vol.PunchHole(context.Background(), mainDBOffset, v.header.MainDBSize); err != nil {
+				return fmt.Errorf("punch hole: %w", err)
+			}
+		}
+		v.mainDBExists = false
+		v.header.MainDBSize = 0
+		v.dirty = true
 		return nil
 	}
 
-	if entry.FileSize > 0 {
-		if err := v.vol.PunchHole(v.ctx, entry.RegionStart, entry.FileSize); err != nil {
-			return fmt.Errorf("punch hole: %w", err)
-		}
-	}
-
-	entry.Flags = 0
-	entry.FileSize = 0
-	v.dirty = true
+	v.memBuf(kind).reset()
 	return nil
 }
 
 func (v *VolumeVFS) Access(name string, flags sqlite3vfs.AccessFlag) (bool, error) {
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		return false, nil
 	}
 
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	var exists bool
+	if kind == fileMainDB {
+		v.mu.Lock()
+		exists = v.mainDBExists
+		v.mu.Unlock()
+	} else {
+		exists = v.memBuf(kind).isExists()
+	}
 
-	entry := &v.sb.Regions[idx]
 	switch flags {
 	case sqlite3vfs.AccessExists:
-		return entry.Exists(), nil
+		return exists, nil
 	case sqlite3vfs.AccessReadWrite:
-		return entry.Exists() && !v.vol.ReadOnly(), nil
+		return exists && !v.vol.ReadOnly(), nil
 	default:
-		return entry.Exists(), nil
+		return exists, nil
 	}
 }
 
@@ -126,37 +161,51 @@ func (v *VolumeVFS) FullPathname(name string) string {
 	return name
 }
 
-// FlushSuperblock writes the superblock if dirty.
-func (v *VolumeVFS) FlushSuperblock() error {
+// FlushHeader writes the header if dirty.
+func (v *VolumeVFS) FlushHeader() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.flushSuperblockLocked()
+	return v.flushHeaderLocked()
 }
 
-func (v *VolumeVFS) flushSuperblockLocked() error {
+func (v *VolumeVFS) flushHeaderLocked() error {
+	// Persist WAL to the end of the volume for snapshot/clone correctness.
+	walData := v.wal.snapshot()
+	walSize := uint64(len(walData))
+	if walSize > 0 {
+		if err := v.vol.Write(context.Background(), walData, v.vol.Size()-walSize); err != nil {
+			return fmt.Errorf("persist WAL: %w", err)
+		}
+	}
+	if walSize != v.header.WALSize {
+		v.header.WALSize = walSize
+		v.dirty = true
+	}
+
 	if !v.dirty {
 		return nil
 	}
-	if err := writeSuperblock(v.ctx, v.vol, v.sb); err != nil {
+	if err := writeHeader(context.Background(), v.vol, v.header); err != nil {
 		return err
 	}
 	v.dirty = false
 	return nil
 }
 
-// Superblock returns the current superblock (for testing/inspection).
-func (v *VolumeVFS) Superblock() *Superblock {
+// Header returns the current header (for testing/inspection).
+func (v *VolumeVFS) Header() *Header {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	return v.sb
+	return v.header
 }
 
-// SetSuperblock replaces the in-memory superblock. Used by follow mode
+// SetHeader replaces the in-memory header. Used by follow mode
 // to refresh file sizes after re-reading from the volume.
-func (v *VolumeVFS) SetSuperblock(sb *Superblock) {
+func (v *VolumeVFS) SetHeader(h *Header) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.sb = sb
+	v.header = h
+	v.mainDBExists = h.MainDBSize > 0
 }
 
 // SyncMode returns the sync mode configured at open time.
@@ -164,29 +213,27 @@ func (v *VolumeVFS) SyncMode() SyncMode {
 	return v.syncMode
 }
 
-// volumeFile implements [sqlite3vfs.File] for a region within a volume.
+// volumeFile implements [sqlite3vfs.File] for a volume-backed VFS.
 type volumeFile struct {
 	vfs       *VolumeVFS
-	regionIdx int
+	kind      fileKind
 	lockLevel sqlite3vfs.LockType
 	lockMu    sync.Mutex
 }
 
 var _ sqlite3vfs.File = (*volumeFile)(nil)
 
-func (f *volumeFile) region() *RegionEntry {
-	return &f.vfs.sb.Regions[f.regionIdx]
-}
-
 func (f *volumeFile) Close() error {
-	return f.vfs.FlushSuperblock()
+	return f.vfs.FlushHeader()
 }
 
 func (f *volumeFile) ReadAt(p []byte, off int64) (int, error) {
+	if f.kind != fileMainDB {
+		return f.vfs.memBuf(f.kind).readAt(p, off)
+	}
+
 	f.vfs.mu.Lock()
-	entry := f.region()
-	fileSize := int64(entry.FileSize)
-	regionStart := entry.RegionStart
+	fileSize := int64(f.vfs.header.MainDBSize)
 	f.vfs.mu.Unlock()
 
 	if off >= fileSize {
@@ -199,8 +246,7 @@ func (f *volumeFile) ReadAt(p []byte, off int64) (int, error) {
 		n = fileSize - off
 	}
 
-	readBuf := p[:n]
-	_, err := f.vfs.vol.Read(f.vfs.ctx, readBuf, regionStart+uint64(off))
+	_, err := f.vfs.vol.Read(context.Background(), p[:n], mainDBOffset+uint64(off))
 	if err != nil {
 		return 0, fmt.Errorf("read at offset %d: %w", off, err)
 	}
@@ -213,24 +259,23 @@ func (f *volumeFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *volumeFile) WriteAt(p []byte, off int64) (int, error) {
-	f.vfs.mu.Lock()
-	entry := f.region()
-	regionStart := entry.RegionStart
-	regionCap := int64(entry.RegionCapacity)
-	f.vfs.mu.Unlock()
-
-	if off+int64(len(p)) > regionCap {
-		return 0, fmt.Errorf("write exceeds region capacity (%d + %d > %d)", off, len(p), regionCap)
+	if f.kind != fileMainDB {
+		return f.vfs.memBuf(f.kind).writeAt(p, off), nil
 	}
 
-	if err := f.vfs.vol.Write(f.vfs.ctx, p, regionStart+uint64(off)); err != nil {
+	volCap := int64(f.vfs.vol.Size()) - mainDBOffset
+	if off+int64(len(p)) > volCap {
+		return 0, fmt.Errorf("write exceeds volume capacity (%d + %d > %d)", off, len(p), volCap)
+	}
+
+	if err := f.vfs.vol.Write(context.Background(), p, mainDBOffset+uint64(off)); err != nil {
 		return 0, fmt.Errorf("write at offset %d: %w", off, err)
 	}
 
 	newEnd := uint64(off) + uint64(len(p))
 	f.vfs.mu.Lock()
-	if newEnd > entry.FileSize {
-		entry.FileSize = newEnd
+	if newEnd > f.vfs.header.MainDBSize {
+		f.vfs.header.MainDBSize = newEnd
 		f.vfs.dirty = true
 	}
 	f.vfs.mu.Unlock()
@@ -239,17 +284,19 @@ func (f *volumeFile) WriteAt(p []byte, off int64) (int, error) {
 }
 
 func (f *volumeFile) Truncate(size int64) error {
+	if f.kind != fileMainDB {
+		f.vfs.memBuf(f.kind).truncate(size)
+		return nil
+	}
+
 	f.vfs.mu.Lock()
-	entry := f.region()
-	oldSize := entry.FileSize
-	entry.FileSize = uint64(size)
+	oldSize := f.vfs.header.MainDBSize
+	f.vfs.header.MainDBSize = uint64(size)
 	f.vfs.dirty = true
-	regionStart := entry.RegionStart
 	f.vfs.mu.Unlock()
 
 	if uint64(size) < oldSize {
-		freed := oldSize - uint64(size)
-		if err := f.vfs.vol.PunchHole(f.vfs.ctx, regionStart+uint64(size), freed); err != nil {
+		if err := f.vfs.vol.PunchHole(context.Background(), mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
 			return fmt.Errorf("truncate punch hole: %w", err)
 		}
 	}
@@ -260,16 +307,19 @@ func (f *volumeFile) Sync(flag sqlite3vfs.SyncType) error {
 	if f.vfs.syncMode == SyncModeAsync {
 		return nil
 	}
-	if err := f.vfs.FlushSuperblock(); err != nil {
+	if err := f.vfs.FlushHeader(); err != nil {
 		return err
 	}
-	return f.vfs.vol.Flush(f.vfs.ctx)
+	return f.vfs.vol.Flush(context.Background())
 }
 
 func (f *volumeFile) FileSize() (int64, error) {
+	if f.kind != fileMainDB {
+		return f.vfs.memBuf(f.kind).fileSize(), nil
+	}
 	f.vfs.mu.Lock()
 	defer f.vfs.mu.Unlock()
-	return int64(f.region().FileSize), nil
+	return int64(f.vfs.header.MainDBSize), nil
 }
 
 func (f *volumeFile) Lock(elock sqlite3vfs.LockType) error {

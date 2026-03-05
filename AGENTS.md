@@ -10,9 +10,7 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make build` — build all packages
 - `make test` — run all unit tests
 - `make test RUN=TestName` — run a specific test across all packages
-- `make test-lwext4` — lwext4 unit tests (run locally on macOS, no Docker needed)
-- `make test-lwext4 RUN=TestName` — run a specific lwext4 test
-- `make clean-lwext4 && make test-lwext4` — when cgo C source changes, clean and rebuild to avoid stale builds
+- `make clean-lwext4` — when cgo C source changes, clean to avoid stale builds
 - E2E tests require Linux (FUSE). Run in Docker: `docker compose run --rm go bash -c 'make clean-lwext4 && make e2e-lwext4fuse'`
 - `make e2e-juicefs [RUN=TestName]` — JuiceFS in-process e2e tests (macOS/Linux, no FUSE)
 - `make e2e-juicefsfuse [RUN=TestName]` — JuiceFS FUSE e2e tests (Linux only)

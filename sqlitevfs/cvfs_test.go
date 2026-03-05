@@ -16,13 +16,13 @@ import (
 func openCVFSDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	cvfs, err := NewCVFS(t.Context(), vol, name, SyncModeAsync)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_ = cvfs.FlushSuperblock()
+		_ = cvfs.FlushHeader()
 	})
 
 	dsn := fmt.Sprintf("file:main.db?vfs=%s&cache=private&_busy_timeout=5000&_txlock=immediate", name)
@@ -276,13 +276,13 @@ func TestCVFS_ConcurrentTransactions(t *testing.T) {
 // and exercises them concurrently to test cross-connection locking/SHM.
 func TestCVFS_MultipleConnections(t *testing.T) {
 	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfsName := "cvfs-multi-conn"
 	cvfs, err := NewCVFS(t.Context(), vol, vfsName, SyncModeAsync)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = cvfs.FlushSuperblock() })
+	t.Cleanup(func() { _ = cvfs.FlushHeader() })
 
 	dsn := fmt.Sprintf("file:main.db?vfs=%s&cache=private&_busy_timeout=5000&_txlock=immediate", vfsName)
 
@@ -342,13 +342,13 @@ func TestCVFS_MultipleConnections(t *testing.T) {
 // each writing and reading concurrently, to stress cross-connection locking/SHM.
 func TestCVFS_ManyConnections(t *testing.T) {
 	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfsName := "cvfs-many-conn"
 	cvfs, err := NewCVFS(t.Context(), vol, vfsName, SyncModeAsync)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = cvfs.FlushSuperblock() })
+	t.Cleanup(func() { _ = cvfs.FlushHeader() })
 
 	dsn := fmt.Sprintf("file:main.db?vfs=%s&cache=private&_busy_timeout=10000&_txlock=immediate", vfsName)
 

@@ -71,7 +71,7 @@ func Create(ctx context.Context, mgr loophole.VolumeManager, name string, opts .
 		return nil, fmt.Errorf("create volume: %w", err)
 	}
 
-	_, err = FormatVolume(ctx, vol)
+	err = FormatVolume(ctx, vol)
 	if err != nil {
 		_ = vol.ReleaseRef(ctx)
 		return nil, fmt.Errorf("format volume: %w", err)
@@ -122,7 +122,7 @@ func (db *DB) VFS() *VolumeVFS {
 
 // Flush explicitly flushes all pending data to S3.
 func (db *DB) Flush(ctx context.Context) error {
-	if err := db.vfs.FlushSuperblock(); err != nil {
+	if err := db.vfs.FlushHeader(); err != nil {
 		return err
 	}
 	return db.vol.Flush(ctx)
@@ -216,11 +216,9 @@ func (db *DB) startRefreshLoop(ctx context.Context, interval time.Duration) {
 	db.startTickerLoop(interval, func() {
 		// Re-read layer map from S3 to see new data.
 		_ = db.vol.Refresh(ctx)
-		// Re-read superblock to see updated file sizes.
-		if sb, err := ReadSuperblock(ctx, db.vol); err == nil {
-			db.vfs.mu.Lock()
-			db.vfs.sb = sb
-			db.vfs.mu.Unlock()
+		// Re-read header to see updated file sizes.
+		if h, err := ReadHeader(ctx, db.vol); err == nil {
+			db.vfs.SetHeader(h)
 		}
 	})
 }

@@ -30,8 +30,8 @@ func NewInProcess(vm loophole.VolumeManager, store loophole.ObjectStore) fsbacke
 }
 
 func (d *InProcessDriver) Format(ctx context.Context, vol loophole.Volume) error {
-	// 1. Format the volume with sqlitevfs superblock.
-	if _, err := svfs.FormatVolume(ctx, vol); err != nil {
+	// 1. Format the volume with sqlitevfs header.
+	if err := svfs.FormatVolume(ctx, vol); err != nil {
 		return fmt.Errorf("format volume: %w", err)
 	}
 
@@ -43,7 +43,7 @@ func (d *InProcessDriver) Format(ctx context.Context, vol loophole.Volume) error
 	}
 	defer func() {
 		util.SafeRun(m.Shutdown, "juicefs: format shutdown")
-		util.SafeRun(cvfs.FlushSuperblock, "juicefs: format flush superblock")
+		util.SafeRun(cvfs.FlushHeader, "juicefs: format flush header")
 		util.SafeRunCtx(ctx, vol.Flush, "juicefs: format flush volume")
 	}()
 
@@ -122,8 +122,8 @@ func (d *InProcessDriver) Freeze(ctx context.Context, h *juiceFSMount) error {
 	}
 	// Flush metadata to volume.
 	if h.cvfs != nil {
-		if err := h.cvfs.FlushSuperblock(); err != nil {
-			return fmt.Errorf("flush superblock: %w", err)
+		if err := h.cvfs.FlushHeader(); err != nil {
+			return fmt.Errorf("flush header: %w", err)
 		}
 	}
 	return h.vol.Flush(ctx)

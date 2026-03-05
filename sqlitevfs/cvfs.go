@@ -29,15 +29,20 @@ var (
 )
 
 // CVFS is a loophole-backed SQLite VFS with full WAL/SHM/locking support.
+// The main database lives on the volume; WAL, journal, and SHM are in memory.
 type CVFS struct {
 	name     string
 	vol      loophole.Volume
-	sb       *Superblock
+	header   *Header
 	syncMode SyncMode
-	ctx      context.Context
 
-	mu    sync.Mutex // protects sb, dirty
+	mu    sync.Mutex // protects header, dirty, mainDBExists
 	dirty bool
+
+	mainDBExists bool
+	wal          memBuffer
+	journal      memBuffer
+	shmBuf       memBuffer // in-memory SHM for xOpen path
 
 	// In-process lock state for the main database file.
 	lock dbLock
@@ -49,17 +54,26 @@ type CVFS struct {
 // NewCVFS creates and registers a new C VFS backed by a loophole Volume.
 // The volume must already be formatted with FormatVolume.
 func NewCVFS(ctx context.Context, vol loophole.Volume, name string, syncMode SyncMode) (*CVFS, error) {
-	sb, err := ReadSuperblock(ctx, vol)
+	h, err := ReadHeader(ctx, vol)
 	if err != nil {
 		return nil, fmt.Errorf("open CVFS: %w", err)
 	}
 
 	v := &CVFS{
-		name:     name,
-		vol:      vol,
-		sb:       sb,
-		syncMode: syncMode,
-		ctx:      ctx,
+		name:         name,
+		vol:          vol,
+		header:       h,
+		syncMode:     syncMode,
+		mainDBExists: h.MainDBSize > 0,
+	}
+
+	// Restore WAL from volume if present (persisted by a previous flush).
+	if h.WALSize > 0 {
+		walData := make([]byte, h.WALSize)
+		if _, err := vol.Read(ctx, walData, vol.Size()-h.WALSize); err != nil {
+			return nil, fmt.Errorf("read WAL from volume: %w", err)
+		}
+		v.wal.restore(walData)
 	}
 
 	cvfsRegistryMu.Lock()
@@ -80,18 +94,45 @@ func NewCVFS(ctx context.Context, vol loophole.Volume, name string, syncMode Syn
 	return v, nil
 }
 
-// FlushSuperblock writes the superblock if dirty.
-func (v *CVFS) FlushSuperblock() error {
+// FlushHeader persists the WAL to the volume and writes the header if dirty.
+func (v *CVFS) FlushHeader() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+
+	// Persist WAL to the end of the volume for snapshot/clone correctness.
+	walData := v.wal.snapshot()
+	walSize := uint64(len(walData))
+	if walSize > 0 {
+		if err := v.vol.Write(context.Background(), walData, v.vol.Size()-walSize); err != nil {
+			return fmt.Errorf("persist WAL: %w", err)
+		}
+	}
+	if walSize != v.header.WALSize {
+		v.header.WALSize = walSize
+		v.dirty = true
+	}
+
 	if !v.dirty {
 		return nil
 	}
-	if err := writeSuperblock(v.ctx, v.vol, v.sb); err != nil {
+	if err := writeHeader(context.Background(), v.vol, v.header); err != nil {
 		return err
 	}
 	v.dirty = false
 	return nil
+}
+
+func (v *CVFS) memBuf(k fileKind) *memBuffer {
+	switch k {
+	case fileWAL:
+		return &v.wal
+	case fileJournal:
+		return &v.journal
+	case fileSHM:
+		return &v.shmBuf
+	default:
+		return nil
+	}
 }
 
 func cvfsLookup(cvfs *C.sqlite3_vfs) *CVFS {
@@ -112,7 +153,7 @@ var (
 
 type cvfsFile struct {
 	vfs       *CVFS
-	regionIdx int
+	kind      fileKind
 	lockLevel int // SQLITE_LOCK_NONE .. SQLITE_LOCK_EXCLUSIVE
 }
 
@@ -135,24 +176,28 @@ func goLHOpen(cvfs *C.sqlite3_vfs, cname *C.char, cf *C.sqlite3_file, flags C.in
 	}
 
 	name := C.GoString(cname)
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		return C.SQLITE_CANTOPEN
 	}
 
-	v.mu.Lock()
-	entry := &v.sb.Regions[idx]
-	if flags&C.SQLITE_OPEN_CREATE != 0 {
-		if !entry.Exists() {
-			entry.Flags |= flagExists
-			entry.FileSize = 0
-			v.dirty = true
+	if kind == fileMainDB {
+		v.mu.Lock()
+		if flags&C.SQLITE_OPEN_CREATE != 0 {
+			v.mainDBExists = true
+		} else if !v.mainDBExists {
+			v.mu.Unlock()
+			return C.SQLITE_CANTOPEN
 		}
-	} else if !entry.Exists() {
 		v.mu.Unlock()
-		return C.SQLITE_CANTOPEN
+	} else {
+		buf := v.memBuf(kind)
+		if flags&C.SQLITE_OPEN_CREATE != 0 {
+			buf.setExists()
+		} else if !buf.isExists() {
+			return C.SQLITE_CANTOPEN
+		}
 	}
-	v.mu.Unlock()
 
 	if outFlags != nil {
 		if v.vol.ReadOnly() {
@@ -164,7 +209,7 @@ func goLHOpen(cvfs *C.sqlite3_vfs, cname *C.char, cf *C.sqlite3_file, flags C.in
 
 	f := &cvfsFile{
 		vfs:       v,
-		regionIdx: idx,
+		kind:      kind,
 		lockLevel: C.SQLITE_LOCK_NONE,
 	}
 
@@ -188,27 +233,30 @@ func goLHDelete(cvfs *C.sqlite3_vfs, cname *C.char, syncDir C.int) C.int {
 	}
 
 	name := C.GoString(cname)
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		return C.SQLITE_OK // unknown file, nothing to delete
 	}
 
-	v.mu.Lock()
-	defer v.mu.Unlock()
+	if kind == fileMainDB {
+		v.mu.Lock()
+		defer v.mu.Unlock()
 
-	entry := &v.sb.Regions[idx]
-	if !entry.Exists() {
+		if !v.mainDBExists {
+			return C.SQLITE_OK
+		}
+		if v.header.MainDBSize > 0 {
+			if err := v.vol.PunchHole(context.Background(), mainDBOffset, v.header.MainDBSize); err != nil {
+				return C.SQLITE_IOERR_DELETE
+			}
+		}
+		v.mainDBExists = false
+		v.header.MainDBSize = 0
+		v.dirty = true
 		return C.SQLITE_OK
 	}
 
-	if entry.FileSize > 0 {
-		if err := v.vol.PunchHole(v.ctx, entry.RegionStart, entry.FileSize); err != nil {
-			return C.SQLITE_IOERR_DELETE
-		}
-	}
-	entry.Flags = 0
-	entry.FileSize = 0
-	v.dirty = true
+	v.memBuf(kind).reset()
 	return C.SQLITE_OK
 }
 
@@ -221,16 +269,20 @@ func goLHAccess(cvfs *C.sqlite3_vfs, cname *C.char, flags C.int, pOut *C.int) C.
 	}
 
 	name := C.GoString(cname)
-	idx := regionForName(name)
-	if idx < 0 {
+	kind, ok := fileKindForName(name)
+	if !ok {
 		*pOut = 0
 		return C.SQLITE_OK
 	}
 
-	v.mu.Lock()
-	entry := &v.sb.Regions[idx]
-	exists := entry.Exists()
-	v.mu.Unlock()
+	var exists bool
+	if kind == fileMainDB {
+		v.mu.Lock()
+		exists = v.mainDBExists
+		v.mu.Unlock()
+	} else {
+		exists = v.memBuf(kind).isExists()
+	}
 
 	switch flags {
 	case C.SQLITE_ACCESS_EXISTS:
@@ -309,8 +361,8 @@ func goLHClose(cf *C.sqlite3_file) C.int {
 		f.lockLevel = C.SQLITE_LOCK_NONE
 	}
 
-	if err := f.vfs.FlushSuperblock(); err != nil {
-		slog.Warn("lhvfs: close flush superblock", "error", err)
+	if err := f.vfs.FlushHeader(); err != nil {
+		slog.Warn("lhvfs: close flush header", "error", err)
 	}
 
 	return C.SQLITE_OK
@@ -323,15 +375,23 @@ func goLHRead(cf *C.sqlite3_file, buf unsafe.Pointer, iAmt C.int, iOfst C.sqlite
 		return C.SQLITE_IOERR_READ
 	}
 
-	f.vfs.mu.Lock()
-	entry := f.vfs.sb.Regions[f.regionIdx]
-	f.vfs.mu.Unlock()
-
 	off := int64(iOfst)
 	n := int(iAmt)
 	goBuf := unsafe.Slice((*byte)(buf), n)
 
-	fileSize := int64(entry.FileSize)
+	if f.kind != fileMainDB {
+		_, err := f.vfs.memBuf(f.kind).readAt(goBuf, off)
+		if err != nil {
+			return C.SQLITE_IOERR_SHORT_READ
+		}
+		return C.SQLITE_OK
+	}
+
+	// MainDB: read from volume.
+	f.vfs.mu.Lock()
+	fileSize := int64(f.vfs.header.MainDBSize)
+	f.vfs.mu.Unlock()
+
 	if off >= fileSize {
 		for i := range goBuf {
 			goBuf[i] = 0
@@ -344,12 +404,11 @@ func goLHRead(cf *C.sqlite3_file, buf unsafe.Pointer, iAmt C.int, iOfst C.sqlite
 		toRead = int(fileSize - off)
 	}
 
-	_, err := f.vfs.vol.Read(f.vfs.ctx, goBuf[:toRead], entry.RegionStart+uint64(off))
+	_, err := f.vfs.vol.Read(context.Background(), goBuf[:toRead], mainDBOffset+uint64(off))
 	if err != nil && err != io.EOF {
 		return C.SQLITE_IOERR_READ
 	}
 
-	// Zero-fill the rest if short.
 	if toRead < n {
 		for i := toRead; i < n; i++ {
 			goBuf[i] = 0
@@ -366,28 +425,29 @@ func goLHWrite(cf *C.sqlite3_file, buf unsafe.Pointer, iAmt C.int, iOfst C.sqlit
 		return C.SQLITE_IOERR_WRITE
 	}
 
-	f.vfs.mu.Lock()
-	entry := &f.vfs.sb.Regions[f.regionIdx]
-	regionStart := entry.RegionStart
-	regionCap := int64(entry.RegionCapacity)
-	f.vfs.mu.Unlock()
-
 	off := int64(iOfst)
 	n := int(iAmt)
+	goBuf := unsafe.Slice((*byte)(buf), n)
 
-	if off+int64(n) > regionCap {
+	if f.kind != fileMainDB {
+		f.vfs.memBuf(f.kind).writeAt(goBuf, off)
+		return C.SQLITE_OK
+	}
+
+	// MainDB: write to volume.
+	volCap := int64(f.vfs.vol.Size()) - mainDBOffset
+	if off+int64(n) > volCap {
 		return C.SQLITE_FULL
 	}
 
-	goBuf := unsafe.Slice((*byte)(buf), n)
-	if err := f.vfs.vol.Write(f.vfs.ctx, goBuf, regionStart+uint64(off)); err != nil {
+	if err := f.vfs.vol.Write(context.Background(), goBuf, mainDBOffset+uint64(off)); err != nil {
 		return C.SQLITE_IOERR_WRITE
 	}
 
 	newEnd := uint64(off) + uint64(n)
 	f.vfs.mu.Lock()
-	if newEnd > entry.FileSize {
-		entry.FileSize = newEnd
+	if newEnd > f.vfs.header.MainDBSize {
+		f.vfs.header.MainDBSize = newEnd
 		f.vfs.dirty = true
 	}
 	f.vfs.mu.Unlock()
@@ -402,16 +462,19 @@ func goLHTruncate(cf *C.sqlite3_file, size C.sqlite3_int64) C.int {
 		return C.SQLITE_IOERR_TRUNCATE
 	}
 
+	if f.kind != fileMainDB {
+		f.vfs.memBuf(f.kind).truncate(int64(size))
+		return C.SQLITE_OK
+	}
+
 	f.vfs.mu.Lock()
-	entry := &f.vfs.sb.Regions[f.regionIdx]
-	oldSize := entry.FileSize
-	entry.FileSize = uint64(size)
+	oldSize := f.vfs.header.MainDBSize
+	f.vfs.header.MainDBSize = uint64(size)
 	f.vfs.dirty = true
-	regionStart := entry.RegionStart
 	f.vfs.mu.Unlock()
 
 	if uint64(size) < oldSize {
-		if err := f.vfs.vol.PunchHole(f.vfs.ctx, regionStart+uint64(size), oldSize-uint64(size)); err != nil {
+		if err := f.vfs.vol.PunchHole(context.Background(), mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
 			return C.SQLITE_IOERR_TRUNCATE
 		}
 	}
@@ -429,10 +492,10 @@ func goLHSync(cf *C.sqlite3_file, flags C.int) C.int {
 		return C.SQLITE_OK
 	}
 
-	if err := f.vfs.FlushSuperblock(); err != nil {
+	if err := f.vfs.FlushHeader(); err != nil {
 		return C.SQLITE_IOERR_FSYNC
 	}
-	if err := f.vfs.vol.Flush(f.vfs.ctx); err != nil {
+	if err := f.vfs.vol.Flush(context.Background()); err != nil {
 		return C.SQLITE_IOERR_FSYNC
 	}
 	return C.SQLITE_OK
@@ -445,8 +508,13 @@ func goLHFileSize(cf *C.sqlite3_file, pSize *C.sqlite3_int64) C.int {
 		return C.SQLITE_IOERR_FSTAT
 	}
 
+	if f.kind != fileMainDB {
+		*pSize = C.sqlite3_int64(f.vfs.memBuf(f.kind).fileSize())
+		return C.SQLITE_OK
+	}
+
 	f.vfs.mu.Lock()
-	*pSize = C.sqlite3_int64(f.vfs.sb.Regions[f.regionIdx].FileSize)
+	*pSize = C.sqlite3_int64(f.vfs.header.MainDBSize)
 	f.vfs.mu.Unlock()
 	return C.SQLITE_OK
 }
@@ -512,7 +580,6 @@ func (l *dbLock) tryLock(f *cvfsFile, target int) int {
 
 	switch {
 	case cur == C.SQLITE_LOCK_NONE && target == C.SQLITE_LOCK_SHARED:
-		// Can't get SHARED if someone holds PENDING or EXCLUSIVE.
 		if l.pending || l.excl {
 			return C.SQLITE_BUSY
 		}
@@ -527,20 +594,16 @@ func (l *dbLock) tryLock(f *cvfsFile, target int) int {
 		return C.SQLITE_OK
 
 	case cur == C.SQLITE_LOCK_SHARED && target == C.SQLITE_LOCK_EXCLUSIVE:
-		// SHARED → EXCLUSIVE: must first acquire RESERVED, then PENDING, then EXCLUSIVE.
 		if l.reserved || l.excl {
 			return C.SQLITE_BUSY
 		}
 		l.reserved = true
 		l.pending = true
 		if l.shared > 1 {
-			// Can't promote yet — other readers still active.
-			// Revert: release RESERVED and PENDING so we don't deadlock.
 			l.reserved = false
 			l.pending = false
 			return C.SQLITE_BUSY
 		}
-		// Promote to EXCLUSIVE.
 		l.pending = false
 		l.reserved = false
 		l.shared--
@@ -548,14 +611,10 @@ func (l *dbLock) tryLock(f *cvfsFile, target int) int {
 		return C.SQLITE_OK
 
 	case cur == C.SQLITE_LOCK_RESERVED && target == C.SQLITE_LOCK_EXCLUSIVE:
-		// RESERVED → EXCLUSIVE: set PENDING to block new readers, wait for current readers.
 		l.pending = true
 		if l.shared > 1 {
-			// Leave PENDING set — we own RESERVED and are waiting for readers to drain.
-			// SQLite will retry via busy handler. We keep PENDING to prevent new SHARED.
 			return C.SQLITE_BUSY
 		}
-		// All readers drained. Promote to EXCLUSIVE.
 		l.pending = false
 		l.reserved = false
 		l.shared--
@@ -563,7 +622,6 @@ func (l *dbLock) tryLock(f *cvfsFile, target int) int {
 		return C.SQLITE_OK
 
 	default:
-		// Already at or above target level.
 		return C.SQLITE_OK
 	}
 }
@@ -578,7 +636,6 @@ func (l *dbLock) unlock(f *cvfsFile, target int) {
 		return
 	}
 
-	// Release locks from highest to lowest.
 	if cur >= C.SQLITE_LOCK_EXCLUSIVE && target < C.SQLITE_LOCK_EXCLUSIVE {
 		l.excl = false
 	}
@@ -589,16 +646,11 @@ func (l *dbLock) unlock(f *cvfsFile, target int) {
 		l.reserved = false
 	}
 
-	// Handle SHARED count.
 	if cur >= C.SQLITE_LOCK_EXCLUSIVE && target >= C.SQLITE_LOCK_SHARED {
-		// Dropping from EXCLUSIVE back to SHARED: re-add SHARED count.
 		l.shared++
 	} else if cur >= C.SQLITE_LOCK_SHARED && cur < C.SQLITE_LOCK_EXCLUSIVE && target < C.SQLITE_LOCK_SHARED {
-		// Dropping from SHARED (or RESERVED/PENDING) to NONE: decrement SHARED.
 		l.shared--
 	}
-	// Note: EXCLUSIVE→NONE needs no shared count adjustment — it was
-	// already decremented during the SHARED→EXCLUSIVE promotion.
 
 	if l.cond != nil {
 		l.cond.Broadcast()
@@ -613,7 +665,7 @@ func goLHLock(cf *C.sqlite3_file, eLock C.int) C.int {
 	}
 
 	// Only the main DB file needs locking.
-	if f.regionIdx != RegionMainDB {
+	if f.kind != fileMainDB {
 		return C.SQLITE_OK
 	}
 
@@ -631,7 +683,7 @@ func goLHUnlock(cf *C.sqlite3_file, eLock C.int) C.int {
 		return C.SQLITE_ERROR
 	}
 
-	if f.regionIdx != RegionMainDB {
+	if f.kind != fileMainDB {
 		return C.SQLITE_OK
 	}
 
@@ -665,7 +717,6 @@ type shmState struct {
 	regions [][]byte // each region is pgsz bytes (typically 32KB)
 
 	// Lock slots: SQLITE_SHM_NLOCK = 8
-	// For each slot, track the number of shared holders and whether exclusive is held.
 	lockShared [8]int
 	lockExcl   [8]bool
 }
@@ -685,7 +736,6 @@ func goLHShmMap(cf *C.sqlite3_file, iRegion C.int, szRegion C.int, bExtend C.int
 	idx := int(iRegion)
 	sz := int(szRegion)
 
-	// Extend if needed.
 	for len(shm.regions) <= idx {
 		if bExtend == 0 {
 			*pp = nil
@@ -694,7 +744,6 @@ func goLHShmMap(cf *C.sqlite3_file, iRegion C.int, szRegion C.int, bExtend C.int
 		shm.regions = append(shm.regions, make([]byte, sz))
 	}
 
-	// Return pointer to the region's backing array.
 	*pp = unsafe.Pointer(&shm.regions[idx][0])
 	return C.SQLITE_OK
 }
@@ -717,7 +766,6 @@ func goLHShmLock(cf *C.sqlite3_file, offset C.int, n C.int, flags C.int) C.int {
 
 	if isLock {
 		if isExcl {
-			// Acquire EXCLUSIVE on [off, off+cnt).
 			for i := off; i < off+cnt; i++ {
 				if shm.lockShared[i] > 0 || shm.lockExcl[i] {
 					return C.SQLITE_BUSY
@@ -727,7 +775,6 @@ func goLHShmLock(cf *C.sqlite3_file, offset C.int, n C.int, flags C.int) C.int {
 				shm.lockExcl[i] = true
 			}
 		} else {
-			// Acquire SHARED on [off, off+cnt).
 			for i := off; i < off+cnt; i++ {
 				if shm.lockExcl[i] {
 					return C.SQLITE_BUSY
@@ -738,7 +785,6 @@ func goLHShmLock(cf *C.sqlite3_file, offset C.int, n C.int, flags C.int) C.int {
 			}
 		}
 	} else {
-		// Unlock.
 		if isExcl {
 			for i := off; i < off+cnt; i++ {
 				shm.lockExcl[i] = false
@@ -757,9 +803,6 @@ func goLHShmLock(cf *C.sqlite3_file, offset C.int, n C.int, flags C.int) C.int {
 
 //export goLHShmBarrier
 func goLHShmBarrier(cf *C.sqlite3_file) {
-	// Memory barrier. sync.Mutex Lock/Unlock provides this implicitly
-	// in the Go memory model. For cross-goroutine visibility we just
-	// do a quick lock/unlock on the SHM mutex.
 	f := fileFromC(cf)
 	if f == nil {
 		return

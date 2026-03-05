@@ -1,8 +1,8 @@
 // Package sqlitevfs implements a SQLite VFS backed by loophole volumes.
 //
-// A single volume stores all SQLite-related files (main db, journal, WAL, SHM)
-// in fixed regions. Snapshots and clones of the volume capture the entire
-// database state atomically.
+// The main database file lives on the volume. WAL, journal, and SHM are kept
+// in memory. Snapshots and clones of the volume capture the database state
+// atomically (after checkpoint).
 //
 // VolumeVFS implements [sqlite3vfs.VFS] from github.com/psanford/sqlite3vfs and
 // can be registered with [sqlite3vfs.RegisterVFS] for use with mattn/go-sqlite3.

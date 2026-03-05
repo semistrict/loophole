@@ -3912,10 +3912,11 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 
 	// Phase 4: partial sub-page writes to pages 16-19.
 	for i := 16; i < 20; i++ {
-		subPage := make([]byte, 4096)
+		subPage := make([]byte, PageSize/2)
 		rand.Read(subPage)
-		copy(expected[i][8192:8192+4096], subPage)
-		if err := v1.Write(ctx, subPage, uint64(i)*PageSize+8192); err != nil {
+		off := PageSize / 4
+		copy(expected[i][off:off+len(subPage)], subPage)
+		if err := v1.Write(ctx, subPage, uint64(i)*PageSize+uint64(off)); err != nil {
 			t.Fatal(err)
 		}
 	}

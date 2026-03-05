@@ -126,7 +126,7 @@ func TestDBBranch(t *testing.T) {
 func TestDBCreateTooSmall(t *testing.T) {
 	mgr := testManager(t)
 
-	_, err := Create(t.Context(), mgr, "tiny", WithSize(64*1024*1024))
+	_, err := Create(t.Context(), mgr, "tiny", WithSize(2*1024*1024))
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "too small")
 }

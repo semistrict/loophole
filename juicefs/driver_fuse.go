@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"time"
 
+	gofuse "github.com/hanwen/go-fuse/v2/fuse"
 	jfuse "github.com/juicedata/juicefs/pkg/fuse"
 
 	"github.com/semistrict/loophole"
@@ -34,7 +36,7 @@ func NewFUSE(vm loophole.VolumeManager, store loophole.ObjectStore) fsbackend.Se
 }
 
 func (d *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
-	if _, err := svfs.FormatVolume(ctx, vol); err != nil {
+	if err := svfs.FormatVolume(ctx, vol); err != nil {
 		return fmt.Errorf("format volume: %w", err)
 	}
 
@@ -45,7 +47,7 @@ func (d *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	}
 	defer func() {
 		util.SafeRun(m.Shutdown, "juicefs: format shutdown")
-		util.SafeRun(cvfs.FlushSuperblock, "juicefs: format flush superblock")
+		util.SafeRun(cvfs.FlushHeader, "juicefs: format flush header")
 		util.SafeRunCtx(ctx, vol.Flush, "juicefs: format flush volume")
 	}()
 
@@ -96,10 +98,17 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 		return nil, fmt.Errorf("create VFS: %w", err)
 	}
 
-	// Start FUSE server in background goroutine (blocks until unmount).
+	// Create and start FUSE server.
+	srv, err := jfuse.CreateServer(jfsVFS, "", false, false)
+	if err != nil {
+		_ = m.Shutdown()
+		return nil, fmt.Errorf("create fuse server: %w", err)
+	}
+
 	fuseErr := make(chan error, 1)
 	go func() {
-		fuseErr <- jfuse.Serve(jfsVFS, "", false, false)
+		srv.Serve()
+		fuseErr <- nil
 	}()
 
 	// Wait for the mount to become available.
@@ -117,6 +126,7 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 		cvfs:       cvfs,
 		vfsName:    vfsName,
 		mountpoint: mountpoint,
+		fuseServer: srv,
 		cacheDir:   cacheDir,
 	}, nil
 }
@@ -124,8 +134,18 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 func (d *FUSEDriver) Unmount(ctx context.Context, h *juiceFSMount) error {
 	slog.Info("juicefs-fuse: unmounting", "mountpoint", h.mountpoint)
 
-	// Shutdown the FUSE server (causes Serve goroutine to return).
-	jfuse.Shutdown()
+	// Shutdown this specific FUSE server (causes Serve goroutine to return).
+	if srv, ok := h.fuseServer.(*gofuse.Server); ok && srv != nil {
+		srv.Shutdown()
+	}
+
+	// Lazy-unmount to detach the mount from the namespace immediately,
+	// even if the FUSE server hasn't fully exited yet.
+	// Use fusermount -uz (unprivileged, lazy) instead of syscall.Unmount
+	// which requires CAP_SYS_ADMIN.
+	if out, err := exec.Command("fusermount", "-uz", h.mountpoint).CombinedOutput(); err != nil {
+		slog.Warn("juicefs-fuse: lazy unmount failed", "mountpoint", h.mountpoint, "error", err, "output", string(out))
+	}
 
 	return closeMount(ctx, h)
 }
@@ -139,8 +159,8 @@ func (d *FUSEDriver) Freeze(ctx context.Context, h *juiceFSMount) error {
 		return fmt.Errorf("flush pending uploads: %w", err)
 	}
 	if h.cvfs != nil {
-		if err := h.cvfs.FlushSuperblock(); err != nil {
-			return fmt.Errorf("flush superblock: %w", err)
+		if err := h.cvfs.FlushHeader(); err != nil {
+			return fmt.Errorf("flush header: %w", err)
 		}
 	}
 	return h.vol.Flush(ctx)

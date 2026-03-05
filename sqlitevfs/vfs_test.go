@@ -7,8 +7,8 @@ import (
 )
 
 func TestOpenCreateReadWrite(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -46,8 +46,8 @@ func TestOpenCreateReadWrite(t *testing.T) {
 }
 
 func TestReadPastEOF(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -75,8 +75,8 @@ func TestReadPastEOF(t *testing.T) {
 }
 
 func TestTruncate(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -114,8 +114,8 @@ func TestTruncate(t *testing.T) {
 }
 
 func TestDeleteAndAccess(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -151,22 +151,22 @@ func TestDeleteAndAccess(t *testing.T) {
 }
 
 func TestOpenNonexistent(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
 	require.NoError(t, err)
 
-	// Open without CREATE should fail.
+	// Open without CREATE should fail (mainDBExists is false on fresh volume).
 	_, _, err = vfs.Open("main.db", OpenReadWrite|OpenMainDB)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "does not exist")
 }
 
 func TestOpenUnknownFile(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -178,8 +178,8 @@ func TestOpenUnknownFile(t *testing.T) {
 }
 
 func TestFullPathname(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -190,8 +190,8 @@ func TestFullPathname(t *testing.T) {
 }
 
 func TestSyncFlushes(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -210,8 +210,8 @@ func TestSyncFlushes(t *testing.T) {
 }
 
 func TestAsyncSyncIsNoop(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeAsync)
@@ -230,10 +230,8 @@ func TestAsyncSyncIsNoop(t *testing.T) {
 }
 
 func TestDeviceCharacteristics(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-
-	// Sync mode.
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -252,8 +250,8 @@ func TestDeviceCharacteristics(t *testing.T) {
 }
 
 func TestDeviceCharacteristicsAsync(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeAsync)
@@ -269,8 +267,8 @@ func TestDeviceCharacteristicsAsync(t *testing.T) {
 }
 
 func TestSectorSize(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -284,8 +282,8 @@ func TestSectorSize(t *testing.T) {
 }
 
 func TestLockUnlock(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -319,15 +317,15 @@ func TestLockUnlock(t *testing.T) {
 	require.NoError(t, f.Close())
 }
 
-func TestMultipleRegions(t *testing.T) {
-	vol := testVolume(t, 512*1024*1024)
-	_, err := FormatVolume(t.Context(), vol)
+func TestMultipleFiles(t *testing.T) {
+	vol := testVolume(t, 8*1024*1024)
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
 	require.NoError(t, err)
 
-	// Open all four region files.
+	// Open all four files.
 	mainF, _, err := vfs.Open("main.db", OpenReadWrite|OpenCreate|OpenMainDB)
 	require.NoError(t, err)
 	journalF, _, err := vfs.Open("main.db-journal", OpenReadWrite|OpenCreate|OpenMainJournal)
@@ -365,22 +363,23 @@ func TestMultipleRegions(t *testing.T) {
 	require.NoError(t, shmF.Close())
 }
 
-func TestWriteExceedsCapacity(t *testing.T) {
-	vol := testVolume(t, 256*1024*1024) // minimum size
-	_, err := FormatVolume(t.Context(), vol)
+func TestWriteExceedsVolume(t *testing.T) {
+	vol := testVolume(t, 4*1024*1024) // minimum size
+	err := FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
 	require.NoError(t, err)
 
-	f, _, err := vfs.Open("main.db-shm", OpenReadWrite|OpenCreate|OpenSubJournal)
+	f, _, err := vfs.Open("main.db", OpenReadWrite|OpenCreate|OpenMainDB)
 	require.NoError(t, err)
 
-	// SHM region is only 1MB. Writing 2MB should fail.
-	big := make([]byte, 2*1024*1024)
+	// Volume is 4MB, header takes 4KB, so maindb capacity is ~4MB - 4KB.
+	// Writing 5MB should fail.
+	big := make([]byte, 5*1024*1024)
 	_, err = f.WriteAt(big, 0)
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "exceeds region capacity")
+	require.Contains(t, err.Error(), "exceeds volume capacity")
 
 	require.NoError(t, f.Close())
 }

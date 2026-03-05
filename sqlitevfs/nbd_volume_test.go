@@ -18,7 +18,7 @@ func startTestNBDServer(t *testing.T) string {
 	// Create and format a volume so the superblock exists.
 	vol, err := mgr.NewVolume(t.Context(), "testdb", 256*1024*1024, "")
 	require.NoError(t, err)
-	_, err = FormatVolume(t.Context(), vol)
+	err = FormatVolume(t.Context(), vol)
 	require.NoError(t, err)
 
 	// Write some known data after the superblock so we can verify reads.
@@ -65,17 +65,17 @@ func TestNBDVolumeReadWrite(t *testing.T) {
 	require.NoError(t, vol.Flush(t.Context()))
 }
 
-func TestNBDVolumeSuperblock(t *testing.T) {
+func TestNBDVolumeHeader(t *testing.T) {
 	sock := startTestNBDServer(t)
 
 	vol, err := DialNBD(t.Context(), sock, "testdb")
 	require.NoError(t, err)
 	defer vol.ReleaseRef(t.Context())
 
-	// Should be able to read and parse the superblock.
-	sb, err := ReadSuperblock(t.Context(), vol)
+	// Should be able to read and parse the header.
+	h, err := ReadHeader(t.Context(), vol)
 	require.NoError(t, err)
-	require.Equal(t, "main.db", sb.Regions[RegionMainDB].Name)
+	require.Equal(t, uint64(0), h.MainDBSize)
 }
 
 func TestNBDVolumeVFS(t *testing.T) {

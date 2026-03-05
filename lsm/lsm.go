@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	PageSize = 65536 // 64KB
+	PageSize = 4096 // 4KB
 
 	DefaultFlushThreshold  = 256 * 1024 * 1024 // 256MB
 	DefaultMaxFrozenLayers = 2
