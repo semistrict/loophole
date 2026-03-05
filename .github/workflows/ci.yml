@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -24,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -33,6 +37,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -45,6 +51,8 @@ jobs:
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - run: docker compose build
       - run: docker compose up -d s3
       - run: docker compose run --rm go make e2e-fuse
@@ -55,6 +63,8 @@ jobs:
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - run: sudo modprobe nbd nbds_max=16
       - run: docker compose build
       - run: docker compose up -d s3
@@ -66,6 +76,8 @@ jobs:
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - run: sudo modprobe nbd nbds_max=16
       - run: docker compose build
       - run: docker compose up -d s3
@@ -77,6 +89,8 @@ jobs:
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - run: docker compose build
       - run: docker compose up -d s3
       - run: docker compose run --rm go make e2e-lwext4fuse
@@ -87,6 +101,8 @@ jobs:
     needs: [build, test, check]
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true
       - run: docker compose build
       - run: docker compose up -d s3
       - run: docker compose run --rm go make e2e-sqlite
