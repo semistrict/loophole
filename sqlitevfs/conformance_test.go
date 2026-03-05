@@ -4,9 +4,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
-	"github.com/ncruces/go-sqlite3/vfs"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/psanford/sqlite3vfs"
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
@@ -33,9 +32,10 @@ func openConformanceDB(t *testing.T, mgr loophole.VolumeManager, name string) (*
 	require.NoError(t, err)
 
 	vfsName := "loophole-" + name
-	vfs.Register(vfsName, db.VFS())
+	err = sqlite3vfs.RegisterVFS(vfsName, db.VFS())
+	require.NoError(t, err)
 
-	sqlDB, err := driver.Open("file:main.db?vfs=" + vfsName)
+	sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs="+vfsName)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -47,11 +47,12 @@ func openConformanceDB(t *testing.T, mgr loophole.VolumeManager, name string) (*
 }
 
 // registerAndOpenSQL registers a VFS and opens a SQL connection to it.
-// The vfsName must be unique across the process (ncruces uses a global registry).
+// The vfsName must be unique across the process.
 func registerAndOpenSQL(t *testing.T, db *sqlitevfs.DB, vfsName string) *sql.DB {
 	t.Helper()
-	vfs.Register(vfsName, db.VFS())
-	sqlDB, err := driver.Open("file:main.db?vfs=" + vfsName)
+	err := sqlite3vfs.RegisterVFS(vfsName, db.VFS())
+	require.NoError(t, err)
+	sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs="+vfsName)
 	require.NoError(t, err)
 	return sqlDB
 }

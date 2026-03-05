@@ -11,7 +11,7 @@ import (
 )
 
 func TestE2E_CreateFileOwnership(t *testing.T) {
-	mp := stressMountGo(t, "own-file")
+	mp := stressMountGo(t, "own-file").mountpoint
 
 	path := mp + "/hello.txt"
 	f, err := os.Create(path)
@@ -28,7 +28,7 @@ func TestE2E_CreateFileOwnership(t *testing.T) {
 }
 
 func TestE2E_MkdirOwnership(t *testing.T) {
-	mp := stressMountGo(t, "own-dir")
+	mp := stressMountGo(t, "own-dir").mountpoint
 
 	path := mp + "/subdir"
 	require.NoError(t, os.Mkdir(path, 0o755))
@@ -43,7 +43,7 @@ func TestE2E_MkdirOwnership(t *testing.T) {
 }
 
 func TestE2E_RootAndLostFoundOwnership(t *testing.T) {
-	mp := stressMountGo(t, "own-root")
+	mp := stressMountGo(t, "own-root").mountpoint
 
 	uid := uint32(os.Getuid())
 	gid := uint32(os.Getgid())
@@ -62,7 +62,7 @@ func TestE2E_RootAndLostFoundOwnership(t *testing.T) {
 }
 
 func TestE2E_SymlinkOwnership(t *testing.T) {
-	mp := stressMountGo(t, "own-sym")
+	mp := stressMountGo(t, "own-sym").mountpoint
 
 	target := mp + "/target.txt"
 	f, err := os.Create(target)

@@ -90,3 +90,27 @@ jobs:
       - run: docker compose build
       - run: docker compose up -d s3
       - run: docker compose run --rm go make e2e-sqlite
+
+  e2e-juicefs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build, test, check]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: docker compose build
+      - run: docker compose up -d s3
+      - run: docker compose run --rm go make e2e-juicefs
+
+  e2e-juicefsfuse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [build, test, check]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: docker compose build
+      - run: docker compose up -d s3
+      - run: docker compose run --rm go make e2e-juicefsfuse

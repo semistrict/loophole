@@ -1,5 +1,3 @@
-//go:build linux
-
 package e2e
 
 import (
@@ -9,14 +7,12 @@ import (
 	"hash/crc32"
 	"io"
 	mrand "math/rand/v2"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/fsbackend"
 )
 
 // Go reimplementations of the fsx/fio stress tests so they run without
@@ -32,32 +28,42 @@ func rngFill(rng *mrand.Rand, p []byte) {
 	}
 }
 
-// stressMountGo creates a volume and returns the mountpoint path.
-func stressMountGo(t *testing.T, name string) string {
+// stressMountGo creates a volume and returns the testFS.
+func stressMountGo(t *testing.T, name string) testFS {
 	t.Helper()
-	b := newBackend(t)
-	ctx := t.Context()
-	mp := mountpoint(t, name)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
-	require.NoError(t, b.Mount(ctx, name, mp))
-	return mp
+	tfs, _ := mountVolume(t, name)
+	return tfs
+}
+
+// createFile creates a file via fsbackend.FS and returns the handle.
+func createFile(t *testing.T, tfs testFS, name string) fsbackend.File {
+	t.Helper()
+	f, err := tfs.fs.Create(name)
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	return f
+}
+
+// openFile opens a file via fsbackend.FS and returns the handle.
+func openFile(t *testing.T, tfs testFS, name string) fsbackend.File {
+	t.Helper()
+	f, err := tfs.fs.Open(name)
+	require.NoError(t, err)
+	t.Cleanup(func() { f.Close() })
+	return f
 }
 
 // --- fsx-like tests ---
 
 // fsxRun performs N random file operations (read, write, truncate) on a single
 // file, verifying the file contents match an in-memory reference after each op.
-func fsxRun(t *testing.T, path string, fileSize, ops int, seed int64) {
+func fsxRun(t *testing.T, f fsbackend.File, fileSize, ops int, seed int64) {
 	t.Helper()
 
 	rng := mrand.New(mrand.NewPCG(uint64(seed), 0))
 
 	// Reference buffer (ground truth).
 	ref := make([]byte, 0, fileSize)
-
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
 
 	for i := range ops {
 		op := rng.IntN(4) // 0=write, 1=read, 2=truncate, 3=write
@@ -119,7 +125,7 @@ func fsxRun(t *testing.T, path string, fileSize, ops int, seed int64) {
 	}
 
 	// Final full-file verify.
-	_, err = f.Seek(0, io.SeekStart)
+	_, err := f.Seek(0, io.SeekStart)
 	require.NoError(t, err)
 	actual, err := io.ReadAll(f)
 	require.NoError(t, err)
@@ -128,13 +134,15 @@ func fsxRun(t *testing.T, path string, fileSize, ops int, seed int64) {
 }
 
 func TestE2E_GoFsxBasic(t *testing.T) {
-	mp := stressMountGo(t, "gofsx-basic")
-	fsxRun(t, filepath.Join(mp, "fsx-testfile"), 1048576, 5000, 42)
+	tfs := stressMountGo(t, "gofsx-basic")
+	f := createFile(t, tfs, "fsx-testfile")
+	fsxRun(t, f, 1048576, 5000, 42)
 }
 
 func TestE2E_GoFsxHeavy(t *testing.T) {
-	mp := stressMountGo(t, "gofsx-heavy")
-	fsxRun(t, filepath.Join(mp, "fsx-heavy-testfile"), 4194304, 20000, 999)
+	tfs := stressMountGo(t, "gofsx-heavy")
+	f := createFile(t, tfs, "fsx-heavy-testfile")
+	fsxRun(t, f, 4194304, 20000, 999)
 }
 
 // --- fio-like tests ---
@@ -142,7 +150,7 @@ func TestE2E_GoFsxHeavy(t *testing.T) {
 // TestE2E_GoFioRandomRW does random 4K reads and writes across multiple
 // goroutines with CRC32 verification (approximates fio --rw=randrw --verify=crc32c).
 func TestE2E_GoFioRandomRW(t *testing.T) {
-	mp := stressMountGo(t, "gofio-randrw")
+	tfs := stressMountGo(t, "gofio-randrw")
 	size := 8 * 1024 * 1024
 	numJobs := 2
 	numBlocks := size / 4096
@@ -152,9 +160,8 @@ func TestE2E_GoFioRandomRW(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			path := filepath.Join(mp, fmt.Sprintf("randrw.%d", job))
 
-			f, err := os.Create(path)
+			f, err := tfs.fs.Create(fmt.Sprintf("randrw.%d", job))
 			require.NoError(t, err)
 			defer f.Close()
 
@@ -202,14 +209,12 @@ func TestE2E_GoFioRandomRW(t *testing.T) {
 // with SHA256 checksums, then reads back and verifies each block
 // (approximates fio --rw=write --verify=sha256 + --verify_only).
 func TestE2E_GoFioSequentialWriteVerify(t *testing.T) {
-	mp := stressMountGo(t, "gofio-seqver")
-	path := filepath.Join(mp, "seqwrite.0")
+	tfs := stressMountGo(t, "gofio-seqver")
 	blockSize := 65536
 	size := 16 * 1024 * 1024
 	numBlocks := size / blockSize
 
-	f, err := os.Create(path)
-	require.NoError(t, err)
+	f := createFile(t, tfs, "seqwrite.0")
 
 	hashes := make([][32]byte, numBlocks)
 	buf := make([]byte, blockSize)
@@ -223,15 +228,13 @@ func TestE2E_GoFioSequentialWriteVerify(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.NoError(t, f.Sync())
-	require.NoError(t, f.Close())
+	f.Close()
 
 	// Verify phase.
-	f, err = os.Open(path)
-	require.NoError(t, err)
-	defer f.Close()
+	f2 := openFile(t, tfs, "seqwrite.0")
 
 	for i := range numBlocks {
-		_, err := io.ReadFull(f, buf)
+		_, err := io.ReadFull(f2, buf)
 		require.NoError(t, err)
 		got := sha256.Sum256(buf)
 		require.Equal(t, hashes[i], got, "block %d SHA256 mismatch", i)
@@ -241,15 +244,12 @@ func TestE2E_GoFioSequentialWriteVerify(t *testing.T) {
 // TestE2E_GoFioRandomWriteVerify writes random 4K blocks then reads them all
 // back with CRC32 verification (approximates fio --fallocate=keep --verify=crc32c).
 func TestE2E_GoFioRandomWriteVerify(t *testing.T) {
-	mp := stressMountGo(t, "gofio-randwr")
-	path := filepath.Join(mp, "randwrite.0")
+	tfs := stressMountGo(t, "gofio-randwr")
 	blockSize := 4096
 	size := 4 * 1024 * 1024
 	numBlocks := size / blockSize
 
-	f, err := os.Create(path)
-	require.NoError(t, err)
-	defer f.Close()
+	f := createFile(t, tfs, "randwrite.0")
 
 	// Pre-allocate by writing zeros.
 	require.NoError(t, f.Truncate(int64(size)))

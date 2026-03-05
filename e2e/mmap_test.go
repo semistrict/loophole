@@ -15,7 +15,7 @@ import (
 // the region that was truncated away. It should be zeros.
 func TestE2E_MmapTruncateStaleData(t *testing.T) {
 	mp := stressMountGo(t, "mmap-trunc")
-	path := mp + "/mmap-test"
+	path := mp.mountpoint + "/mmap-test"
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestE2E_MmapTruncateStaleData(t *testing.T) {
 // to verify mmap writes are properly flushed through FUSE.
 func TestE2E_MmapWriteReadback(t *testing.T) {
 	mp := stressMountGo(t, "mmap-write")
-	path := mp + "/mmap-wr"
+	path := mp.mountpoint + "/mmap-wr"
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	require.NoError(t, err)
@@ -107,7 +107,7 @@ func TestE2E_MmapWriteReadback(t *testing.T) {
 // read+write at different offsets, then reads back via mmap.
 func TestE2E_MmapCopyRange(t *testing.T) {
 	mp := stressMountGo(t, "mmap-copy")
-	path := mp + "/mmap-copy"
+	path := mp.mountpoint + "/mmap-copy"
 
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0644)
 	require.NoError(t, err)

@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite liblwext4 clean-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-juicefs e2e-juicefsfuse e2e-sqlite liblwext4 clean-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -16,6 +16,10 @@ AR  ?= ar
 BINDIR := bin
 GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
+
+# JuiceFS build tags: exclude all backends except sqlite (meta) and s3 (object storage)
+JUICEFS_NOTAGS := noredis nomysql nopg notikv noetcd nobadger noazure nob2 nobos nocifs nocos nodragonfly nogs nohdfs noibmcos nonfs noobs nooss noqingstore noqiniu nosftp noswift noufile nowebdav
+BUILDTAGS := $(JUICEFS_NOTAGS)
 
 LWEXT4_CFLAGS := -O2 -Wall \
   -DCONFIG_USE_DEFAULT_CFG=1 \
@@ -48,15 +52,15 @@ clean-lwext4:
 
 # Build loophole library and CLI
 build: liblwext4
-	go build ./...
+	go build -tags "$(BUILDTAGS)" ./...
 
 # Build loophole binary
 loophole: liblwext4
-	go build -o $(BINDIR)/loophole-$(GOOS)-$(GOARCH) ./cmd/loophole
+	go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-$(GOOS)-$(GOARCH) ./cmd/loophole
 
 # Build e2e test binary
 e2e.test: liblwext4
-	go test -c -o $(BINDIR)/e2e.test-$(GOOS)-$(GOARCH) ./e2e/
+	go test -tags "$(BUILDTAGS)" -c -o $(BINDIR)/e2e.test-$(GOOS)-$(GOARCH) ./e2e/
 
 # Install loophole CLI into $GOPATH/bin
 install: loophole
@@ -64,7 +68,7 @@ install: loophole
 
 # Static checks: lint + vet + build
 check: liblwext4
-	golangci-lint run ./...
+	golangci-lint run --build-tags "$(BUILDTAGS)" ./...
 
 # Format all Go source files
 fmt:
@@ -72,9 +76,9 @@ fmt:
 
 # Run unit tests (excludes e2e/linuxutil which require Linux)
 # Usage: make test [RUN=TestName]
-UNIT_PKGS := $(shell go list ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
+UNIT_PKGS := $(shell go list -tags "$(BUILDTAGS)" ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
 test: liblwext4
-	go test $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
+	go test -tags "$(BUILDTAGS)" $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
 
 # Build and run lwext4 C tests (client-server model)
 # Requires: cmake, make, e2fsprogs (mkfs.ext4)
@@ -111,34 +115,44 @@ e2e: test e2e-fuse e2e-nbd e2e-testnbdtcp
 # Run e2e tests (FUSE + losetup + kernel ext4)
 # Usage: make e2e-fuse [RUN=TestName]
 e2e-fuse: liblwext4
-	go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (NBD + kernel ext4)
 # Usage: make e2e-nbd [RUN=TestName]
 e2e-nbd: liblwext4
-	LOOPHOLE_MODE=nbd go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=nbd go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (NBD over TCP + kernel ext4)
 # Usage: make e2e-testnbdtcp [RUN=TestName]
 e2e-testnbdtcp: liblwext4
-	LOOPHOLE_MODE=testnbdtcp go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=testnbdtcp go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (lwext4 + FUSE, no root required)
 # Usage: make e2e-lwext4fuse [RUN=TestName]
 e2e-lwext4fuse: liblwext4
-	LOOPHOLE_MODE=lwext4fuse go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=lwext4fuse go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+
+# Run e2e tests (JuiceFS in-process, no root/FUSE/NBD required)
+# Usage: make e2e-juicefs [RUN=TestName]
+e2e-juicefs: liblwext4
+	LOOPHOLE_MODE=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+
+# Run e2e tests (JuiceFS + FUSE, requires root and FUSE)
+# Usage: make e2e-juicefsfuse [RUN=TestName]
+e2e-juicefsfuse: liblwext4
+	LOOPHOLE_MODE=juicefsfuse go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run SQLite e2e tests (pure Go, no root/FUSE/NBD required)
 # Usage: make e2e-sqlite [RUN=TestName]
 e2e-sqlite: liblwext4
-	go test -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') -run 'TestE2E_SQLite' ./e2e/
+	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') -run 'TestE2E_SQLite' ./e2e/
 
 # Run containerstorage integration tests (FUSE mode)
 test-containerstorage: install
 	mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-	go test -v -count=1 -timeout 600s -run TestLoophole ./containerstorage/
+	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 600s -run TestLoophole ./containerstorage/
 
 # Run containerstorage integration tests (NBD mode)
 test-containerstorage-nbd: install
 	mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
-	LOOPHOLE_MODE=nbd go test -v -count=1 -timeout 600s -run TestLoophole ./containerstorage/
+	LOOPHOLE_MODE=nbd go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 600s -run TestLoophole ./containerstorage/

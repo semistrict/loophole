@@ -82,6 +82,11 @@ type FS interface {
 type File interface {
 	Read(p []byte) (int, error)
 	Write(p []byte) (int, error)
+	ReadAt(p []byte, off int64) (int, error)
+	WriteAt(p []byte, off int64) (int, error)
+	Seek(offset int64, whence int) (int64, error)
+	Truncate(size int64) error
+	Sync() error
 	Close() error
 }
 
@@ -139,11 +144,15 @@ func New[H any](driver Driver[H], vm loophole.VolumeManager) *Backend[H] {
 // VM returns the underlying VolumeManager.
 func (b *Backend[H]) VM() loophole.VolumeManager { return b.vm }
 
-// Create creates a new volume and formats it with ext4.
+// Create creates a new volume and formats it.
 // Size is the volume size in bytes; 0 means use the default.
 func (b *Backend[H]) Create(ctx context.Context, p client.CreateParams) error {
-	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size)
-	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size, loophole.VolumeTypeExt4)
+	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size, "type", p.Type)
+	volType := p.Type
+	if volType == "" {
+		volType = loophole.VolumeTypeExt4
+	}
+	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size, volType)
 	if err != nil {
 		return err
 	}

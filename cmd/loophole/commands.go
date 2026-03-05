@@ -87,6 +87,7 @@ func createCmd() *cobra.Command {
 	var mountpoint string
 	var sizeStr string
 	var noFormat bool
+	var volType string
 	cmd := &cobra.Command{
 		Use:   "create <volume>",
 		Short: "Create and format a new volume",
@@ -109,6 +110,7 @@ func createCmd() *cobra.Command {
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
+				Type:     volType,
 			}); err != nil {
 				return err
 			}
@@ -124,7 +126,8 @@ func createCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path after creation")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
-	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting ext4")
+	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
+	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume type (ext4, juicefs); default ext4")
 	return cmd
 }
 

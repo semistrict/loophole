@@ -12,6 +12,10 @@ func DefaultMode() Mode {
 		return ModeTestNBDTCP
 	case "lwext4fuse":
 		return ModeLwext4FUSE
+	case "juicefs":
+		return ModeJuiceFS
+	case "juicefsfuse":
+		return ModeJuiceFSFuse
 	default:
 		return ModeFUSE
 	}

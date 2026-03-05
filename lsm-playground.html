@@ -1,0 +1,1580 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Loophole LSM Storage Layer — Interactive Explorer</title>
+<style>
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --bg4: #30363d;
+  --fg: #c9d1d9; --fg2: #8b949e; --fg3: #6e7681;
+  --accent: #58a6ff; --accent2: #3fb950; --accent3: #d29922;
+  --red: #f85149; --purple: #bc8cff; --pink: #f778ba;
+  --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --radius: 6px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--sans); background: var(--bg); color: var(--fg); height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+button { font-family: var(--sans); cursor: pointer; border: none; border-radius: var(--radius); padding: 6px 12px; font-size: 12px; transition: all 0.15s; }
+button:active { transform: scale(0.97); }
+
+/* Header */
+header { display: flex; align-items: center; gap: 16px; padding: 10px 20px; background: var(--bg2); border-bottom: 1px solid var(--bg4); flex-shrink: 0; }
+header h1 { font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; }
+header h1 span { color: var(--fg3); font-weight: 400; }
+
+/* Tabs */
+.tabs { display: flex; gap: 2px; flex-shrink: 0; }
+.tab { padding: 6px 14px; font-size: 12px; color: var(--fg2); background: transparent; border-radius: var(--radius); transition: all 0.15s; }
+.tab:hover { color: var(--fg); background: var(--bg3); }
+.tab.active { color: var(--accent); background: var(--bg3); }
+
+/* Main layout */
+main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.panel { display: none; flex: 1; overflow: auto; padding: 20px; }
+.panel.active { display: flex; flex-direction: column; gap: 16px; }
+
+/* Code ref badges */
+.cref { font-family: var(--mono); font-size: 10px; color: var(--purple); background: rgba(188,140,255,0.1); padding: 1px 6px; border-radius: 3px; cursor: default; white-space: nowrap; }
+
+/* Section headers */
+.section-title { font-size: 13px; font-weight: 600; color: var(--fg); display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.section-desc { font-size: 12px; color: var(--fg2); line-height: 1.5; margin-bottom: 8px; }
+
+/* Cards */
+.card { background: var(--bg2); border: 1px solid var(--bg4); border-radius: 8px; padding: 16px; }
+
+/* Write Path Simulator */
+.sim-row { display: flex; gap: 16px; align-items: stretch; flex-wrap: wrap; }
+.sim-col { flex: 1; min-width: 220px; }
+.sim-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.sim-controls button { background: var(--bg3); color: var(--fg); border: 1px solid var(--bg4); }
+.sim-controls button:hover { background: var(--bg4); border-color: var(--fg3); }
+.sim-controls button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sim-controls button.primary:hover { opacity: 0.9; }
+.sim-controls button.danger { background: rgba(248,81,73,0.15); color: var(--red); border-color: rgba(248,81,73,0.3); }
+.sim-controls button.success { background: rgba(63,185,80,0.15); color: var(--accent2); border-color: rgba(63,185,80,0.3); }
+.sim-controls input { font-family: var(--mono); font-size: 12px; background: var(--bg); color: var(--fg); border: 1px solid var(--bg4); border-radius: var(--radius); padding: 5px 8px; width: 80px; }
+.sim-controls label { font-size: 11px; color: var(--fg2); }
+
+/* MemLayer viz */
+.memlayer-viz { display: flex; flex-direction: column; gap: 2px; }
+.memlayer-header { font-size: 11px; color: var(--fg2); font-family: var(--mono); display: flex; justify-content: space-between; }
+.slot-grid { display: flex; flex-wrap: wrap; gap: 2px; }
+.slot { width: 24px; height: 24px; border-radius: 3px; background: var(--bg); border: 1px solid var(--bg4); display: flex; align-items: center; justify-content: center; font-size: 8px; font-family: var(--mono); color: var(--fg3); transition: all 0.3s; cursor: default; position: relative; }
+.slot.used { background: rgba(88,166,255,0.2); border-color: var(--accent); color: var(--accent); }
+.slot.tombstone { background: rgba(248,81,73,0.15); border-color: var(--red); color: var(--red); }
+.slot.hot { animation: slotPulse 0.6s ease-out; }
+@keyframes slotPulse { 0% { transform: scale(1.3); box-shadow: 0 0 12px var(--accent); } 100% { transform: scale(1); box-shadow: none; } }
+.slot.frozen { opacity: 0.5; }
+.slot-tip { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); background: var(--bg4); color: var(--fg); padding: 4px 8px; border-radius: 4px; font-size: 10px; white-space: nowrap; pointer-events: none; z-index: 10; display: none; }
+.slot:hover .slot-tip { display: block; }
+
+/* Frozen layers */
+.frozen-stack { display: flex; flex-direction: column; gap: 4px; min-height: 40px; }
+.frozen-bar { padding: 6px 10px; background: rgba(210,153,34,0.15); border: 1px solid rgba(210,153,34,0.3); border-radius: var(--radius); font-size: 11px; font-family: var(--mono); color: var(--accent3); display: flex; justify-content: space-between; align-items: center; transition: all 0.4s; }
+.frozen-bar.uploading { animation: uploadPulse 1s ease-in-out infinite; }
+@keyframes uploadPulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* S3 Tree */
+.s3-tree { font-family: var(--mono); font-size: 12px; line-height: 1.8; }
+.s3-tree .dir { color: var(--accent); cursor: pointer; }
+.s3-tree .dir:hover { text-decoration: underline; }
+.s3-tree .file { color: var(--fg2); cursor: pointer; padding: 1px 4px; border-radius: 3px; }
+.s3-tree .file:hover { background: var(--bg3); color: var(--fg); }
+.s3-tree .file.selected { background: rgba(88,166,255,0.15); color: var(--accent); }
+.s3-tree .indent { display: inline-block; }
+.s3-tree .size { color: var(--fg3); font-size: 10px; }
+
+/* Binary inspector */
+.hex-view { font-family: var(--mono); font-size: 11px; line-height: 1.6; background: var(--bg); border: 1px solid var(--bg4); border-radius: var(--radius); padding: 12px; overflow-x: auto; max-height: 360px; overflow-y: auto; }
+.hex-row { display: flex; gap: 0; white-space: nowrap; }
+.hex-offset { color: var(--fg3); min-width: 70px; user-select: none; }
+.hex-byte { padding: 0 3px; border-radius: 2px; cursor: default; transition: background 0.1s; }
+.hex-byte:hover { background: var(--bg3); }
+.hex-byte.h-magic { color: var(--pink); }
+.hex-byte.h-version { color: var(--accent3); }
+.hex-byte.h-seq { color: var(--accent); }
+.hex-byte.h-range { color: var(--accent2); }
+.hex-byte.h-count { color: var(--purple); }
+.hex-byte.h-offset { color: var(--red); }
+.hex-byte.h-data { color: var(--fg2); }
+.hex-byte.h-index { color: var(--accent3); }
+.hex-ascii { color: var(--fg3); margin-left: 12px; letter-spacing: 1px; }
+.hex-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px; font-size: 11px; }
+.hex-legend span { display: flex; align-items: center; gap: 4px; }
+.hex-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+
+/* Read tracer */
+.read-trace { display: flex; flex-direction: column; gap: 4px; }
+.trace-step { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: var(--radius); font-size: 12px; transition: all 0.3s; background: var(--bg); border: 1px solid var(--bg4); }
+.trace-step .step-num { font-family: var(--mono); font-size: 10px; color: var(--fg3); min-width: 20px; }
+.trace-step .step-name { flex: 1; }
+.trace-step .step-result { font-family: var(--mono); font-size: 11px; }
+.trace-step.searching { border-color: var(--accent); background: rgba(88,166,255,0.05); }
+.trace-step.searching .step-num { color: var(--accent); }
+.trace-step.found { border-color: var(--accent2); background: rgba(63,185,80,0.08); }
+.trace-step.found .step-result { color: var(--accent2); }
+.trace-step.miss { opacity: 0.4; }
+.trace-step.skip { opacity: 0.25; }
+
+/* Compaction viz */
+.compact-layers { display: flex; flex-direction: column; gap: 4px; }
+.layer-bar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-radius: var(--radius); font-size: 11px; font-family: var(--mono); transition: all 0.4s; }
+.layer-bar.delta { background: rgba(88,166,255,0.1); border: 1px solid rgba(88,166,255,0.25); color: var(--accent); }
+.layer-bar.image { background: rgba(63,185,80,0.1); border: 1px solid rgba(63,185,80,0.25); color: var(--accent2); }
+.layer-bar .bar-fill { height: 6px; border-radius: 3px; transition: width 0.5s; }
+.layer-bar.delta .bar-fill { background: var(--accent); }
+.layer-bar.image .bar-fill { background: var(--accent2); }
+.layer-bar.merging { animation: mergeGlow 0.8s ease-in-out; }
+@keyframes mergeGlow { 0% { opacity: 1; } 50% { opacity: 0.3; transform: scaleY(0.8); } 100% { opacity: 0; height: 0; padding: 0; margin: 0; } }
+.compact-stats { font-size: 11px; color: var(--fg2); font-family: var(--mono); display: flex; gap: 16px; }
+
+/* Branch viz */
+.branch-graph { position: relative; min-height: 200px; }
+.branch-node { position: absolute; padding: 10px 14px; background: var(--bg2); border: 2px solid var(--accent); border-radius: 8px; font-size: 11px; font-family: var(--mono); cursor: pointer; transition: all 0.2s; z-index: 2; min-width: 140px; }
+.branch-node:hover { border-color: var(--fg); }
+.branch-node.selected { border-color: var(--accent2); box-shadow: 0 0 16px rgba(63,185,80,0.2); }
+.branch-node .node-id { color: var(--accent); font-weight: 600; font-size: 12px; }
+.branch-node .node-meta { color: var(--fg2); font-size: 10px; margin-top: 4px; }
+.branch-edge { position: absolute; z-index: 1; }
+
+/* Sequence timeline */
+.seq-timeline { display: flex; align-items: flex-end; gap: 1px; height: 60px; padding: 4px 0; }
+.seq-bar { flex: 1; min-width: 3px; max-width: 12px; border-radius: 2px 2px 0 0; transition: all 0.3s; cursor: default; position: relative; }
+.seq-bar.write { background: var(--accent); }
+.seq-bar.tombstone { background: var(--red); }
+
+/* Log */
+.log { font-family: var(--mono); font-size: 11px; line-height: 1.6; background: var(--bg); border: 1px solid var(--bg4); border-radius: var(--radius); padding: 10px; max-height: 180px; overflow-y: auto; color: var(--fg2); }
+.log .log-line { display: flex; gap: 8px; }
+.log .log-ts { color: var(--fg3); min-width: 50px; }
+.log .log-op { min-width: 60px; }
+.log .log-op.write { color: var(--accent); }
+.log .log-op.read { color: var(--accent2); }
+.log .log-op.flush { color: var(--accent3); }
+.log .log-op.compact { color: var(--purple); }
+.log .log-op.branch { color: var(--pink); }
+.log .log-op.error { color: var(--red); }
+
+/* Scrollable areas */
+.scroll-y { overflow-y: auto; flex: 1; }
+
+/* Flex helpers */
+.flex-row { display: flex; gap: 16px; }
+.flex-col { display: flex; flex-direction: column; gap: 8px; }
+.flex-1 { flex: 1; min-width: 0; }
+.gap-8 { gap: 8px; }
+.gap-4 { gap: 4px; }
+.mt-8 { margin-top: 8px; }
+.mb-4 { margin-bottom: 4px; }
+
+/* Status bar */
+.status-bar { padding: 6px 20px; background: var(--bg2); border-top: 1px solid var(--bg4); font-size: 11px; font-family: var(--mono); color: var(--fg3); display: flex; gap: 20px; flex-shrink: 0; }
+.status-bar .stat { display: flex; gap: 4px; }
+.status-bar .stat-val { color: var(--fg2); }
+
+/* Animation for new items */
+@keyframes fadeSlideIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+.animate-in { animation: fadeSlideIn 0.3s ease-out; }
+
+/* Responsive */
+@media (max-width: 900px) { .sim-row { flex-direction: column; } .flex-row { flex-direction: column; } }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>loophole <span>/ lsm storage explorer</span></h1>
+  <div class="tabs">
+    <button class="tab active" data-tab="write">Write Path</button>
+    <button class="tab" data-tab="read">Read Path</button>
+    <button class="tab" data-tab="binary">Binary Format</button>
+    <button class="tab" data-tab="compact">Compaction</button>
+    <button class="tab" data-tab="branch">Branching</button>
+    <button class="tab" data-tab="s3">S3 Layout</button>
+  </div>
+</header>
+
+<main>
+
+<!-- ====================== WRITE PATH ====================== -->
+<div class="panel active" id="panel-write">
+  <div class="section-title">Write Path Simulator <span class="cref">timeline.go:160-251</span></div>
+  <div class="section-desc">
+    Writes land in an mmap'd <strong>MemLayer</strong> with fixed slots. Same-page overwrites reuse slots (in-place).
+    When full (256MB / 4096 slots), the MemLayer freezes and a <strong>Delta Layer</strong> is built and uploaded to S3.
+    Per-page locks <span class="cref">timeline.go:79</span> prevent lost writes during concurrent read-modify-write.
+  </div>
+
+  <div class="sim-controls">
+    <label>Page addr:</label>
+    <input type="number" id="write-addr" value="0" min="0" max="255" style="width:60px">
+    <label>Data:</label>
+    <input type="text" id="write-data" value="hello" maxlength="8" style="width:70px">
+    <button class="primary" onclick="doWrite()">Write Page</button>
+    <button onclick="doRandomWrites(5)">+5 Random</button>
+    <button onclick="doRandomWrites(20)">+20 Random</button>
+    <button class="danger" onclick="doPunchHole()">Punch Hole</button>
+    <span style="color:var(--fg3)">|</span>
+    <button class="success" onclick="doFlush()">Flush to S3</button>
+    <button onclick="doAutoFill()">Fill MemLayer</button>
+  </div>
+
+  <div class="sim-row" style="flex: 1; min-height: 0;">
+    <div class="sim-col card flex-col" style="flex: 2;">
+      <div class="memlayer-viz">
+        <div class="memlayer-header">
+          <span>MemLayer <span class="cref">memlayer.go:28-40</span></span>
+          <span id="mem-stats">0 / 64 slots</span>
+        </div>
+        <div class="slot-grid" id="mem-slots"></div>
+      </div>
+      <div class="mt-8">
+        <div class="memlayer-header mb-4">
+          <span>Frozen Layers <span class="cref">timeline.go:453-478</span></span>
+          <span id="frozen-count">0 pending</span>
+        </div>
+        <div class="frozen-stack" id="frozen-stack"></div>
+      </div>
+    </div>
+
+    <div class="sim-col card flex-col" style="flex: 1;">
+      <div class="section-title" style="font-size: 12px;">Sequence Timeline</div>
+      <div class="seq-timeline" id="seq-timeline"></div>
+      <div style="font-size:10px; color:var(--fg3); font-family:var(--mono);">
+        nextSeq: <span id="next-seq">1</span> &nbsp;|&nbsp; Each write increments seq atomically <span class="cref">timeline.go:210</span>
+      </div>
+      <div class="section-title" style="font-size: 12px; margin-top: 12px;">Event Log</div>
+      <div class="log scroll-y" id="write-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================== READ PATH ====================== -->
+<div class="panel" id="panel-read">
+  <div class="section-title">Read Path Tracer <span class="cref">timeline.go:321-417</span></div>
+  <div class="section-desc">
+    Reads search from newest to oldest: memLayer &rarr; frozenLayers &rarr; pageCache &rarr; deltas (newest first) &rarr; images (newest first) &rarr; ancestor &rarr; zeroPage.
+    Click <strong>Trace Read</strong> to step through the search. Each layer is checked in order; first hit wins.
+  </div>
+
+  <div class="sim-controls">
+    <label>Read page addr:</label>
+    <input type="number" id="read-addr" value="0" min="0" max="255" style="width:60px">
+    <button class="primary" onclick="doTraceRead()">Trace Read</button>
+    <button onclick="doStepRead()">Step</button>
+    <button onclick="doTraceReadInstant()">Instant</button>
+    <span style="color:var(--fg3)">|</span>
+    <span style="font-size:11px; color:var(--fg2);">Write some pages first, then flush, to see reads hit different layers.</span>
+  </div>
+
+  <div class="flex-row" style="flex: 1; min-height: 0;">
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Layer Search Order</div>
+      <div class="read-trace scroll-y" id="read-trace">
+        <div class="trace-step" data-layer="mem">
+          <span class="step-num">1</span>
+          <span class="step-name">memLayer <span class="cref">timeline.go:328</span></span>
+          <span class="step-result" id="rt-mem"></span>
+        </div>
+        <div class="trace-step" data-layer="frozen">
+          <span class="step-num">2</span>
+          <span class="step-name">frozenLayers <span class="cref">timeline.go:341</span></span>
+          <span class="step-result" id="rt-frozen"></span>
+        </div>
+        <div class="trace-step" data-layer="cache">
+          <span class="step-num">3</span>
+          <span class="step-name">pageCache (LRU mmap) <span class="cref">timeline.go:359</span></span>
+          <span class="step-result" id="rt-cache"></span>
+        </div>
+        <div class="trace-step" data-layer="deltas">
+          <span class="step-num">4</span>
+          <span class="step-name">Delta layers in S3 (newest first) <span class="cref">timeline.go:369</span></span>
+          <span class="step-result" id="rt-deltas"></span>
+        </div>
+        <div class="trace-step" data-layer="images">
+          <span class="step-num">5</span>
+          <span class="step-name">Image layers in S3 (newest first) <span class="cref">timeline.go:390</span></span>
+          <span class="step-result" id="rt-images"></span>
+        </div>
+        <div class="trace-step" data-layer="ancestor">
+          <span class="step-num">6</span>
+          <span class="step-name">Ancestor timeline <span class="cref">timeline.go:411</span></span>
+          <span class="step-result" id="rt-ancestor"></span>
+        </div>
+        <div class="trace-step" data-layer="zero">
+          <span class="step-num">7</span>
+          <span class="step-name">zeroPage (default) <span class="cref">timeline.go:416</span></span>
+          <span class="step-result" id="rt-zero"></span>
+        </div>
+      </div>
+    </div>
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Page Data</div>
+      <div id="read-result" style="font-family:var(--mono); font-size: 12px; color: var(--fg2); padding: 12px; background: var(--bg); border-radius: var(--radius); flex: 1;">
+        Trace a read to see the resolved page data.
+      </div>
+      <div class="section-title" style="font-size: 12px; margin-top: 8px;">Current State Summary</div>
+      <div id="read-state-summary" class="log scroll-y" style="font-size: 11px;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================== BINARY FORMAT ====================== -->
+<div class="panel" id="panel-binary">
+  <div class="section-title">Binary Layer Inspector</div>
+  <div class="section-desc">
+    Examine the byte-level layout of Delta and Image layers as stored in S3. Click fields in the hex view to see explanations.
+    Delta layers <span class="cref">layer.go:51-73</span> store page diffs with a searchable index.
+    Image layers <span class="cref">layer.go:557-576</span> store full snapshots.
+  </div>
+
+  <div class="sim-controls mb-4">
+    <button class="primary" id="btn-show-delta" onclick="showBinaryDelta()">Delta Layer (LDLT)</button>
+    <button id="btn-show-image" onclick="showBinaryImage()">Image Layer (LIMG)</button>
+    <span style="color:var(--fg3)">|</span>
+    <span style="font-size:11px; color:var(--fg2);">Flush some writes first to inspect real layer data.</span>
+  </div>
+
+  <div class="flex-row" style="flex: 1; min-height: 0;">
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Hex View</div>
+      <div class="hex-view scroll-y" id="hex-view"></div>
+      <div class="hex-legend" id="hex-legend"></div>
+    </div>
+    <div class="card flex-col" style="width: 320px;">
+      <div class="section-title" style="font-size: 12px;">Structure</div>
+      <div id="binary-structure" class="scroll-y" style="font-size: 12px; line-height: 1.8;"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================== COMPACTION ====================== -->
+<div class="panel" id="panel-compact">
+  <div class="section-title">Compaction Lab <span class="cref">timeline.go:818-904</span></div>
+  <div class="section-desc">
+    Two strategies: <strong>Delta Merge</strong> combines multiple deltas into one (when deltas &lt; 50% of image size).
+    <strong>Image Promotion</strong> materializes all pages into a single image layer.
+    Branch points constrain what can be compacted. Build up layers below, then compact.
+  </div>
+
+  <div class="sim-controls mb-4">
+    <button onclick="compactAddDelta()">+ Delta Layer</button>
+    <button onclick="compactAddDelta();compactAddDelta();compactAddDelta();">+ 3 Deltas</button>
+    <button onclick="compactAddImage()">+ Image Layer</button>
+    <span style="color:var(--fg3)">|</span>
+    <button class="primary" onclick="doCompact()">Run Compact()</button>
+    <button onclick="compactReset()">Reset</button>
+  </div>
+
+  <div class="flex-row" style="flex: 1; min-height: 0;">
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Layer Stack (newest at top)</div>
+      <div class="compact-layers scroll-y" id="compact-layers"></div>
+      <div class="compact-stats mt-8" id="compact-stats"></div>
+    </div>
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Compaction Decision</div>
+      <div id="compact-decision" style="font-size: 12px; line-height: 1.7; color: var(--fg2);"></div>
+      <div class="section-title" style="font-size: 12px; margin-top: 12px;">Log</div>
+      <div class="log scroll-y" id="compact-log"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================== BRANCHING ====================== -->
+<div class="panel" id="panel-branch">
+  <div class="section-title">Branching &amp; Copy-on-Write <span class="cref">volume.go:89-151</span></div>
+  <div class="section-desc">
+    <strong>branch()</strong> freezes + flushes, creates a child timeline with an ancestor pointer.
+    The child sees parent data at <code>ancestorSeq</code> via recursive readPage().
+    Writes in the child go to its own memLayer/deltas. BranchPoints in parent protect compaction.
+  </div>
+
+  <div class="sim-controls mb-4">
+    <button class="primary" onclick="doBranch()">Snapshot / Branch</button>
+    <button onclick="branchWrite()">Write to Selected</button>
+    <button onclick="branchReset()">Reset</button>
+    <span style="color:var(--fg3)">|</span>
+    <span style="font-size:11px; color:var(--fg2);">Click a node to select it. Writes go to the selected timeline.</span>
+  </div>
+
+  <div class="flex-row" style="flex: 1; min-height: 0;">
+    <div class="flex-1 card" style="position: relative; overflow: auto;">
+      <svg id="branch-svg" style="position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; z-index:1;"></svg>
+      <div class="branch-graph" id="branch-graph"></div>
+    </div>
+    <div class="card flex-col" style="width: 320px;">
+      <div class="section-title" style="font-size: 12px;">Selected Timeline</div>
+      <div id="branch-detail" style="font-size: 12px; font-family: var(--mono); line-height: 1.8; color: var(--fg2);"></div>
+      <div class="section-title" style="font-size: 12px; margin-top: 12px;">Read Resolution</div>
+      <div id="branch-read" style="font-size: 12px; color: var(--fg2); line-height: 1.6;">
+        Select a timeline and write to it to see how reads resolve through the ancestor chain.
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ====================== S3 LAYOUT ====================== -->
+<div class="panel" id="panel-s3">
+  <div class="section-title">S3 Object Layout</div>
+  <div class="section-desc">
+    The full object hierarchy in the S3 bucket. Objects are created as you interact with other tabs.
+    Click any object to inspect its contents. <span class="cref">manager.go:39-40</span>
+  </div>
+
+  <div class="flex-row" style="flex: 1; min-height: 0;">
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Object Tree</div>
+      <div class="s3-tree scroll-y" id="s3-tree"></div>
+    </div>
+    <div class="flex-1 card flex-col">
+      <div class="section-title" style="font-size: 12px;">Object Content</div>
+      <div id="s3-content" style="font-family: var(--mono); font-size: 12px; color: var(--fg2); line-height: 1.6; white-space: pre-wrap; background: var(--bg); border-radius: var(--radius); padding: 12px; flex: 1; overflow: auto;">
+        Click an object in the tree to inspect it.
+      </div>
+    </div>
+  </div>
+</div>
+
+</main>
+
+<div class="status-bar" id="status-bar">
+  <span class="stat">nextSeq: <span class="stat-val" id="sb-seq">1</span></span>
+  <span class="stat">memLayer: <span class="stat-val" id="sb-mem">0 pages</span></span>
+  <span class="stat">frozen: <span class="stat-val" id="sb-frozen">0</span></span>
+  <span class="stat">deltas: <span class="stat-val" id="sb-deltas">0</span></span>
+  <span class="stat">images: <span class="stat-val" id="sb-images">0</span></span>
+  <span class="stat">S3 objects: <span class="stat-val" id="sb-s3">0</span></span>
+</div>
+
+<script>
+// ======================== SIMULATION ENGINE ========================
+
+const SLOT_COUNT = 64; // visual slots (scaled down from 4096)
+const PAGE_SIZE = 65536;
+
+const state = {
+  nextSeq: 1,
+  timelineId: 'tl-a1b2c3',
+  // MemLayer
+  memSlots: new Map(), // pageAddr -> { seq, data, tombstone, slot }
+  memNextSlot: 0,
+  // Frozen
+  frozenLayers: [], // [{ id, entries: Map<pageAddr, {seq, data, tombstone}>, startSeq, endSeq }]
+  // S3 layers
+  deltas: [], // [{ key, startSeq, endSeq, entries: Map, size }]
+  images: [], // [{ key, seq, entries: Map, size }]
+  // Page cache
+  pageCache: new Map(),
+  // S3 objects
+  s3Objects: new Map(),
+  // Branches
+  branches: [{ id: 'tl-a1b2c3', ancestor: null, ancestorSeq: 0, branchPoints: [], nextSeq: 1, deltas: [], images: [], pages: new Map() }],
+  selectedBranch: 'tl-a1b2c3',
+  // Compaction sim (separate)
+  compactDeltas: [],
+  compactImages: [],
+  compactSeqCounter: 1,
+  // Log
+  logLines: [],
+  // Read trace state
+  readTraceState: null,
+};
+
+function genId() { return Math.random().toString(36).substr(2, 8); }
+function hexPad(n, w) { return n.toString(16).padStart(w, '0'); }
+
+function log(op, msg) {
+  state.logLines.push({ op, msg, ts: state.nextSeq });
+  renderLog();
+}
+
+// ======================== WRITE PATH ========================
+
+function doWrite(addr, data, isTombstone) {
+  const pageAddr = addr !== undefined ? addr : parseInt(document.getElementById('write-addr').value) || 0;
+  const pageData = data !== undefined ? data : (document.getElementById('write-data').value || 'data');
+
+  if (state.memNextSlot >= SLOT_COUNT && !state.memSlots.has(pageAddr)) {
+    log('error', `MemLayer full (${SLOT_COUNT} slots). Freeze & flush first.`);
+    doFlush();
+    // retry after flush
+  }
+
+  const seq = state.nextSeq++;
+  const existing = state.memSlots.get(pageAddr);
+  const slot = existing ? existing.slot : state.memNextSlot++;
+
+  state.memSlots.set(pageAddr, {
+    seq, data: isTombstone ? null : pageData, tombstone: !!isTombstone, slot
+  });
+
+  log('write', `page=${pageAddr} seq=${seq} ${isTombstone ? 'TOMBSTONE' : `"${pageData}"`} slot=${slot}${existing ? ' (overwrite)' : ''}`);
+  renderWritePanel();
+  updateStatusBar();
+}
+
+function doPunchHole() {
+  const addr = parseInt(document.getElementById('write-addr').value) || 0;
+  doWrite(addr, null, true);
+}
+
+function doRandomWrites(n) {
+  for (let i = 0; i < n; i++) {
+    const addr = Math.floor(Math.random() * 256);
+    const words = ['alpha','bravo','delta','echo','fox','golf','hotel','kilo','lima','papa','romeo','zulu'];
+    const data = words[Math.floor(Math.random() * words.length)];
+    doWrite(addr, data, false);
+  }
+}
+
+function doAutoFill() {
+  const remaining = SLOT_COUNT - state.memSlots.size;
+  if (remaining <= 0) { log('flush', 'MemLayer already full'); return; }
+  const usedAddrs = new Set(state.memSlots.keys());
+  let addr = 0;
+  for (let i = 0; i < remaining && addr < 10000; addr++) {
+    if (!usedAddrs.has(addr)) {
+      doWrite(addr, `fill-${addr}`, false);
+      i++;
+    }
+  }
+}
+
+function doFlush() {
+  if (state.memSlots.size === 0) { log('flush', 'Nothing to flush'); return; }
+
+  const startSeq = Math.min(...[...state.memSlots.values()].map(e => e.seq));
+  const endSeq = Math.max(...[...state.memSlots.values()].map(e => e.seq)) + 1;
+  const frozenId = genId();
+
+  // Freeze
+  const entries = new Map(state.memSlots);
+  state.frozenLayers.push({ id: frozenId, entries, startSeq, endSeq });
+  state.memSlots = new Map();
+  state.memNextSlot = 0;
+
+  log('flush', `Frozen memLayer → frozenLayer#${frozenId} [seq ${startSeq}-${endSeq}) ${entries.size} pages`);
+
+  // Simulate S3 upload
+  setTimeout(() => flushFrozen(frozenId), 300);
+  renderWritePanel();
+  updateStatusBar();
+}
+
+function flushFrozen(frozenId) {
+  const idx = state.frozenLayers.findIndex(f => f.id === frozenId);
+  if (idx === -1) return;
+  const frozen = state.frozenLayers[idx];
+
+  const key = `deltas/${hexPad(frozen.startSeq, 16)}-${hexPad(frozen.endSeq, 16)}`;
+  const delta = {
+    key,
+    startSeq: frozen.startSeq,
+    endSeq: frozen.endSeq,
+    entries: frozen.entries,
+    size: frozen.entries.size * 200 // approximate compressed size
+  };
+
+  state.deltas.push(delta);
+  state.frozenLayers.splice(idx, 1);
+
+  // Invalidate pageCache for flushed pages
+  for (const addr of frozen.entries.keys()) {
+    state.pageCache.delete(addr);
+  }
+
+  // S3 objects
+  const tlPath = `timelines/${state.timelineId}`;
+  state.s3Objects.set(`${tlPath}/${key}`, { type: 'delta', delta });
+  state.s3Objects.set(`${tlPath}/layers.json`, {
+    type: 'json',
+    data: { NextSeq: state.nextSeq, Deltas: state.deltas.map(d => ({ Key: d.key, StartSeq: d.startSeq, EndSeq: d.endSeq, Size: d.size })), Images: state.images.map(im => ({ Key: im.key, Seq: im.seq, Size: im.size })) }
+  });
+  state.s3Objects.set(`${tlPath}/meta.json`, {
+    type: 'json',
+    data: { Ancestor: '', AncestorSeq: 0, BranchPoints: [], CreatedAt: new Date().toISOString() }
+  });
+
+  log('flush', `Uploaded ${key} (${frozen.entries.size} pages, ~${(delta.size / 1024).toFixed(1)}KB) → S3`);
+  log('flush', `Saved layers.json (nextSeq=${state.nextSeq}, ${state.deltas.length} deltas, ${state.images.length} images)`);
+
+  renderWritePanel();
+  updateStatusBar();
+}
+
+// ======================== READ PATH ========================
+
+function resolveRead(pageAddr) {
+  const steps = [];
+
+  // 1. memLayer
+  const memEntry = state.memSlots.get(pageAddr);
+  if (memEntry) {
+    steps.push({ layer: 'mem', found: true, data: memEntry.tombstone ? 'TOMBSTONE → zeroPage' : `"${memEntry.data}"`, seq: memEntry.seq });
+    return { steps, result: memEntry.tombstone ? '[zero]' : memEntry.data, source: 'memLayer' };
+  }
+  steps.push({ layer: 'mem', found: false });
+
+  // 2. frozenLayers (newest first)
+  for (let i = state.frozenLayers.length - 1; i >= 0; i--) {
+    const fe = state.frozenLayers[i].entries.get(pageAddr);
+    if (fe) {
+      steps.push({ layer: 'frozen', found: true, data: fe.tombstone ? 'TOMBSTONE' : `"${fe.data}"`, seq: fe.seq, detail: `frozenLayer#${state.frozenLayers[i].id}` });
+      return { steps, result: fe.tombstone ? '[zero]' : fe.data, source: 'frozenLayer' };
+    }
+  }
+  steps.push({ layer: 'frozen', found: false });
+
+  // 3. pageCache
+  const cached = state.pageCache.get(pageAddr);
+  if (cached) {
+    steps.push({ layer: 'cache', found: true, data: `"${cached}"` });
+    return { steps, result: cached, source: 'pageCache' };
+  }
+  steps.push({ layer: 'cache', found: false });
+
+  // 4. Deltas (newest first)
+  for (let i = state.deltas.length - 1; i >= 0; i--) {
+    const de = state.deltas[i].entries.get(pageAddr);
+    if (de) {
+      // Cache on read
+      if (!de.tombstone) state.pageCache.set(pageAddr, de.data);
+      steps.push({ layer: 'deltas', found: true, data: de.tombstone ? 'TOMBSTONE' : `"${de.data}"`, seq: de.seq, detail: state.deltas[i].key });
+      return { steps, result: de.tombstone ? '[zero]' : de.data, source: `delta ${state.deltas[i].key}` };
+    }
+  }
+  steps.push({ layer: 'deltas', found: false, detail: `${state.deltas.length} delta(s) searched` });
+
+  // 5. Images (newest first)
+  for (let i = state.images.length - 1; i >= 0; i--) {
+    const ie = state.images[i].entries.get(pageAddr);
+    if (ie) {
+      state.pageCache.set(pageAddr, ie.data);
+      steps.push({ layer: 'images', found: true, data: `"${ie.data}"`, detail: state.images[i].key });
+      return { steps, result: ie.data, source: `image ${state.images[i].key}` };
+    }
+  }
+  steps.push({ layer: 'images', found: false, detail: `${state.images.length} image(s) searched` });
+
+  // 6. Ancestor (not modeled in simple sim)
+  steps.push({ layer: 'ancestor', found: false, detail: 'no ancestor' });
+
+  // 7. zeroPage
+  steps.push({ layer: 'zero', found: true, data: '0x00 * 65536' });
+  return { steps, result: '[zero]', source: 'zeroPage' };
+}
+
+let readAnimTimer = null;
+let readAnimSteps = [];
+let readAnimIdx = 0;
+let readAnimResult = null;
+
+function doTraceRead() {
+  clearTimeout(readAnimTimer);
+  const addr = parseInt(document.getElementById('read-addr').value) || 0;
+  const { steps, result, source } = resolveRead(addr);
+  readAnimSteps = steps;
+  readAnimIdx = 0;
+  readAnimResult = { result, source, addr };
+
+  // Reset UI
+  document.querySelectorAll('#read-trace .trace-step').forEach(el => {
+    el.className = 'trace-step';
+    el.querySelector('.step-result').textContent = '';
+  });
+  document.getElementById('read-result').innerHTML = `<span style="color:var(--fg3)">Searching page ${addr}...</span>`;
+
+  animateReadStep();
+}
+
+function animateReadStep() {
+  if (readAnimIdx >= readAnimSteps.length) {
+    showReadResult();
+    return;
+  }
+  const step = readAnimSteps[readAnimIdx];
+  const el = document.querySelector(`#read-trace .trace-step[data-layer="${step.layer}"]`);
+  if (!el) { readAnimIdx++; animateReadStep(); return; }
+
+  el.className = 'trace-step searching';
+  const resultEl = el.querySelector('.step-result');
+
+  readAnimTimer = setTimeout(() => {
+    if (step.found) {
+      el.className = 'trace-step found';
+      resultEl.innerHTML = `HIT ${step.data}${step.seq !== undefined ? ` <span style="color:var(--fg3)">seq=${step.seq}</span>` : ''}`;
+      // Mark remaining as skipped
+      readAnimSteps.slice(readAnimIdx + 1).forEach(s => {
+        const el2 = document.querySelector(`#read-trace .trace-step[data-layer="${s.layer}"]`);
+        if (el2 && !el2.classList.contains('found') && !el2.classList.contains('miss')) el2.className = 'trace-step skip';
+      });
+      showReadResult();
+    } else {
+      el.className = 'trace-step miss';
+      resultEl.textContent = step.detail ? `MISS (${step.detail})` : 'MISS';
+      readAnimIdx++;
+      animateReadStep();
+    }
+  }, 400);
+}
+
+function doStepRead() {
+  if (readAnimSteps.length === 0) {
+    doTraceRead();
+    return;
+  }
+  clearTimeout(readAnimTimer);
+  if (readAnimIdx < readAnimSteps.length) {
+    const step = readAnimSteps[readAnimIdx];
+    const el = document.querySelector(`#read-trace .trace-step[data-layer="${step.layer}"]`);
+    if (el) {
+      const resultEl = el.querySelector('.step-result');
+      if (step.found) {
+        el.className = 'trace-step found';
+        resultEl.innerHTML = `HIT ${step.data}`;
+        showReadResult();
+      } else {
+        el.className = 'trace-step miss';
+        resultEl.textContent = step.detail ? `MISS (${step.detail})` : 'MISS';
+        readAnimIdx++;
+      }
+    }
+  }
+}
+
+function doTraceReadInstant() {
+  clearTimeout(readAnimTimer);
+  const addr = parseInt(document.getElementById('read-addr').value) || 0;
+  const { steps, result, source } = resolveRead(addr);
+  readAnimResult = { result, source, addr };
+
+  document.querySelectorAll('#read-trace .trace-step').forEach(el => {
+    el.className = 'trace-step';
+    el.querySelector('.step-result').textContent = '';
+  });
+
+  let foundYet = false;
+  steps.forEach(step => {
+    const el = document.querySelector(`#read-trace .trace-step[data-layer="${step.layer}"]`);
+    if (!el) return;
+    const resultEl = el.querySelector('.step-result');
+    if (foundYet) { el.className = 'trace-step skip'; return; }
+    if (step.found) {
+      el.className = 'trace-step found';
+      resultEl.innerHTML = `HIT ${step.data}`;
+      foundYet = true;
+    } else {
+      el.className = 'trace-step miss';
+      resultEl.textContent = step.detail ? `MISS (${step.detail})` : 'MISS';
+    }
+  });
+
+  showReadResult();
+  log('read', `page=${addr} → ${result} (from ${source})`);
+}
+
+function showReadResult() {
+  if (!readAnimResult) return;
+  const { result, source, addr } = readAnimResult;
+  document.getElementById('read-result').innerHTML =
+    `<div style="margin-bottom:8px;"><span style="color:var(--fg3)">page[${addr}] =</span></div>` +
+    `<div style="font-size:18px; color:${result === '[zero]' ? 'var(--fg3)' : 'var(--accent2)'}; margin-bottom:8px;">${result === '[zero]' ? '0x00 (64KB zeros)' : `"${result}"`}</div>` +
+    `<div style="color:var(--fg3);">resolved from: <span style="color:var(--accent)">${source}</span></div>`;
+  log('read', `page=${addr} → ${result} (from ${source})`);
+}
+
+// ======================== BINARY FORMAT ========================
+
+function showBinaryDelta() {
+  document.getElementById('btn-show-delta').classList.add('primary');
+  document.getElementById('btn-show-image').classList.remove('primary');
+
+  const delta = state.deltas.length > 0 ? state.deltas[state.deltas.length - 1] : null;
+
+  // Build synthetic binary
+  const entries = delta ? [...delta.entries.entries()].sort((a, b) => a[0] - b[0]) : [[0, { seq: 1, data: 'hello', tombstone: false }], [5, { seq: 3, data: 'world', tombstone: false }], [12, { seq: 2, data: null, tombstone: true }]];
+  const numEntries = entries.length;
+  const startSeq = delta ? delta.startSeq : 1;
+  const endSeq = delta ? delta.endSeq : 4;
+  const minPage = entries.length > 0 ? (typeof entries[0][0] === 'number' ? entries[0][0] : entries[0][0]) : 0;
+  const maxPage = entries.length > 0 ? entries[entries.length - 1][0] : 0;
+
+  // Simulated compressed page data
+  const compressedPages = entries.map(([addr, e]) => {
+    if (e.tombstone) return [];
+    const fake = [];
+    const str = typeof e.data === 'string' ? e.data : 'data';
+    for (let i = 0; i < Math.min(str.length + 4, 12); i++) fake.push(Math.floor(Math.random() * 256));
+    return fake;
+  });
+
+  let dataOffset = 50; // after header
+  const indexEntries = [];
+  entries.forEach(([addr, e], i) => {
+    const compressed = compressedPages[i];
+    indexEntries.push({ pageAddr: addr, seq: typeof e === 'object' ? e.seq : 1, offset: dataOffset, len: e.tombstone ? 0 : compressed.length, crc: Math.floor(Math.random() * 0xFFFFFFFF) });
+    dataOffset += compressed.length;
+  });
+  const indexOffset = dataOffset;
+
+  // Build bytes
+  const bytes = [];
+  const regions = [];
+  // Header: Magic(4) + Version(2) + StartSeq(8) + EndSeq(8) + PageRange(16) + NumEntries(4) + IndexOffset(8) = 50
+  // Magic
+  regions.push({ start: 0, end: 4, cls: 'h-magic', label: 'Magic "LDLT"' });
+  bytes.push(0x4C, 0x44, 0x4C, 0x54);
+  // Version
+  regions.push({ start: 4, end: 6, cls: 'h-version', label: 'Version' });
+  bytes.push(0x00, 0x01);
+  // StartSeq
+  regions.push({ start: 6, end: 14, cls: 'h-seq', label: `StartSeq = ${startSeq}` });
+  for (let i = 7; i >= 0; i--) bytes.push((startSeq >> (i * 8)) & 0xFF);
+  // EndSeq
+  regions.push({ start: 14, end: 22, cls: 'h-seq', label: `EndSeq = ${endSeq}` });
+  for (let i = 7; i >= 0; i--) bytes.push((endSeq >> (i * 8)) & 0xFF);
+  // PageRange[0]
+  regions.push({ start: 22, end: 30, cls: 'h-range', label: `MinPage = ${minPage}` });
+  for (let i = 7; i >= 0; i--) bytes.push((minPage >> (i * 8)) & 0xFF);
+  // PageRange[1]
+  regions.push({ start: 30, end: 38, cls: 'h-range', label: `MaxPage = ${maxPage}` });
+  for (let i = 7; i >= 0; i--) bytes.push((maxPage >> (i * 8)) & 0xFF);
+  // NumEntries
+  regions.push({ start: 38, end: 42, cls: 'h-count', label: `NumEntries = ${numEntries}` });
+  bytes.push((numEntries >> 24) & 0xFF, (numEntries >> 16) & 0xFF, (numEntries >> 8) & 0xFF, numEntries & 0xFF);
+  // IndexOffset
+  regions.push({ start: 42, end: 50, cls: 'h-offset', label: `IndexOffset = ${indexOffset}` });
+  for (let i = 7; i >= 0; i--) bytes.push((indexOffset >> (i * 8)) & 0xFF);
+
+  // Compressed pages
+  let pgStart = 50;
+  compressedPages.forEach((pg, i) => {
+    if (pg.length > 0) {
+      regions.push({ start: pgStart, end: pgStart + pg.length, cls: 'h-data', label: `zstd(page[${entries[i][0]}])` });
+      pg.forEach(b => bytes.push(b));
+      pgStart += pg.length;
+    }
+  });
+
+  // Index
+  const idxStart = bytes.length;
+  regions.push({ start: idxStart, end: idxStart + numEntries * 32, cls: 'h-index', label: `Index (${numEntries} entries * 32 bytes)` });
+  indexEntries.forEach(ie => {
+    // PageAddr(8) + Seq(8) + Offset(4) + Len(4) + CRC(4) = 28... let's use 32 with padding
+    for (let i = 7; i >= 0; i--) bytes.push((ie.pageAddr >> (i * 8)) & 0xFF);
+    for (let i = 7; i >= 0; i--) bytes.push((ie.seq >> (i * 8)) & 0xFF);
+    bytes.push((ie.offset >> 24) & 0xFF, (ie.offset >> 16) & 0xFF, (ie.offset >> 8) & 0xFF, ie.offset & 0xFF);
+    bytes.push((ie.len >> 24) & 0xFF, (ie.len >> 16) & 0xFF, (ie.len >> 8) & 0xFF, ie.len & 0xFF);
+    bytes.push((ie.crc >> 24) & 0xFF, (ie.crc >> 16) & 0xFF, (ie.crc >> 8) & 0xFF, ie.crc & 0xFF);
+    bytes.push(0x00, 0x00, 0x00, 0x00); // padding to 32
+  });
+
+  renderHexView(bytes, regions);
+  renderBinaryStructure('delta', { startSeq, endSeq, minPage, maxPage, numEntries, indexOffset, indexEntries, entries });
+}
+
+function showBinaryImage() {
+  document.getElementById('btn-show-image').classList.add('primary');
+  document.getElementById('btn-show-delta').classList.remove('primary');
+
+  const image = state.images.length > 0 ? state.images[state.images.length - 1] : null;
+  const entries = image ? [...image.entries.entries()].sort((a, b) => a[0] - b[0]) : [[0, { data: 'snapshot' }], [3, { data: 'image' }]];
+  const seq = image ? image.seq : 5;
+  const numPages = entries.length;
+  const minPage = entries.length > 0 ? entries[0][0] : 0;
+  const maxPage = entries.length > 0 ? entries[entries.length - 1][0] : 0;
+
+  const compressedPages = entries.map(([addr, e]) => {
+    const fake = [];
+    const str = typeof e === 'object' ? (e.data || 'data') : 'data';
+    for (let i = 0; i < Math.min(str.length + 4, 12); i++) fake.push(Math.floor(Math.random() * 256));
+    return fake;
+  });
+
+  let dataOffset = 42;
+  const indexEntries = [];
+  entries.forEach(([addr, e], i) => {
+    indexEntries.push({ pageAddr: addr, offset: dataOffset, len: compressedPages[i].length, crc: Math.floor(Math.random() * 0xFFFFFFFF) });
+    dataOffset += compressedPages[i].length;
+  });
+  const indexOffset = dataOffset;
+
+  const bytes = [];
+  const regions = [];
+
+  // Header: Magic(4) + Version(2) + Seq(8) + PageRange(16) + NumPages(4) + IndexOffset(8) = 42
+  regions.push({ start: 0, end: 4, cls: 'h-magic', label: 'Magic "LIMG"' });
+  bytes.push(0x4C, 0x49, 0x4D, 0x47);
+  regions.push({ start: 4, end: 6, cls: 'h-version', label: 'Version' });
+  bytes.push(0x00, 0x01);
+  regions.push({ start: 6, end: 14, cls: 'h-seq', label: `Seq = ${seq}` });
+  for (let i = 7; i >= 0; i--) bytes.push((seq >> (i * 8)) & 0xFF);
+  regions.push({ start: 14, end: 22, cls: 'h-range', label: `MinPage = ${minPage}` });
+  for (let i = 7; i >= 0; i--) bytes.push((minPage >> (i * 8)) & 0xFF);
+  regions.push({ start: 22, end: 30, cls: 'h-range', label: `MaxPage = ${maxPage}` });
+  for (let i = 7; i >= 0; i--) bytes.push((maxPage >> (i * 8)) & 0xFF);
+  regions.push({ start: 30, end: 34, cls: 'h-count', label: `NumPages = ${numPages}` });
+  bytes.push((numPages >> 24) & 0xFF, (numPages >> 16) & 0xFF, (numPages >> 8) & 0xFF, numPages & 0xFF);
+  regions.push({ start: 34, end: 42, cls: 'h-offset', label: `IndexOffset = ${indexOffset}` });
+  for (let i = 7; i >= 0; i--) bytes.push((indexOffset >> (i * 8)) & 0xFF);
+
+  let pgStart = 42;
+  compressedPages.forEach((pg, i) => {
+    regions.push({ start: pgStart, end: pgStart + pg.length, cls: 'h-data', label: `zstd(page[${entries[i][0]}])` });
+    pg.forEach(b => bytes.push(b));
+    pgStart += pg.length;
+  });
+
+  const idxStart = bytes.length;
+  regions.push({ start: idxStart, end: idxStart + numPages * 24, cls: 'h-index', label: `Index (${numPages} * 24 bytes)` });
+  indexEntries.forEach(ie => {
+    for (let i = 7; i >= 0; i--) bytes.push((ie.pageAddr >> (i * 8)) & 0xFF);
+    bytes.push((ie.offset >> 24) & 0xFF, (ie.offset >> 16) & 0xFF, (ie.offset >> 8) & 0xFF, ie.offset & 0xFF);
+    bytes.push((ie.len >> 24) & 0xFF, (ie.len >> 16) & 0xFF, (ie.len >> 8) & 0xFF, ie.len & 0xFF);
+    bytes.push((ie.crc >> 24) & 0xFF, (ie.crc >> 16) & 0xFF, (ie.crc >> 8) & 0xFF, ie.crc & 0xFF);
+    bytes.push(0x00, 0x00, 0x00, 0x00);
+  });
+
+  renderHexView(bytes, regions);
+  renderBinaryStructure('image', { seq, minPage, maxPage, numPages, indexOffset, indexEntries, entries });
+}
+
+function renderHexView(bytes, regions) {
+  const view = document.getElementById('hex-view');
+  let html = '';
+  const regionMap = new Map();
+  regions.forEach(r => { for (let i = r.start; i < r.end; i++) regionMap.set(i, r); });
+
+  for (let row = 0; row < bytes.length; row += 16) {
+    html += '<div class="hex-row">';
+    html += `<span class="hex-offset">${hexPad(row, 6)}  </span>`;
+    let ascii = '';
+    for (let col = 0; col < 16; col++) {
+      const idx = row + col;
+      if (idx < bytes.length) {
+        const b = bytes[idx];
+        const r = regionMap.get(idx);
+        const cls = r ? r.cls : '';
+        html += `<span class="hex-byte ${cls}" title="${r ? r.label : ''}">${hexPad(b, 2)} </span>`;
+        ascii += (b >= 32 && b < 127) ? String.fromCharCode(b) : '.';
+      } else {
+        html += '<span class="hex-byte">   </span>';
+        ascii += ' ';
+      }
+    }
+    html += `<span class="hex-ascii">${ascii}</span>`;
+    html += '</div>';
+  }
+  view.innerHTML = html;
+
+  // Legend
+  const legend = document.getElementById('hex-legend');
+  const items = [
+    { cls: 'h-magic', label: 'Magic' }, { cls: 'h-version', label: 'Version' },
+    { cls: 'h-seq', label: 'Sequence' }, { cls: 'h-range', label: 'Page Range' },
+    { cls: 'h-count', label: 'Count' }, { cls: 'h-offset', label: 'Offset' },
+    { cls: 'h-data', label: 'Compressed Data' }, { cls: 'h-index', label: 'Index' }
+  ];
+  legend.innerHTML = items.map(i => {
+    const el = document.createElement('span');
+    el.className = `hex-byte ${i.cls}`;
+    const color = getComputedStyle(el).color || 'var(--fg)';
+    return `<span><span class="swatch" style="background:${i.cls === 'h-magic' ? 'var(--pink)' : i.cls === 'h-version' ? 'var(--accent3)' : i.cls === 'h-seq' ? 'var(--accent)' : i.cls === 'h-range' ? 'var(--accent2)' : i.cls === 'h-count' ? 'var(--purple)' : i.cls === 'h-offset' ? 'var(--red)' : i.cls === 'h-data' ? 'var(--fg3)' : 'var(--accent3)'}"></span>${i.label}</span>`;
+  }).join('');
+}
+
+function renderBinaryStructure(type, info) {
+  const el = document.getElementById('binary-structure');
+  if (type === 'delta') {
+    el.innerHTML = `
+      <div style="color:var(--pink); font-weight:600;">Delta Layer <span class="cref">layer.go:51-73</span></div>
+      <div style="margin-top:8px; color:var(--fg2);">
+        <div><strong style="color:var(--fg);">Header</strong> (50 bytes)</div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          Magic: <span style="color:var(--pink)">LDLT</span><br>
+          Version: <span style="color:var(--accent3)">1</span><br>
+          StartSeq: <span style="color:var(--accent)">${info.startSeq}</span><br>
+          EndSeq: <span style="color:var(--accent)">${info.endSeq}</span><br>
+          PageRange: <span style="color:var(--accent2)">[${info.minPage}, ${info.maxPage}]</span><br>
+          NumEntries: <span style="color:var(--purple)">${info.numEntries}</span><br>
+          IndexOffset: <span style="color:var(--red)">${info.indexOffset}</span>
+        </div>
+        <div style="margin-top:8px;"><strong style="color:var(--fg);">Compressed Pages</strong></div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          ${info.entries.map(([addr, e]) => `page[${addr}]: ${e.tombstone ? '<span style="color:var(--red)">tombstone (0 bytes)</span>' : `zstd compressed`}`).join('<br>')}
+        </div>
+        <div style="margin-top:8px;"><strong style="color:var(--fg);">Index</strong> (${info.numEntries} * 32 bytes) <span class="cref">layer.go:73</span></div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          Sorted by (PageAddr, Seq)<br>
+          Binary search for reads <span class="cref">layer.go:268</span><br>
+          ${info.indexEntries.map(ie => `[${ie.pageAddr}] seq=${ie.seq} off=${ie.offset} len=${ie.len}${ie.len === 0 ? ' <span style="color:var(--red)">TOMBSTONE</span>' : ''}`).join('<br>')}
+        </div>
+        <div style="margin-top:12px; color:var(--fg3); font-size:11px; line-height:1.6;">
+          <strong style="color:var(--fg);">Index-only download</strong> <span class="cref">layer.go:300-348</span><br>
+          Header (50B) + index fetched first via range reads.<br>
+          Page data fetched lazily with GetRange on first access.
+        </div>
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <div style="color:var(--accent2); font-weight:600;">Image Layer <span class="cref">layer.go:557-576</span></div>
+      <div style="margin-top:8px; color:var(--fg2);">
+        <div><strong style="color:var(--fg);">Header</strong> (42 bytes)</div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          Magic: <span style="color:var(--pink)">LIMG</span><br>
+          Version: <span style="color:var(--accent3)">1</span><br>
+          Seq: <span style="color:var(--accent)">${info.seq}</span><br>
+          PageRange: <span style="color:var(--accent2)">[${info.minPage}, ${info.maxPage}]</span><br>
+          NumPages: <span style="color:var(--purple)">${info.numPages}</span><br>
+          IndexOffset: <span style="color:var(--red)">${info.indexOffset}</span>
+        </div>
+        <div style="margin-top:8px;"><strong style="color:var(--fg);">Compressed Pages</strong></div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          ${info.entries.map(([addr]) => `page[${addr}]: zstd compressed (full 64KB snapshot)`).join('<br>')}
+        </div>
+        <div style="margin-top:8px;"><strong style="color:var(--fg);">Index</strong> (${info.numPages} * 24 bytes) <span class="cref">layer.go:576</span></div>
+        <div style="padding-left:12px; font-family:var(--mono); font-size:11px; color:var(--fg3); line-height:2;">
+          No tombstones in image layers<br>
+          ${info.indexEntries.map(ie => `[${ie.pageAddr}] off=${ie.offset} len=${ie.len}`).join('<br>')}
+        </div>
+        <div style="margin-top:12px; color:var(--fg3); font-size:11px; line-height:1.6;">
+          Full point-in-time snapshot at seq=${info.seq}.<br>
+          Created by <strong style="color:var(--fg)">compactToImage()</strong> <span class="cref">timeline.go:1048</span>
+        </div>
+      </div>`;
+  }
+}
+
+// ======================== COMPACTION ========================
+
+function compactAddDelta() {
+  const s = state.compactSeqCounter;
+  const numPages = 3 + Math.floor(Math.random() * 10);
+  const size = numPages * 200;
+  state.compactSeqCounter += numPages;
+  state.compactDeltas.push({
+    key: `deltas/${hexPad(s, 16)}-${hexPad(state.compactSeqCounter, 16)}`,
+    startSeq: s, endSeq: state.compactSeqCounter, size, numPages
+  });
+  renderCompaction();
+}
+
+function compactAddImage() {
+  const seq = state.compactSeqCounter;
+  const numPages = 10 + Math.floor(Math.random() * 50);
+  const size = numPages * 400;
+  state.compactImages.push({ key: `images/${hexPad(seq, 16)}`, seq, size, numPages });
+  renderCompaction();
+}
+
+function compactReset() {
+  state.compactDeltas = [];
+  state.compactImages = [];
+  state.compactSeqCounter = 1;
+  document.getElementById('compact-log').innerHTML = '';
+  renderCompaction();
+}
+
+function doCompact() {
+  const totalDeltaSize = state.compactDeltas.reduce((s, d) => s + d.size, 0);
+  const totalImageSize = state.compactImages.reduce((s, i) => s + i.size, 0);
+  const logEl = document.getElementById('compact-log');
+
+  if (state.compactDeltas.length === 0) {
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">COMPACT</span> Nothing to compact (no deltas)</div>`;
+    return;
+  }
+
+  let strategy;
+  if (totalImageSize === 0 || totalDeltaSize > totalImageSize / 2) {
+    strategy = 'image';
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">COMPACT</span> Strategy: <strong>Image Promotion</strong> <span class="cref">timeline.go:1048</span></div>`;
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">REASON</span> ${totalImageSize === 0 ? 'No existing images' : `deltaSize(${(totalDeltaSize/1024).toFixed(1)}KB) > imageSize/2(${(totalImageSize/2/1024).toFixed(1)}KB)`}</div>`;
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">MERGE</span> Merging ${state.compactDeltas.length} delta(s) + ${state.compactImages.length} image(s) → 1 image</div>`;
+
+    const totalPages = state.compactDeltas.reduce((s, d) => s + d.numPages, 0) + state.compactImages.reduce((s, i) => s + i.numPages, 0);
+    const newSeq = state.compactSeqCounter;
+    state.compactDeltas = [];
+    state.compactImages = [{ key: `images/${hexPad(newSeq, 16)}`, seq: newSeq, size: totalPages * 350, numPages: totalPages }];
+  } else if (state.compactDeltas.length < 2) {
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">COMPACT</span> Nothing to do (only 1 delta, below threshold)</div>`;
+    return;
+  } else {
+    strategy = 'merge';
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">COMPACT</span> Strategy: <strong>Delta Merge</strong> <span class="cref">timeline.go:906</span></div>`;
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">REASON</span> deltaSize(${(totalDeltaSize/1024).toFixed(1)}KB) <= imageSize/2(${(totalImageSize/2/1024).toFixed(1)}KB)</div>`;
+    logEl.innerHTML += `<div class="log-line"><span class="log-op compact">MERGE</span> Merging ${state.compactDeltas.length} deltas → 1 delta</div>`;
+
+    const totalPages = state.compactDeltas.reduce((s, d) => s + d.numPages, 0);
+    const minSeq = Math.min(...state.compactDeltas.map(d => d.startSeq));
+    const maxSeq = Math.max(...state.compactDeltas.map(d => d.endSeq));
+    state.compactDeltas = [{ key: `deltas/${hexPad(minSeq, 16)}-${hexPad(maxSeq, 16)}`, startSeq: minSeq, endSeq: maxSeq, size: totalPages * 180, numPages: totalPages }];
+  }
+
+  logEl.innerHTML += `<div class="log-line"><span class="log-op compact">DONE</span> ${state.compactDeltas.length} delta(s), ${state.compactImages.length} image(s)</div>`;
+  logEl.scrollTop = logEl.scrollHeight;
+  renderCompaction();
+}
+
+function renderCompaction() {
+  const container = document.getElementById('compact-layers');
+  const totalDeltaSize = state.compactDeltas.reduce((s, d) => s + d.size, 0);
+  const totalImageSize = state.compactImages.reduce((s, i) => s + i.size, 0);
+  const maxSize = Math.max(totalDeltaSize, totalImageSize, 1);
+
+  let html = '';
+  // Deltas newest first
+  [...state.compactDeltas].reverse().forEach(d => {
+    const pct = (d.size / maxSize * 100).toFixed(0);
+    html += `<div class="layer-bar delta animate-in">
+      <span style="min-width:60px;">DELTA</span>
+      <span style="flex:1;"><div class="bar-fill" style="width:${pct}%"></div></span>
+      <span style="font-size:10px; color:var(--fg3);">[${d.startSeq}-${d.endSeq}) ${d.numPages}pg ${(d.size/1024).toFixed(1)}KB</span>
+    </div>`;
+  });
+  // Images newest first
+  [...state.compactImages].reverse().forEach(im => {
+    const pct = (im.size / maxSize * 100).toFixed(0);
+    html += `<div class="layer-bar image animate-in">
+      <span style="min-width:60px;">IMAGE</span>
+      <span style="flex:1;"><div class="bar-fill" style="width:${pct}%"></div></span>
+      <span style="font-size:10px; color:var(--fg3);">seq=${im.seq} ${im.numPages}pg ${(im.size/1024).toFixed(1)}KB</span>
+    </div>`;
+  });
+  if (!html) html = '<div style="color:var(--fg3); font-size:12px; padding:20px;">Add some layers to experiment with compaction.</div>';
+  container.innerHTML = html;
+
+  // Stats
+  document.getElementById('compact-stats').innerHTML =
+    `<span>deltas: ${state.compactDeltas.length} (${(totalDeltaSize/1024).toFixed(1)}KB)</span>` +
+    `<span>images: ${state.compactImages.length} (${(totalImageSize/1024).toFixed(1)}KB)</span>` +
+    `<span>ratio: ${totalImageSize > 0 ? (totalDeltaSize / totalImageSize * 100).toFixed(0) + '%' : 'N/A'}</span>`;
+
+  // Decision preview
+  const dec = document.getElementById('compact-decision');
+  if (state.compactDeltas.length === 0) {
+    dec.innerHTML = '<span style="color:var(--fg3)">No deltas to compact.</span>';
+  } else if (totalImageSize === 0 || totalDeltaSize > totalImageSize / 2) {
+    dec.innerHTML = `<div style="color:var(--accent2); font-weight:600;">→ Image Promotion</div>
+      <div style="margin-top:4px;">All ${state.compactDeltas.length} delta(s) and ${state.compactImages.length} image(s) will be materialized into a single image layer.</div>
+      <div style="margin-top:8px; font-family:var(--mono); font-size:11px; color:var(--fg3);">
+        ${totalImageSize === 0 ? 'No existing images → promote' : `deltaSize(${(totalDeltaSize/1024).toFixed(1)}KB) > imageSize/2(${(totalImageSize/2/1024).toFixed(1)}KB)`}
+        <br><span class="cref">timeline.go:887-889</span>
+      </div>`;
+  } else if (state.compactDeltas.length < 2) {
+    dec.innerHTML = `<div style="color:var(--fg3);">Only 1 delta, below merge threshold. Nothing to do.</div>`;
+  } else {
+    dec.innerHTML = `<div style="color:var(--accent); font-weight:600;">→ Delta Merge</div>
+      <div style="margin-top:4px;">${state.compactDeltas.length} deltas will be merged into a single delta. Images preserved.</div>
+      <div style="margin-top:8px; font-family:var(--mono); font-size:11px; color:var(--fg3);">
+        deltaSize(${(totalDeltaSize/1024).toFixed(1)}KB) <= imageSize/2(${(totalImageSize/2/1024).toFixed(1)}KB)
+        <br><span class="cref">timeline.go:893-895</span>
+      </div>`;
+  }
+}
+
+// ======================== BRANCHING ========================
+
+let branchCounter = 0;
+
+function resetBranches() {
+  state.branches = [{
+    id: 'tl-root',
+    label: 'root',
+    ancestor: null,
+    ancestorSeq: 0,
+    branchPoints: [],
+    nextSeq: 1,
+    deltas: [],
+    images: [],
+    pages: new Map(),
+    writeCount: 0,
+  }];
+  state.selectedBranch = 'tl-root';
+  branchCounter = 0;
+}
+
+function doBranch() {
+  const parent = state.branches.find(b => b.id === state.selectedBranch);
+  if (!parent) return;
+
+  branchCounter++;
+  const childId = `tl-child-${branchCounter}`;
+  const branchSeq = parent.nextSeq;
+
+  parent.branchPoints.push({ child: childId, seq: branchSeq });
+
+  state.branches.push({
+    id: childId,
+    label: `snap-${branchCounter}`,
+    ancestor: parent.id,
+    ancestorSeq: branchSeq,
+    branchPoints: [],
+    nextSeq: branchSeq,
+    deltas: [],
+    images: [],
+    pages: new Map(),
+    writeCount: 0,
+  });
+
+  log('branch', `Created ${childId} from ${parent.id} at ancestorSeq=${branchSeq}`);
+  renderBranches();
+}
+
+function branchWrite() {
+  const tl = state.branches.find(b => b.id === state.selectedBranch);
+  if (!tl) return;
+  const addr = Math.floor(Math.random() * 20);
+  const words = ['alpha','bravo','delta','echo','fox','golf'];
+  const data = `${words[Math.floor(Math.random() * words.length)]}-${tl.nextSeq}`;
+  tl.pages.set(addr, { seq: tl.nextSeq, data });
+  tl.nextSeq++;
+  tl.writeCount++;
+  renderBranches();
+}
+
+function branchReset() {
+  resetBranches();
+  renderBranches();
+}
+
+function branchReadResolve(tlId, pageAddr) {
+  const tl = state.branches.find(b => b.id === tlId);
+  if (!tl) return { value: '[zero]', chain: [] };
+
+  const chain = [];
+  const entry = tl.pages.get(pageAddr);
+  if (entry) {
+    chain.push({ tl: tl.id, found: true, data: entry.data, seq: entry.seq });
+    return { value: entry.data, chain };
+  }
+  chain.push({ tl: tl.id, found: false });
+
+  if (tl.ancestor) {
+    const ancestorResult = branchReadResolve(tl.ancestor, pageAddr);
+    return { value: ancestorResult.value, chain: [...chain, ...ancestorResult.chain] };
+  }
+
+  return { value: '[zero]', chain };
+}
+
+function renderBranches() {
+  const graph = document.getElementById('branch-graph');
+  const svg = document.getElementById('branch-svg');
+
+  // Layout: tree layout
+  const nodes = state.branches;
+  const positions = new Map();
+  const levelWidth = 180;
+  const levelHeight = 80;
+
+  // BFS to assign positions
+  const roots = nodes.filter(n => !n.ancestor);
+  let queue = roots.map((r, i) => ({ node: r, depth: 0, index: i }));
+  const levelCounts = {};
+  const processed = new Set();
+
+  // First pass: count nodes per level
+  const bfsQueue = [...queue];
+  while (bfsQueue.length > 0) {
+    const { node, depth } = bfsQueue.shift();
+    if (processed.has(node.id)) continue;
+    processed.add(node.id);
+    levelCounts[depth] = (levelCounts[depth] || 0) + 1;
+    const children = nodes.filter(n => n.ancestor === node.id);
+    children.forEach((c, i) => bfsQueue.push({ node: c, depth: depth + 1, index: i }));
+  }
+
+  // Second pass: assign positions
+  processed.clear();
+  const levelIdx = {};
+  queue = roots.map((r) => ({ node: r, depth: 0 }));
+  while (queue.length > 0) {
+    const { node, depth } = queue.shift();
+    if (processed.has(node.id)) continue;
+    processed.add(node.id);
+    const idx = levelIdx[depth] || 0;
+    levelIdx[depth] = idx + 1;
+    const count = levelCounts[depth] || 1;
+    positions.set(node.id, {
+      x: 20 + depth * levelWidth,
+      y: 20 + idx * levelHeight + (depth > 0 ? 10 : 0)
+    });
+    const children = nodes.filter(n => n.ancestor === node.id);
+    children.forEach(c => queue.push({ node: c, depth: depth + 1 }));
+  }
+
+  // Set graph height
+  const maxY = Math.max(...[...positions.values()].map(p => p.y)) + 100;
+  const maxX = Math.max(...[...positions.values()].map(p => p.x)) + 180;
+  graph.style.minHeight = maxY + 'px';
+  graph.style.minWidth = maxX + 'px';
+
+  // Draw edges
+  let svgHtml = '';
+  nodes.forEach(n => {
+    if (n.ancestor) {
+      const from = positions.get(n.ancestor);
+      const to = positions.get(n.id);
+      if (from && to) {
+        svgHtml += `<line x1="${from.x + 140}" y1="${from.y + 25}" x2="${to.x}" y2="${to.y + 25}" stroke="var(--bg4)" stroke-width="2" stroke-dasharray="6,3"/>`;
+      }
+    }
+  });
+  svg.innerHTML = svgHtml;
+  svg.style.width = maxX + 'px';
+  svg.style.height = maxY + 'px';
+
+  // Draw nodes
+  let nodesHtml = '';
+  nodes.forEach(n => {
+    const pos = positions.get(n.id);
+    if (!pos) return;
+    const selected = n.id === state.selectedBranch ? 'selected' : '';
+    nodesHtml += `<div class="branch-node ${selected}" style="left:${pos.x}px; top:${pos.y}px;" onclick="selectBranch('${n.id}')">
+      <div class="node-id">${n.label || n.id}</div>
+      <div class="node-meta">seq=${n.nextSeq} writes=${n.writeCount}${n.ancestor ? ` ancestor@${n.ancestorSeq}` : ''}</div>
+    </div>`;
+  });
+  graph.innerHTML = nodesHtml;
+
+  // Detail panel
+  const tl = state.branches.find(b => b.id === state.selectedBranch);
+  if (tl) {
+    const detail = document.getElementById('branch-detail');
+    detail.innerHTML = `
+      <div style="color:var(--accent);">${tl.id}</div>
+      <div>ancestor: ${tl.ancestor || 'none'}</div>
+      <div>ancestorSeq: ${tl.ancestorSeq}</div>
+      <div>nextSeq: ${tl.nextSeq}</div>
+      <div>writes: ${tl.writeCount}</div>
+      <div>branchPoints: [${tl.branchPoints.map(bp => `{${bp.child}@${bp.seq}}`).join(', ')}]</div>
+      <div style="margin-top:8px; color:var(--fg3);">pages:</div>
+      ${[...tl.pages.entries()].map(([a, e]) => `<div style="padding-left:8px;">[${a}] = "${e.data}" seq=${e.seq}</div>`).join('') || '<div style="padding-left:8px; color:var(--fg3);">(empty)</div>'}
+    `;
+
+    // Show read resolution for a sample page
+    if (tl.pages.size > 0 || tl.ancestor) {
+      const testAddr = tl.pages.size > 0 ? [...tl.pages.keys()][0] : 0;
+      const { value, chain } = branchReadResolve(tl.id, testAddr);
+      const readEl = document.getElementById('branch-read');
+      readEl.innerHTML = `<div style="font-family:var(--mono); font-size:11px;">readPage(${testAddr}) on ${tl.id}:</div>` +
+        chain.map(c => `<div style="padding-left:8px; font-family:var(--mono); font-size:11px; color:${c.found ? 'var(--accent2)' : 'var(--fg3)'};">${c.tl}: ${c.found ? `HIT "${c.data}" seq=${c.seq}` : 'MISS → check ancestor'}</div>`).join('') +
+        `<div style="margin-top:4px; font-family:var(--mono); font-size:11px;">= ${value === '[zero]' ? '<span style="color:var(--fg3)">zeroPage</span>' : `<span style="color:var(--accent2)">"${value}"</span>`}</div>` +
+        `<div style="margin-top:8px; color:var(--fg3); font-size:11px;">Ancestor visibility bounded by ancestorSeq <span class="cref">timeline.go:411-412</span></div>`;
+    }
+  }
+}
+
+function selectBranch(id) {
+  state.selectedBranch = id;
+  renderBranches();
+}
+
+// ======================== S3 TREE ========================
+
+function renderS3Tree() {
+  const tree = document.getElementById('s3-tree');
+  // Build tree from s3Objects + synthetic structure
+  const paths = new Map();
+
+  // Always show base structure
+  const tlId = state.timelineId;
+  paths.set(`volumes/`, { type: 'dir' });
+  paths.set(`volumes/my-volume`, { type: 'json', data: { TimelineID: tlId, Size: 1073741824, ReadOnly: false, Type: 'block' } });
+  paths.set(`timelines/`, { type: 'dir' });
+  paths.set(`timelines/${tlId}/`, { type: 'dir' });
+
+  // Copy from state
+  for (const [key, val] of state.s3Objects) {
+    paths.set(key, val);
+  }
+
+  // Sort and render
+  const sorted = [...paths.keys()].sort();
+  let html = '<div style="color:var(--accent);">s3://loophole-bucket/</div>';
+
+  sorted.forEach(path => {
+    const depth = path.split('/').length - 1;
+    const indent = '  '.repeat(depth);
+    const name = path.split('/').filter(Boolean).pop() || path;
+    const val = paths.get(path);
+    const isDir = path.endsWith('/');
+    const sizeStr = val && val.delta ? ` <span class="size">(${(val.delta.size / 1024).toFixed(1)}KB)</span>` : '';
+
+    if (isDir) {
+      html += `<div><span class="indent">${indent}</span><span class="dir">${name}/</span></div>`;
+    } else {
+      html += `<div><span class="indent">${indent}</span><span class="file" onclick="inspectS3Object('${path}')">${name}</span>${sizeStr}</div>`;
+    }
+  });
+
+  tree.innerHTML = html;
+}
+
+function inspectS3Object(path) {
+  const el = document.getElementById('s3-content');
+  // Highlight selected
+  document.querySelectorAll('.s3-tree .file').forEach(f => f.classList.remove('selected'));
+  event.target.classList.add('selected');
+
+  const obj = state.s3Objects.get(path);
+  if (!obj) {
+    // Check synthetic
+    if (path.includes('volumes/my-volume')) {
+      el.textContent = JSON.stringify({ TimelineID: state.timelineId, Size: 1073741824, ReadOnly: false, Type: 'block' }, null, 2);
+      return;
+    }
+    el.textContent = `Object: ${path}\n\n(no data available)`;
+    return;
+  }
+
+  if (obj.type === 'json') {
+    el.textContent = `${path}\n\n${JSON.stringify(obj.data, null, 2)}`;
+  } else if (obj.type === 'delta') {
+    const d = obj.delta;
+    el.innerHTML = `<span style="color:var(--accent);">${path}</span>\n\n` +
+      `Type: Delta Layer\n` +
+      `Magic: LDLT\n` +
+      `StartSeq: ${d.startSeq}\n` +
+      `EndSeq: ${d.endSeq}\n` +
+      `Pages: ${d.entries.size}\n` +
+      `Size: ~${(d.size / 1024).toFixed(1)}KB\n\n` +
+      `Entries:\n` +
+      [...d.entries.entries()].map(([addr, e]) =>
+        `  page[${addr}] seq=${e.seq} ${e.tombstone ? 'TOMBSTONE' : `"${e.data}"`}`
+      ).join('\n');
+  }
+}
+
+// ======================== RENDER FUNCTIONS ========================
+
+function renderWritePanel() {
+  // Mem slots
+  const grid = document.getElementById('mem-slots');
+  let html = '';
+  const slotMap = new Map();
+  state.memSlots.forEach((entry, addr) => { slotMap.set(entry.slot, { addr, ...entry }); });
+
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const entry = slotMap.get(i);
+    if (entry) {
+      const cls = entry.tombstone ? 'tombstone' : 'used';
+      html += `<div class="slot ${cls}" title="page[${entry.addr}] seq=${entry.seq}">
+        <span class="slot-tip">page[${entry.addr}] seq=${entry.seq} ${entry.tombstone ? 'TOMBSTONE' : `"${entry.data}"`}</span>
+        ${entry.addr}
+      </div>`;
+    } else if (i < state.memNextSlot) {
+      html += `<div class="slot" style="opacity:0.3;"></div>`;
+    } else {
+      html += `<div class="slot"></div>`;
+    }
+  }
+  grid.innerHTML = html;
+  document.getElementById('mem-stats').textContent = `${state.memSlots.size} / ${SLOT_COUNT} slots`;
+
+  // Frozen stack
+  const frozenEl = document.getElementById('frozen-stack');
+  frozenEl.innerHTML = state.frozenLayers.map(f =>
+    `<div class="frozen-bar uploading animate-in">
+      <span>frozen#${f.id} [seq ${f.startSeq}-${f.endSeq})</span>
+      <span>${f.entries.size} pages — uploading...</span>
+    </div>`
+  ).join('') || '<div style="color:var(--fg3); font-size:11px; padding: 8px;">No frozen layers</div>';
+  document.getElementById('frozen-count').textContent = `${state.frozenLayers.length} pending`;
+
+  // Seq timeline
+  renderSeqTimeline();
+}
+
+function renderSeqTimeline() {
+  const el = document.getElementById('seq-timeline');
+  const allEntries = [];
+  state.memSlots.forEach((entry) => { allEntries.push({ seq: entry.seq, tombstone: entry.tombstone }); });
+  state.frozenLayers.forEach(f => { f.entries.forEach(e => allEntries.push({ seq: e.seq, tombstone: e.tombstone })); });
+  state.deltas.forEach(d => { d.entries.forEach(e => allEntries.push({ seq: e.seq, tombstone: e.tombstone })); });
+
+  allEntries.sort((a, b) => a.seq - b.seq);
+  const maxSeq = state.nextSeq;
+  const display = allEntries.slice(-80); // show last 80
+
+  el.innerHTML = display.map(e => {
+    const h = Math.max(4, 10 + Math.random() * 40);
+    return `<div class="seq-bar ${e.tombstone ? 'tombstone' : 'write'}" style="height:${h}px;" title="seq=${e.seq}"></div>`;
+  }).join('');
+
+  document.getElementById('next-seq').textContent = state.nextSeq;
+}
+
+function renderLog() {
+  const el = document.getElementById('write-log');
+  const recent = state.logLines.slice(-50);
+  el.innerHTML = recent.map(l =>
+    `<div class="log-line"><span class="log-ts">${l.ts}</span><span class="log-op ${l.op}">${l.op.toUpperCase()}</span><span>${l.msg}</span></div>`
+  ).join('');
+  el.scrollTop = el.scrollHeight;
+}
+
+function renderReadStateSummary() {
+  const el = document.getElementById('read-state-summary');
+  let html = '';
+  html += `<div>memLayer: ${state.memSlots.size} pages</div>`;
+  html += `<div>frozen: ${state.frozenLayers.length} layers</div>`;
+  html += `<div>pageCache: ${state.pageCache.size} entries</div>`;
+  state.deltas.forEach(d => { html += `<div style="color:var(--accent);">delta ${d.key.split('/').pop()} — ${d.entries.size} pages</div>`; });
+  state.images.forEach(im => { html += `<div style="color:var(--accent2);">image ${im.key.split('/').pop()} — ${im.entries.size} pages</div>`; });
+  html += `<div>ancestor: none</div>`;
+  el.innerHTML = html;
+}
+
+function updateStatusBar() {
+  document.getElementById('sb-seq').textContent = state.nextSeq;
+  document.getElementById('sb-mem').textContent = `${state.memSlots.size} pages`;
+  document.getElementById('sb-frozen').textContent = state.frozenLayers.length;
+  document.getElementById('sb-deltas').textContent = state.deltas.length;
+  document.getElementById('sb-images').textContent = state.images.length;
+  document.getElementById('sb-s3').textContent = state.s3Objects.size;
+}
+
+// ======================== TABS ========================
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+
+    // Refresh panel content
+    if (tab.dataset.tab === 'read') renderReadStateSummary();
+    if (tab.dataset.tab === 'binary') showBinaryDelta();
+    if (tab.dataset.tab === 'compact') renderCompaction();
+    if (tab.dataset.tab === 'branch') renderBranches();
+    if (tab.dataset.tab === 's3') renderS3Tree();
+  });
+});
+
+// ======================== INIT ========================
+
+function init() {
+  resetBranches();
+  renderWritePanel();
+  renderCompaction();
+  updateStatusBar();
+
+  // Seed the S3 tree
+  const tlPath = `timelines/${state.timelineId}`;
+  state.s3Objects.set(`${tlPath}/meta.json`, {
+    type: 'json',
+    data: { Ancestor: '', AncestorSeq: 0, BranchPoints: [], CreatedAt: new Date().toISOString() }
+  });
+}
+
+init();
+</script>
+</body>
+</html>

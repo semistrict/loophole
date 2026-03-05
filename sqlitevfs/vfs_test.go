@@ -20,7 +20,7 @@ func TestOpenCreateReadWrite(t *testing.T) {
 	require.NotZero(t, flags&OpenReadWrite)
 
 	// File size starts at 0.
-	sz, err := f.Size()
+	sz, err := f.FileSize()
 	require.NoError(t, err)
 	require.Equal(t, int64(0), sz)
 
@@ -31,7 +31,7 @@ func TestOpenCreateReadWrite(t *testing.T) {
 	require.Equal(t, len(data), n)
 
 	// File size extended.
-	sz, err = f.Size()
+	sz, err = f.FileSize()
 	require.NoError(t, err)
 	require.Equal(t, int64(len(data)), sz)
 
@@ -93,20 +93,20 @@ func TestTruncate(t *testing.T) {
 	_, err = f.WriteAt(data, 0)
 	require.NoError(t, err)
 
-	sz, err := f.Size()
+	sz, err := f.FileSize()
 	require.NoError(t, err)
 	require.Equal(t, int64(4096), sz)
 
 	// Truncate to 1024.
 	require.NoError(t, f.Truncate(1024))
 
-	sz, err = f.Size()
+	sz, err = f.FileSize()
 	require.NoError(t, err)
 	require.Equal(t, int64(1024), sz)
 
 	// Extend via truncate.
 	require.NoError(t, f.Truncate(8192))
-	sz, err = f.Size()
+	sz, err = f.FileSize()
 	require.NoError(t, err)
 	require.Equal(t, int64(8192), sz)
 
@@ -185,8 +185,7 @@ func TestFullPathname(t *testing.T) {
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
 	require.NoError(t, err)
 
-	name, err := vfs.FullPathname("main.db")
-	require.NoError(t, err)
+	name := vfs.FullPathname("main.db")
 	require.Equal(t, "main.db", name)
 }
 
@@ -280,7 +279,7 @@ func TestSectorSize(t *testing.T) {
 	f, _, err := vfs.Open("main.db", OpenReadWrite|OpenCreate|OpenMainDB)
 	require.NoError(t, err)
 
-	require.Equal(t, 4096, f.SectorSize())
+	require.Equal(t, int64(4096), f.SectorSize())
 	require.NoError(t, f.Close())
 }
 

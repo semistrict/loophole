@@ -13,6 +13,8 @@ func DefaultMode() Mode {
 		return ModeInProcess
 	case string(ModeLwext4FUSE):
 		return ModeLwext4FUSE
+	case string(ModeJuiceFS):
+		return ModeJuiceFS
 	case "":
 		// macOS only supports userspace mode; verify macFUSE is present.
 		if _, err := os.Stat("/Library/Filesystems/macfuse.fs"); err != nil {

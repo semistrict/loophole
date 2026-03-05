@@ -662,6 +662,8 @@ func (f *File) Size() int64 {
 	return int64(C.ext4_fsize(&f.f))
 }
 
+func (f *File) Sync() error { return f.fs.CacheFlush() }
+
 func (f *File) Close() error {
 	rc := C.ext4_fclose(&f.f)
 	if rc != 0 {

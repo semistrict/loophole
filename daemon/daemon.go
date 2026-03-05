@@ -95,7 +95,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 	cacheDir := dir.Cache(inst.ProfileName)
 	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil)
 
-	backend, err := createBackend(vm, inst, dir)
+	backend, err := createBackend(vm, inst, dir, store)
 	if err != nil {
 		return nil, err
 	}

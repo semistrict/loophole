@@ -10,10 +10,11 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/nbdvm"
 )
 
-func newBackendForMode(t *testing.T, vm loophole.VolumeManager, inst loophole.Instance) fsbackend.Service {
+func newPlatformBackend(t *testing.T, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
 	t.Helper()
 	switch mode() {
 	case loophole.ModeNBD:
@@ -31,7 +32,9 @@ func newBackendForMode(t *testing.T, vm loophole.VolumeManager, inst loophole.In
 		return b
 	case loophole.ModeLwext4FUSE:
 		return fsbackend.NewLwext4FUSE(vm)
+	case loophole.ModeJuiceFSFuse:
+		return juicefs.NewFUSE(vm, store)
 	default:
-		return fsbackend.NewLwext4(vm)
+		return nil
 	}
 }

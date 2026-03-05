@@ -11,9 +11,8 @@ import (
 	"time"
 
 	"github.com/ergochat/readline"
-	"github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
-	"github.com/ncruces/go-sqlite3/vfs"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/psanford/sqlite3vfs"
 	"github.com/spf13/cobra"
 
 	"github.com/semistrict/loophole/client"
@@ -244,9 +243,11 @@ func dbFollowCmd() *cobra.Command {
 			}()
 
 			vfsName := "loophole-follow-" + args[0]
-			vfs.Register(vfsName, dbVFS)
+			if err := sqlite3vfs.RegisterVFS(vfsName, dbVFS); err != nil {
+				return fmt.Errorf("register VFS: %w", err)
+			}
 
-			sqlDB, err := driver.Open("file:main.db?vfs=" + vfsName + "&mode=ro")
+			sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs="+vfsName+"&mode=ro")
 			if err != nil {
 				return fmt.Errorf("open SQLite: %w", err)
 			}
@@ -388,13 +389,16 @@ func (cfg *replConfig) openDB(name string) error {
 
 	cfg.vfsSeq++
 	vfsName := fmt.Sprintf("loophole-repl-%s-%d", name, cfg.vfsSeq)
-	vfs.Register(vfsName, dbVFS)
+	if err := sqlite3vfs.RegisterVFS(vfsName, dbVFS); err != nil {
+		_ = vol.ReleaseRef(cfg.ctx)
+		return fmt.Errorf("register VFS: %w", err)
+	}
 
 	uri := "file:main.db?vfs=" + vfsName
 	if cfg.readOnly {
 		uri += "&mode=ro"
 	}
-	sqlDB, err := driver.Open(uri)
+	sqlDB, err := sql.Open("sqlite3", uri)
 	if err != nil {
 		_ = vol.ReleaseRef(cfg.ctx)
 		return fmt.Errorf("open SQLite: %w", err)

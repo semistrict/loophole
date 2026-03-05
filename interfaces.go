@@ -4,8 +4,9 @@ import "context"
 
 // Volume types.
 const (
-	VolumeTypeExt4   = "ext4"
-	VolumeTypeSQLite = "sqlite"
+	VolumeTypeExt4    = "ext4"
+	VolumeTypeSQLite  = "sqlite"
+	VolumeTypeJuiceFS = "juicefs"
 )
 
 // VolumeManager manages the lifecycle of volumes.

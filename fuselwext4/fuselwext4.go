@@ -38,14 +38,14 @@ func Mount(mountpoint string, ext4fs *lwext4.FS) (*Server, error) {
 	negTTL := time.Second
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName:            "loophole-lwext4",
-			Name:              "loophole",
-			DisableXAttrs:     true,
-			MaxWrite:          1 << 20, // 1 MiB
-			MaxReadAhead:      1 << 20, // 1 MiB
-			MaxBackground:     128,
-			DirectMount:       true,
-			ExtraCapabilities: fuse.CAP_WRITEBACK_CACHE, // kernel batches writes into page cache
+			FsName:          "loophole-lwext4",
+			Name:            "loophole",
+			DisableXAttrs:   true,
+			MaxWrite:        1 << 20, // 1 MiB
+			MaxReadAhead:    1 << 20, // 1 MiB
+			MaxBackground:   128,
+			DirectMount:     true,
+			EnableWriteback: true, // kernel batches writes into page cache
 		},
 		AttrTimeout:     &cacheTTL,
 		EntryTimeout:    &cacheTTL,

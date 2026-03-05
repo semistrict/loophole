@@ -1,5 +1,3 @@
-//go:build linux
-
 package e2e
 
 import (
@@ -7,19 +5,18 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ncruces/go-sqlite3/driver"
-	_ "github.com/ncruces/go-sqlite3/embed"
-	"github.com/ncruces/go-sqlite3/vfs"
+	_ "github.com/mattn/go-sqlite3"
+	"github.com/psanford/sqlite3vfs"
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/lsm"
-	"github.com/semistrict/loophole/sqlitevfs"
+	svfs "github.com/semistrict/loophole/sqlitevfs"
 )
 
 // newSQLiteDB creates a fresh SQLite database on a loophole volume backed by S3.
 // Returns the open *sql.DB and the sqlitevfs.DB handle (for flush/snapshot/branch).
-func newSQLiteDB(t *testing.T, name string) (*sql.DB, *sqlitevfs.DB) {
+func newSQLiteDB(t *testing.T, name string) (*sql.DB, *svfs.DB) {
 	t.Helper()
 	trackMetrics(t)
 
@@ -32,14 +29,15 @@ func newSQLiteDB(t *testing.T, name string) (*sql.DB, *sqlitevfs.DB) {
 	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 	t.Cleanup(func() { vm.Close(ctx) })
 
-	db, err := sqlitevfs.Create(ctx, vm, name)
+	db, err := svfs.Create(ctx, vm, name)
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close(ctx) })
 
 	vfsName := fmt.Sprintf("e2e-%s-%s", t.Name(), name)
-	vfs.Register(vfsName, db.VFS())
+	err = sqlite3vfs.RegisterVFS(vfsName, db.VFS())
+	require.NoError(t, err)
 
-	sqlDB, err := driver.Open("file:main.db?vfs=" + vfsName)
+	sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs="+vfsName)
 	require.NoError(t, err)
 	t.Cleanup(func() { sqlDB.Close() })
 
@@ -81,11 +79,12 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil)
 
 	// Create and populate.
-	db, err := sqlitevfs.Create(ctx, vm, "reopen-test")
+	db, err := svfs.Create(ctx, vm, "reopen-test")
 	require.NoError(t, err)
 
-	vfs.Register("e2e-reopen-1", db.VFS())
-	sqlDB, err := driver.Open("file:main.db?vfs=e2e-reopen-1")
+	err = sqlite3vfs.RegisterVFS("e2e-reopen-1", db.VFS())
+	require.NoError(t, err)
+	sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-reopen-1")
 	require.NoError(t, err)
 
 	_, err = sqlDB.Exec("CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)")
@@ -103,12 +102,13 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	vm2 := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 	defer vm2.Close(ctx)
 
-	db2, err := sqlitevfs.Open(ctx, vm2, "reopen-test")
+	db2, err := svfs.Open(ctx, vm2, "reopen-test")
 	require.NoError(t, err)
 	defer db2.Close(ctx)
 
-	vfs.Register("e2e-reopen-2", db2.VFS())
-	sqlDB2, err := driver.Open("file:main.db?vfs=e2e-reopen-2")
+	err = sqlite3vfs.RegisterVFS("e2e-reopen-2", db2.VFS())
+	require.NoError(t, err)
+	sqlDB2, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-reopen-2")
 	require.NoError(t, err)
 	defer sqlDB2.Close()
 
@@ -130,11 +130,12 @@ func TestE2E_SQLiteSnapshot(t *testing.T) {
 	defer vm.Close(ctx)
 
 	// Create and populate.
-	db, err := sqlitevfs.Create(ctx, vm, "snap-parent")
+	db, err := svfs.Create(ctx, vm, "snap-parent")
 	require.NoError(t, err)
 
-	vfs.Register("e2e-snap-parent", db.VFS())
-	sqlDB, err := driver.Open("file:main.db?vfs=e2e-snap-parent")
+	err = sqlite3vfs.RegisterVFS("e2e-snap-parent", db.VFS())
+	require.NoError(t, err)
+	sqlDB, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-snap-parent")
 	require.NoError(t, err)
 
 	_, err = sqlDB.Exec("CREATE TABLE items (id INTEGER PRIMARY KEY, val TEXT)")
@@ -147,8 +148,9 @@ func TestE2E_SQLiteSnapshot(t *testing.T) {
 	require.NoError(t, db.Snapshot(ctx, "snap-child"))
 
 	// Write more to parent after snapshot.
-	vfs.Register("e2e-snap-parent-2", db.VFS())
-	sqlDB, err = driver.Open("file:main.db?vfs=e2e-snap-parent-2")
+	err = sqlite3vfs.RegisterVFS("e2e-snap-parent-2", db.VFS())
+	require.NoError(t, err)
+	sqlDB, err = sql.Open("sqlite3", "file:main.db?vfs=e2e-snap-parent-2")
 	require.NoError(t, err)
 	_, err = sqlDB.Exec("INSERT INTO items VALUES (2, 'after-snapshot')")
 	require.NoError(t, err)
@@ -156,12 +158,13 @@ func TestE2E_SQLiteSnapshot(t *testing.T) {
 	require.NoError(t, db.Close(ctx))
 
 	// Open snapshot — should only see the pre-snapshot data.
-	snapDB, err := sqlitevfs.OpenSnapshot(ctx, vm, "snap-child")
+	snapDB, err := svfs.OpenSnapshot(ctx, vm, "snap-child")
 	require.NoError(t, err)
 	defer snapDB.Close(ctx)
 
-	vfs.Register("e2e-snap-child", snapDB.VFS())
-	snapSQL, err := driver.Open("file:main.db?vfs=e2e-snap-child&mode=ro")
+	err = sqlite3vfs.RegisterVFS("e2e-snap-child", snapDB.VFS())
+	require.NoError(t, err)
+	snapSQL, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-snap-child&mode=ro")
 	require.NoError(t, err)
 	defer snapSQL.Close()
 
@@ -188,11 +191,12 @@ func TestE2E_SQLiteBranch(t *testing.T) {
 	defer vm.Close(ctx)
 
 	// Create parent with initial data.
-	parentDB, err := sqlitevfs.Create(ctx, vm, "branch-parent")
+	parentDB, err := svfs.Create(ctx, vm, "branch-parent")
 	require.NoError(t, err)
 
-	vfs.Register("e2e-branch-parent", parentDB.VFS())
-	parentSQL, err := driver.Open("file:main.db?vfs=e2e-branch-parent")
+	err = sqlite3vfs.RegisterVFS("e2e-branch-parent", parentDB.VFS())
+	require.NoError(t, err)
+	parentSQL, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-branch-parent")
 	require.NoError(t, err)
 
 	_, err = parentSQL.Exec("CREATE TABLE counters (name TEXT PRIMARY KEY, val INTEGER)")
@@ -208,8 +212,9 @@ func TestE2E_SQLiteBranch(t *testing.T) {
 	require.NoError(t, parentDB.Close(ctx))
 
 	// Write to branch — should be independent.
-	vfs.Register("e2e-branch-child", branchDB.VFS())
-	branchSQL, err := driver.Open("file:main.db?vfs=e2e-branch-child")
+	err = sqlite3vfs.RegisterVFS("e2e-branch-child", branchDB.VFS())
+	require.NoError(t, err)
+	branchSQL, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-branch-child")
 	require.NoError(t, err)
 	defer branchSQL.Close()
 
@@ -222,12 +227,13 @@ func TestE2E_SQLiteBranch(t *testing.T) {
 	require.Equal(t, 200, val)
 
 	// Reopen parent — should still have original value.
-	parentDB2, err := sqlitevfs.Open(ctx, vm, "branch-parent")
+	parentDB2, err := svfs.Open(ctx, vm, "branch-parent")
 	require.NoError(t, err)
 	defer parentDB2.Close(ctx)
 
-	vfs.Register("e2e-branch-parent-2", parentDB2.VFS())
-	parentSQL2, err := driver.Open("file:main.db?vfs=e2e-branch-parent-2&mode=ro")
+	err = sqlite3vfs.RegisterVFS("e2e-branch-parent-2", parentDB2.VFS())
+	require.NoError(t, err)
+	parentSQL2, err := sql.Open("sqlite3", "file:main.db?vfs=e2e-branch-parent-2&mode=ro")
 	require.NoError(t, err)
 	defer parentSQL2.Close()
 

@@ -4,56 +4,59 @@
 // in fixed regions. Snapshots and clones of the volume capture the entire
 // database state atomically.
 //
-// VolumeVFS implements [vfs.VFS] from github.com/ncruces/go-sqlite3/vfs and
-// can be registered directly with [vfs.Register] for use with real SQLite.
+// VolumeVFS implements [sqlite3vfs.VFS] from github.com/psanford/sqlite3vfs and
+// can be registered with [sqlite3vfs.RegisterVFS] for use with mattn/go-sqlite3.
 package sqlitevfs
 
-import "github.com/ncruces/go-sqlite3/vfs"
+import "github.com/psanford/sqlite3vfs"
 
-// Re-export ncruces types so callers don't need to import both packages.
+// Re-export psanford types so callers don't need to import both packages.
 type (
-	OpenFlag             = vfs.OpenFlag
-	AccessFlag           = vfs.AccessFlag
-	SyncFlag             = vfs.SyncFlag
-	LockLevel            = vfs.LockLevel
-	DeviceCharacteristic = vfs.DeviceCharacteristic
+	OpenFlag             = sqlite3vfs.OpenFlag
+	AccessFlag           = sqlite3vfs.AccessFlag
+	SyncFlag             = sqlite3vfs.SyncType
+	LockLevel            = sqlite3vfs.LockType
+	DeviceCharacteristic = sqlite3vfs.DeviceCharacteristic
 )
 
-// Re-export ncruces constants.
+// Re-export psanford constants.
 const (
-	OpenReadOnly      = vfs.OPEN_READONLY
-	OpenReadWrite     = vfs.OPEN_READWRITE
-	OpenCreate        = vfs.OPEN_CREATE
-	OpenDeleteOnClose = vfs.OPEN_DELETEONCLOSE
-	OpenExclusive     = vfs.OPEN_EXCLUSIVE
-	OpenMainDB        = vfs.OPEN_MAIN_DB
-	OpenTempDB        = vfs.OPEN_TEMP_DB
-	OpenMainJournal   = vfs.OPEN_MAIN_JOURNAL
-	OpenSubJournal    = vfs.OPEN_SUBJOURNAL
-	OpenSuperJournal  = vfs.OPEN_SUPER_JOURNAL
-	OpenWAL           = vfs.OPEN_WAL
+	OpenReadOnly      = sqlite3vfs.OpenReadOnly
+	OpenReadWrite     = sqlite3vfs.OpenReadWrite
+	OpenCreate        = sqlite3vfs.OpenCreate
+	OpenDeleteOnClose = sqlite3vfs.OpenDeleteOnClose
+	OpenExclusive     = sqlite3vfs.OpenExclusive
+	OpenMainDB        = sqlite3vfs.OpenMainDB
+	OpenTempDB        = sqlite3vfs.OpenTempDB
+	OpenMainJournal   = sqlite3vfs.OpenMainJournal
+	OpenSubJournal    = sqlite3vfs.OpenSubJournal
+	OpenSuperJournal  = sqlite3vfs.OpenSuperJournal
+	OpenWAL           = sqlite3vfs.OpenWAL
 
-	AccessExists    = vfs.ACCESS_EXISTS
-	AccessReadWrite = vfs.ACCESS_READWRITE
+	AccessExists    = sqlite3vfs.AccessExists
+	AccessReadWrite = sqlite3vfs.AccessReadWrite
 
-	SyncNormal   = vfs.SYNC_NORMAL
-	SyncFull     = vfs.SYNC_FULL
-	SyncDataOnly = vfs.SYNC_DATAONLY
+	SyncNormal   = sqlite3vfs.SyncNormal
+	SyncFull     = sqlite3vfs.SyncFull
+	SyncDataOnly = sqlite3vfs.SyncDataOnly
 
-	LockNone      = vfs.LOCK_NONE
-	LockShared    = vfs.LOCK_SHARED
-	LockReserved  = vfs.LOCK_RESERVED
-	LockPending   = vfs.LOCK_PENDING
-	LockExclusive = vfs.LOCK_EXCLUSIVE
+	LockNone      = sqlite3vfs.LockNone
+	LockShared    = sqlite3vfs.LockShared
+	LockReserved  = sqlite3vfs.LockReserved
+	LockPending   = sqlite3vfs.LockPending
+	LockExclusive = sqlite3vfs.LockExclusive
 
-	IocapAtomic             = vfs.IOCAP_ATOMIC
-	IocapAtomic4K           = vfs.IOCAP_ATOMIC4K
-	IocapSafeAppend         = vfs.IOCAP_SAFE_APPEND
-	IocapSequential         = vfs.IOCAP_SEQUENTIAL
-	IocapPowersafeOverwrite = vfs.IOCAP_POWERSAFE_OVERWRITE
-	IocapImmutable          = vfs.IOCAP_IMMUTABLE
-	IocapBatchAtomic        = vfs.IOCAP_BATCH_ATOMIC
+	IocapAtomic             = sqlite3vfs.IocapAtomic
+	IocapAtomic4K           = sqlite3vfs.IocapAtomic4K
+	IocapSafeAppend         = sqlite3vfs.IocapSafeAppend
+	IocapSequential         = sqlite3vfs.IocapSequential
+	IocapPowersafeOverwrite = sqlite3vfs.IocapPowersafeOverwrite
+	IocapImmutable          = sqlite3vfs.IocapImmutable
+	IocapBatchAtomic        = sqlite3vfs.IocapBatchAtomic
 )
+
+// RegisterVFS registers a VFS with the SQLite driver.
+var RegisterVFS = sqlite3vfs.RegisterVFS
 
 // SyncMode controls how xSync behaves.
 type SyncMode int

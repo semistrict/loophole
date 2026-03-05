@@ -1,5 +1,3 @@
-//go:build linux
-
 package e2e
 
 import (
@@ -17,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/sys/unix"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
@@ -35,7 +32,7 @@ const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 // needsRoot returns true if the mode requires root privileges.
 func needsRoot() bool {
 	switch mode() {
-	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP:
+	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP, loophole.ModeJuiceFSFuse:
 		return true
 	default:
 		return false
@@ -43,9 +40,13 @@ func needsRoot() bool {
 }
 
 // needsRealMount returns true if the mode does real filesystem mounts.
-// All current modes (fuse, nbd, testnbdtcp, lwext4fuse) use real mounts.
 func needsRealMount() bool {
-	return true
+	switch mode() {
+	case loophole.ModeInProcess, loophole.ModeJuiceFS:
+		return false
+	default:
+		return true
+	}
 }
 
 // needsKernelExt4 returns true if the mode uses kernel ext4 (needs sync, FIFREEZE, etc.).
@@ -99,7 +100,7 @@ func newBackend(t *testing.T) fsbackend.Service {
 
 	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
 
-	backend := newBackendForMode(t, vm, inst)
+	backend := newBackendForMode(t, vm, inst, store)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -237,18 +238,6 @@ func verifyTestFiles(t *testing.T, tfs testFS, randomMD5 string) {
 	data := tfs.ReadFile(t, "numbers.txt")
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Equal(t, 1000, len(lines))
-}
-
-// syncFS flushes the filesystem at the given mountpoint using syncfs(2).
-// Unlike the global sync command, this only syncs the target filesystem,
-// avoiding hangs when a FUSE blockdev mount is also present.
-func syncFS(t *testing.T, mountpoint string) {
-	t.Helper()
-	fd, err := unix.Open(mountpoint, unix.O_RDONLY, 0)
-	require.NoError(t, err)
-	defer unix.Close(fd)
-	err = unix.Syncfs(fd)
-	require.NoError(t, err)
 }
 
 // hasTool returns true if the given tool is in PATH.

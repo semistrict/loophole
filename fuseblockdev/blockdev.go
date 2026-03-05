@@ -184,8 +184,7 @@ func (r *rootNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 
 type deviceNode struct {
 	fs.Inode
-	vol      loophole.Volume
-	nodeOnce sync.Once
+	vol loophole.Volume
 }
 
 type deviceHandle struct {
@@ -209,7 +208,6 @@ var _ = (fs.NodeWriter)((*deviceNode)(nil))
 var _ = (fs.NodeFsyncer)((*deviceNode)(nil))
 var _ = (fs.NodeFlusher)((*deviceNode)(nil))
 var _ = (fs.NodeReleaser)((*deviceNode)(nil))
-var _ = (fs.NodeOnForgetter)((*deviceNode)(nil))
 var _ = (fs.NodeAllocater)((*deviceNode)(nil))
 var _ = (fs.NodeCopyFileRanger)((*deviceNode)(nil))
 
@@ -269,14 +267,6 @@ func (d *deviceNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errn
 	}
 	done(fs.OK)
 	return fs.OK
-}
-
-func (d *deviceNode) OnForget() {
-	d.nodeOnce.Do(func() {
-		if err := d.vol.ReleaseRef(context.Background()); err != nil {
-			slog.Warn("release ref on forget", "error", err)
-		}
-	})
 }
 
 func (d *deviceNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
