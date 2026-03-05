@@ -18,7 +18,7 @@ type nbdTCPMount struct {
 	volumeName string
 }
 
-// NBDTCPDriver implements Driver using TCP-based NBD + kernel ext4.
+// NBDTCPDriver implements Driver using TCP-based NBD + kernel FS.
 type NBDTCPDriver struct {
 	nbd *nbdvm.TCPServer
 }
@@ -41,7 +41,7 @@ func (n *NBDTCPDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	if err != nil {
 		return err
 	}
-	return linuxutil.Ext4FormatDirect(ctx, dev)
+	return linuxutil.FormatFSDirect(ctx, dev, vol.VolumeType())
 }
 
 func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (nbdTCPMount, error) {
@@ -49,7 +49,7 @@ func (n *NBDTCPDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoin
 	if err != nil {
 		return nbdTCPMount{}, err
 	}
-	if err := linuxutil.Ext4MountDirect(ctx, dev, mountpoint); err != nil {
+	if err := linuxutil.MountFSDirect(ctx, dev, mountpoint, vol.VolumeType()); err != nil {
 		if disconnErr := n.nbd.Disconnect(ctx, vol.Name()); disconnErr != nil {
 			slog.Warn("nbd tcp disconnect error during mount cleanup", "error", disconnErr)
 		}

@@ -130,17 +130,17 @@ e2e-testnbdtcp: liblwext4
 # Run e2e tests (lwext4 + FUSE, no root required)
 # Usage: make e2e-lwext4fuse [RUN=TestName]
 e2e-lwext4fuse: liblwext4
-	LOOPHOLE_MODE=lwext4fuse go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=fusefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (JuiceFS in-process, no root/FUSE/NBD required)
 # Usage: make e2e-juicefs [RUN=TestName]
 e2e-juicefs: liblwext4
-	LOOPHOLE_MODE=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=inprocess LOOPHOLE_DEFAULT_FS=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (JuiceFS + FUSE, requires root and FUSE)
 # Usage: make e2e-juicefsfuse [RUN=TestName]
 e2e-juicefsfuse: liblwext4
-	LOOPHOLE_MODE=juicefsfuse go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	LOOPHOLE_MODE=fusefs LOOPHOLE_DEFAULT_FS=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run SQLite e2e tests (pure Go, no root/FUSE/NBD required)
 # Usage: make e2e-sqlite [RUN=TestName]

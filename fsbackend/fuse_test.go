@@ -92,7 +92,7 @@ func TestFUSE_CreateMountUnmount_CleansUpLoopDevice(t *testing.T) {
 
 	before := loopDeviceCount(t)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "looptest"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "looptest"}))
 
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "looptest", mp))
@@ -116,7 +116,7 @@ func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
 	mps := make([]string, n)
 	for i := range n {
 		name := fmt.Sprintf("multi-%d", i)
-		require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
+		require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: name}))
 		mps[i] = t.TempDir()
 		require.NoError(t, b.Mount(ctx, name, mps[i]))
 	}
@@ -138,7 +138,7 @@ func TestFUSE_Close_CleansUpLoopDevices(t *testing.T) {
 
 	before := loopDeviceCount(t)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "closetest"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "closetest"}))
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "closetest", mp))
 
@@ -157,7 +157,7 @@ func TestFUSE_CreateDoesNotLeakLoopDevice(t *testing.T) {
 
 	before := loopDeviceCount(t)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "noleak"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "noleak"}))
 
 	after := loopDeviceCount(t)
 	require.Equal(t, before, after, "Create/Format should not leak a loop device")

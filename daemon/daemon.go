@@ -44,6 +44,9 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 	if inst.Mode == "" {
 		inst.Mode = loophole.DefaultMode()
 	}
+	if inst.DefaultFSType == "" {
+		inst.DefaultFSType = loophole.DefaultFSType()
+	}
 	logPath := dir.Log(inst.ProfileName)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
@@ -274,7 +277,10 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("create", "volume", req.Volume, "size", req.Size, "no_format", req.NoFormat)
+	if req.Type == "" {
+		req.Type = string(d.inst.DefaultFSType)
+	}
+	d.log.Info("create", "volume", req.Volume, "size", req.Size, "type", req.Type, "no_format", req.NoFormat)
 	if err := d.backend.Create(r.Context(), req); err != nil {
 		d.log.Error("create failed", "err", err)
 		writeError(w, 500, err)

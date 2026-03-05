@@ -27,22 +27,27 @@ func mode() loophole.Mode {
 	return loophole.DefaultMode()
 }
 
+// fsType returns the LOOPHOLE_DEFAULT_FS for tests.
+func fsType() loophole.FSType {
+	return loophole.DefaultFSType()
+}
+
+// defaultVolumeType returns the volume type string matching the current fsType.
+func defaultVolumeType() string {
+	return string(fsType())
+}
+
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 
 // needsRoot returns true if the mode requires root privileges.
 func needsRoot() bool {
-	switch mode() {
-	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP, loophole.ModeJuiceFSFuse:
-		return true
-	default:
-		return false
-	}
+	return mode().NeedsRoot()
 }
 
 // needsRealMount returns true if the mode does real filesystem mounts.
 func needsRealMount() bool {
 	switch mode() {
-	case loophole.ModeInProcess, loophole.ModeJuiceFS:
+	case loophole.ModeInProcess:
 		return false
 	default:
 		return true
@@ -262,7 +267,7 @@ func mountVolume(t *testing.T, name string) (testFS, fsbackend.Service) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 256 * 1024 * 1024}) // 256MB — 8GB is too slow through FUSE
+	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 512 * 1024 * 1024, Type: defaultVolumeType()}) // 512MB — XFS needs ≥300MB, 8GB is too slow through FUSE
 	require.NoError(t, err)
 
 	mp := mountpoint(t, name)

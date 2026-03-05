@@ -26,6 +26,7 @@ type MountOpts struct {
 	FSType     string
 	NoAtime    bool
 	NoBarrier  bool
+	NoUUID     bool // XFS: allow duplicate UUIDs (needed for clones)
 }
 
 // Mount mounts a filesystem with the given options.
@@ -34,10 +35,14 @@ func Mount(opts MountOpts) error {
 	if opts.NoAtime {
 		flags |= unix.MS_NOATIME
 	}
-	var data string
+	var parts []string
 	if opts.NoBarrier {
-		data = "nobarrier"
+		parts = append(parts, "nobarrier")
 	}
+	if opts.NoUUID {
+		parts = append(parts, "nouuid")
+	}
+	data := strings.Join(parts, ",")
 	if err := unix.Mount(opts.Source, opts.Mountpoint, opts.FSType, flags, data); err != nil {
 		return fmt.Errorf("mount %s on %s: %w", opts.Source, opts.Mountpoint, err)
 	}
@@ -348,17 +353,27 @@ func LoopDetachPath(devPath string) error {
 	return nil
 }
 
-// ext4 filesystem helpers.
+// Kernel filesystem format/mount helpers.
 
-// mkfsFeatures is the pinned set of ext4 features for mkfs.ext4.
+// mkfsExt4Features is the pinned set of ext4 features for mkfs.ext4.
 // Pinning avoids surprises when mkfs.ext4 defaults change across distro versions.
 // These match Debian bookworm e2fsprogs 1.47 defaults and are all supported by lwext4.
-const mkfsFeatures = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
+const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
 	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
 	"dir_nlink,extra_isize,metadata_csum"
 
-// Ext4Format creates an ext4 filesystem on a block device via a loop device.
-func Ext4Format(ctx context.Context, devicePath string, optimalIOSize int) error {
+// mkfsArgs returns the mkfs command and arguments for the given filesystem type.
+func mkfsArgs(fstype, device string) (string, []string) {
+	switch fstype {
+	case "xfs":
+		return "mkfs.xfs", []string{"-f", "-q", device}
+	default: // ext4
+		return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
+	}
+}
+
+// FormatFS creates a filesystem on a block device via a loop device.
+func FormatFS(ctx context.Context, devicePath, fstype string, optimalIOSize int) error {
 	dev, err := LoopAttach(devicePath, optimalIOSize)
 	if err != nil {
 		return fmt.Errorf("loop attach: %w", err)
@@ -369,24 +384,26 @@ func Ext4Format(ctx context.Context, devicePath string, optimalIOSize int) error
 		}
 	}()
 
-	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", dev.Path); err != nil {
-		return fmt.Errorf("mkfs.ext4: %w", err)
+	cmd, args := mkfsArgs(fstype, dev.Path)
+	if err := run(ctx, cmd, args...); err != nil {
+		return fmt.Errorf("%s: %w", cmd, err)
 	}
 	return nil
 }
 
-// Ext4FormatDirect creates an ext4 filesystem directly on a block device
+// FormatFSDirect creates a filesystem directly on a block device
 // (e.g. /dev/nbdN) without loop device setup.
-func Ext4FormatDirect(ctx context.Context, blockDev string) error {
-	if err := run(ctx, "mkfs.ext4", "-q", "-O", mkfsFeatures, "-E", "lazy_itable_init=1,nodiscard", blockDev); err != nil {
-		return fmt.Errorf("mkfs.ext4: %w", err)
+func FormatFSDirect(ctx context.Context, blockDev, fstype string) error {
+	cmd, args := mkfsArgs(fstype, blockDev)
+	if err := run(ctx, cmd, args...); err != nil {
+		return fmt.Errorf("%s: %w", cmd, err)
 	}
 	return nil
 }
 
-// Ext4Mount attaches a loop device to devicePath and mounts ext4 at mountpoint.
+// MountFS attaches a loop device to devicePath and mounts a filesystem at mountpoint.
 // Returns the loop device path for cleanup.
-func Ext4Mount(ctx context.Context, devicePath, mountpoint string, optimalIOSize int) (loopDevice string, err error) {
+func MountFS(ctx context.Context, devicePath, mountpoint, fstype string, optimalIOSize int) (loopDevice string, err error) {
 	dev, err := LoopAttach(devicePath, optimalIOSize)
 	if err != nil {
 		return "", fmt.Errorf("loop attach: %w", err)
@@ -399,7 +416,7 @@ func Ext4Mount(ctx context.Context, devicePath, mountpoint string, optimalIOSize
 		return "", err
 	}
 
-	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true}); err != nil {
+	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: fstype, NoAtime: true, NoUUID: fstype == "xfs"}); err != nil {
 		if derr := dev.Detach(); derr != nil {
 			slog.Warn("loop detach failed", "error", derr)
 		}
@@ -408,24 +425,24 @@ func Ext4Mount(ctx context.Context, devicePath, mountpoint string, optimalIOSize
 	return dev.Path, nil
 }
 
-// Ext4MountDirect mounts ext4 directly on a block device (e.g. /dev/nbdN).
-func Ext4MountDirect(ctx context.Context, blockDev, mountpoint string) error {
+// MountFSDirect mounts a filesystem directly on a block device (e.g. /dev/nbdN).
+func MountFSDirect(ctx context.Context, blockDev, mountpoint, fstype string) error {
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
 		return err
 	}
-	return Mount(MountOpts{Source: blockDev, Mountpoint: mountpoint, FSType: "ext4", NoAtime: true})
+	return Mount(MountOpts{Source: blockDev, Mountpoint: mountpoint, FSType: fstype, NoAtime: true, NoUUID: fstype == "xfs"})
 }
 
-// Ext4Unmount unmounts the filesystem and detaches the loop device.
-func Ext4Unmount(ctx context.Context, mountpoint string) error {
+// UnmountLoop unmounts the filesystem and detaches the loop device.
+func UnmountLoop(ctx context.Context, mountpoint string) error {
 	loopDev, _ := FindMount(mountpoint)
 
-	slog.Info("ext4: unmount start", "mountpoint", mountpoint, "loopDev", loopDev)
+	slog.Info("unmount start", "mountpoint", mountpoint, "loopDev", loopDev)
 	if err := Unmount(mountpoint); err != nil {
-		slog.Info("ext4: unmount failed", "mountpoint", mountpoint, "error", err)
+		slog.Info("unmount failed", "mountpoint", mountpoint, "error", err)
 		return err
 	}
-	slog.Info("ext4: unmount done", "mountpoint", mountpoint)
+	slog.Info("unmount done", "mountpoint", mountpoint)
 
 	if loopDev != "" {
 		if err := LoopDetachPath(loopDev); err != nil {

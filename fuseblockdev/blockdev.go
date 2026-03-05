@@ -323,7 +323,7 @@ func (d *deviceNode) Write(ctx context.Context, _ fs.FileHandle, data []byte, of
 }
 
 func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) syscall.Errno {
-	slog.Info("blockdev: fsync start")
+	slog.Debug("blockdev: fsync start")
 	done := metrics.FuseOp("fsync")
 	if _, ok := fh.(*deviceHandle); !ok {
 		done(syscall.EBADF)
@@ -334,13 +334,13 @@ func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) sysc
 		done(syscall.EIO)
 		return syscall.EIO
 	}
-	slog.Info("blockdev: fsync done")
+	slog.Debug("blockdev: fsync done")
 	done(fs.OK)
 	return fs.OK
 }
 
 func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
-	slog.Info("blockdev: flush start")
+	slog.Debug("blockdev: flush start")
 	done := metrics.FuseOp("flush")
 	if _, ok := fh.(*deviceHandle); !ok {
 		done(syscall.EBADF)
@@ -351,7 +351,7 @@ func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno 
 		done(syscall.EIO)
 		return syscall.EIO
 	}
-	slog.Info("blockdev: flush done")
+	slog.Debug("blockdev: flush done")
 	done(fs.OK)
 	return fs.OK
 }

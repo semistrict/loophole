@@ -57,11 +57,14 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 // unmounts, then re-opens the raw volume with lwext4 in-process to verify
 // the on-disk format is lwext4-compatible.
 func TestE2E_Lwext4CanMountCurrentFormat(t *testing.T) {
+	if fsType() != loophole.FSExt4 {
+		t.Skipf("lwext4 compat test only applies to ext4, got %s", fsType())
+	}
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, "compat")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "compat"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "compat"}))
 	require.NoError(t, b.Mount(ctx, "compat", mp))
 
 	tfs := newTestFS(t, b, mp)

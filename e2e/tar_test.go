@@ -29,7 +29,7 @@ func TestE2E_TarExtractRemount(t *testing.T) {
 	vol := "tartest"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: vol}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	runCmd(t, "tar", "xf", tarPath, "-C", mp)

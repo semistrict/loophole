@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     nbd-server \
     strace \
     fio \
+    xfsprogs \
     cmake \
     sysstat \
     procps \

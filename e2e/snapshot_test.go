@@ -14,7 +14,7 @@ func TestE2E_SnapshotPreservesData(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
 
@@ -36,7 +36,7 @@ func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
 	err := b.Mount(ctx, "parent", parentMP)
 	require.NoError(t, err)
 
@@ -65,7 +65,7 @@ func TestE2E_DeviceSnapshotParentStaysWritable(t *testing.T) {
 
 	b := newBackend(t)
 	ctx := t.Context()
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "frozen-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "frozen-parent"}))
 	parentDev, err := b.DeviceAttach(ctx, "frozen-parent")
 	require.NoError(t, err)
 

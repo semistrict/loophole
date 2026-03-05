@@ -18,7 +18,7 @@ func stressMount(t *testing.T, name string) string {
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, name)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: name}))
 	err := b.Mount(ctx, name, mp)
 	require.NoError(t, err)
 	return mp

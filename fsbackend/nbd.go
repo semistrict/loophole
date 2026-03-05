@@ -18,7 +18,7 @@ type nbdMount struct {
 	volumeName string
 }
 
-// NBDDriver implements Driver using NBD devices (/dev/nbdN) + kernel ext4.
+// NBDDriver implements Driver using NBD devices (/dev/nbdN) + kernel FS.
 type NBDDriver struct {
 	nbd *nbdvm.Server
 }
@@ -41,7 +41,7 @@ func (n *NBDDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	if err != nil {
 		return err
 	}
-	return linuxutil.Ext4FormatDirect(ctx, dev)
+	return linuxutil.FormatFSDirect(ctx, dev, vol.VolumeType())
 }
 
 func (n *NBDDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (nbdMount, error) {
@@ -49,7 +49,7 @@ func (n *NBDDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint s
 	if err != nil {
 		return nbdMount{}, err
 	}
-	if err := linuxutil.Ext4MountDirect(ctx, dev, mountpoint); err != nil {
+	if err := linuxutil.MountFSDirect(ctx, dev, mountpoint, vol.VolumeType()); err != nil {
 		if disconnErr := n.nbd.Disconnect(ctx, vol.Name()); disconnErr != nil {
 			slog.Warn("nbd disconnect error during mount cleanup", "error", disconnErr)
 		}

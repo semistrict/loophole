@@ -5,6 +5,7 @@ import "context"
 // Volume types.
 const (
 	VolumeTypeExt4    = "ext4"
+	VolumeTypeXFS     = "xfs"
 	VolumeTypeSQLite  = "sqlite"
 	VolumeTypeJuiceFS = "juicefs"
 )

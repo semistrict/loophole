@@ -30,10 +30,11 @@ func newPlatformBackend(t *testing.T, vm loophole.VolumeManager, inst loophole.I
 		b, err := fsbackend.NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})
 		require.NoError(t, err)
 		return b
-	case loophole.ModeLwext4FUSE:
+	case loophole.ModeFuseFS:
+		if fsType() == loophole.FSJuiceFS {
+			return juicefs.NewFUSE(vm, store)
+		}
 		return fsbackend.NewLwext4FUSE(vm)
-	case loophole.ModeJuiceFSFuse:
-		return juicefs.NewFUSE(vm, store)
 	default:
 		return nil
 	}

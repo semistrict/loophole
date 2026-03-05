@@ -127,7 +127,7 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 	vol := "remount-empty"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: vol}))
 
 	err := b.Mount(ctx, vol, mp)
 	require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "persist")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "persist"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "persist"}))
 
 	// Phase 1: mount, write, unmount.
 	err := b.Mount(ctx, "persist", mp)
@@ -200,7 +200,7 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "survive")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "survive"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "survive"}))
 
 	// Phase 1: write.
 	err := b.Mount(ctx, "survive", mp)
@@ -239,7 +239,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 			volName := fmt.Sprintf("concurrent-%d", i)
 			mp := mountpoint(t, volName)
 
-			if err := b.Create(ctx, client.CreateParams{Volume: volName}); err != nil {
+			if err := b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: volName}); err != nil {
 				return fmt.Errorf("worker %d create: %w", i, err)
 			}
 
@@ -294,7 +294,7 @@ func TestE2E_NBDDeviceExclOpen(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range nDevices {
 		vols[i] = fmt.Sprintf("excl-%d", i)
-		require.NoError(t, b.Create(gctx, client.CreateParams{Volume: vols[i]}))
+		require.NoError(t, b.Create(gctx, client.CreateParams{Type: defaultVolumeType(), Volume: vols[i]}))
 	}
 
 	// Now connect all at once

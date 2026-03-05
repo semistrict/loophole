@@ -49,7 +49,7 @@ func startDaemon(ctx context.Context, inst loophole.Instance, dir loophole.Dir, 
 func startDaemonBackground(inst loophole.Instance, dir loophole.Dir) error {
 	c := client.New(dir, inst)
 	c.Bin = selfBin
-	c.Sudo = runtime.GOOS == "linux" && inst.Mode != loophole.ModeInProcess && inst.Mode != loophole.ModeLwext4FUSE
+	c.Sudo = runtime.GOOS == "linux" && inst.Mode.NeedsRoot()
 	c.Profile = globalProfile
 	if err := c.EnsureDaemon(); err != nil {
 		return err
@@ -127,7 +127,7 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path after creation")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
-	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume type (ext4, juicefs); default ext4")
+	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume/filesystem type (ext4, xfs, juicefs); default from LOOPHOLE_DEFAULT_FS or ext4")
 	return cmd
 }
 

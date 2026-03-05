@@ -13,16 +13,20 @@ import (
 
 func createBackend(vm loophole.VolumeManager, inst loophole.Instance, dir loophole.Dir, store loophole.ObjectStore) (fsbackend.Service, error) {
 	switch inst.Mode {
+	case loophole.ModeInProcess:
+		if inst.DefaultFSType == loophole.FSJuiceFS {
+			return juicefs.NewInProcess(vm, store), nil
+		}
+		return fsbackend.NewLwext4(vm), nil
+	case loophole.ModeFuseFS:
+		if inst.DefaultFSType == loophole.FSJuiceFS {
+			return juicefs.NewFUSE(vm, store), nil
+		}
+		return fsbackend.NewLwext4FUSE(vm), nil
 	case loophole.ModeNBD:
 		return fsbackend.NewNBD(vm, nil)
 	case loophole.ModeTestNBDTCP:
 		return fsbackend.NewNBDTCP(vm, nil)
-	case loophole.ModeInProcess:
-		return fsbackend.NewLwext4(vm), nil
-	case loophole.ModeLwext4FUSE:
-		return fsbackend.NewLwext4FUSE(vm), nil
-	case loophole.ModeJuiceFS:
-		return juicefs.NewInProcess(vm, store), nil
 	default:
 		backend, err := fsbackend.NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug"})
 		if err != nil {

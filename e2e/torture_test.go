@@ -39,7 +39,7 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 1: Create root volume, populate with diverse data ---
 
 	rootMP := mountpoint(t, "tort-root")
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "tort-root"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "tort-root"}))
 	require.NoError(t, b.Mount(ctx, "tort-root", rootMP))
 	rootFS := newTestFS(t, b, rootMP)
 

@@ -17,7 +17,7 @@ type fuseMount struct {
 	loopDev    string
 }
 
-// FUSEDriver implements Driver using FUSE block device files + loop devices + kernel ext4.
+// FUSEDriver implements Driver using FUSE block device files + loop devices + kernel FS.
 type FUSEDriver struct {
 	fuse     *fuseblockdev.Server
 	pageSize int
@@ -40,7 +40,7 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Info("fuse: formatting", "volume", vol.Name(), "device", devPath, "pageSize", f.pageSize)
-	err := linuxutil.Ext4Format(ctx, devPath, f.pageSize)
+	err := linuxutil.FormatFS(ctx, devPath, vol.VolumeType(), f.pageSize)
 	slog.Info("fuse: format done", "volume", vol.Name(), "error", err)
 	return err
 }
@@ -48,7 +48,7 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Info("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
-	loopDev, err := linuxutil.Ext4Mount(ctx, devPath, mountpoint, f.pageSize)
+	loopDev, err := linuxutil.MountFS(ctx, devPath, mountpoint, vol.VolumeType(), f.pageSize)
 	if err != nil {
 		slog.Info("fuse: mount failed", "volume", vol.Name(), "error", err)
 		return fuseMount{}, err
@@ -59,7 +59,7 @@ func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 
 func (f *FUSEDriver) Unmount(ctx context.Context, h fuseMount) error {
 	slog.Info("fuse: unmounting", "mountpoint", h.mountpoint)
-	if err := linuxutil.Ext4Unmount(ctx, h.mountpoint); err != nil {
+	if err := linuxutil.UnmountLoop(ctx, h.mountpoint); err != nil {
 		return err
 	}
 	if h.loopDev != "" {

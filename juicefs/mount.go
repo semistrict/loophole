@@ -5,9 +5,10 @@
 // (BLAKE3 hashing) under a blobs/ prefix in the same S3 bucket.
 //
 // Two modes are supported:
-//   - ModeJuiceFS (in-process): JuiceFS VFS used directly, no FUSE needed.
-//     Works on macOS and Linux.
-//   - (future) FUSE mode: JuiceFS VFS → fuse.Serve → kernel mount.
+//   - InProcess (LOOPHOLE_MODE=inprocess LOOPHOLE_DEFAULT_FS=juicefs): JuiceFS VFS
+//     used directly, no FUSE needed. Works on macOS and Linux.
+//   - FUSE (LOOPHOLE_MODE=fusefs LOOPHOLE_DEFAULT_FS=juicefs): JuiceFS VFS →
+//     fuse.Serve → kernel mount. Linux only.
 package juicefs
 
 import (

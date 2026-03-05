@@ -16,7 +16,7 @@ import (
 // TestE2E_Lwext4FUSEMountIsReal proves that lwext4fuse mode creates a real
 // FUSE mount visible in /proc/mounts, and that OS-level file I/O goes through it.
 func TestE2E_Lwext4FUSEMountIsReal(t *testing.T) {
-	if mode() != loophole.ModeLwext4FUSE {
+	if mode() != loophole.ModeFuseFS {
 		t.Skip("lwext4fuse-only test")
 	}
 
@@ -24,7 +24,7 @@ func TestE2E_Lwext4FUSEMountIsReal(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "fuse-proof")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "fuse-proof"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "fuse-proof"}))
 	require.NoError(t, b.Mount(ctx, "fuse-proof", mp))
 
 	// 1. The mountpoint must appear in /proc/mounts as a fuse mount.
