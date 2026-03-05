@@ -8,7 +8,7 @@ import (
 	"github.com/semistrict/loophole/juicefs"
 )
 
-func newBackendForMode(t *testing.T, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
+func newBackendForMode(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
 	t.Helper()
 	if b := newPlatformBackend(t, vm, inst, store); b != nil {
 		return b

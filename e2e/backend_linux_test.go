@@ -14,7 +14,7 @@ import (
 	"github.com/semistrict/loophole/nbdvm"
 )
 
-func newPlatformBackend(t *testing.T, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
+func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
 	t.Helper()
 	switch mode() {
 	case loophole.ModeNBD:

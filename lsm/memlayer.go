@@ -10,8 +10,6 @@ import (
 	"sort"
 	"sync"
 	"sync/atomic"
-
-	"golang.org/x/sys/unix"
 )
 
 var errMemLayerCleanedUp = errors.New("memlayer already cleaned up")
@@ -20,15 +18,19 @@ var errMemLayerCleanedUp = errors.New("memlayer already cleaned up")
 // Callers should freeze the current memlayer and retry.
 var ErrMemLayerFull = errors.New("memlayer full")
 
-// MemLayer is the in-memory write buffer backed by a memory-mapped file.
-// Pages are stored in fixed-size slots within the mmap region, and an
-// in-memory index maps page addresses to slots. Overwrites to the same
-// page reuse the existing slot (in-place update), avoiding the append-only
-// amplification of the previous file-based design.
+// MemLayer is the in-memory write buffer backed by a file on local disk.
+// Pages are stored in fixed-size slots within the file, and an in-memory
+// index maps page addresses to slots. Overwrites to the same page reuse
+// the existing slot (in-place update), avoiding the append-only amplification
+// of the previous file-based design.
+//
+// I/O uses pread/pwrite with fadvise(FADV_DONTNEED) to avoid populating the
+// kernel page cache. This prevents double-caching when the FUSE writeback
+// cache is enabled.
 type MemLayer struct {
 	mu       sync.RWMutex
-	data     []byte   // mmap'd region (maxPages * PageSize)
-	file     *os.File // backing file (kept open for mmap lifetime)
+	file     *os.File // backing file (kept open)
+	fd       int      // cached fd for fadvise
 	path     string
 	index    map[uint64]memEntry // pageAddr → latest entry
 	nextSlot int                 // bump allocator for slots
@@ -37,16 +39,17 @@ type MemLayer struct {
 	endSeq   uint64 // set when frozen
 	size     atomic.Int64
 	frozen   bool
+	closed   bool // set when cleanup() is called
 }
 
 // memEntry is an index entry for a single page in the memLayer.
 type memEntry struct {
 	seq       uint64
-	slot      int  // index into mmap slab
+	slot      int  // index into file slab
 	tombstone bool // true = PunchHole, read as zeros
 }
 
-// newMemLayer creates a new memLayer backed by a memory-mapped file.
+// newMemLayer creates a new memLayer backed by a file on local disk.
 // maxPages is the maximum number of unique pages that can be stored.
 func newMemLayer(dir string, startSeq uint64, maxPages int) (*MemLayer, error) {
 	var rnd [4]byte
@@ -65,16 +68,9 @@ func newMemLayer(dir string, startSeq uint64, maxPages int) (*MemLayer, error) {
 		return nil, err
 	}
 
-	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("mmap memlayer: %w", err)
-	}
-
 	return &MemLayer{
-		data:     data,
 		file:     f,
+		fd:       int(f.Fd()),
 		path:     path,
 		index:    make(map[uint64]memEntry),
 		maxPages: maxPages,
@@ -82,7 +78,7 @@ func newMemLayer(dir string, startSeq uint64, maxPages int) (*MemLayer, error) {
 	}, nil
 }
 
-// put writes a page into the mmap region and updates the index.
+// put writes a page into the backing file and updates the index.
 // If the page already exists, its slot is reused (in-place overwrite).
 func (ml *MemLayer) put(pageAddr, seq uint64, data []byte) error {
 	if len(data) != PageSize {
@@ -110,8 +106,11 @@ func (ml *MemLayer) put(pageAddr, seq uint64, data []byte) error {
 		ml.size.Add(PageSize)
 	}
 
-	off := slot * PageSize
-	copy(ml.data[off:off+PageSize], data)
+	off := int64(slot) * PageSize
+	if _, err := ml.file.WriteAt(data, off); err != nil {
+		return fmt.Errorf("memlayer write: %w", err)
+	}
+	fadviseDropCache(ml.fd, off, PageSize)
 
 	ml.index[pageAddr] = memEntry{seq: seq, slot: slot}
 	return nil
@@ -145,8 +144,8 @@ func (ml *MemLayer) get(pageAddr uint64) (memEntry, bool) {
 	return e, ok
 }
 
-// readData returns a copy of the page data for an entry from the mmap region.
-// The copy is made under the read lock to prevent torn reads from concurrent put() calls
+// readData returns a copy of the page data for an entry from the backing file.
+// The read is done under the read lock to prevent torn reads from concurrent put() calls
 // that reuse the same slot for in-place overwrites.
 func (ml *MemLayer) readData(e memEntry) ([]byte, error) {
 	if e.tombstone {
@@ -156,13 +155,16 @@ func (ml *MemLayer) readData(e memEntry) ([]byte, error) {
 	ml.mu.RLock()
 	defer ml.mu.RUnlock()
 
-	if ml.data == nil {
+	if ml.closed {
 		return nil, errMemLayerCleanedUp
 	}
 
-	off := e.slot * PageSize
+	off := int64(e.slot) * PageSize
 	buf := make([]byte, PageSize)
-	copy(buf, ml.data[off:off+PageSize])
+	if _, err := ml.file.ReadAt(buf, off); err != nil {
+		return nil, fmt.Errorf("memlayer read: %w", err)
+	}
+	fadviseDropCache(ml.fd, off, PageSize)
 	return buf, nil
 }
 
@@ -198,12 +200,11 @@ func (ml *MemLayer) entries() []sortedEntry {
 	return out
 }
 
-// cleanup unmaps the mmap region, closes the backing file, and removes it.
+// cleanup closes the backing file and removes it.
 func (ml *MemLayer) cleanup() {
 	ml.mu.Lock()
 	defer ml.mu.Unlock()
-	_ = unix.Munmap(ml.data)
-	ml.data = nil
+	ml.closed = true
 	_ = ml.file.Close()
 	_ = os.Remove(ml.path)
 }

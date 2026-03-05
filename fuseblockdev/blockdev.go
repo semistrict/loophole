@@ -56,13 +56,14 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 	negTTL := time.Second
 	server, err := fs.Mount(mountDir, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName:        "loophole",
-			Name:          "loophole",
-			DisableXAttrs: true,
-			MaxWrite:      1024 * 1024,
-			MaxBackground: 128,
-			DirectMount:   true,
-			Debug:         opts.Debug,
+			FsName:          "loophole",
+			Name:            "loophole",
+			DisableXAttrs:   true,
+			MaxWrite:        1024 * 1024,
+			MaxBackground:   128,
+			DirectMount:     true,
+			Debug:           opts.Debug,
+			EnableWriteback: true,
 		},
 		EntryTimeout:    &cacheTTL,
 		AttrTimeout:     &cacheTTL,
@@ -251,7 +252,7 @@ func (d *deviceNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint3
 		return nil, 0, syscall.EIO
 	}
 	done(fs.OK)
-	return &deviceHandle{vol: d.vol}, fuse.FOPEN_DIRECT_IO, fs.OK
+	return &deviceHandle{vol: d.vol}, fuse.FOPEN_KEEP_CACHE, fs.OK
 }
 
 func (d *deviceNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {

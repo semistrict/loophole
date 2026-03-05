@@ -4,8 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-
-	"golang.org/x/sys/unix"
 )
 
 // pageCacheKey identifies a cached page.
@@ -14,10 +12,15 @@ type pageCacheKey struct {
 	pageAddr   uint64
 }
 
-// PageCache is a fixed-size page cache backed by a memory-mapped file.
+// PageCache is a fixed-size page cache backed by a file on local disk.
 // Data lives off-heap (zero GC pressure). The backing file is deleted and
 // recreated on every startup — the cache is write-through from S3, so stale
 // data after a crash is unsafe.
+//
+// I/O uses pread/pwrite with fadvise(FADV_DONTNEED) to avoid populating the
+// kernel page cache. This prevents double-caching when the FUSE writeback
+// cache is enabled: data cached here is not also held in the kernel page
+// cache for the backing file.
 //
 // Eviction uses the CLOCK algorithm (approximate LRU). Each slot has a
 // referenced bit that is set on access. The clock hand sweeps slots: if
@@ -26,8 +29,8 @@ type pageCacheKey struct {
 type PageCache struct {
 	mu         sync.Mutex
 	maxPages   int
-	data       []byte               // mmap'd region (maxPages * PageSize)
 	file       *os.File             // backing file (kept open)
+	fd         int                  // cached fd for fadvise
 	path       string               // backing file path
 	index      map[pageCacheKey]int // key → slot index
 	slots      []pageCacheKey       // slot → key (reverse index for eviction)
@@ -36,7 +39,7 @@ type PageCache struct {
 	freeSlots  []int                // stack of free slot indices
 }
 
-// NewPageCache creates a page cache backed by a memory-mapped file at path.
+// NewPageCache creates a page cache backed by a file at path.
 // Any existing file at path is deleted first.
 func NewPageCache(path string, maxBytes int64) (*PageCache, error) {
 	maxPages := int(maxBytes / PageSize)
@@ -62,13 +65,6 @@ func NewPageCache(path string, maxBytes int64) (*PageCache, error) {
 		return nil, err
 	}
 
-	data, err := unix.Mmap(int(f.Fd()), 0, int(size), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
-	if err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
-		return nil, err
-	}
-
 	// Initialize all slots as free (in reverse order so slot 0 is popped first).
 	freeSlots := make([]int, maxPages)
 	for i := range maxPages {
@@ -77,8 +73,8 @@ func NewPageCache(path string, maxBytes int64) (*PageCache, error) {
 
 	return &PageCache{
 		maxPages:   maxPages,
-		data:       data,
 		file:       f,
+		fd:         int(f.Fd()),
 		path:       path,
 		index:      make(map[pageCacheKey]int, maxPages),
 		slots:      make([]pageCacheKey, maxPages),
@@ -98,8 +94,13 @@ func (pc *PageCache) Get(timelineID string, pageAddr uint64) []byte {
 		return nil
 	}
 	pc.referenced[slot] = true
+
+	off := int64(slot) * PageSize
 	out := make([]byte, PageSize)
-	copy(out, pc.data[slot*PageSize:])
+	if _, err := pc.file.ReadAt(out, off); err != nil {
+		return nil
+	}
+	fadviseDropCache(pc.fd, off, PageSize)
 	return out
 }
 
@@ -112,7 +113,11 @@ func (pc *PageCache) Put(timelineID string, pageAddr uint64, data []byte) {
 
 	// Update in place if already cached.
 	if slot, ok := pc.index[key]; ok {
-		copy(pc.data[slot*PageSize:], data)
+		off := int64(slot) * PageSize
+		if _, err := pc.file.WriteAt(data, off); err != nil {
+			return
+		}
+		fadviseDropCache(pc.fd, off, PageSize)
 		pc.referenced[slot] = true
 		return
 	}
@@ -126,7 +131,12 @@ func (pc *PageCache) Put(timelineID string, pageAddr uint64, data []byte) {
 		slot = pc.clockEvict()
 	}
 
-	copy(pc.data[slot*PageSize:], data)
+	off := int64(slot) * PageSize
+	if _, err := pc.file.WriteAt(data, off); err != nil {
+		pc.freeSlots = append(pc.freeSlots, slot)
+		return
+	}
+	fadviseDropCache(pc.fd, off, PageSize)
 	pc.index[key] = slot
 	pc.slots[slot] = key
 	pc.referenced[slot] = true
@@ -164,12 +174,8 @@ func (pc *PageCache) Delete(timelineID string, pageAddr uint64) {
 	pc.freeSlots = append(pc.freeSlots, slot)
 }
 
-// Close unmaps the memory, closes the file, and removes the backing file.
+// Close closes the file and removes the backing file.
 func (pc *PageCache) Close() error {
-	if err := unix.Munmap(pc.data); err != nil {
-		return err
-	}
-	pc.data = nil
 	if err := pc.file.Close(); err != nil {
 		return err
 	}

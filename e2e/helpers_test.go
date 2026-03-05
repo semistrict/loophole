@@ -75,7 +75,7 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func skipE2E(t *testing.T) {
+func skipE2E(t testing.TB) {
 	t.Helper()
 	if needsRoot() && os.Getuid() != 0 {
 		t.Skip("mode requires root; skipping")
@@ -92,10 +92,12 @@ func skipKernelOnly(t *testing.T) {
 // ---------- Backend creation ----------
 
 // newBackend creates a fsbackend.Service for the current mode.
-func newBackend(t *testing.T) fsbackend.Service {
+func newBackend(t testing.TB) fsbackend.Service {
 	t.Helper()
 	skipE2E(t)
-	trackMetrics(t)
+	if tt, ok := t.(*testing.T); ok {
+		trackMetrics(tt)
+	}
 
 	inst := uniqueInstance(t)
 	ctx := t.Context()
@@ -122,7 +124,7 @@ type testFS struct {
 	mountpoint string
 }
 
-func newTestFS(t *testing.T, b fsbackend.Service, mountpoint string) testFS {
+func newTestFS(t testing.TB, b fsbackend.Service, mountpoint string) testFS {
 	t.Helper()
 	f, err := b.FS(mountpoint)
 	require.NoError(t, err)
@@ -187,7 +189,7 @@ func (f testFS) ReadDir(t *testing.T, name string) []string {
 
 // ---------- Shared helpers ----------
 
-func uniqueInstance(t *testing.T) loophole.Instance {
+func uniqueInstance(t testing.TB) loophole.Instance {
 	t.Helper()
 	bucket := os.Getenv("BUCKET")
 	if bucket == "" {
@@ -262,7 +264,7 @@ func runCmd(t *testing.T, name string, args ...string) {
 }
 
 // mountVolume is a convenience: creates a backend, creates+formats a volume, mounts it, returns testFS + backend.
-func mountVolume(t *testing.T, name string) (testFS, fsbackend.Service) {
+func mountVolume(t testing.TB, name string) (testFS, fsbackend.Service) {
 	t.Helper()
 	b := newBackend(t)
 	ctx := t.Context()
@@ -279,7 +281,7 @@ func mountVolume(t *testing.T, name string) (testFS, fsbackend.Service) {
 // mountpoint returns a mountpoint path for a volume name.
 // For modes with real mounts, returns a temp directory.
 // For in-process lwext4 mode, returns a logical key.
-func mountpoint(t *testing.T, volume string) string {
+func mountpoint(t testing.TB, volume string) string {
 	if needsRealMount() {
 		dir := t.TempDir()
 		return dir

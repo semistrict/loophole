@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-juicefs e2e-juicefsfuse e2e-sqlite liblwext4 clean-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-juicefs e2e-juicefsfuse e2e-sqlite bench-fuse liblwext4 clean-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -146,6 +146,13 @@ e2e-juicefsfuse: liblwext4
 # Usage: make e2e-sqlite [RUN=TestName]
 e2e-sqlite: liblwext4
 	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') -run 'TestE2E_SQLite' ./e2e/
+
+# Run FUSE benchmarks (ext4 by default, override with LOOPHOLE_DEFAULT_FS=xfs)
+# Usage: make bench-fuse
+#        make bench-fuse LOOPHOLE_DEFAULT_FS=xfs
+#        make bench-fuse COUNT=5   (for benchstat: run 5 times)
+bench-fuse: liblwext4
+	LOG_LEVEL=error go test -tags "$(BUILDTAGS)" -bench=. -run=^$$ -benchmem -count=$(or $(COUNT),1) -timeout 600s ./e2e/
 
 # Run containerstorage integration tests (FUSE mode)
 test-containerstorage: install

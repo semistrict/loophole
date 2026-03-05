@@ -204,7 +204,7 @@ type LoopDevice struct {
 // caller can grab the same device number. We retry up to 6 times on EBUSY,
 // mirroring the strategy used by util-linux's losetup.
 func LoopAttach(backingPath string, optimalIOSize int) (*LoopDevice, error) {
-	backingFD, err := unix.Open(backingPath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_DIRECT, 0)
+	backingFD, err := unix.Open(backingPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open backing file %s: %w", backingPath, err)
 	}
@@ -278,9 +278,7 @@ func loopConfigure1(backingFD int) (string, error) {
 	cfg := loopConfig{
 		FD:        uint32(backingFD),
 		BlockSize: 4096,
-		Info: loopInfo64{
-			Flags: loFlagsDirectIO,
-		},
+		Info:      loopInfo64{},
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
 		uintptr(loopFile.Fd()),

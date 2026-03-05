@@ -9,6 +9,6 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 )
 
-func newPlatformBackend(_ *testing.T, _ loophole.VolumeManager, _ loophole.Instance, _ loophole.ObjectStore) fsbackend.Service {
+func newPlatformBackend(_ testing.TB, _ loophole.VolumeManager, _ loophole.Instance, _ loophole.ObjectStore) fsbackend.Service {
 	return nil
 }
