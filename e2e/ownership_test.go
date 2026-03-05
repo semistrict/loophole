@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/semistrict/loophole"
 	"github.com/stretchr/testify/require"
 )
 
