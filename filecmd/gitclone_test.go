@@ -2,10 +2,14 @@ package filecmd
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 	"github.com/semistrict/loophole/fsbackend"
@@ -70,6 +74,141 @@ func TestDotGitInitLwext4(t *testing.T) {
 	require.NoError(t, err)
 	_, err = fsys.Stat("/repo/.git/refs/tags")
 	require.NoError(t, err)
+}
+
+// TestGitCloneLocalToLwext4 clones a local git repo into an lwext4-backed billyFS.
+func TestGitCloneLocalToLwext4(t *testing.T) {
+	// Create a small test repo with real git so we have a valid packfile.
+	srcDir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = srcDir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v: %s", args, out)
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@test.com")
+	run("git", "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "hello.txt"), []byte("hello world\n"), 0o644))
+	run("git", "add", ".")
+	run("git", "commit", "-m", "initial")
+
+	fsys := newTestLwext4FS(t)
+	worktree := newBillyFS(fsys, "/repo")
+	dotgit, err := worktree.Chroot(".git")
+	require.NoError(t, err)
+
+	storage := filesystem.NewStorageWithOptions(dotgit, cache.NewObjectLRUDefault(), filesystem.Options{})
+	_, err = git.Clone(storage, worktree, &git.CloneOptions{URL: srcDir})
+	require.NoError(t, err)
+
+	// Verify the file was checked out.
+	data, err := fsys.ReadFile("/repo/hello.txt")
+	require.NoError(t, err)
+	require.Equal(t, "hello world\n", string(data))
+
+	// Verify we can open the repo and read the log.
+	repo, err := git.Open(storage, worktree)
+	require.NoError(t, err)
+	logIter, err := repo.Log(&git.LogOptions{})
+	require.NoError(t, err)
+	commit, err := logIter.Next()
+	require.NoError(t, err)
+	require.Equal(t, "initial\n", commit.Message)
+}
+
+// TestGitCloneLargeRepoToLwext4 clones a repo with enough objects to produce
+// a multi-object packfile, reproducing the "zlib: invalid checksum" bug.
+func TestGitCloneLargeRepoToLwext4(t *testing.T) {
+	srcDir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = srcDir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v: %s", args, out)
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@test.com")
+	run("git", "config", "user.name", "Test")
+
+	// Create 100 commits with unique files to generate a sizable packfile.
+	for i := range 100 {
+		name := filepath.Join(srcDir, fmt.Sprintf("file%03d.txt", i))
+		content := fmt.Sprintf("content for file %d\nline 2\nline 3\n", i)
+		require.NoError(t, os.WriteFile(name, []byte(content), 0o644))
+		run("git", "add", ".")
+		run("git", "commit", "-m", fmt.Sprintf("commit %d", i))
+	}
+
+	fsys := newTestLwext4FS(t)
+	worktree := newBillyFS(fsys, "/repo")
+	dotgit, err := worktree.Chroot(".git")
+	require.NoError(t, err)
+
+	storage := filesystem.NewStorageWithOptions(dotgit, cache.NewObjectLRUDefault(), filesystem.Options{})
+	_, err = git.Clone(storage, worktree, &git.CloneOptions{URL: srcDir})
+	require.NoError(t, err)
+
+	// Verify last file exists.
+	data, err := fsys.ReadFile("/repo/file099.txt")
+	require.NoError(t, err)
+	require.Contains(t, string(data), "content for file 99")
+
+	// Verify we can read the log.
+	repo, err := git.Open(storage, worktree)
+	require.NoError(t, err)
+	logIter, err := repo.Log(&git.LogOptions{})
+	require.NoError(t, err)
+	commit, err := logIter.Next()
+	require.NoError(t, err)
+	require.Equal(t, "commit 99\n", commit.Message)
+}
+
+// TestGitCloneRealRepoToLwext4 clones the loophole repo itself into lwext4.
+// This reproduces the "zlib: invalid checksum" seen with large packfiles.
+func TestGitCloneRealRepoToLwext4(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+
+	const size = 512 * 1024 * 1024 // 512MB for the real repo
+	dev := &memDev{data: make([]byte, size)}
+	ext4fs, err := lwext4.Format(dev, size, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { ext4fs.Close() })
+	fsys := fsbackend.NewLwext4FS(ext4fs)
+
+	worktree := newBillyFS(fsys, "/repo")
+	dotgit, err := worktree.Chroot(".git")
+	require.NoError(t, err)
+
+	storage := filesystem.NewStorageWithOptions(dotgit, cache.NewObjectLRUDefault(), filesystem.Options{})
+	_, err = git.Clone(storage, worktree, &git.CloneOptions{
+		URL:   repoRoot,
+		Depth: 1,
+	})
+	require.NoError(t, err)
+
+	// Verify a known file exists.
+	data, err := fsys.ReadFile("/repo/go.mod")
+	require.NoError(t, err)
+	require.Contains(t, string(data), "github.com/semistrict/loophole")
+}
+
+func findRepoRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("could not find repo root")
+		}
+		dir = parent
+	}
 }
 
 // TestBillyStatNotFound verifies that billyFS.Stat returns os.ErrNotExist

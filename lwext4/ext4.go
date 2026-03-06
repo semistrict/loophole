@@ -52,6 +52,7 @@ type FormatOptions struct {
 
 // FS is a mounted lwext4 filesystem instance.
 type FS struct {
+	mu         sync.Mutex // serializes all CGO calls; lwext4 is not thread-safe
 	bdev       C.lh_bdev
 	handle     int
 	devName    string
@@ -197,6 +198,8 @@ func Mount(dev BlockDevice, size int64) (*FS, error) {
 
 // Close unmounts and cleans up.
 func (fs *FS) Close() error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cMountPoint := C.CString(fs.mountPoint)
 	defer C.free(unsafe.Pointer(cMountPoint))
 	cDevName := C.CString(fs.devName)
@@ -216,6 +219,12 @@ func (fs *FS) Close() error {
 
 // CacheFlush flushes all dirty cache entries to the block device.
 func (fs *FS) CacheFlush() error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	return fs.cacheFlushLocked()
+}
+
+func (fs *FS) cacheFlushLocked() error {
 	cMountPoint := C.CString(fs.mountPoint)
 	defer C.free(unsafe.Pointer(cMountPoint))
 	rc := C.lh_cache_flush(cMountPoint)
@@ -270,6 +279,8 @@ const (
 
 // Lookup finds a child inode by name in a parent directory.
 func (fs *FS) Lookup(parent Ino, name string) (Ino, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	var child C.uint32_t
@@ -282,6 +293,8 @@ func (fs *FS) Lookup(parent Ino, name string) (Ino, error) {
 
 // GetAttr returns the attributes of an inode.
 func (fs *FS) GetAttr(ino Ino) (*Attr, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	var ca C.struct_inode_attr
 	rc := C.lh_getattr(fs.mp, C.uint32_t(ino), &ca)
 	if rc != 0 {
@@ -302,6 +315,8 @@ func (fs *FS) GetAttr(ino Ino) (*Attr, error) {
 
 // SetAttr sets attributes on an inode. Only fields indicated by mask are written.
 func (fs *FS) SetAttr(ino Ino, attr *Attr, mask uint32) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	ca := C.struct_inode_attr{
 		mode:  C.uint32_t(attr.Mode),
 		uid:   C.uint32_t(attr.Uid),
@@ -319,6 +334,8 @@ func (fs *FS) SetAttr(ino Ino, attr *Attr, mask uint32) error {
 
 // Mknod creates a regular file in a parent directory. Returns the new inode.
 func (fs *FS) Mknod(parent Ino, name string, mode uint32) (Ino, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	var child C.uint32_t
@@ -332,6 +349,8 @@ func (fs *FS) Mknod(parent Ino, name string, mode uint32) (Ino, error) {
 
 // Mkdir creates a directory in a parent directory. Returns the new inode.
 func (fs *FS) Mkdir(parent Ino, name string, mode uint32) (Ino, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	var child C.uint32_t
@@ -345,6 +364,8 @@ func (fs *FS) Mkdir(parent Ino, name string, mode uint32) (Ino, error) {
 
 // Unlink removes a non-directory entry from a parent directory.
 func (fs *FS) Unlink(parent Ino, name string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	rc := C.lh_unlink(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)))
@@ -358,6 +379,8 @@ func (fs *FS) Unlink(parent Ino, name string) error {
 // to zero, adds it to the on-disk orphan list instead of freeing it. Returns
 // the child inode number so the caller can track open handles.
 func (fs *FS) UnlinkOrphan(parent Ino, name string) (Ino, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	var child C.uint32_t
@@ -371,6 +394,8 @@ func (fs *FS) UnlinkOrphan(parent Ino, name string) (Ino, error) {
 // FreeOrphan removes an inode from the orphan list and frees its data and inode.
 // Call when the last open file handle for an orphaned inode is closed.
 func (fs *FS) FreeOrphan(ino Ino) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	rc := C.lh_free_orphan(fs.mp, C.uint32_t(ino))
 	if rc != 0 {
 		return rcError(fmt.Sprintf("lwext4: free_orphan(%d)", ino), rc)
@@ -381,6 +406,8 @@ func (fs *FS) FreeOrphan(ino Ino) error {
 // OrphanRecover walks the on-disk orphan list and frees all orphaned inodes.
 // Call once at mount time to clean up after crashes.
 func (fs *FS) OrphanRecover() error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	rc := C.lh_orphan_recover(fs.mp)
 	if rc != 0 {
 		return rcError("lwext4: orphan_recover", rc)
@@ -390,6 +417,8 @@ func (fs *FS) OrphanRecover() error {
 
 // Rmdir removes an empty directory from a parent directory.
 func (fs *FS) Rmdir(parent Ino, name string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	rc := C.lh_rmdir(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)))
@@ -401,6 +430,8 @@ func (fs *FS) Rmdir(parent Ino, name string) error {
 
 // Rename moves an entry from one parent directory to another.
 func (fs *FS) Rename(srcParent Ino, srcName string, dstParent Ino, dstName string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cSrc := C.CString(srcName)
 	defer C.free(unsafe.Pointer(cSrc))
 	cDst := C.CString(dstName)
@@ -417,6 +448,8 @@ func (fs *FS) Rename(srcParent Ino, srcName string, dstParent Ino, dstName strin
 
 // Link creates a hard link to an existing inode in a parent directory.
 func (fs *FS) Link(ino Ino, newParent Ino, newName string) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(newName)
 	defer C.free(unsafe.Pointer(cName))
 	rc := C.lh_link(fs.mp, C.uint32_t(ino), C.uint32_t(newParent),
@@ -429,6 +462,8 @@ func (fs *FS) Link(ino Ino, newParent Ino, newName string) error {
 
 // Symlink creates a symbolic link. Returns the new inode.
 func (fs *FS) Symlink(parent Ino, name string, target string) (Ino, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	cName := C.CString(name)
 	defer C.free(unsafe.Pointer(cName))
 	cTarget := C.CString(target)
@@ -444,6 +479,8 @@ func (fs *FS) Symlink(parent Ino, name string, target string) (Ino, error) {
 
 // Readlink reads the target of a symbolic link.
 func (fs *FS) Readlink(ino Ino) (string, error) {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
 	buf := make([]byte, 4096)
 	var rcnt C.size_t
 	rc := C.lh_readlink(fs.mp, C.uint32_t(ino), (*C.char)(unsafe.Pointer(&buf[0])),
@@ -501,7 +538,9 @@ func (fs *FS) Readdir(ino Ino) ([]DirEntry, error) {
 		readdirMu.Unlock()
 	}()
 
+	fs.mu.Lock()
 	rc := C.lh_readdir_bridge(fs.mp, C.uint32_t(ino), C.uintptr_t(id))
+	fs.mu.Unlock()
 	if rc != 0 {
 		return nil, rcError(fmt.Sprintf("lwext4: readdir(%d)", ino), rc)
 	}
@@ -526,7 +565,9 @@ func (fs *FS) OpenFile(ino Ino, flags int) (*File, error) {
 		cFlags = 0x0000 // O_RDONLY
 	}
 
+	fs.mu.Lock()
 	f := C.lh_file_open(fs.mp, C.uint32_t(ino), C.int(cFlags))
+	fs.mu.Unlock()
 	if f == nil {
 		return nil, fmt.Errorf("lwext4: open(%d): failed", ino)
 	}
@@ -544,8 +585,10 @@ func (f *File) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	f.fs.mu.Lock()
 	var rcnt C.size_t
 	rc := C.lh_file_read(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &rcnt)
+	f.fs.mu.Unlock()
 	if rc != 0 {
 		return int(rcnt), rcError("lwext4: fread", rc)
 	}
@@ -559,12 +602,15 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	f.fs.mu.Lock()
 	rc := C.lh_file_seek(f.f, C.int64_t(off), 0) // SEEK_SET
 	if rc != 0 {
+		f.fs.mu.Unlock()
 		return 0, rcError("lwext4: fseek", rc)
 	}
 	var rcnt C.size_t
 	rc = C.lh_file_read(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &rcnt)
+	f.fs.mu.Unlock()
 	if rc != 0 {
 		return int(rcnt), rcError("lwext4: fread", rc)
 	}
@@ -578,8 +624,10 @@ func (f *File) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	f.fs.mu.Lock()
 	var wcnt C.size_t
 	rc := C.lh_file_write(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &wcnt)
+	f.fs.mu.Unlock()
 	if rc != 0 {
 		return int(wcnt), rcError("lwext4: fwrite", rc)
 	}
@@ -590,10 +638,12 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
 	// If writing past EOF, zero-fill the gap. lwext4's ext4_fwrite
 	// allocates blocks but doesn't zero the gap between old EOF and the
 	// write offset, violating POSIX sparse-file semantics.
-	curSize := f.Size()
+	curSize := int64(C.lh_file_size(f.f))
 	if off > curSize {
 		if err := f.zeroFill(curSize, off-curSize); err != nil {
 			return 0, err
@@ -634,16 +684,21 @@ func (f *File) zeroFill(offset, length int64) error {
 }
 
 func (f *File) Seek(offset int64, whence int) (int64, error) {
+	f.fs.mu.Lock()
 	rc := C.lh_file_seek(f.f, C.int64_t(offset), C.uint32_t(whence))
 	if rc != 0 {
+		f.fs.mu.Unlock()
 		return 0, rcError("lwext4: fseek", rc)
 	}
 	pos := C.lh_file_tell(f.f)
+	f.fs.mu.Unlock()
 	return int64(pos), nil
 }
 
 func (f *File) Truncate(size int64) error {
-	curSize := f.Size()
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+	curSize := int64(C.lh_file_size(f.f))
 	rc := C.lh_file_truncate(f.f, C.uint64_t(size))
 	if rc != 0 {
 		return rcError("lwext4: ftruncate", rc)
@@ -659,13 +714,22 @@ func (f *File) Truncate(size int64) error {
 }
 
 func (f *File) Size() int64 {
-	return int64(C.lh_file_size(f.f))
+	f.fs.mu.Lock()
+	s := int64(C.lh_file_size(f.f))
+	f.fs.mu.Unlock()
+	return s
 }
 
-func (f *File) Sync() error { return f.fs.CacheFlush() }
+func (f *File) Sync() error {
+	f.fs.mu.Lock()
+	defer f.fs.mu.Unlock()
+	return f.fs.cacheFlushLocked()
+}
 
 func (f *File) Close() error {
+	f.fs.mu.Lock()
 	rc := C.lh_file_close(f.f)
+	f.fs.mu.Unlock()
 	if rc != 0 {
 		return rcError("lwext4: fclose", rc)
 	}

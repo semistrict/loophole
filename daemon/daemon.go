@@ -261,7 +261,13 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 // instrument wraps a handler with logging and metrics.
 func (d *Daemon) instrument(next http.Handler) http.Handler {
+	serverHash := loophole.SelfHash()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if clientHash := r.Header.Get("X-Binary-Hash"); clientHash != "" && serverHash != "" && clientHash != serverHash {
+			writeError(w, http.StatusConflict, fmt.Errorf("binary mismatch: client %s != daemon %s (restart the daemon)", clientHash, serverHash))
+			return
+		}
+
 		// Skip endpoints that hijack the connection or don't need metrics.
 		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" {
 			next.ServeHTTP(w, r)

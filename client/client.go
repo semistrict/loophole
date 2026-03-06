@@ -229,7 +229,12 @@ func (c *Client) File(ctx context.Context, argv []string) (*FileResult, error) {
 		},
 	}
 
-	conn, _, err := dialer.DialContext(ctx, "ws://loophole/file", nil)
+	hdrs := http.Header{}
+	if h := loophole.SelfHash(); h != "" {
+		hdrs.Set("X-Binary-Hash", h)
+	}
+
+	conn, _, err := dialer.DialContext(ctx, "ws://loophole/file", hdrs)
 	if err != nil {
 		return nil, fmt.Errorf("no daemon running (socket %s): %w", c.sock, err)
 	}
@@ -471,6 +476,9 @@ func (c *Client) rpc(ctx context.Context, method, path string, body any) (json.R
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if h := loophole.SelfHash(); h != "" {
+		req.Header.Set("X-Binary-Hash", h)
 	}
 
 	resp, err := c.http.Do(req)
