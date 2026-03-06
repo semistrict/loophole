@@ -10,6 +10,14 @@ const (
 	VolumeTypeJuiceFS = "juicefs"
 )
 
+// CreateParams holds the parameters for creating a new volume.
+type CreateParams struct {
+	Volume   string `json:"volume"`
+	Size     uint64 `json:"size,omitempty"`
+	NoFormat bool   `json:"no_format,omitempty"`
+	Type     string `json:"type,omitempty"`
+}
+
 // VolumeManager manages the lifecycle of volumes.
 type VolumeManager interface {
 	NewVolume(ctx context.Context, name string, size uint64, volType string) (Volume, error)
@@ -30,6 +38,10 @@ type Volume interface {
 	ReadOnly() bool
 	VolumeType() string
 	Read(ctx context.Context, buf []byte, offset uint64) (int, error)
+	// ReadAt returns n bytes starting at offset without copying into a
+	// caller-provided buffer. The returned slice is pinned in the page
+	// cache until release is called. Callers must not modify the slice.
+	ReadAt(ctx context.Context, offset uint64, n int) (buf []byte, release func(), err error)
 	Write(ctx context.Context, data []byte, offset uint64) error
 	PunchHole(ctx context.Context, offset, length uint64) error
 	ZeroRange(ctx context.Context, offset, length uint64) error

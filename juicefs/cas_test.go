@@ -1,15 +1,18 @@
 package juicefs
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/juicedata/juicefs/pkg/chunk"
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/diskcache"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -22,7 +25,7 @@ type testChunkHashDB struct {
 func (m *testChunkHashDB) InitChunkHashTable() error {
 	_, err := m.db.Exec(`CREATE TABLE IF NOT EXISTS lh_chunk_hash (
 		slice_id INTEGER PRIMARY KEY,
-		hashes   BLOB NOT NULL,
+		hashes   BLOB,
 		inline   BLOB
 	)`)
 	return err
@@ -60,7 +63,7 @@ func testCASStore(t *testing.T) *casStore {
 	t.Helper()
 	db := newTestChunkHashDB(t)
 	require.NoError(t, db.InitChunkHashTable())
-	return newCASStore(loophole.NewMemStore(), db, chunk.Config{
+	return newCASStore(Config{ObjStore: loophole.NewMemStore()}, db, chunk.Config{
 		BlockSize: 1 << 20, // 1MB blocks for tests
 	})
 }
@@ -197,7 +200,7 @@ func TestCASStore_Dedup(t *testing.T) {
 	s := testCASStore(t)
 	memStore := s.objStore.(*loophole.MemStore)
 
-	data := []byte("identical content for dedup test!")
+	data := bytes.Repeat([]byte("dedup"), inlineMaxBytes/5+1) // >64KB to force S3 upload path
 
 	w1 := s.NewWriter(10)
 	_, err := w1.WriteAt(data, 0)
@@ -222,6 +225,46 @@ func TestCASStore_Dedup(t *testing.T) {
 	keys, err := memStore.ListKeys(context.Background(), "chunks/")
 	require.NoError(t, err)
 	require.Equal(t, 1, len(keys), fmt.Sprintf("expected 1 CAS object, got %d", len(keys)))
+}
+
+func TestCASReaderCachesBlocksOnDisk(t *testing.T) {
+	db := newTestChunkHashDB(t)
+	require.NoError(t, db.InitChunkHashTable())
+	objStore := loophole.NewMemStore()
+	conf := chunk.Config{BlockSize: 1 << 20}
+
+	// Write without disk cache so blocks only live in S3.
+	writerStore := newCASStore(Config{ObjStore: objStore}, db, conf)
+	data := bytes.Repeat([]byte("block-cache"), inlineMaxBytes/11+1) // >64KB to force S3 upload path
+	w := writerStore.NewWriter(12)
+	_, err := w.WriteAt(data, 0)
+	require.NoError(t, err)
+	require.NoError(t, w.Finish(len(data)))
+
+	// Read with fresh disk cache — first read hits S3 and populates cache.
+	cache, err := diskcache.New(t.TempDir())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, cache.Close()) })
+	readerStore := newCASStore(Config{ObjStore: objStore, DiskCache: cache}, db, conf)
+	objStore.ResetCounts()
+
+	r := readerStore.NewReader(12, len(data))
+	page1 := chunk.NewPage(make([]byte, len(data)))
+	defer page1.Release()
+	n, err := r.ReadAt(t.Context(), page1, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(data), n)
+	require.Equal(t, data, page1.Data)
+	require.EqualValues(t, 1, objStore.Count(loophole.OpGet))
+
+	// Second read hits disk cache — no additional S3 calls.
+	page2 := chunk.NewPage(make([]byte, len(data)))
+	defer page2.Release()
+	n, err = r.ReadAt(t.Context(), page2, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(data), n)
+	require.Equal(t, data, page2.Data)
+	require.EqualValues(t, 1, objStore.Count(loophole.OpGet))
 }
 
 func TestCASStore_FlushPending(t *testing.T) {
@@ -265,4 +308,136 @@ func TestCASWriter_SetID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 4, n)
 	require.Equal(t, []byte("test"), page.Data)
+}
+
+func testCASStoreWithStaging(t *testing.T) (*casStore, *loophole.MemStore) {
+	t.Helper()
+	db := newTestChunkHashDB(t)
+	require.NoError(t, db.InitChunkHashTable())
+	objStore := loophole.NewMemStore()
+	stagingDir := filepath.Join(t.TempDir(), "staging")
+	return newCASStore(Config{ObjStore: objStore, StagingDir: stagingDir}, db, chunk.Config{
+		BlockSize: 1 << 20,
+	}), objStore
+}
+
+func TestCASWriter_Writeback(t *testing.T) {
+	s, objStore := testCASStoreWithStaging(t)
+	defer s.Close()
+
+	data := bytes.Repeat([]byte("writeback-test"), inlineMaxBytes/14+1) // >64KB
+
+	w := s.NewWriter(100)
+	w.SetWriteback(true)
+	_, err := w.WriteAt(data, 0)
+	require.NoError(t, err)
+	require.NoError(t, w.Finish(len(data)))
+
+	// Data should be readable immediately from staging (before upload completes).
+	r := s.NewReader(100, len(data))
+	page := chunk.NewPage(make([]byte, len(data)))
+	defer page.Release()
+	n, err := r.ReadAt(t.Context(), page, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(data), n)
+	require.Equal(t, data, page.Data)
+
+	// After FlushPending, data should be in S3.
+	require.NoError(t, s.FlushPending(t.Context()))
+
+	keys, err := objStore.ListKeys(t.Context(), "chunks/")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(keys))
+}
+
+func TestCASWriter_WritebackDedup(t *testing.T) {
+	s, objStore := testCASStoreWithStaging(t)
+	defer s.Close()
+
+	data := bytes.Repeat([]byte("dedup-wb"), inlineMaxBytes/8+1) // >64KB
+
+	for _, id := range []uint64{200, 201} {
+		w := s.NewWriter(id)
+		w.SetWriteback(true)
+		_, err := w.WriteAt(data, 0)
+		require.NoError(t, err)
+		require.NoError(t, w.Finish(len(data)))
+	}
+
+	require.NoError(t, s.FlushPending(t.Context()))
+
+	keys, err := objStore.ListKeys(t.Context(), "chunks/")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(keys), fmt.Sprintf("expected 1 CAS object, got %d", len(keys)))
+
+	// Both slices should be readable.
+	for _, id := range []uint64{200, 201} {
+		r := s.NewReader(id, len(data))
+		page := chunk.NewPage(make([]byte, len(data)))
+		n, err := r.ReadAt(t.Context(), page, 0)
+		require.NoError(t, err, "slice %d", id)
+		require.Equal(t, len(data), n)
+		require.Equal(t, data, page.Data)
+		page.Release()
+	}
+}
+
+func TestCASWriter_WritebackFallback(t *testing.T) {
+	db := newTestChunkHashDB(t)
+	require.NoError(t, db.InitChunkHashTable())
+	objStore := loophole.NewMemStore()
+	// Use a path that will fail staging.
+	s := newCASStore(Config{ObjStore: objStore, StagingDir: "/dev/null/impossible"}, db, chunk.Config{
+		BlockSize: 1 << 20,
+	})
+	defer s.Close()
+
+	data := bytes.Repeat([]byte("fallback"), inlineMaxBytes/8+1) // >64KB
+
+	w := s.NewWriter(300)
+	w.SetWriteback(true)
+	_, err := w.WriteAt(data, 0)
+	require.NoError(t, err)
+	// Staging will fail, should fall back to direct upload.
+	require.NoError(t, w.Finish(len(data)))
+
+	r := s.NewReader(300, len(data))
+	page := chunk.NewPage(make([]byte, len(data)))
+	defer page.Release()
+	n, err := r.ReadAt(t.Context(), page, 0)
+	require.NoError(t, err)
+	require.Equal(t, len(data), n)
+	require.Equal(t, data, page.Data)
+
+	keys, err := objStore.ListKeys(t.Context(), "chunks/")
+	require.NoError(t, err)
+	require.Equal(t, 1, len(keys))
+}
+
+func TestCASStore_FlushPendingDrainsAll(t *testing.T) {
+	s, objStore := testCASStoreWithStaging(t)
+	defer s.Close()
+
+	// Write multiple slices with writeback.
+	for id := uint64(400); id < 410; id++ {
+		data := bytes.Repeat([]byte(fmt.Sprintf("drain-%d-", id)), inlineMaxBytes/10+1) // >64KB, unique per slice
+		w := s.NewWriter(id)
+		w.SetWriteback(true)
+		_, err := w.WriteAt(data, 0)
+		require.NoError(t, err)
+		require.NoError(t, w.Finish(len(data)))
+	}
+
+	require.NoError(t, s.FlushPending(t.Context()))
+
+	// All 10 slices should have been uploaded (each unique = 10 objects).
+	keys, err := objStore.ListKeys(t.Context(), "chunks/")
+	require.NoError(t, err)
+	require.Equal(t, 10, len(keys))
+
+	// No pending items should remain.
+	s.pendingMu.Lock()
+	remaining := len(s.pending)
+	s.pendingMu.Unlock()
+	require.Equal(t, 0, remaining)
 }

@@ -11,27 +11,40 @@ import (
 	"github.com/semistrict/loophole/juicefs"
 )
 
-func createBackend(vm loophole.VolumeManager, inst loophole.Instance, dir loophole.Dir, store loophole.ObjectStore) (fsbackend.Service, error) {
+func createBackend(vm loophole.VolumeManager, inst loophole.Instance, dir loophole.Dir, cfg juicefs.Config) (fsbackend.Service, error) {
+	drivers := make(map[string]fsbackend.AnyDriver)
 	switch inst.Mode {
 	case loophole.ModeInProcess:
-		if inst.DefaultFSType == loophole.FSJuiceFS {
-			return juicefs.NewInProcess(vm, store), nil
+		drivers[loophole.VolumeTypeExt4] = fsbackend.NewLwext4Driver()
+		if cfg.ObjStore != nil {
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewInProcessDriver(cfg)
 		}
-		return fsbackend.NewLwext4(vm), nil
 	case loophole.ModeFuseFS:
-		if inst.DefaultFSType == loophole.FSJuiceFS {
-			return juicefs.NewFUSE(vm, store), nil
+		drivers[loophole.VolumeTypeExt4] = fsbackend.NewLwext4FUSEDriver()
+		if cfg.ObjStore != nil {
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewFUSEDriver(cfg)
 		}
-		return fsbackend.NewLwext4FUSE(vm), nil
 	case loophole.ModeNBD:
-		return fsbackend.NewNBD(vm, nil)
+		nbd, err := fsbackend.NewNBDDriver(vm, nil)
+		if err != nil {
+			return nil, fmt.Errorf("start NBD backend: %w", err)
+		}
+		drivers[loophole.VolumeTypeExt4] = nbd
+		drivers[loophole.VolumeTypeXFS] = nbd
 	case loophole.ModeTestNBDTCP:
-		return fsbackend.NewNBDTCP(vm, nil)
-	default:
-		backend, err := fsbackend.NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug"})
+		nbd, err := fsbackend.NewNBDTCPDriver(vm, nil)
+		if err != nil {
+			return nil, fmt.Errorf("start NBD TCP backend: %w", err)
+		}
+		drivers[loophole.VolumeTypeExt4] = nbd
+		drivers[loophole.VolumeTypeXFS] = nbd
+	default: // ModeFUSE (blockdev)
+		fuse, err := fsbackend.NewFUSEDriver(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug"})
 		if err != nil {
 			return nil, fmt.Errorf("start FUSE backend: %w", err)
 		}
-		return backend, nil
+		drivers[loophole.VolumeTypeExt4] = fuse
+		drivers[loophole.VolumeTypeXFS] = fuse
 	}
+	return fsbackend.NewBackend(vm, drivers), nil
 }

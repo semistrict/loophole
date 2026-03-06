@@ -9,9 +9,9 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +21,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/diskcache"
 	"github.com/semistrict/loophole/metrics"
 )
 
@@ -51,7 +52,7 @@ type Timeline struct {
 	timelinesRoot loophole.ObjectStore // rooted at timelines/
 	cacheDir      string
 	config        Config
-	pageCache     *PageCache
+	diskCache     *diskcache.DiskCache
 	fs            LocalFS
 
 	ancestor    *Timeline // nil for root timelines
@@ -68,7 +69,7 @@ type Timeline struct {
 	imageCache  layerCache[parsedImageLayer]
 	layerFlight singleflight.Group // deduplicates concurrent layer downloads
 
-	frozenMu     sync.Mutex
+	frozenMu     sync.RWMutex
 	frozenLayers []*MemLayer
 	flushMu      sync.Mutex // serializes concurrent calls to flushFrozenLayers
 	compactMu    sync.Mutex // serializes concurrent calls to Compact
@@ -81,8 +82,9 @@ type Timeline struct {
 	pageLocks [256]sync.Mutex
 
 	// Periodic flush goroutine.
-	flushStop chan struct{}
-	flushDone chan struct{}
+	flushStop   chan struct{}
+	flushDone   chan struct{}
+	flushNotify chan struct{}
 
 	// Debug logging for compact/flush tracing. Set in tests.
 	debugLog func(string)
@@ -101,7 +103,7 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 		timelinesRoot: m.timelines,
 		cacheDir:      filepath.Join(m.cacheDir, "timelines", id),
 		config:        m.config,
-		pageCache:     m.pageCache,
+		diskCache:     m.diskCache,
 		fs:            m.fs,
 		deltaCache:    newLayerCache[parsedDeltaLayer](m.config.MaxLayerCacheEntries),
 		imageCache:    newLayerCache[parsedImageLayer](m.config.MaxLayerCacheEntries),
@@ -123,10 +125,8 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 		return nil, fmt.Errorf("load layer map: %w", err)
 	}
 
-	// Create local dirs. Use os.MkdirAll directly because mmap needs a
-	// real OS path, even when tl.fs is a SimLocalFS in tests.
 	memDir := filepath.Join(tl.cacheDir, "mem")
-	if err := os.MkdirAll(memDir, 0o755); err != nil {
+	if err := ensureMemDir(memDir); err != nil {
 		return nil, fmt.Errorf("create mem dir: %w", err)
 	}
 
@@ -138,8 +138,20 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 	return tl, nil
 }
 
+func (tl *Timeline) pageCacheKey(pageAddr uint64) diskcache.CacheKey {
+	return diskcache.CacheKey{Timeline: tl.id, PageAddr: pageAddr}
+}
+
+func (tl *Timeline) blobCacheKey(key string) string {
+	return tl.id + ":" + key
+}
+
 // Read reads data from the timeline's layers into buf at the given byte offset.
 func (tl *Timeline) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
+	// Snapshot layer state once for the entire read, avoiding repeated lock
+	// acquisitions for each page (a 1MB read touches 256 × 4KB pages).
+	snap := tl.snapshotLayers()
+
 	total := 0
 	for total < len(buf) {
 		if err := ctx.Err(); err != nil {
@@ -149,7 +161,7 @@ func (tl *Timeline) Read(ctx context.Context, buf []byte, offset uint64) (int, e
 		pageOff := (offset + uint64(total)) % PageSize
 		chunk := min(uint64(len(buf)-total), PageSize-pageOff)
 
-		page, err := tl.readPage(ctx, pageAddr, math.MaxUint64)
+		page, err := tl.readPageWith(ctx, &snap, pageAddr)
 		if err != nil {
 			return total, err
 		}
@@ -157,6 +169,179 @@ func (tl *Timeline) Read(ctx context.Context, buf []byte, offset uint64) (int, e
 		total += int(chunk)
 	}
 	return total, nil
+}
+
+// layerSnapshot holds an immutable view of the timeline's layer state,
+// captured under the lock once and reused across multiple page reads.
+type layerSnapshot struct {
+	memLayer    *MemLayer
+	frozen      []*MemLayer
+	deltas      []DeltaLayerMeta
+	images      []ImageLayerMeta
+	ancestor    *Timeline
+	ancestorSeq uint64
+}
+
+// snapshotLayers captures the current layer state under the appropriate locks.
+func (tl *Timeline) snapshotLayers() layerSnapshot {
+	tl.mu.RLock()
+	snap := layerSnapshot{
+		memLayer:    tl.memLayer,
+		deltas:      tl.layers.Deltas,
+		images:      tl.layers.Images,
+		ancestor:    tl.ancestor,
+		ancestorSeq: tl.ancestorSeq,
+	}
+	tl.mu.RUnlock()
+
+	tl.frozenMu.RLock()
+	snap.frozen = make([]*MemLayer, len(tl.frozenLayers))
+	copy(snap.frozen, tl.frozenLayers)
+	tl.frozenMu.RUnlock()
+
+	return snap
+}
+
+// readPageWith reads a single page using a pre-captured layer snapshot.
+// This avoids re-acquiring locks and re-snapshotting state for each page
+// in a batched read.
+func (tl *Timeline) readPageWith(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, error) {
+	const beforeSeq = math.MaxUint64
+
+	// 1. Active memLayer.
+	if entry, ok := snap.memLayer.get(pageAddr); ok && entry.seq < beforeSeq {
+		if entry.tombstone {
+			return zeroPage[:], nil
+		}
+		return snap.memLayer.readData(entry)
+	}
+
+	// 2. Frozen memLayers (newest first).
+	for i := len(snap.frozen) - 1; i >= 0; i-- {
+		if entry, ok := snap.frozen[i].get(pageAddr); ok && entry.seq < beforeSeq {
+			if entry.tombstone {
+				return zeroPage[:], nil
+			}
+			data, err := snap.frozen[i].readData(entry)
+			if err == nil {
+				return data, nil
+			}
+			break
+		}
+	}
+
+	// 3. Page cache.
+	if tl.diskCache != nil {
+		if cached := tl.diskCache.GetPage(tl.pageCacheKey(pageAddr)); cached != nil {
+			return cached, nil
+		}
+	}
+
+	// 4. Delta layers (newest first).
+	for i := len(snap.deltas) - 1; i >= 0; i-- {
+		dl := &snap.deltas[i]
+		if pageAddr < dl.PageRange[0] || pageAddr > dl.PageRange[1] {
+			continue
+		}
+		data, found, err := tl.readFromDeltaLayer(ctx, dl, pageAddr, beforeSeq)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if tl.diskCache != nil {
+				tl.diskCache.PutPage(tl.pageCacheKey(pageAddr), data)
+			}
+			return data, nil
+		}
+	}
+
+	// 5. Image layers.
+	for i := len(snap.images) - 1; i >= 0; i-- {
+		il := &snap.images[i]
+		if pageAddr < il.PageRange[0] || pageAddr > il.PageRange[1] {
+			continue
+		}
+		data, found, err := tl.readFromImageLayer(ctx, il, pageAddr)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if tl.diskCache != nil {
+				tl.diskCache.PutPage(tl.pageCacheKey(pageAddr), data)
+			}
+			return data, nil
+		}
+	}
+
+	// 6. Ancestor timeline.
+	if snap.ancestor != nil {
+		return snap.ancestor.readPage(ctx, pageAddr, snap.ancestorSeq)
+	}
+
+	// 7. Page never written — return zeros.
+	return zeroPage[:], nil
+}
+
+// readPagePinned reads a single page using a pre-captured layer snapshot,
+// returning a pinned slice and a release function. For memLayer hits the
+// slice points directly into the mmap and the release function unlocks the
+// RWMutex. For all other sources (delta/image/cache/ancestor) the data is
+// heap-allocated and release is a no-op.
+func (tl *Timeline) readPagePinned(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, func(), error) {
+	const beforeSeq = math.MaxUint64
+
+	// 1. Active memLayer.
+	if entry, ok := snap.memLayer.get(pageAddr); ok && entry.seq < beforeSeq {
+		return snap.memLayer.readDataPinned(entry)
+	}
+
+	// 2. Frozen memLayers (newest first).
+	for i := len(snap.frozen) - 1; i >= 0; i-- {
+		if entry, ok := snap.frozen[i].get(pageAddr); ok && entry.seq < beforeSeq {
+			data, release, err := snap.frozen[i].readDataPinned(entry)
+			if err == nil {
+				return data, release, nil
+			}
+			break
+		}
+	}
+
+	// 3. Disk cache (pinned).
+	if tl.diskCache != nil {
+		if data, release := tl.diskCache.GetPagePinned(tl.pageCacheKey(pageAddr)); data != nil {
+			return data, release, nil
+		}
+	}
+
+	// 4–8. Delta, image, ancestor, zero — all allocate.
+	data, err := tl.readPageWith(ctx, snap, pageAddr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, func() {}, nil
+}
+
+// ReadPinned reads n bytes starting at offset, returning a pinned slice and
+// release function. For single-page aligned reads that hit the memLayer, the
+// returned slice is zero-copy from the mmap. Callers MUST call release when
+// done with the data.
+func (tl *Timeline) ReadPinned(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
+	pageAddr := offset / PageSize
+	pageOff := offset % PageSize
+
+	// Fast path: single full page, page-aligned.
+	if pageOff == 0 && n == PageSize {
+		snap := tl.snapshotLayers()
+		return tl.readPagePinned(ctx, &snap, pageAddr)
+	}
+
+	// Slow path: spans multiple pages or sub-page — allocate and copy.
+	buf := make([]byte, n)
+	got, err := tl.Read(ctx, buf, offset)
+	if err != nil {
+		return nil, nil, err
+	}
+	return buf[:got], func() {}, nil
 }
 
 // Write writes data to the timeline's active memLayer at the given byte offset.
@@ -233,9 +418,9 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 	}
 
 	// Backpressure: if frozen layers are at capacity, flush them now.
-	tl.frozenMu.Lock()
+	tl.frozenMu.RLock()
 	nfrozen := len(tl.frozenLayers)
-	tl.frozenMu.Unlock()
+	tl.frozenMu.RUnlock()
 	if nfrozen >= tl.config.MaxFrozenLayers {
 		if err := tl.flushFrozenLayers(ctx); err != nil {
 			return err
@@ -305,8 +490,8 @@ func (tl *Timeline) PunchHole(ctx context.Context, offset, length uint64) error 
 		if err != nil {
 			return err
 		}
-		if tl.pageCache != nil {
-			tl.pageCache.Delete(tl.id, pageAddr)
+		if tl.diskCache != nil {
+			tl.diskCache.DeletePage(tl.pageCacheKey(pageAddr))
 		}
 	}
 	return nil
@@ -341,10 +526,10 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 	}
 
 	// 2. Frozen memLayers (newest first).
-	tl.frozenMu.Lock()
+	tl.frozenMu.RLock()
 	frozen := make([]*MemLayer, len(tl.frozenLayers))
 	copy(frozen, tl.frozenLayers)
-	tl.frozenMu.Unlock()
+	tl.frozenMu.RUnlock()
 
 	for i := len(frozen) - 1; i >= 0; i-- {
 		if entry, ok := frozen[i].get(pageAddr); ok && entry.seq < beforeSeq {
@@ -364,11 +549,11 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 	// Only use page cache for direct reads (beforeSeq == MaxUint64).
 	// Ancestor reads with limited beforeSeq can't use the cache because the
 	// cached entry may have a seq higher than what's visible at beforeSeq.
-	useCache := tl.pageCache != nil && beforeSeq == math.MaxUint64
+	useCache := tl.diskCache != nil && beforeSeq == math.MaxUint64
 
 	// 3. Page cache (for pages previously read from S3 layers).
 	if useCache {
-		if cached := tl.pageCache.Get(tl.id, pageAddr); cached != nil {
+		if cached := tl.diskCache.GetPage(tl.pageCacheKey(pageAddr)); cached != nil {
 			return cached, nil
 		}
 	}
@@ -388,7 +573,7 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 		}
 		if found {
 			if useCache {
-				tl.pageCache.Put(tl.id, pageAddr, data)
+				tl.diskCache.PutPage(tl.pageCacheKey(pageAddr), data)
 			}
 			return data, nil
 		}
@@ -409,7 +594,7 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 		}
 		if found {
 			if useCache {
-				tl.pageCache.Put(tl.id, pageAddr, data)
+				tl.diskCache.PutPage(tl.pageCacheKey(pageAddr), data)
 			}
 			return data, nil
 		}
@@ -446,13 +631,23 @@ func (tl *Timeline) freezeMemLayer() error {
 	return nil
 }
 
-// maybeFreezeAndFlush freezes the memLayer and flushes all frozen layers
-// synchronously. Called inline from Write when the memLayer exceeds the
-// flush threshold.
+// maybeFreezeAndFlush freezes the memLayer and notifies the background
+// flush loop to upload it. The write path never blocks on S3 here;
+// backpressure is applied separately when frozen layer count is too high.
+// If no flush loop is running (FlushInterval <= 0), falls back to inline flush.
 func (tl *Timeline) maybeFreezeAndFlush(ctx context.Context) error {
 	if err := tl.freezeMemLayer(); err != nil {
 		return err
 	}
+	if tl.flushNotify != nil {
+		// Non-blocking signal to the flush loop.
+		select {
+		case tl.flushNotify <- struct{}{}:
+		default:
+		}
+		return nil
+	}
+	// No background flush loop — flush inline.
 	return tl.flushFrozenLayers(ctx)
 }
 
@@ -463,13 +658,13 @@ func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 	defer tl.flushMu.Unlock()
 
 	for {
-		tl.frozenMu.Lock()
+		tl.frozenMu.RLock()
 		if len(tl.frozenLayers) == 0 {
-			tl.frozenMu.Unlock()
+			tl.frozenMu.RUnlock()
 			return nil
 		}
 		ml := tl.frozenLayers[0]
-		tl.frozenMu.Unlock()
+		tl.frozenMu.RUnlock()
 
 		if err := tl.flushMemLayer(ctx, ml); err != nil {
 			return err
@@ -498,14 +693,27 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 		return fmt.Errorf("build delta layer: %w", err)
 	}
 
-	// Upload to S3.
-	if err := tl.store.PutReader(ctx, meta.Key, bytes.NewReader(data)); err != nil {
-		return fmt.Errorf("upload delta layer: %w", err)
+	// Upload to S3 with retry on transient errors.
+	const maxRetries = 5
+	for attempt := range maxRetries {
+		err = tl.store.PutReader(ctx, meta.Key, bytes.NewReader(data))
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("upload delta layer: %w", err)
+		}
+		if attempt == maxRetries-1 {
+			return fmt.Errorf("upload delta layer (after %d attempts): %w", maxRetries, err)
+		}
+		backoff := time.Duration(1<<attempt) * 100 * time.Millisecond // 100ms, 200ms, 400ms, 800ms, 1.6s
+		slog.Warn("retrying delta upload", "key", meta.Key, "attempt", attempt+1, "error", err, "backoff", backoff)
+		time.Sleep(backoff)
 	}
 	metrics.FlushBytes.Add(float64(len(data)))
 
 	// Pre-cache locally so subsequent reads don't hit S3.
-	tl.cacheDeltaLocally(meta.Key, data)
+	tl.cacheDelta(meta.Key, data)
 
 	// Update layer map and invalidate page cache entries for all pages in
 	// the flushed layer. Both happen under tl.mu.Lock so that readPage
@@ -514,9 +722,9 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 	// invalidated, new delta visible).
 	tl.mu.Lock()
 	tl.layers.Deltas = append(tl.layers.Deltas, meta)
-	if tl.pageCache != nil {
+	if tl.diskCache != nil {
 		for i := range entries {
-			tl.pageCache.Delete(tl.id, entries[i].pageAddr)
+			tl.diskCache.DeletePage(tl.pageCacheKey(entries[i].pageAddr))
 		}
 	}
 	tl.mu.Unlock()
@@ -615,17 +823,41 @@ func (tl *Timeline) loadLayerMap(ctx context.Context) error {
 		return tl.layers.Deltas[i].StartSeq < tl.layers.Deltas[j].StartSeq
 	})
 
-	// Also list images/.
+	// Also list images/ — segments are stored as images/<seq>/<segIdx>.
 	imageObjects, listErr := tl.store.ListKeys(ctx, "images/")
 	if listErr == nil {
+		// Group segments by seq.
+		seqSegments := make(map[uint64][]SegmentMeta)
 		for _, obj := range imageObjects {
-			im, parseErr := parseImageKey("images/"+obj.Key, obj.Size)
-			if parseErr != nil {
+			// obj.Key is relative to "images/", e.g. "0000000000000005/0000000000000000"
+			fullKey := "images/" + obj.Key
+			parts := strings.SplitN(obj.Key, "/", 2)
+			if len(parts) != 2 {
 				continue
 			}
-			tl.layers.Images = append(tl.layers.Images, im)
-			if im.Seq > maxSeq {
-				maxSeq = im.Seq
+			seq, err := strconv.ParseUint(parts[0], 16, 64)
+			if err != nil {
+				continue
+			}
+			segIdx, err := strconv.ParseUint(parts[1], 16, 64)
+			if err != nil {
+				continue
+			}
+			seqSegments[seq] = append(seqSegments[seq], SegmentMeta{
+				SegIdx: segIdx,
+				Key:    fullKey,
+				Size:   obj.Size,
+			})
+		}
+		for seq, segs := range seqSegments {
+			sort.Slice(segs, func(i, j int) bool { return segs[i].SegIdx < segs[j].SegIdx })
+			tl.layers.Images = append(tl.layers.Images, ImageLayerMeta{
+				Seq:       seq,
+				PageRange: [2]uint64{0, math.MaxUint64},
+				Segments:  segs,
+			})
+			if seq > maxSeq {
+				maxSeq = seq
 			}
 		}
 		sort.Slice(tl.layers.Images, func(i, j int) bool {
@@ -712,8 +944,11 @@ func (lc *layerCache[T]) evict(key string) {
 	delete(lc.items, key)
 }
 
-// getLayer fetches a parsed layer from cache, local disk, or S3 (via index-only
-// range reads). Concurrent requests for the same key are deduplicated.
+// getLayer fetches a parsed layer from cache, local disk, or S3.
+// On S3 cache miss, the full blob is downloaded (not just the index)
+// because the FUSE read path typically needs many pages from the same
+// layer, and one GET is cheaper than N per-page GetRange calls.
+// Concurrent requests for the same key are deduplicated.
 func getLayer[T any](
 	ctx context.Context,
 	tl *Timeline,
@@ -721,7 +956,6 @@ func getLayer[T any](
 	flightPrefix string,
 	key string,
 	parseBlob func([]byte) (*T, error),
-	parseIndex func(context.Context, loophole.ObjectStore, string) (*T, error),
 ) (*T, error) {
 	if cached, ok := cache.get(key); ok {
 		return cached, nil
@@ -733,25 +967,29 @@ func getLayer[T any](
 			return cached, nil
 		}
 
-		// Try local disk cache.
-		localPath := filepath.Join(tl.cacheDir, key)
-		if data, err := tl.fs.ReadFile(localPath); err == nil {
-			if parsed, err := parseBlob(data); err == nil {
-				cache.put(key, parsed)
-				return parsed, nil
+		// Try shared disk cache before S3.
+		if tl.diskCache != nil {
+			if data := tl.diskCache.GetBlob(tl.blobCacheKey(key)); data != nil {
+				if parsed, err := parseBlob(data); err == nil {
+					cache.put(key, parsed)
+					return parsed, nil
+				}
 			}
-			// Corrupted cache file — remove and re-download.
-			_ = tl.fs.Remove(localPath)
 		}
 
-		// Index-only download from S3 via range reads.
-		parsed, err := parseIndex(ctx, tl.store, key)
+		// Download full blob from S3.
+		data, err := tl.downloadLayer(ctx, key)
 		if err != nil {
 			return nil, err
 		}
 
-		cache.put(key, parsed)
-		return parsed, nil
+		parsed, err := parseBlob(data)
+		if err == nil {
+			cache.put(key, parsed)
+			return parsed, nil
+		}
+
+		return nil, err
 	})
 	if err != nil {
 		return nil, err
@@ -759,40 +997,59 @@ func getLayer[T any](
 	return v.(*T), nil
 }
 
-func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
-	return getLayer(ctx, tl, &tl.deltaCache, "delta:", key, parseDeltaLayer, parseDeltaIndex)
-}
+// downloadLayer downloads a complete layer blob from S3 and caches it locally.
+func (tl *Timeline) downloadLayer(ctx context.Context, key string) ([]byte, error) {
+	if tl.diskCache != nil {
+		if data := tl.diskCache.GetBlob(tl.blobCacheKey(key)); data != nil {
+			return data, nil
+		}
+	}
 
-func (tl *Timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
-	return getLayer(ctx, tl, &tl.imageCache, "image:", key, parseImageLayer, parseImageIndex)
-}
-
-// readFromImageLayer reads a page from an image layer on S3.
-func (tl *Timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, pageAddr uint64) ([]byte, bool, error) {
-	parsed, err := tl.getImageLayer(ctx, il.Key)
+	body, _, err := tl.store.Get(ctx, key)
 	if err != nil {
-		return nil, false, fmt.Errorf("get image layer %s: %w", il.Key, err)
+		return nil, fmt.Errorf("download layer %s: %w", key, err)
 	}
-	return parsed.findPage(ctx, pageAddr)
+	data, err := io.ReadAll(body)
+	_ = body.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read layer %s: %w", key, err)
+	}
+	tl.cacheBlob(key, data)
+	return data, nil
 }
 
-// cacheLocally writes a layer blob to the local disk cache so that evicted
-// layers can be reloaded without hitting S3. Errors are ignored (best-effort).
-func (tl *Timeline) cacheLocally(key string, data []byte) {
-	localPath := filepath.Join(tl.cacheDir, key)
-	if dir := filepath.Dir(localPath); dir != "" {
-		_ = tl.fs.MkdirAll(dir, 0o755)
+func (tl *Timeline) cacheBlob(key string, data []byte) {
+	if tl.diskCache != nil {
+		tl.diskCache.PutBlob(tl.blobCacheKey(key), data)
 	}
-	_ = tl.fs.WriteFile(localPath, data, 0o644)
 }
 
-// cacheDeltaLocally parses a delta layer blob, adds it to the in-memory index
-// cache, and writes it to the local disk cache.
-func (tl *Timeline) cacheDeltaLocally(key string, data []byte) {
+func (tl *Timeline) cacheDelta(key string, data []byte) {
 	if parsed, err := parseDeltaLayer(data); err == nil {
 		tl.deltaCache.put(key, parsed)
 	}
-	tl.cacheLocally(key, data)
+	tl.cacheBlob(key, data)
+}
+
+func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
+	return getLayer(ctx, tl, &tl.deltaCache, "delta:", key, parseDeltaLayer)
+}
+
+func (tl *Timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
+	return getLayer(ctx, tl, &tl.imageCache, "image:", key, parseImageLayer)
+}
+
+// readFromImageLayer reads a page from the correct segment of an image layer.
+func (tl *Timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, pageAddr uint64) ([]byte, bool, error) {
+	seg := il.FindSegment(pageAddr)
+	if seg == nil {
+		return nil, false, nil
+	}
+	parsed, err := tl.getImageLayer(ctx, seg.Key)
+	if err != nil {
+		return nil, false, fmt.Errorf("get image segment %s: %w", seg.Key, err)
+	}
+	return parsed.findPage(pageAddr)
 }
 
 // cleanupOldLayers deletes replaced layer blobs from S3 (best-effort) and
@@ -802,13 +1059,17 @@ func (tl *Timeline) cleanupOldLayers(ctx context.Context, deltas []DeltaLayerMet
 		_ = tl.store.DeleteObject(ctx, dl.Key)
 	}
 	for _, il := range images {
-		_ = tl.store.DeleteObject(ctx, il.Key)
+		for _, seg := range il.Segments {
+			_ = tl.store.DeleteObject(ctx, seg.Key)
+		}
 	}
 	for _, dl := range deltas {
 		tl.deltaCache.evict(dl.Key)
 	}
 	for _, il := range images {
-		tl.imageCache.evict(il.Key)
+		for _, seg := range il.Segments {
+			tl.imageCache.evict(seg.Key)
+		}
 	}
 }
 
@@ -856,7 +1117,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 		tl.compactLog("  delta[%d]: %s seq=[%d,%d) pages=[%d,%d]", i, dl.Key, dl.StartSeq, dl.EndSeq, dl.PageRange[0], dl.PageRange[1])
 	}
 	for i, il := range existingImages {
-		tl.compactLog("  image[%d]: %s seq=%d pages=[%d,%d]", i, il.Key, il.Seq, il.PageRange[0], il.PageRange[1])
+		tl.compactLog("  image[%d]: %s seq=%d pages=[%d,%d] segs=%d", i, il.LogKey(), il.Seq, il.PageRange[0], il.PageRange[1], len(il.Segments))
 	}
 
 	// Split deltas into compactable vs remaining based on branch points.
@@ -892,7 +1153,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	}
 	var totalImageSize int64
 	for _, il := range existingImages {
-		totalImageSize += il.Size
+		totalImageSize += il.TotalSize()
 	}
 
 	compactSeq := deltas[len(deltas)-1].EndSeq
@@ -951,7 +1212,7 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 		mergedMeta.Key, mergedMeta.StartSeq, mergedMeta.EndSeq, mergedMeta.PageRange[0], mergedMeta.PageRange[1])
 
 	// Pre-cache locally so subsequent reads don't hit S3.
-	tl.cacheDeltaLocally(mergedMeta.Key, mergedData)
+	tl.cacheDelta(mergedMeta.Key, mergedData)
 
 	// Update layer map: replace compacted deltas with merged + remaining.
 	newDeltas := []DeltaLayerMeta{mergedMeta}
@@ -972,10 +1233,10 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 
 	// Clean up replaced layers and invalidate page cache.
 	tl.cleanupOldLayers(ctx, deltas, nil)
-	if tl.pageCache != nil {
+	if tl.diskCache != nil {
 		for _, p := range parsed {
 			for _, ie := range p.index {
-				tl.pageCache.Delete(tl.id, ie.PageAddr)
+				tl.diskCache.DeletePage(tl.pageCacheKey(ie.PageAddr))
 			}
 		}
 	}
@@ -985,12 +1246,12 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 	return nil
 }
 
-// downloadDeltaLayer downloads a complete delta layer blob from S3 or local cache.
+// downloadDeltaLayer downloads a complete delta layer blob from S3 or shared disk cache.
 func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte, error) {
-	// Try local disk cache first.
-	localPath := filepath.Join(tl.cacheDir, key)
-	if data, err := tl.fs.ReadFile(localPath); err == nil {
-		return data, nil
+	if tl.diskCache != nil {
+		if data := tl.diskCache.GetBlob(tl.blobCacheKey(key)); data != nil {
+			return data, nil
+		}
 	}
 
 	// Download from S3.
@@ -1004,7 +1265,7 @@ func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte,
 		return nil, err
 	}
 
-	tl.cacheLocally(key, data)
+	tl.cacheBlob(key, data)
 	return data, nil
 }
 
@@ -1022,12 +1283,14 @@ func (tl *Timeline) collectPageAddrs(ctx context.Context, deltas []DeltaLayerMet
 		}
 	}
 	for _, il := range images {
-		parsed, err := tl.getImageLayer(ctx, il.Key)
-		if err != nil {
-			return nil, fmt.Errorf("get image layer %s: %w", il.Key, err)
-		}
-		for _, ie := range parsed.index {
-			pageSet[ie.PageAddr] = struct{}{}
+		for _, seg := range il.Segments {
+			parsed, err := tl.getImageLayer(ctx, seg.Key)
+			if err != nil {
+				return nil, fmt.Errorf("get image segment %s: %w", seg.Key, err)
+			}
+			for _, ie := range parsed.index {
+				pageSet[ie.PageAddr] = struct{}{}
+			}
 		}
 	}
 
@@ -1111,16 +1374,21 @@ func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta,
 		return tl.compactRemoveAllLayers(ctx, deltas, existingImages, remainingDeltas)
 	}
 
-	// Build and upload image layer.
-	imgData, imgMeta, err := buildImageLayer(compactSeq, pages)
+	// Build and upload image segments.
+	segBlobs, imgMeta, err := buildImageSegments(compactSeq, pages)
 	if err != nil {
-		return fmt.Errorf("build image layer: %w", err)
+		return fmt.Errorf("build image segments: %w", err)
 	}
-	if err := tl.store.PutReader(ctx, imgMeta.Key, bytes.NewReader(imgData)); err != nil {
-		tl.compactLog("  image upload FAILED: %v", err)
-		return fmt.Errorf("upload image layer: %w", err)
+	for _, sb := range segBlobs {
+		key := imageSegmentKey(compactSeq, sb.SegIdx)
+		if err := tl.store.PutReader(ctx, key, bytes.NewReader(sb.Data)); err != nil {
+			tl.compactLog("  segment upload FAILED %s: %v", key, err)
+			return fmt.Errorf("upload image segment %s: %w", key, err)
+		}
+		tl.compactLog("  segment uploaded: %s", key)
 	}
-	tl.compactLog("  image uploaded: %s seq=%d pages=[%d,%d]", imgMeta.Key, imgMeta.Seq, imgMeta.PageRange[0], imgMeta.PageRange[1])
+	tl.compactLog("  image uploaded: %s seq=%d pages=[%d,%d] segments=%d",
+		imgMeta.LogKey(), imgMeta.Seq, imgMeta.PageRange[0], imgMeta.PageRange[1], len(imgMeta.Segments))
 
 	// Update layer map: replace compacted layers with the new image.
 	tl.mu.Lock()
@@ -1180,7 +1448,7 @@ func (tl *Timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq ui
 		add("    delta[%d]: %s seq=[%d,%d) pages=[%d,%d]", i, dl.Key, dl.StartSeq, dl.EndSeq, dl.PageRange[0], dl.PageRange[1])
 	}
 	for i, il := range tl.layers.Images {
-		add("    image[%d]: %s seq=%d pages=[%d,%d]", i, il.Key, il.Seq, il.PageRange[0], il.PageRange[1])
+		add("    image[%d]: %s seq=%d pages=[%d,%d] segs=%d", i, il.LogKey(), il.Seq, il.PageRange[0], il.PageRange[1], len(il.Segments))
 	}
 
 	// 1. Active memLayer.
@@ -1204,10 +1472,10 @@ func (tl *Timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq ui
 	}
 
 	// 2. Frozen memLayers.
-	tl.frozenMu.Lock()
+	tl.frozenMu.RLock()
 	frozen := make([]*MemLayer, len(tl.frozenLayers))
 	copy(frozen, tl.frozenLayers)
-	tl.frozenMu.Unlock()
+	tl.frozenMu.RUnlock()
 
 	for i := len(frozen) - 1; i >= 0; i-- {
 		if entry, ok := frozen[i].get(pageAddr); ok {
@@ -1228,15 +1496,15 @@ func (tl *Timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq ui
 		}
 	}
 
-	// 3. Page cache.
-	if tl.pageCache != nil && beforeSeq == math.MaxUint64 {
-		if cached := tl.pageCache.Get(tl.id, pageAddr); cached != nil {
-			add("  [3] pageCache: zero=%v hash=%s", isZero(cached), hash(cached))
+	// 3. Disk cache.
+	if tl.diskCache != nil && beforeSeq == math.MaxUint64 {
+		if cached := tl.diskCache.GetPage(tl.pageCacheKey(pageAddr)); cached != nil {
+			add("  [3] diskCache: zero=%v hash=%s", isZero(cached), hash(cached))
 		} else {
-			add("  [3] pageCache: miss")
+			add("  [3] diskCache: miss")
 		}
 	} else {
-		add("  [3] pageCache: skipped (beforeSeq != MaxUint64 or no cache)")
+		add("  [3] diskCache: skipped (beforeSeq != MaxUint64 or no cache)")
 	}
 
 	// 4. Delta layers.
@@ -1263,21 +1531,22 @@ func (tl *Timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq ui
 	// 5. Image layers.
 	for i := len(tl.layers.Images) - 1; i >= 0; i-- {
 		il := &tl.layers.Images[i]
+		logKey := il.LogKey()
 		if il.Seq > beforeSeq {
-			add("  [5] image[%d] %s: seq=%d FILTERED (> beforeSeq=%d)", i, il.Key, il.Seq, beforeSeq)
+			add("  [5] image[%d] %s: seq=%d FILTERED (> beforeSeq=%d)", i, logKey, il.Seq, beforeSeq)
 			continue
 		}
 		if pageAddr < il.PageRange[0] || pageAddr > il.PageRange[1] {
-			add("  [5] image[%d] %s: range=[%d,%d] NOT IN RANGE", i, il.Key, il.PageRange[0], il.PageRange[1])
+			add("  [5] image[%d] %s: range=[%d,%d] NOT IN RANGE", i, logKey, il.PageRange[0], il.PageRange[1])
 			continue
 		}
 		data, found, err := tl.readFromImageLayer(ctx, il, pageAddr)
 		if err != nil {
-			add("  [5] image[%d] %s: err=%v", i, il.Key, err)
+			add("  [5] image[%d] %s: err=%v", i, logKey, err)
 		} else if found {
-			add("  [5] image[%d] %s: seq=%d FOUND zero=%v hash=%s", i, il.Key, il.Seq, isZero(data), hash(data))
+			add("  [5] image[%d] %s: seq=%d FOUND zero=%v hash=%s", i, logKey, il.Seq, isZero(data), hash(data))
 		} else {
-			add("  [5] image[%d] %s: seq=%d page not in layer", i, il.Key, il.Seq)
+			add("  [5] image[%d] %s: seq=%d page not in layer", i, logKey, il.Seq)
 		}
 	}
 
@@ -1334,6 +1603,7 @@ func (tl *Timeline) releaseLease(ctx context.Context, token string) error {
 func (tl *Timeline) startPeriodicFlush() {
 	tl.flushStop = make(chan struct{})
 	tl.flushDone = make(chan struct{})
+	tl.flushNotify = make(chan struct{}, 1)
 	go tl.periodicFlushLoop()
 }
 
@@ -1346,6 +1616,17 @@ func (tl *Timeline) periodicFlushLoop() {
 		case <-tl.flushStop:
 			return
 		case <-timer.C:
+		case <-tl.flushNotify:
+		}
+
+		// Drain any pending notifications so we don't loop unnecessarily.
+		select {
+		case <-tl.flushNotify:
+		default:
+		}
+
+		if err := tl.flushFrozenLayers(context.Background()); err != nil {
+			slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
 		}
 
 		tl.mu.RLock()

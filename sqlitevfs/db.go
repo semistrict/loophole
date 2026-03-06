@@ -1,3 +1,5 @@
+//go:build !tinygo && !js
+
 package sqlitevfs
 
 import (

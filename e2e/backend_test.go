@@ -8,19 +8,24 @@ import (
 	"github.com/semistrict/loophole/juicefs"
 )
 
-func newBackendForMode(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
+func newBackendForMode(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, cfg juicefs.Config) fsbackend.Service {
 	t.Helper()
-	if b := newPlatformBackend(t, vm, inst, store); b != nil {
+	if b := newPlatformBackend(t, vm, inst, cfg); b != nil {
 		return b
 	}
 	// Cross-platform userspace backends.
 	switch mode() {
 	case loophole.ModeInProcess:
-		if fsType() == loophole.FSJuiceFS {
-			return juicefs.NewInProcess(vm, store)
+		drivers := map[string]fsbackend.AnyDriver{
+			loophole.VolumeTypeExt4: fsbackend.NewLwext4Driver(),
 		}
-		return fsbackend.NewLwext4(vm)
+		if cfg.ObjStore != nil {
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewInProcessDriver(cfg)
+		}
+		return fsbackend.NewBackend(vm, drivers)
 	default:
-		return fsbackend.NewLwext4(vm)
+		return fsbackend.NewBackend(vm, map[string]fsbackend.AnyDriver{
+			loophole.VolumeTypeExt4: fsbackend.NewLwext4Driver(),
+		})
 	}
 }

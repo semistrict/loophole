@@ -7,7 +7,6 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/lwext4"
 )
 
@@ -24,8 +23,7 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
-	defer vm.Close(ctx)
+	vm, _ := newVolumeManager(t, store)
 
 	vol, err := vm.NewVolume(ctx, "big", 0, "")
 	require.NoError(t, err)

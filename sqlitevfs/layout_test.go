@@ -15,7 +15,7 @@ func testManager(t *testing.T) loophole.VolumeManager {
 		FlushThreshold:  16 * lsm.PageSize,
 		MaxFrozenLayers: 2,
 		PageCacheBytes:  16 * lsm.PageSize,
-	}, nil)
+	}, nil, nil)
 	t.Cleanup(func() { m.Close(t.Context()) })
 	return m
 }

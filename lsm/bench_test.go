@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
+	"path/filepath"
 	"testing"
 
 	"github.com/semistrict/loophole"
@@ -21,8 +22,13 @@ func randomPage(rng *rand.Rand, buf []byte) {
 
 func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Manager {
 	b.Helper()
-	m := NewVolumeManager(store, b.TempDir(), config, NewSimLocalFS())
-	b.Cleanup(func() { m.Close(b.Context()) })
+	cacheDir := b.TempDir()
+	dc := newTestDiskCacheAt(b, filepath.Join(cacheDir, "diskcache"))
+	m := NewVolumeManager(store, cacheDir, config, NewSimLocalFS(), dc)
+	b.Cleanup(func() {
+		_ = m.Close(b.Context())
+		_ = dc.Close()
+	})
 	return m
 }
 

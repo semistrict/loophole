@@ -212,6 +212,16 @@ func (v *NBDVolume) Read(_ context.Context, buf []byte, offset uint64) (int, err
 	return len(buf), nil
 }
 
+func (v *NBDVolume) ReadAt(_ context.Context, offset uint64, n int) ([]byte, func(), error) {
+	buf := make([]byte, n)
+	rep, err := v.sendRequest(nbdCmdRead, offset, nil, uint32(n))
+	if err != nil {
+		return nil, nil, err
+	}
+	copy(buf, rep.data)
+	return buf, func() {}, nil
+}
+
 func (v *NBDVolume) Write(_ context.Context, data []byte, offset uint64) error {
 	_, err := v.sendRequest(nbdCmdWrite, offset, data, 0)
 	return err

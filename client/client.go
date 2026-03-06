@@ -73,15 +73,8 @@ func (c *Client) EnsureDaemon() error {
 
 // --- RPC methods ---
 
-// Create creates a new volume and formats it.
-// Size is the volume size in bytes; 0 means use the default.
-// Type is the volume type ("ext4" or "juicefs"); empty defaults to "ext4".
-type CreateParams struct {
-	Volume   string `json:"volume"`
-	Size     uint64 `json:"size,omitempty"`
-	NoFormat bool   `json:"no_format,omitempty"`
-	Type     string `json:"type,omitempty"`
-}
+// CreateParams is an alias for loophole.CreateParams.
+type CreateParams = loophole.CreateParams
 
 func (c *Client) Create(ctx context.Context, p CreateParams) error {
 	_, err := c.rpc(ctx, "POST", "/create", p)

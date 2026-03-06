@@ -17,9 +17,14 @@ import (
 const (
 	PageSize = 4096 // 4KB
 
+	// PagesPerSegment is the number of contiguous pages in one image segment.
+	// Each segment is a self-contained S3 object (~4MB uncompressed).
+	// Given a pageAddr, the segment index is pageAddr / PagesPerSegment.
+	PagesPerSegment = 1024 // 1024 * 4KB = 4MB
+
 	DefaultFlushThreshold  = 256 * 1024 * 1024 // 256MB
 	DefaultMaxFrozenLayers = 2
-	DefaultPageCacheSize   = 512 * 1024 * 1024      // 512MB
+	DefaultPageCacheSize   = 512 * 1024 * 1024      // retained for legacy tests; ignored by Manager
 	DefaultVolumeSize      = 8 * 1024 * 1024 * 1024 // 8GB
 	DefaultMaxLayerCache   = 64
 	DefaultFlushInterval   = 30 * time.Second
@@ -86,7 +91,7 @@ type Config struct {
 	// When full, writes block until a flush completes (write backpressure).
 	MaxFrozenLayers int
 
-	// PageCacheBytes is the size of the LRU page cache on local disk.
+	// PageCacheBytes is retained for test/config compatibility but ignored.
 	PageCacheBytes int64
 
 	// MaxLayerCacheEntries caps the number of parsed delta/image layers kept

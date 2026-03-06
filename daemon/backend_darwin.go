@@ -10,19 +10,22 @@ import (
 	"github.com/semistrict/loophole/juicefs"
 )
 
-func createBackend(vm loophole.VolumeManager, inst loophole.Instance, _ loophole.Dir, store loophole.ObjectStore) (fsbackend.Service, error) {
+func createBackend(vm loophole.VolumeManager, inst loophole.Instance, _ loophole.Dir, cfg juicefs.Config) (fsbackend.Service, error) {
+	drivers := make(map[string]fsbackend.AnyDriver)
 	switch inst.Mode {
 	case loophole.ModeInProcess:
-		if inst.DefaultFSType == loophole.FSJuiceFS {
-			return juicefs.NewInProcess(vm, store), nil
+		drivers[loophole.VolumeTypeExt4] = fsbackend.NewLwext4Driver()
+		if cfg.ObjStore != nil {
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewInProcessDriver(cfg)
 		}
-		return fsbackend.NewLwext4(vm), nil
 	case loophole.ModeFuseFS:
-		if inst.DefaultFSType == loophole.FSJuiceFS {
-			return nil, fmt.Errorf("juicefs+fusefs not supported on macOS (use inprocess)")
+		drivers[loophole.VolumeTypeExt4] = fsbackend.NewLwext4FUSEDriver()
+		if cfg.ObjStore != nil {
+			// JuiceFS FUSE driver is Linux-only; use in-process on macOS.
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewInProcessDriver(cfg)
 		}
-		return fsbackend.NewLwext4FUSE(vm), nil
 	default:
 		return nil, fmt.Errorf("unsupported mode %q on macOS", inst.Mode)
 	}
+	return fsbackend.NewBackend(vm, drivers), nil
 }

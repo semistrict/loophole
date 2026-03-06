@@ -27,13 +27,22 @@ var _ Driver[nbdTCPMount] = (*NBDTCPDriver)(nil)
 var _ DevicePather = (*NBDTCPDriver)(nil)
 var _ DeviceConnector = (*NBDTCPDriver)(nil)
 
-// NewNBDTCP creates a Service backed by TCP NBD.
-func NewNBDTCP(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+// NewNBDTCPDriver creates a type-erased TCP NBD driver.
+func NewNBDTCPDriver(vm loophole.VolumeManager, opts *nbdvm.Options) (AnyDriver, error) {
 	srv, err := nbdvm.NewTCPServer(vm, opts)
 	if err != nil {
 		return nil, err
 	}
-	return New[nbdTCPMount](&NBDTCPDriver{nbd: srv}, vm), nil
+	return EraseDriver[nbdTCPMount](&NBDTCPDriver{nbd: srv}), nil
+}
+
+// NewNBDTCP creates a Service backed by TCP NBD.
+func NewNBDTCP(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+	d, err := NewNBDTCPDriver(vm, opts)
+	if err != nil {
+		return nil, err
+	}
+	return New(vm, d, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS), nil
 }
 
 func (n *NBDTCPDriver) Format(ctx context.Context, vol loophole.Volume) error {

@@ -14,27 +14,30 @@ import (
 	"github.com/semistrict/loophole/nbdvm"
 )
 
-func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, store loophole.ObjectStore) fsbackend.Service {
+func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, cfg juicefs.Config) fsbackend.Service {
 	t.Helper()
 	switch mode() {
 	case loophole.ModeNBD:
-		b, err := fsbackend.NewNBD(vm, &nbdvm.Options{})
+		nbd, err := fsbackend.NewNBDDriver(vm, &nbdvm.Options{})
 		require.NoError(t, err)
-		return b
+		return fsbackend.New(vm, nbd, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS)
 	case loophole.ModeTestNBDTCP:
-		b, err := fsbackend.NewNBDTCP(vm, &nbdvm.Options{})
+		nbd, err := fsbackend.NewNBDTCPDriver(vm, &nbdvm.Options{})
 		require.NoError(t, err)
-		return b
+		return fsbackend.New(vm, nbd, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS)
 	case loophole.ModeFUSE:
 		dir := loophole.Dir(t.TempDir())
-		b, err := fsbackend.NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})
+		fuse, err := fsbackend.NewFUSEDriver(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})
 		require.NoError(t, err)
-		return b
+		return fsbackend.New(vm, fuse, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS)
 	case loophole.ModeFuseFS:
-		if fsType() == loophole.FSJuiceFS {
-			return juicefs.NewFUSE(vm, store)
+		drivers := map[string]fsbackend.AnyDriver{
+			loophole.VolumeTypeExt4: fsbackend.NewLwext4FUSEDriver(),
 		}
-		return fsbackend.NewLwext4FUSE(vm)
+		if cfg.ObjStore != nil {
+			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewFUSEDriver(cfg)
+		}
+		return fsbackend.NewBackend(vm, drivers)
 	default:
 		return nil
 	}

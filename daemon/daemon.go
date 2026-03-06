@@ -21,6 +21,8 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/internal/diskcache"
+	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
@@ -29,11 +31,12 @@ import (
 
 // Daemon serves the loophole HTTP API over a Unix socket.
 type Daemon struct {
-	inst    loophole.Instance
-	dir     loophole.Dir
-	backend fsbackend.Service
-	ln      net.Listener
-	log     *slog.Logger
+	inst      loophole.Instance
+	dir       loophole.Dir
+	backend   fsbackend.Service
+	diskCache *diskcache.DiskCache
+	ln        net.Listener
+	log       *slog.Logger
 
 	nbdSock string       // set once NBD server is started
 	nbdLn   net.Listener // NBD listener, closed on shutdown
@@ -96,10 +99,16 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 
 	// Create LSM volume manager
 	cacheDir := dir.Cache(inst.ProfileName)
-	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil)
-
-	backend, err := createBackend(vm, inst, dir, store)
+	diskCache, err := diskcache.New(filepath.Join(cacheDir, "diskcache"))
 	if err != nil {
+		return nil, fmt.Errorf("create disk cache: %w", err)
+	}
+	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil, diskCache)
+
+	cfg := juicefs.NewConfig(store, diskCache, cacheDir)
+	backend, err := createBackend(vm, inst, dir, cfg)
+	if err != nil {
+		_ = diskCache.Close()
 		return nil, err
 	}
 
@@ -125,11 +134,12 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 	}
 
 	d := &Daemon{
-		inst:    inst,
-		dir:     dir,
-		backend: backend,
-		ln:      ln,
-		log:     logger,
+		inst:      inst,
+		dir:       dir,
+		backend:   backend,
+		diskCache: diskCache,
+		ln:        ln,
+		log:       logger,
 	}
 
 	// Always start an NBD server for db commands.
@@ -181,6 +191,11 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	d.log.Info("shutting down")
 	if err := d.backend.Close(context.Background()); err != nil {
 		d.log.Warn("backend close error", "error", err)
+	}
+	if d.diskCache != nil {
+		if err := d.diskCache.Close(); err != nil {
+			d.log.Warn("disk cache close error", "error", err)
+		}
 	}
 	d.log.Info("daemon stopped")
 	return err

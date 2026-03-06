@@ -53,6 +53,12 @@ func (v *volume) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 	return v.timeline.Read(ctx, buf, offset)
 }
 
+func (v *volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.timeline.ReadPinned(ctx, offset, n)
+}
+
 func (v *volume) Write(ctx context.Context, data []byte, offset uint64) error {
 	if v.readOnly.Load() {
 		return fmt.Errorf("volume %q is read-only", v.name)

@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/lsm"
 	svfs "github.com/semistrict/loophole/sqlitevfs"
 )
 
@@ -26,8 +25,7 @@ func newSQLiteDB(t *testing.T, name string) (*sql.DB, *svfs.DB) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
-	t.Cleanup(func() { vm.Close(ctx) })
+	vm, _ := newVolumeManager(t, store)
 
 	db, err := svfs.Create(ctx, vm, name)
 	require.NoError(t, err)
@@ -75,8 +73,7 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	cacheDir := t.TempDir()
-	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil)
+	vm, _ := newVolumeManager(t, store)
 
 	// Create and populate.
 	db, err := svfs.Create(ctx, vm, "reopen-test")
@@ -96,11 +93,10 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	require.NoError(t, sqlDB.Close())
 	require.NoError(t, db.Flush(ctx))
 	require.NoError(t, db.Close(ctx))
-	vm.Close(ctx)
+	_ = vm.Close(ctx)
 
 	// Reopen with a fresh manager (simulates restart).
-	vm2 := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
-	defer vm2.Close(ctx)
+	vm2, _ := newVolumeManager(t, store)
 
 	db2, err := svfs.Open(ctx, vm2, "reopen-test")
 	require.NoError(t, err)
@@ -126,8 +122,7 @@ func TestE2E_SQLiteSnapshot(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
-	defer vm.Close(ctx)
+	vm, _ := newVolumeManager(t, store)
 
 	// Create and populate.
 	db, err := svfs.Create(ctx, vm, "snap-parent")
@@ -187,8 +182,7 @@ func TestE2E_SQLiteBranch(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
-	defer vm.Close(ctx)
+	vm, _ := newVolumeManager(t, store)
 
 	// Create parent with initial data.
 	parentDB, err := svfs.Create(ctx, vm, "branch-parent")

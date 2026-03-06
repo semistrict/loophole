@@ -16,38 +16,37 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
-	svfs "github.com/semistrict/loophole/sqlitevfs"
 )
 
 // FUSEDriver implements fsbackend.Driver using JuiceFS's built-in FUSE server.
 // File I/O goes through the kernel mount (osFS). Linux only.
 type FUSEDriver struct {
-	objStore loophole.ObjectStore
+	cfg Config
 }
 
 var _ fsbackend.Driver[*juiceFSMount] = (*FUSEDriver)(nil)
 
-// NewFUSE creates a Service backed by JuiceFS FUSE.
-func NewFUSE(vm loophole.VolumeManager, store loophole.ObjectStore) fsbackend.Service {
-	if store == nil {
-		panic("juicefs: NewFUSE requires a non-nil ObjectStore")
+// NewFUSEDriver returns a type-erased driver for JuiceFS FUSE.
+func NewFUSEDriver(cfg Config) fsbackend.AnyDriver {
+	if cfg.ObjStore == nil {
+		panic("juicefs: NewFUSEDriver requires a non-nil ObjectStore")
 	}
-	return fsbackend.New[*juiceFSMount](&FUSEDriver{objStore: store}, vm)
+	return fsbackend.EraseDriver[*juiceFSMount](&FUSEDriver{cfg: cfg})
+}
+
+// NewFUSE creates a Service backed by JuiceFS FUSE.
+func NewFUSE(vm loophole.VolumeManager, cfg Config) fsbackend.Service {
+	return fsbackend.New(vm, NewFUSEDriver(cfg), loophole.VolumeTypeJuiceFS)
 }
 
 func (d *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
-	if err := svfs.FormatVolume(ctx, vol); err != nil {
-		return fmt.Errorf("format volume: %w", err)
-	}
-
-	vfsName := fmt.Sprintf("jfs-fmt-%s", vol.Name())
-	m, cvfs, err := openMeta(ctx, vol, vfsName)
+	m, vd, err := openMeta(ctx, vol)
 	if err != nil {
 		return fmt.Errorf("open meta for format: %w", err)
 	}
 	defer func() {
 		util.SafeRun(m.Shutdown, "juicefs: format shutdown")
-		util.SafeRun(cvfs.FlushHeader, "juicefs: format flush header")
+		util.SafeRun(vd.Sync, "juicefs: format sync volume data")
 		util.SafeRunCtx(ctx, vol.Flush, "juicefs: format flush volume")
 	}()
 
@@ -62,16 +61,9 @@ func (d *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (*juiceFSMount, error) {
 	slog.Info("juicefs-fuse: mounting", "volume", vol.Name(), "mountpoint", mountpoint)
 
-	vfsName := fmt.Sprintf("jfs-%s", vol.Name())
-	m, cvfs, err := openMeta(ctx, vol, vfsName)
+	m, vd, err := openMeta(ctx, vol)
 	if err != nil {
 		return nil, fmt.Errorf("open meta: %w", err)
-	}
-
-	cacheDir, err := os.MkdirTemp("", "jfs-cache-*")
-	if err != nil {
-		_ = m.Shutdown()
-		return nil, fmt.Errorf("create cache dir: %w", err)
 	}
 
 	format, err := m.Load(false)
@@ -79,7 +71,7 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 		_ = m.Shutdown()
 		return nil, fmt.Errorf("load format: %w", err)
 	}
-	chunkConf := chunkConfig(format, cacheDir)
+	chunkConf := chunkConfig(format)
 
 	chs, ok := m.(chunkHashStore)
 	if !ok {
@@ -90,7 +82,7 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 		_ = m.Shutdown()
 		return nil, fmt.Errorf("init chunk hash table: %w", err)
 	}
-	store := newCASStore(d.objStore, chs, *chunkConf)
+	store := newCASStore(d.cfg, chs, *chunkConf)
 
 	jfsVFS, err := createVFSWithMountpoint(m, format, chunkConf, store, mountpoint)
 	if err != nil {
@@ -123,11 +115,9 @@ func (d *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 		metaCl:     m,
 		store:      store,
 		vol:        vol,
-		cvfs:       cvfs,
-		vfsName:    vfsName,
+		volData:    vd,
 		mountpoint: mountpoint,
 		fuseServer: srv,
-		cacheDir:   cacheDir,
 	}, nil
 }
 
@@ -158,9 +148,9 @@ func (d *FUSEDriver) Freeze(ctx context.Context, h *juiceFSMount) error {
 	if err := h.store.FlushPending(ctx); err != nil {
 		return fmt.Errorf("flush pending uploads: %w", err)
 	}
-	if h.cvfs != nil {
-		if err := h.cvfs.FlushHeader(); err != nil {
-			return fmt.Errorf("flush header: %w", err)
+	if h.volData != nil {
+		if err := h.volData.Sync(); err != nil {
+			return fmt.Errorf("sync volume data: %w", err)
 		}
 	}
 	return h.vol.Flush(ctx)

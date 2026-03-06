@@ -10,3 +10,5 @@ build/
 vmlinuz
 /boot/
 /old/
+node_modules/
+docker-config/

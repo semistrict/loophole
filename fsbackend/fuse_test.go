@@ -61,7 +61,7 @@ func newFUSEBackend(t *testing.T) Service {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
+	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil, nil)
 
 	dir := loophole.Dir(t.TempDir())
 	b, err := NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})

@@ -1,12 +1,12 @@
 // Package juicefs provides a JuiceFS-based filesystem driver for loophole.
 //
-// JuiceFS metadata is stored in SQLite, backed by a loophole Volume via
-// the sqlitevfs VolumeVFS adapter. File data uses content-addressable storage
+// JuiceFS metadata is stored in bbolt, backed by a loophole Volume via
+// the VolumeData adapter. File data uses content-addressable storage
 // (BLAKE3 hashing) under a blobs/ prefix in the same S3 bucket.
 //
 // Two modes are supported:
 //   - InProcess (LOOPHOLE_MODE=inprocess LOOPHOLE_DEFAULT_FS=juicefs): JuiceFS VFS
-//     used directly, no FUSE needed. Works on macOS and Linux.
+//     used directly, no FUSE needed. Works on macOS, Linux, and WASM.
 //   - FUSE (LOOPHOLE_MODE=fusefs LOOPHOLE_DEFAULT_FS=juicefs): JuiceFS VFS →
 //     fuse.Serve → kernel mount. Linux only.
 package juicefs
@@ -15,7 +15,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"syscall"
 	"time"
 
@@ -25,37 +24,49 @@ import (
 	"github.com/juicedata/juicefs/pkg/vfs"
 
 	"github.com/semistrict/loophole"
-	svfs "github.com/semistrict/loophole/sqlitevfs"
 )
 
-// juiceFSMount is the per-mount handle shared by both drivers.
+// juiceFSMount is the per-mount handle shared by all drivers.
 type juiceFSMount struct {
-	jfsVFS *vfs.VFS
-	metaCl meta.Meta
-	store  *casStore
-	vol    loophole.Volume
-	cvfs   *svfs.CVFS // C VFS for the metadata volume
+	jfsVFS  *vfs.VFS
+	metaCl  meta.Meta
+	store   *casStore
+	vol     loophole.Volume
+	volData *VolumeData
 
-	vfsName    string // registered sqlite3vfs name (for cleanup)
 	mountpoint string //nolint:unused // only used by FUSE driver (linux)
 	fuseServer any    //nolint:unused // *fuse.Server, only used by FUSE driver (linux)
-	cacheDir   string // temp dir for chunk cache
 }
 
-// openMeta opens a JuiceFS meta client backed by a loophole Volume.
-// It registers a C VFS (iVersion=3, full SHM/WAL support) named vfsName,
-// opens the SQLite meta engine through it, and returns the meta client.
-func openMeta(ctx context.Context, vol loophole.Volume, vfsName string) (meta.Meta, *svfs.CVFS, error) {
-	cvfs, err := svfs.NewCVFS(ctx, vol, vfsName, svfs.SyncModeAsync)
+// openMeta opens a JuiceFS meta client backed by a loophole Volume via bbolt.
+func openMeta(ctx context.Context, vol loophole.Volume) (meta.Meta, *VolumeData, error) {
+	vd, err := NewVolumeData(ctx, vol)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open CVFS: %w", err)
+		return nil, nil, fmt.Errorf("create VolumeData: %w", err)
 	}
 
-	dsn := fmt.Sprintf("sqlite3://file:main.db?vfs=%s&cache=private&_busy_timeout=5000", vfsName)
+	addr := vol.Name()
+	meta.SetBoltData(addr, vd, vol.ReadOnly())
+
+	dsn := fmt.Sprintf("loophole://%s", addr)
 	conf := meta.DefaultConf()
-	conf.NoBGJob = true // We handle lifecycle ourselves.
+	conf.NoBGJob = true
+	conf.ReadOnly = vol.ReadOnly()
 	m := meta.NewClient(dsn, conf)
-	return m, cvfs, nil
+	return m, vd, nil
+}
+
+// closeMount tears down a juiceFSMount.
+func closeMount(ctx context.Context, h *juiceFSMount) error {
+	closeMountShared(ctx, h)
+
+	if h.volData != nil && !h.vol.ReadOnly() {
+		if err := h.volData.Sync(); err != nil {
+			slog.Warn("juicefs: volume data sync error", "error", err)
+		}
+	}
+
+	return nil
 }
 
 // formatMeta initializes JuiceFS metadata in a fresh volume.
@@ -76,11 +87,8 @@ func formatMeta(m meta.Meta, volumeName string) error {
 	return nil
 }
 
-// chunkConfig builds a chunk.Config from the meta.Format and a cache directory.
-// This mirrors JuiceFS's getChunkConf (cmd/mount.go) so the VFS writer and
-// chunk store share the same config — critically including BufferSize and
-// Writeback — avoiding the split-brain that caused permanent backpressure.
-func chunkConfig(format *meta.Format, cacheDir string) *chunk.Config {
+// chunkConfig builds a chunk.Config from the meta.Format.
+func chunkConfig(format *meta.Format) *chunk.Config {
 	conf := &chunk.Config{
 		BlockSize:      format.BlockSize * 1024, // KiB → bytes
 		Compress:       format.Compression,
@@ -93,15 +101,15 @@ func chunkConfig(format *meta.Format, cacheDir string) *chunk.Config {
 		Writeback:      true,
 		Prefetch:       1,
 		BufferSize:     300 << 20, // 300 MiB
-		CacheDir:       cacheDir,
-		CacheSize:      1 << 10, // 1 GiB (in MiB units per JuiceFS convention)
+		CacheDir:       "",
+		CacheSize:      0,
 		CacheItems:     1000,
 		FreeSpace:      0.01,
-		CacheMode:      os.FileMode(0600),
+		CacheMode:      0o600,
 		CacheFullBlock: true,
 		CacheChecksum:  "extend",
 		CacheEviction:  "2-random",
-		AutoCreate:     true,
+		AutoCreate:     false,
 		OSCache:        true,
 	}
 	conf.SelfCheck(format.UUID)
@@ -135,9 +143,6 @@ func createVFSWithMountpoint(m meta.Meta, format *meta.Format, chunkConf *chunk.
 		FuseOpts:        &vfs.FuseOptions{},
 	}
 
-	// Register message callbacks for slice compaction and deletion.
-	// Without these, writes fail with EIO once the slice count exceeds
-	// the compaction threshold (~350 slices per chunk).
 	m.OnMsg(meta.DeleteSlice, func(args ...interface{}) error {
 		return store.Remove(args[0].(uint64), int(args[1].(uint32)))
 	})
@@ -157,31 +162,21 @@ func errnoErr(errno syscall.Errno) error {
 	return errno
 }
 
-// closeMount tears down a juiceFSMount.
-func closeMount(ctx context.Context, h *juiceFSMount) error {
-	slog.Info("juicefs: closing mount")
+// closeMountShared tears down the shared parts of a juiceFSMount.
+func closeMountShared(ctx context.Context, h *juiceFSMount) {
+	slog.Debug("juicefs: closing mount")
 
-	// Flush all pending writes.
 	if err := h.jfsVFS.FlushAll(""); err != nil {
 		slog.Warn("juicefs: FlushAll error", "error", err)
 	}
 
+	if h.store != nil {
+		if err := h.store.FlushPending(ctx); err != nil {
+			slog.Warn("juicefs: FlushPending error", "error", err)
+		}
+		h.store.Close()
+	}
+
 	_ = h.metaCl.CloseSession()
 	_ = h.metaCl.Shutdown()
-
-	if h.cvfs != nil {
-		if err := h.cvfs.FlushHeader(); err != nil {
-			slog.Warn("juicefs: flush header error", "error", err)
-		}
-	}
-
-	if err := h.vol.Flush(ctx); err != nil {
-		slog.Warn("juicefs: volume flush error", "error", err)
-	}
-
-	if h.cacheDir != "" {
-		_ = os.RemoveAll(h.cacheDir)
-	}
-
-	return nil
 }

@@ -12,6 +12,7 @@ services:
     build: .
     privileged: true
     environment:
+      GOMEMLIMIT: 512MiB
       S3_ENDPOINT: http://s3:9000
       BUCKET: testbucket
       AWS_ACCESS_KEY_ID: rustfsadmin
@@ -22,6 +23,9 @@ services:
       - .:/app
       - go-mod:/go/pkg/mod
       - go-cache:/root/.cache/go-build
+      - ./docker-config:/root/.loophole-config
+      - loophole-data:/root/.loophole
+      - /tmp/linux-clone-test/linux:/mnt/linux-src:ro
     depends_on:
       - s3
     devices:
@@ -32,3 +36,4 @@ volumes:
   s3-logs:
   go-mod:
   go-cache:
+  loophole-data:

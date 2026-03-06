@@ -1,3 +1,5 @@
+//go:build !tinygo && !js
+
 // Package sqlitevfs implements a SQLite VFS backed by loophole volumes.
 //
 // The main database file lives on the volume. WAL, journal, and SHM are kept
@@ -57,13 +59,3 @@ const (
 
 // RegisterVFS registers a VFS with the SQLite driver.
 var RegisterVFS = sqlite3vfs.RegisterVFS
-
-// SyncMode controls how xSync behaves.
-type SyncMode int
-
-const (
-	// SyncModeSync flushes to S3 on every xSync call.
-	SyncModeSync SyncMode = 0
-	// SyncModeAsync makes xSync a no-op; data is flushed on a schedule.
-	SyncModeAsync SyncMode = 1
-)

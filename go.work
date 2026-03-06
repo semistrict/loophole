@@ -2,9 +2,13 @@ go 1.25.2
 
 use (
 	.
+	./third_party/bbolt
 	./third_party/compress
 	./third_party/merovius-nbd
 	./third_party/juicefs
+	./third_party/go-sqlite3
+	./third_party/goleveldb
+	./third_party/prometheus-client
 )
 
 // JuiceFS's fuse package requires their go-fuse fork with extra MountOptions fields.

@@ -1,3 +1,5 @@
+//go:build !js
+
 package loophole
 
 import (
@@ -194,18 +196,45 @@ func (s *S3Store) PutBytesCAS(ctx context.Context, key string, data []byte, etag
 
 func (s *S3Store) PutReader(ctx context.Context, key string, r io.Reader) error {
 	done := metrics.S3Op("put")
-	// The AWS SDK determines Content-Length automatically for readers
-	// that implement io.Seeker (e.g. *os.File, *bytes.Reader).
+	// Wrap to count bytes transferred. Use seekableCountingReader when
+	// the underlying reader supports Seek (preserves Content-Length detection).
+	var body io.Reader
+	cr := &countingReader{r: r}
+	if _, ok := r.(io.Seeker); ok {
+		body = &seekableCountingReader{countingReader: cr}
+	} else {
+		body = cr
+	}
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(s.fullKey(key)),
-		Body:   r,
+		Body:   body,
 	})
 	done(err)
+	metrics.S3Transfer("put", "tx", cr.n)
 	if err != nil {
 		return fmt.Errorf("put %s: %w", s.fullKey(key), err)
 	}
 	return nil
+}
+
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+type seekableCountingReader struct {
+	*countingReader
+}
+
+func (s *seekableCountingReader) Seek(offset int64, whence int) (int64, error) {
+	return s.r.(io.Seeker).Seek(offset, whence)
 }
 
 func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte) (bool, error) {

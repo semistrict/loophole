@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/diskcache"
 )
 
 // Compile-time check.
@@ -31,7 +32,7 @@ type Manager struct {
 	store     loophole.ObjectStore // root of the bucket/prefix
 	cacheDir  string
 	config    Config
-	pageCache *PageCache
+	diskCache *diskcache.DiskCache
 	lease     *loophole.LeaseManager
 	fs        LocalFS
 	idGen     func() string
@@ -46,21 +47,17 @@ type Manager struct {
 
 // NewVolumeManager creates and initializes an LSM Manager.
 // fs is optional — nil uses OSLocalFS.
-func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs LocalFS) *Manager {
+func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs LocalFS, diskCache *diskcache.DiskCache) *Manager {
 	store = loophole.NewRetryStore(store)
 	config.setDefaults()
 	if fs == nil {
 		fs = OSLocalFS{}
 	}
-	pc, err := NewPageCache(filepath.Join(cacheDir, "pages.cache"), config.PageCacheBytes)
-	if err != nil {
-		panic(fmt.Sprintf("lsm: create page cache: %v", err))
-	}
 	m := &Manager{
 		store:     store,
 		cacheDir:  cacheDir,
 		config:    config,
-		pageCache: pc,
+		diskCache: diskCache,
 		lease:     loophole.NewLeaseManager(store.At("leases")),
 		fs:        fs,
 		idGen:     uuid.NewString,
@@ -72,6 +69,7 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 }
 
 func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volType string) (loophole.Volume, error) {
+	slog.Info("lsm: NewVolume", "name", name, "size", size, "type", volType)
 	if size == 0 {
 		size = DefaultVolumeSize
 	}
@@ -226,7 +224,7 @@ func (m *Manager) Close(ctx context.Context) error {
 			return err
 		}
 	}
-	return m.pageCache.Close()
+	return nil
 }
 
 // --- internal ---

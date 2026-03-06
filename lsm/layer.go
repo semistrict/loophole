@@ -32,12 +32,21 @@ type DeltaLayerMeta struct {
 	Size      int64     `json:"size"`
 }
 
-// ImageLayerMeta is the metadata for an image layer on S3.
+// ImageLayerMeta is the metadata for a segmented image layer on S3.
+// Each segment is a self-contained S3 object covering PagesPerSegment
+// contiguous page addresses.
 type ImageLayerMeta struct {
-	Seq       uint64    `json:"seq"`
-	PageRange [2]uint64 `json:"pages"` // [min, max] pageAddr
-	Key       string    `json:"key"`
-	Size      int64     `json:"size"`
+	Seq       uint64        `json:"seq"`
+	PageRange [2]uint64     `json:"pages"`    // [min, max] across all segments
+	Segments  []SegmentMeta `json:"segments"` // sorted by SegIdx ascending
+}
+
+// SegmentMeta describes one segment within a segmented image layer.
+type SegmentMeta struct {
+	SegIdx   uint64 `json:"seg_idx"`   // segment index (pageAddr / PagesPerSegment)
+	NumPages uint32 `json:"num_pages"` // number of pages with data
+	Key      string `json:"key"`       // S3 key for this segment
+	Size     int64  `json:"size"`      // compressed size in bytes
 }
 
 // --- Delta layer S3 format ---
@@ -289,59 +298,6 @@ func (p *parsedDeltaLayer) findPage(ctx context.Context, pageAddr, beforeSeq uin
 	return decompressed, true, nil
 }
 
-// parseDeltaIndex downloads only the header and index of a delta layer via
-// two range reads, returning a parsedDeltaLayer in index-only mode (data=nil).
-// Page data is fetched on demand by findPage via GetRange.
-func parseDeltaIndex(ctx context.Context, store loophole.ObjectStore, key string) (*parsedDeltaLayer, error) {
-	// 1. Read header.
-	body, _, err := store.GetRange(ctx, key, 0, deltaLayerHeaderSize)
-	if err != nil {
-		return nil, fmt.Errorf("read delta header: %w", err)
-	}
-	headerData, err := io.ReadAll(body)
-	_ = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read delta header bytes: %w", err)
-	}
-
-	var hdr deltaLayerHeader
-	if err := binary.Read(bytes.NewReader(headerData), binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("parse delta header: %w", err)
-	}
-	if hdr.Magic != deltaLayerMagic {
-		return nil, fmt.Errorf("bad magic: %x", hdr.Magic)
-	}
-	if hdr.Version != deltaLayerVersion {
-		return nil, fmt.Errorf("unsupported version: %d", hdr.Version)
-	}
-
-	// 2. Read index section.
-	indexSize := int64(hdr.NumEntries) * deltaLayerIndexEntrySize
-	body, _, err = store.GetRange(ctx, key, int64(hdr.IndexOffset), indexSize)
-	if err != nil {
-		return nil, fmt.Errorf("read delta index: %w", err)
-	}
-	indexData, err := io.ReadAll(body)
-	_ = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read delta index bytes: %w", err)
-	}
-
-	entries := make([]deltaLayerIndexEntry, hdr.NumEntries)
-	r := bytes.NewReader(indexData)
-	for i := range entries {
-		if err := binary.Read(r, binary.LittleEndian, &entries[i]); err != nil {
-			return nil, fmt.Errorf("read index entry %d: %w", i, err)
-		}
-	}
-
-	return &parsedDeltaLayer{
-		index: entries,
-		store: store,
-		key:   key,
-	}, nil
-}
-
 // mergeDeltaLayers merges N parsed delta layers into a single delta layer.
 // For each unique pageAddr, only the entry with the highest seq is kept.
 // Tombstones are preserved. The merged delta's StartSeq = min of all inputs,
@@ -511,21 +467,34 @@ func parseDeltaKey(key string, size int64) (DeltaLayerMeta, error) {
 	}, nil
 }
 
-// parseImageKey parses an image layer key like "images/0000000000000005"
-// into an ImageLayerMeta. PageRange is set to [0, MaxUint64] since it's
-// unknown until the layer is downloaded and parsed.
-func parseImageKey(key string, size int64) (ImageLayerMeta, error) {
-	base := path.Base(key)
-	seq, err := strconv.ParseUint(base, 16, 64)
-	if err != nil {
-		return ImageLayerMeta{}, fmt.Errorf("parse image seq %q: %w", base, err)
+// imageSegmentKey returns the S3 key for an image segment.
+func imageSegmentKey(seq, segIdx uint64) string {
+	return fmt.Sprintf("images/%016x/%016x", seq, segIdx)
+}
+
+// TotalSize returns the sum of compressed sizes across all segments.
+func (im *ImageLayerMeta) TotalSize() int64 {
+	var total int64
+	for _, seg := range im.Segments {
+		total += seg.Size
 	}
-	return ImageLayerMeta{
-		Seq:       seq,
-		Key:       key,
-		Size:      size,
-		PageRange: [2]uint64{0, math.MaxUint64},
-	}, nil
+	return total
+}
+
+// LogKey returns a human-readable key for logging (not a real S3 key).
+func (im *ImageLayerMeta) LogKey() string {
+	return fmt.Sprintf("images/%016x", im.Seq)
+}
+
+// FindSegment returns the segment covering the given pageAddr, or nil.
+func (im *ImageLayerMeta) FindSegment(pageAddr uint64) *SegmentMeta {
+	segIdx := pageAddr / PagesPerSegment
+	for i := range im.Segments {
+		if im.Segments[i].SegIdx == segIdx {
+			return &im.Segments[i]
+		}
+	}
+	return nil
 }
 
 // --- Image layer S3 format ---
@@ -562,10 +531,11 @@ type imagePageInput struct {
 	Data     []byte // must be PageSize bytes
 }
 
-// buildImageLayer creates an image layer from a sorted set of pages.
-func buildImageLayer(seq uint64, pages []imagePageInput) ([]byte, ImageLayerMeta, error) {
+// buildImageSegmentBlob creates a single image segment blob from a set of pages.
+// All pages must belong to the same segment index.
+func buildImageSegmentBlob(seq uint64, pages []imagePageInput) ([]byte, error) {
 	if len(pages) == 0 {
-		return nil, ImageLayerMeta{}, fmt.Errorf("no pages")
+		return nil, fmt.Errorf("no pages")
 	}
 
 	encoder := getZstdEncoder()
@@ -600,7 +570,7 @@ func buildImageLayer(seq uint64, pages []imagePageInput) ([]byte, ImageLayerMeta
 	indexOffset := uint64(buf.Len())
 	for _, ie := range indexEntries {
 		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
-			return nil, ImageLayerMeta{}, fmt.Errorf("write index entry: %w", err)
+			return nil, fmt.Errorf("write index entry: %w", err)
 		}
 	}
 
@@ -615,27 +585,85 @@ func buildImageLayer(seq uint64, pages []imagePageInput) ([]byte, ImageLayerMeta
 
 	result := buf.Bytes()
 	if err := backfillHeader(result, hdr, imageLayerHeaderSize); err != nil {
-		return nil, ImageLayerMeta{}, err
+		return nil, err
+	}
+
+	return result, nil
+}
+
+// ImageSegmentBlob pairs a segment index with its serialized blob.
+type ImageSegmentBlob struct {
+	SegIdx uint64
+	Data   []byte
+}
+
+// buildImageSegments groups pages by segment index and builds one blob per
+// segment. Returns the per-segment blobs and the aggregate ImageLayerMeta.
+func buildImageSegments(seq uint64, pages []imagePageInput) ([]ImageSegmentBlob, ImageLayerMeta, error) {
+	if len(pages) == 0 {
+		return nil, ImageLayerMeta{}, fmt.Errorf("no pages")
+	}
+
+	// Group pages by segment index.
+	groups := make(map[uint64][]imagePageInput)
+	for _, p := range pages {
+		segIdx := p.PageAddr / PagesPerSegment
+		groups[segIdx] = append(groups[segIdx], p)
+	}
+
+	// Sort segment indices for deterministic output.
+	segIdxs := make([]uint64, 0, len(groups))
+	for idx := range groups {
+		segIdxs = append(segIdxs, idx)
+	}
+	sort.Slice(segIdxs, func(i, j int) bool { return segIdxs[i] < segIdxs[j] })
+
+	var segments []SegmentMeta
+	var blobs []ImageSegmentBlob
+	minPage := pages[0].PageAddr
+	maxPage := pages[0].PageAddr
+
+	for _, segIdx := range segIdxs {
+		segPages := groups[segIdx]
+		// Sort pages within segment by PageAddr.
+		sort.Slice(segPages, func(i, j int) bool { return segPages[i].PageAddr < segPages[j].PageAddr })
+
+		blob, err := buildImageSegmentBlob(seq, segPages)
+		if err != nil {
+			return nil, ImageLayerMeta{}, fmt.Errorf("build segment %d: %w", segIdx, err)
+		}
+
+		key := imageSegmentKey(seq, segIdx)
+		segments = append(segments, SegmentMeta{
+			SegIdx:   segIdx,
+			NumPages: uint32(len(segPages)),
+			Key:      key,
+			Size:     int64(len(blob)),
+		})
+		blobs = append(blobs, ImageSegmentBlob{SegIdx: segIdx, Data: blob})
+
+		if segPages[0].PageAddr < minPage {
+			minPage = segPages[0].PageAddr
+		}
+		if segPages[len(segPages)-1].PageAddr > maxPage {
+			maxPage = segPages[len(segPages)-1].PageAddr
+		}
 	}
 
 	meta := ImageLayerMeta{
 		Seq:       seq,
 		PageRange: [2]uint64{minPage, maxPage},
-		Key:       fmt.Sprintf("images/%016x", seq),
-		Size:      int64(len(result)),
+		Segments:  segments,
 	}
 
-	return result, meta, nil
+	return blobs, meta, nil
 }
 
-// parsedImageLayer holds an image layer's parsed index and optionally the full
-// blob. In index-only mode (data == nil), findPage uses GetRange to fetch
-// individual compressed pages on demand.
+// parsedImageLayer holds a parsed image segment's index and full blob.
+// Each segment is small (~4MB) so we always download the full blob.
 type parsedImageLayer struct {
-	data  []byte // full blob; nil in index-only mode
+	data  []byte
 	index []imageLayerIndexEntry
-	store loophole.ObjectStore // for range reads; nil when data is set
-	key   string               // S3 key for range reads
 }
 
 func parseImageLayer(data []byte) (*parsedImageLayer, error) {
@@ -667,10 +695,8 @@ func parseImageLayer(data []byte) (*parsedImageLayer, error) {
 	return &parsedImageLayer{data: data, index: entries}, nil
 }
 
-// findPage does a binary search for pageAddr in the image layer index.
-// In index-only mode (data == nil), compressed page data is fetched via
-// GetRange on demand.
-func (p *parsedImageLayer) findPage(ctx context.Context, pageAddr uint64) ([]byte, bool, error) {
+// findPage does a binary search for pageAddr in the image segment index.
+func (p *parsedImageLayer) findPage(pageAddr uint64) ([]byte, bool, error) {
 	i := sort.Search(len(p.index), func(i int) bool {
 		return p.index[i].PageAddr >= pageAddr
 	})
@@ -680,58 +706,9 @@ func (p *parsedImageLayer) findPage(ctx context.Context, pageAddr uint64) ([]byt
 
 	ie := &p.index[i]
 
-	decompressed, err := readCompressedPage(ctx, p.data, p.store, p.key, ie.ValueOffset, ie.ValueLen, ie.CRC32, pageAddr)
+	decompressed, err := readCompressedPage(context.Background(), p.data, nil, "", ie.ValueOffset, ie.ValueLen, ie.CRC32, pageAddr)
 	if err != nil {
 		return nil, false, err
 	}
 	return decompressed, true, nil
-}
-
-// parseImageIndex downloads only the header and index of an image layer via
-// two range reads, returning a parsedImageLayer in index-only mode (data=nil).
-func parseImageIndex(ctx context.Context, store loophole.ObjectStore, key string) (*parsedImageLayer, error) {
-	// 1. Read header.
-	body, _, err := store.GetRange(ctx, key, 0, imageLayerHeaderSize)
-	if err != nil {
-		return nil, fmt.Errorf("read image header: %w", err)
-	}
-	headerData, err := io.ReadAll(body)
-	_ = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read image header bytes: %w", err)
-	}
-
-	var hdr imageLayerHeader
-	if err := binary.Read(bytes.NewReader(headerData), binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("parse image header: %w", err)
-	}
-	if hdr.Magic != imageLayerMagic {
-		return nil, fmt.Errorf("bad magic: %x", hdr.Magic)
-	}
-
-	// 2. Read index section.
-	indexSize := int64(hdr.NumPages) * imageLayerIndexEntrySize
-	body, _, err = store.GetRange(ctx, key, int64(hdr.IndexOffset), indexSize)
-	if err != nil {
-		return nil, fmt.Errorf("read image index: %w", err)
-	}
-	indexData, err := io.ReadAll(body)
-	_ = body.Close()
-	if err != nil {
-		return nil, fmt.Errorf("read image index bytes: %w", err)
-	}
-
-	entries := make([]imageLayerIndexEntry, hdr.NumPages)
-	r := bytes.NewReader(indexData)
-	for i := range entries {
-		if err := binary.Read(r, binary.LittleEndian, &entries[i]); err != nil {
-			return nil, fmt.Errorf("read index entry %d: %w", i, err)
-		}
-	}
-
-	return &parsedImageLayer{
-		index: entries,
-		store: store,
-		key:   key,
-	}, nil
 }

@@ -1,3 +1,5 @@
+//go:build !js
+
 package fsbackend
 
 import (
@@ -25,9 +27,14 @@ type Lwext4FUSEDriver struct{}
 
 var _ Driver[lwext4FUSEMount] = (*Lwext4FUSEDriver)(nil)
 
+// NewLwext4FUSEDriver returns a type-erased driver for FUSE + lwext4.
+func NewLwext4FUSEDriver() AnyDriver {
+	return EraseDriver[lwext4FUSEMount](&Lwext4FUSEDriver{})
+}
+
 // NewLwext4FUSE creates a Service backed by FUSE + lwext4.
 func NewLwext4FUSE(vm loophole.VolumeManager) Service {
-	return New[lwext4FUSEMount](&Lwext4FUSEDriver{}, vm)
+	return New(vm, NewLwext4FUSEDriver(), loophole.VolumeTypeExt4)
 }
 
 func (d *Lwext4FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {

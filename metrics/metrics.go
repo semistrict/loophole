@@ -6,12 +6,10 @@
 package metrics
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // --- Registry ---
@@ -21,12 +19,6 @@ var Registry = prometheus.NewRegistry()
 func init() {
 	// Include Go runtime metrics alongside ours.
 	Registry.MustRegister(collectors.NewGoCollector())
-	Registry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
-}
-
-// Handler returns an http.Handler that serves Prometheus metrics.
-func Handler() http.Handler {
-	return promhttp.HandlerFor(Registry, promhttp.HandlerOpts{})
 }
 
 // --- Helpers ---

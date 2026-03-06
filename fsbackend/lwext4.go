@@ -1,3 +1,5 @@
+//go:build !js
+
 package fsbackend
 
 import (
@@ -19,9 +21,14 @@ type Lwext4Driver struct{}
 
 var _ Driver[lwext4Mount] = (*Lwext4Driver)(nil)
 
+// NewLwext4Driver returns a type-erased driver for in-process lwext4.
+func NewLwext4Driver() AnyDriver {
+	return EraseDriver[lwext4Mount](&Lwext4Driver{})
+}
+
 // NewLwext4 creates a Service backed by in-process lwext4.
 func NewLwext4(vm loophole.VolumeManager) Service {
-	return New[lwext4Mount](&Lwext4Driver{}, vm)
+	return New(vm, NewLwext4Driver(), loophole.VolumeTypeExt4)
 }
 
 func (l *Lwext4Driver) Format(ctx context.Context, vol loophole.Volume) error {

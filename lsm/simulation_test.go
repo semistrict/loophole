@@ -8,6 +8,7 @@ import (
 	"math"
 	mrand "math/rand/v2"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
@@ -122,6 +123,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes in
 			FlushInterval:   flushInterval,
 		},
 		fs,
+		newTestDiskCacheAt(sim.t, filepath.Join(cacheDir, "diskcache")),
 	)
 	m.idGen = sim.nextTimelineID
 	return m

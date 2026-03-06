@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,8 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/internal/diskcache"
+	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/lsm"
 )
 
@@ -89,6 +92,25 @@ func skipKernelOnly(t *testing.T) {
 	}
 }
 
+// ---------- Volume manager + disk cache ----------
+
+// newVolumeManager creates a VolumeManager with a real disk cache, matching
+// the production daemon configuration. The cache and manager are cleaned up
+// automatically via t.Cleanup. Returns the VM and a juicefs.Config with
+// production defaults (disk cache + staging enabled).
+func newVolumeManager(t testing.TB, store loophole.ObjectStore) (*lsm.Manager, juicefs.Config) {
+	t.Helper()
+	cacheDir := t.TempDir()
+	dc, err := diskcache.New(filepath.Join(cacheDir, "diskcache"))
+	require.NoError(t, err)
+	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil, dc)
+	t.Cleanup(func() {
+		_ = vm.Close(t.Context())
+		_ = dc.Close()
+	})
+	return vm, juicefs.NewConfig(store, dc, cacheDir)
+}
+
 // ---------- Backend creation ----------
 
 // newBackend creates a fsbackend.Service for the current mode.
@@ -105,9 +127,9 @@ func newBackend(t testing.TB) fsbackend.Service {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil)
+	vm, cfg := newVolumeManager(t, store)
 
-	backend := newBackendForMode(t, vm, inst, store)
+	backend := newBackendForMode(t, vm, inst, cfg)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()

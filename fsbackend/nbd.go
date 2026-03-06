@@ -27,13 +27,22 @@ var _ Driver[nbdMount] = (*NBDDriver)(nil)
 var _ DevicePather = (*NBDDriver)(nil)
 var _ DeviceConnector = (*NBDDriver)(nil)
 
-// NewNBD creates a Service backed by NBD.
-func NewNBD(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+// NewNBDDriver creates a type-erased NBD driver.
+func NewNBDDriver(vm loophole.VolumeManager, opts *nbdvm.Options) (AnyDriver, error) {
 	srv, err := nbdvm.NewServer(vm, opts)
 	if err != nil {
 		return nil, err
 	}
-	return New[nbdMount](&NBDDriver{nbd: srv}, vm), nil
+	return EraseDriver[nbdMount](&NBDDriver{nbd: srv}), nil
+}
+
+// NewNBD creates a Service backed by NBD.
+func NewNBD(vm loophole.VolumeManager, opts *nbdvm.Options) (Service, error) {
+	d, err := NewNBDDriver(vm, opts)
+	if err != nil {
+		return nil, err
+	}
+	return New(vm, d, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS), nil
 }
 
 func (n *NBDDriver) Format(ctx context.Context, vol loophole.Volume) error {

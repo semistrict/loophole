@@ -11,18 +11,38 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/diskcache"
 )
 
 // newTestManager creates a Manager and registers cleanup to close it when the test finishes.
 func newTestManager(t *testing.T, store loophole.ObjectStore, config Config) *Manager {
 	t.Helper()
-	m := NewVolumeManager(store, t.TempDir(), config, nil)
-	t.Cleanup(func() { m.Close(t.Context()) })
+	cacheDir := t.TempDir()
+	dc := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache"))
+	m := NewVolumeManager(store, cacheDir, config, nil, dc)
+	t.Cleanup(func() {
+		_ = m.Close(t.Context())
+		_ = dc.Close()
+	})
 	return m
+}
+
+func newTestDiskCacheAt(t testing.TB, dir string) *diskcache.DiskCache {
+	t.Helper()
+	dc, err := diskcache.New(dir)
+	if err != nil {
+		t.Fatalf("create disk cache: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = dc.Close()
+	})
+	return dc
 }
 
 var testConfig = Config{
@@ -261,8 +281,10 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := NewVolumeManager(store, cacheDir, config, nil)
+	dc1 := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache-1"))
+	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
 	t.Cleanup(func() { m1.Close(t.Context()) })
+	t.Cleanup(func() { dc1.Close() })
 	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
@@ -304,6 +326,73 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	}
 }
 
+func TestDeltaLayerBlobReusedFromSharedDiskCache(t *testing.T) {
+	store := loophole.NewMemStore()
+	cacheDir := t.TempDir()
+	ctx := t.Context()
+
+	dc, err := diskcache.New(filepath.Join(cacheDir, "diskcache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dc.Close() })
+
+	m1 := NewVolumeManager(store, cacheDir, testConfig, nil, dc)
+	t.Cleanup(func() { _ = m1.Close(t.Context()) })
+	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := bytes.Repeat([]byte{0xAB}, PageSize)
+	if err := v1.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v1.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	m2 := NewVolumeManager(store, cacheDir, testConfig, nil, dc)
+	t.Cleanup(func() { _ = m2.Close(t.Context()) })
+	v2, err := m2.OpenVolume(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol2 := v2.(*volume)
+	if len(vol2.timeline.layers.Deltas) != 1 {
+		t.Fatalf("expected 1 delta layer, got %d", len(vol2.timeline.layers.Deltas))
+	}
+
+	store.ResetCounts()
+	deltaKey := vol2.timeline.layers.Deltas[0].Key
+	if _, err := vol2.timeline.getDeltaLayer(ctx, deltaKey); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Count(loophole.OpGet); got != 0 {
+		t.Fatalf("expected flushed delta blob to be reused from shared disk cache, got %d object-store GETs", got)
+	}
+	if err := m2.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	m3 := NewVolumeManager(store, cacheDir, testConfig, nil, dc)
+	t.Cleanup(func() { _ = m3.Close(t.Context()) })
+	v3, err := m3.OpenVolume(ctx, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vol3 := v3.(*volume)
+	store.ResetCounts()
+	if _, err := vol3.timeline.getDeltaLayer(ctx, vol3.timeline.layers.Deltas[0].Key); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Count(loophole.OpGet); got != 0 {
+		t.Fatalf("expected shared disk cache hit, got %d object-store GETs", got)
+	}
+}
+
 func TestCloseFlushesWithoutExplicitFlush(t *testing.T) {
 	store := loophole.NewMemStore()
 	config := Config{
@@ -314,7 +403,9 @@ func TestCloseFlushesWithoutExplicitFlush(t *testing.T) {
 	ctx := t.Context()
 
 	// Write data and close WITHOUT calling Flush.
-	m1 := NewVolumeManager(store, t.TempDir(), config, nil)
+	cacheDir := t.TempDir()
+	dc1 := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache"))
+	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
 	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
@@ -820,7 +911,7 @@ func TestImageLayerRoundtrip(t *testing.T) {
 		rand.Read(pages[i].Data)
 	}
 
-	data, meta, err := buildImageLayer(42, pages)
+	segBlobs, meta, err := buildImageSegments(42, pages)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -830,14 +921,18 @@ func TestImageLayerRoundtrip(t *testing.T) {
 	if meta.PageRange[0] != 0 || meta.PageRange[1] != 12 {
 		t.Fatalf("expected PageRange=[0,12], got %v", meta.PageRange)
 	}
+	// All pages fit in segment 0 (pageAddrs 0-12, PagesPerSegment=1024).
+	if len(segBlobs) != 1 {
+		t.Fatalf("expected 1 segment, got %d", len(segBlobs))
+	}
 
-	parsed, err := parseImageLayer(data)
+	parsed, err := parseImageLayer(segBlobs[0].Data)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	for _, p := range pages {
-		got, found, err := parsed.findPage(t.Context(), p.PageAddr)
+		got, found, err := parsed.findPage(p.PageAddr)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -850,7 +945,7 @@ func TestImageLayerRoundtrip(t *testing.T) {
 	}
 
 	// Non-existent page.
-	_, found, err := parsed.findPage(t.Context(), 999)
+	_, found, err := parsed.findPage(999)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1338,7 +1433,7 @@ func buildTestImageLayer(t *testing.T) []byte {
 	t.Helper()
 	page := make([]byte, PageSize)
 	page[0] = 0xCD
-	data, _, err := buildImageLayer(1, []imagePageInput{{PageAddr: 0, Data: page}})
+	data, err := buildImageSegmentBlob(1, []imagePageInput{{PageAddr: 0, Data: page}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1496,7 +1591,7 @@ func TestImageFindPageCorruption(t *testing.T) {
 			t.Fatal(err)
 		}
 		parsed.data[imageLayerHeaderSize] ^= 0xFF
-		_, _, err = parsed.findPage(t.Context(), 0)
+		_, _, err = parsed.findPage(0)
 		if err == nil || !strings.Contains(err.Error(), "CRC mismatch") {
 			t.Fatalf("expected 'CRC mismatch' error, got: %v", err)
 		}
@@ -1509,7 +1604,7 @@ func TestImageFindPageCorruption(t *testing.T) {
 			t.Fatal(err)
 		}
 		parsed.index[0].ValueLen = 999999
-		_, _, err = parsed.findPage(t.Context(), 0)
+		_, _, err = parsed.findPage(0)
 		if err == nil || !strings.Contains(err.Error(), "value extends beyond") {
 			t.Fatalf("expected 'value extends beyond' error, got: %v", err)
 		}
@@ -1530,7 +1625,7 @@ func TestImageFindPageCorruption(t *testing.T) {
 		ie.ValueLen = uint32(len(wrongSize))
 		ie.CRC32 = crc32.ChecksumIEEE(wrongSize)
 
-		_, _, err = parsed.findPage(t.Context(), 0)
+		_, _, err = parsed.findPage(0)
 		if err == nil || !strings.Contains(err.Error(), "decompressed size") {
 			t.Fatalf("expected 'decompressed size' error, got: %v", err)
 		}
@@ -2156,8 +2251,11 @@ func TestListAllVolumes(t *testing.T) {
 
 func TestConfigDefaults(t *testing.T) {
 	store := loophole.NewMemStore()
-	m := NewVolumeManager(store, t.TempDir(), Config{}, nil)
+	cacheDir := t.TempDir()
+	dc := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache"))
+	m := NewVolumeManager(store, cacheDir, Config{}, nil, dc)
 	t.Cleanup(func() { m.Close(t.Context()) })
+	t.Cleanup(func() { dc.Close() })
 	if m.config.FlushThreshold != DefaultFlushThreshold {
 		t.Fatalf("expected FlushThreshold=%d, got %d", DefaultFlushThreshold, m.config.FlushThreshold)
 	}
@@ -2692,8 +2790,8 @@ func TestGetImageLayerFail(t *testing.T) {
 	}
 	vol2 := v2.(*volume)
 
-	// Fault Get on image layer key.
-	imageKey := "timelines/" + vol2.timeline.id + "/" + vol2.timeline.layers.Images[0].Key
+	// Fault Get on image segment key.
+	imageKey := "timelines/" + vol2.timeline.id + "/" + vol2.timeline.layers.Images[0].Segments[0].Key
 	store.SetFault(loophole.OpGet, imageKey, loophole.Fault{
 		Err: fmt.Errorf("simulated image download failure"),
 	})
@@ -3792,7 +3890,9 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := NewVolumeManager(store, cacheDir, config, nil)
+	dc1 := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache-1"))
+	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
+	t.Cleanup(func() { dc1.Close() })
 	v1, err := m1.NewVolume(ctx, "test", 1024*1024, "")
 	if err != nil {
 		t.Fatal(err)
@@ -3868,7 +3968,9 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	m1 := NewVolumeManager(store, cacheDir, config, nil)
+	dc1 := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache-1"))
+	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
+	t.Cleanup(func() { dc1.Close() })
 	v1, err := m1.NewVolume(ctx, "test", 64*PageSize, "")
 	if err != nil {
 		t.Fatal(err)
@@ -4416,7 +4518,9 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	m := NewVolumeManager(store, cacheDir, config, nil)
+	dc := newTestDiskCacheAt(t, filepath.Join(cacheDir, "diskcache"))
+	m := NewVolumeManager(store, cacheDir, config, nil, dc)
+	t.Cleanup(func() { dc.Close() })
 	defer m.Close(ctx)
 
 	// maxMemLayerSlots is 16384, so volume needs to be larger than that.
@@ -4531,4 +4635,214 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestAsyncFlushWriteDoesNotBlockOnS3 verifies that writes succeed even when
+// S3 is failing, as long as frozen layer capacity is not exhausted. The
+// background flush loop handles uploads asynchronously.
+func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  PageSize, // freeze after every page
+		MaxFrozenLayers: 10,       // allow many frozen layers before backpressure
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   50 * time.Millisecond,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Make S3 uploads fail.
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("simulated S3 outage"),
+	})
+
+	// Write several pages — should all succeed because async flush doesn't
+	// block the write path, and we have room for frozen layers.
+	page := make([]byte, PageSize)
+	for i := range 5 {
+		page[0] = byte(i + 1)
+		err := v.Write(ctx, page, uint64(i)*PageSize)
+		if err != nil {
+			t.Fatalf("write %d failed (should not block on S3): %v", i, err)
+		}
+	}
+
+	// Verify data is readable from frozen layers + memlayer.
+	buf := make([]byte, PageSize)
+	for i := range 5 {
+		if _, err := v.Read(ctx, buf, uint64(i)*PageSize); err != nil {
+			t.Fatalf("read page %d: %v", i, err)
+		}
+		if buf[0] != byte(i+1) {
+			t.Fatalf("page %d: expected %d, got %d", i, i+1, buf[0])
+		}
+	}
+
+	// Clear fault — background flush loop should drain frozen layers.
+	store.ClearAllFaults()
+	// Give the flush loop time to run.
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify data survives after flush by closing and reopening.
+	if err := v.Flush(ctx); err != nil {
+		t.Fatalf("final flush: %v", err)
+	}
+
+	vol := v.(*volume)
+	if len(vol.timeline.layers.Deltas) == 0 {
+		t.Fatal("expected delta layers after flush")
+	}
+}
+
+// TestAsyncFlushNotifyWakesLoop verifies that the flush loop wakes up
+// promptly when notified, rather than waiting for the timer.
+func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  PageSize,
+		MaxFrozenLayers: 10,
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   10 * time.Second, // very long timer
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a page — triggers freeze + notify.
+	page := make([]byte, PageSize)
+	page[0] = 0xDD
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// The flush loop timer is 10s, but notify should wake it immediately.
+	// Wait a short time and check that frozen layers were drained.
+	vol := v.(*volume)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		vol.timeline.frozenMu.RLock()
+		n := len(vol.timeline.frozenLayers)
+		vol.timeline.frozenMu.RUnlock()
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	vol.timeline.frozenMu.RLock()
+	n := len(vol.timeline.frozenLayers)
+	vol.timeline.frozenMu.RUnlock()
+	if n != 0 {
+		t.Fatalf("expected 0 frozen layers after notify, got %d", n)
+	}
+
+	if len(vol.timeline.layers.Deltas) == 0 {
+		t.Fatal("expected delta layers after async flush")
+	}
+}
+
+// TestBackpressureStillBlocksInline verifies that when frozen layers hit
+// MaxFrozenLayers, writes block on S3 inline (backpressure).
+func TestBackpressureStillBlocksInline(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+		FlushInterval:   10 * time.Second, // effectively disabled
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Inject S3 fault so flushes fail.
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("simulated S3 fault"),
+	})
+
+	// Write enough pages to fill MaxFrozenLayers. The first writes succeed
+	// (freeze to frozen layers), but eventually backpressure kicks in and
+	// the write fails because inline flush fails.
+	page := make([]byte, PageSize)
+	var writeErr error
+	for i := range 20 {
+		page[0] = byte(i)
+		writeErr = v.Write(ctx, page, uint64(i)*PageSize)
+		if writeErr != nil {
+			break
+		}
+	}
+
+	if writeErr == nil {
+		t.Fatal("expected write to fail due to backpressure + S3 fault")
+	}
+	if !strings.Contains(writeErr.Error(), "simulated S3 fault") {
+		t.Fatalf("expected S3 fault error, got: %v", writeErr)
+	}
+
+	// Clear fault — data in frozen layers should be flushable.
+	store.ClearAllFaults()
+	if err := v.Flush(ctx); err != nil {
+		t.Fatalf("flush after clearing fault: %v", err)
+	}
+}
+
+// TestFlushRetryOnTransientError verifies that flushMemLayer retries
+// on transient S3 errors before giving up.
+func TestFlushRetryOnTransientError(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenLayers: 2,
+		PageCacheBytes:  16 * PageSize,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	page[0] = 0xEE
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fault that expires after 3 calls.
+	var faultCount atomic.Int32
+	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		Err: fmt.Errorf("transient S3 error"),
+		ShouldFault: func(string) bool {
+			return faultCount.Add(1) <= 3
+		},
+	})
+
+	// Flush should succeed after retries.
+	if err := v.Flush(ctx); err != nil {
+		t.Fatalf("flush should succeed after retries: %v", err)
+	}
+
+	// Verify data.
+	buf := make([]byte, PageSize)
+	if _, err := v.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xEE {
+		t.Fatalf("expected 0xEE, got 0x%02X", buf[0])
+	}
 }
