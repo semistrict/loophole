@@ -10,8 +10,8 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/jsutil"
-	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/lwext4"
 )
 
 var backend fsbackend.Service
@@ -22,10 +22,18 @@ func main() {
 	s3 := jsutil.MustGetS3()
 	store := jsutil.NewJSObjectStore(s3, "")
 
+	// Initialize lwext4 WASM module if available.
+	ext4JS := js.Global().Get("__loophole_ext4")
+	if !ext4JS.IsUndefined() && !ext4JS.IsNull() {
+		lwext4.Init(ext4JS)
+		fmt.Println("loophole wasm: lwext4 initialized")
+	}
+
 	vm := lsm.NewVolumeManager(store, "", lsm.Config{}, nil, nil)
-	backend = fsbackend.NewBackend(vm, map[string]fsbackend.AnyDriver{
-		loophole.VolumeTypeJuiceFS: juicefs.NewInProcessDriver(juicefs.Config{ObjStore: store}),
-	})
+	drivers := map[string]fsbackend.AnyDriver{
+		loophole.VolumeTypeExt4: fsbackend.NewLwext4Driver(),
+	}
+	backend = fsbackend.NewBackend(vm, drivers)
 
 	api := js.Global().Get("Object").New()
 
@@ -39,7 +47,7 @@ func main() {
 		err := backend.Create(context.Background(), loophole.CreateParams{
 			Volume: name,
 			Size:   size,
-			Type:   loophole.VolumeTypeJuiceFS,
+			Type:   loophole.VolumeTypeExt4,
 		})
 		if err != nil {
 			fmt.Println("wasm: create error:", err)

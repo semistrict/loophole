@@ -25,7 +25,7 @@ func newSQLiteDB(t *testing.T, name string) (*sql.DB, *svfs.DB) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm, _ := newVolumeManager(t, store)
+	vm := newVolumeManager(t, store)
 
 	db, err := svfs.Create(ctx, vm, name)
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm, _ := newVolumeManager(t, store)
+	vm := newVolumeManager(t, store)
 
 	// Create and populate.
 	db, err := svfs.Create(ctx, vm, "reopen-test")
@@ -96,7 +96,7 @@ func TestE2E_SQLiteFlushAndReopen(t *testing.T) {
 	_ = vm.Close(ctx)
 
 	// Reopen with a fresh manager (simulates restart).
-	vm2, _ := newVolumeManager(t, store)
+	vm2 := newVolumeManager(t, store)
 
 	db2, err := svfs.Open(ctx, vm2, "reopen-test")
 	require.NoError(t, err)
@@ -122,7 +122,7 @@ func TestE2E_SQLiteSnapshot(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm, _ := newVolumeManager(t, store)
+	vm := newVolumeManager(t, store)
 
 	// Create and populate.
 	db, err := svfs.Create(ctx, vm, "snap-parent")
@@ -182,7 +182,7 @@ func TestE2E_SQLiteBranch(t *testing.T) {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm, _ := newVolumeManager(t, store)
+	vm := newVolumeManager(t, store)
 
 	// Create parent with initial data.
 	parentDB, err := svfs.Create(ctx, vm, "branch-parent")

@@ -5,11 +5,8 @@ use (
 	./third_party/bbolt
 	./third_party/compress
 	./third_party/merovius-nbd
-	./third_party/juicefs
 	./third_party/go-sqlite3
-	./third_party/goleveldb
 	./third_party/prometheus-client
 )
 
-// JuiceFS's fuse package requires their go-fuse fork with extra MountOptions fields.
 replace github.com/hanwen/go-fuse/v2 => github.com/juicedata/go-fuse/v2 v2.1.1-0.20250807045235-112198daa7df

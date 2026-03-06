@@ -22,7 +22,6 @@ import (
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/diskcache"
-	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
@@ -105,8 +104,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 	}
 	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil, diskCache)
 
-	cfg := juicefs.NewConfig(store, diskCache, cacheDir)
-	backend, err := createBackend(vm, inst, dir, cfg)
+	backend, err := createBackend(vm, inst, dir)
 	if err != nil {
 		_ = diskCache.Close()
 		return nil, err

@@ -4,10 +4,9 @@ import "context"
 
 // Volume types.
 const (
-	VolumeTypeExt4    = "ext4"
-	VolumeTypeXFS     = "xfs"
-	VolumeTypeSQLite  = "sqlite"
-	VolumeTypeJuiceFS = "juicefs"
+	VolumeTypeExt4   = "ext4"
+	VolumeTypeXFS    = "xfs"
+	VolumeTypeSQLite = "sqlite"
 )
 
 // CreateParams holds the parameters for creating a new volume.

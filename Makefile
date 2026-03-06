@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c test-juicefs podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-juicefs e2e-juicefsfuse e2e-sqlite bench-fuse liblwext4 clean-lwext4 wasm
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite bench-fuse liblwext4 clean-lwext4 wasm wasm-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -17,9 +17,7 @@ BINDIR := bin
 GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
-# JuiceFS build tags: exclude all backends except bbolt/loophole (meta) and s3 (object storage)
-JUICEFS_NOTAGS := noredis nomysql nopg notikv noetcd nobadger nosqlite noazure nob2 nobos nocifs nocos nodragonfly nogs nohdfs noibmcos nonfs noobs nooss noqingstore noqiniu nosftp noswift noufile nowebdav
-BUILDTAGS := $(JUICEFS_NOTAGS)
+BUILDTAGS :=
 
 LWEXT4_CFLAGS := -O2 -Wall \
   -DCONFIG_USE_DEFAULT_CFG=1 \
@@ -132,16 +130,6 @@ e2e-testnbdtcp: liblwext4
 e2e-lwext4fuse: liblwext4
 	LOOPHOLE_MODE=fusefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
-# Run e2e tests (JuiceFS in-process, no root/FUSE/NBD required)
-# Usage: make e2e-juicefs [RUN=TestName]
-e2e-juicefs: liblwext4
-	LOOPHOLE_MODE=inprocess LOOPHOLE_DEFAULT_FS=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
-
-# Run e2e tests (JuiceFS + FUSE, requires root and FUSE)
-# Usage: make e2e-juicefsfuse [RUN=TestName]
-e2e-juicefsfuse: liblwext4
-	LOOPHOLE_MODE=fusefs LOOPHOLE_DEFAULT_FS=juicefs go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
-
 # Run SQLite e2e tests (pure Go, no root/FUSE/NBD required)
 # Usage: make e2e-sqlite [RUN=TestName]
 e2e-sqlite: liblwext4
@@ -153,11 +141,6 @@ e2e-sqlite: liblwext4
 #        make bench-fuse COUNT=5   (for benchstat: run 5 times)
 bench-fuse: liblwext4
 	LOG_LEVEL=error go test -tags "$(BUILDTAGS)" -bench=. -run=^$$ -benchmem -count=$(or $(COUNT),1) -timeout 600s ./e2e/
-
-# Run JuiceFS upstream tests in Docker
-# Usage: make test-juicefs [RUN=TestName]
-test-juicefs:
-	docker compose run --rm go bash -c 'go test -v -count=1 -timeout 300s $(if $(RUN),-run "$(RUN)") ./third_party/juicefs/...'
 
 # Build WASM binary with standard Go (no TinyGo, no CGO).
 # SQLite runs separately via wa-sqlite on the JS side.

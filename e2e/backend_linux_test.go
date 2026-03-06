@@ -10,11 +10,10 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/fuseblockdev"
-	"github.com/semistrict/loophole/juicefs"
 	"github.com/semistrict/loophole/nbdvm"
 )
 
-func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance, cfg juicefs.Config) fsbackend.Service {
+func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.Instance) fsbackend.Service {
 	t.Helper()
 	switch mode() {
 	case loophole.ModeNBD:
@@ -31,13 +30,9 @@ func newPlatformBackend(t testing.TB, vm loophole.VolumeManager, inst loophole.I
 		require.NoError(t, err)
 		return fsbackend.New(vm, fuse, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS)
 	case loophole.ModeFuseFS:
-		drivers := map[string]fsbackend.AnyDriver{
+		return fsbackend.NewBackend(vm, map[string]fsbackend.AnyDriver{
 			loophole.VolumeTypeExt4: fsbackend.NewLwext4FUSEDriver(),
-		}
-		if cfg.ObjStore != nil {
-			drivers[loophole.VolumeTypeJuiceFS] = juicefs.NewFUSEDriver(cfg)
-		}
-		return fsbackend.NewBackend(vm, drivers)
+		})
 	default:
 		return nil
 	}

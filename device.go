@@ -25,13 +25,12 @@ func (m Mode) NeedsRoot() bool {
 
 // FSType selects the filesystem engine.
 // For block-device modes (fuse, nbd, testnbdtcp): ext4 or xfs (kernel filesystem).
-// For userspace modes (inprocess, fusefs): ext4 (lwext4) or juicefs.
+// For userspace modes (inprocess, fusefs): ext4 (lwext4).
 type FSType string
 
 const (
-	FSExt4    FSType = "ext4"    // ext4 (kernel or lwext4 userspace)
-	FSXFS     FSType = "xfs"     // XFS (kernel only, block-device modes)
-	FSJuiceFS FSType = "juicefs" // JuiceFS (userspace modes only)
+	FSExt4 FSType = "ext4" // ext4 (kernel or lwext4 userspace)
+	FSXFS  FSType = "xfs"  // XFS (kernel only, block-device modes)
 )
 
 // DefaultFSType returns the default filesystem type from LOOPHOLE_DEFAULT_FS.

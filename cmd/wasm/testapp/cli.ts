@@ -1,5 +1,5 @@
 #!/usr/bin/env tsx
-// cli.ts — Minimal Node CLI for mounting a loophole JuiceFS volume and browsing files.
+// cli.ts — Minimal Node CLI for mounting a loophole volume and browsing files.
 //
 // Usage:
 //   tsx cli.ts [--prefix <s3prefix>] <command> [args...]

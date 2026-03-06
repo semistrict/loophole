@@ -38,7 +38,7 @@ describe("volume lifecycle", () => {
   });
 
   test("binary data round-trips correctly", async () => {
-    // 24-byte buffer matching JuiceFS slice format (tests BLOB integrity).
+    // 24-byte buffer (tests BLOB integrity).
     const blob = new Uint8Array(24);
     const view = new DataView(blob.buffer);
     view.setUint32(0, 0, true); // pos

@@ -30,7 +30,7 @@ func openCVFSDB(t *testing.T, name string) *sql.DB {
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })
 
-	// Enable WAL mode — this is what JuiceFS uses and what our VFS needs to handle.
+	// Enable WAL mode — this is what our VFS needs to handle.
 	_, err = db.Exec("PRAGMA journal_mode=WAL")
 	require.NoError(t, err)
 

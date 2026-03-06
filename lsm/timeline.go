@@ -85,6 +85,7 @@ type Timeline struct {
 	flushStop   chan struct{}
 	flushDone   chan struct{}
 	flushNotify chan struct{}
+	flushCancel context.CancelFunc // cancels the flush loop's context
 
 	// Debug logging for compact/flush tracing. Set in tests.
 	debugLog func(string)
@@ -656,7 +657,12 @@ func (tl *Timeline) maybeFreezeAndFlush(ctx context.Context) error {
 func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 	tl.flushMu.Lock()
 	defer tl.flushMu.Unlock()
+	return tl.flushFrozenLayersLocked(ctx, 5)
+}
 
+// flushFrozenLayersLocked is the inner loop of flushFrozenLayers.
+// Caller must hold flushMu.
+func (tl *Timeline) flushFrozenLayersLocked(ctx context.Context, maxRetries int) error {
 	for {
 		tl.frozenMu.RLock()
 		if len(tl.frozenLayers) == 0 {
@@ -666,7 +672,7 @@ func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 		ml := tl.frozenLayers[0]
 		tl.frozenMu.RUnlock()
 
-		if err := tl.flushMemLayer(ctx, ml); err != nil {
+		if err := tl.flushMemLayer(ctx, ml, maxRetries); err != nil {
 			return err
 		}
 
@@ -681,7 +687,7 @@ func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 }
 
 // flushMemLayer serializes a frozen memLayer as a delta layer and uploads to S3.
-func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
+func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer, maxRetries int) error {
 	// Build delta layer from memLayer entries.
 	entries := ml.entries()
 	if len(entries) == 0 {
@@ -694,7 +700,6 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 	}
 
 	// Upload to S3 with retry on transient errors.
-	const maxRetries = 5
 	for attempt := range maxRetries {
 		err = tl.store.PutReader(ctx, meta.Key, bytes.NewReader(data))
 		if err == nil {
@@ -708,7 +713,13 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer) error {
 		}
 		backoff := time.Duration(1<<attempt) * 100 * time.Millisecond // 100ms, 200ms, 400ms, 800ms, 1.6s
 		slog.Warn("retrying delta upload", "key", meta.Key, "attempt", attempt+1, "error", err, "backoff", backoff)
-		time.Sleep(backoff)
+		t := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return fmt.Errorf("upload delta layer: %w", ctx.Err())
+		case <-t.C:
+		}
 	}
 	metrics.FlushBytes.Add(float64(len(data)))
 
@@ -1604,10 +1615,12 @@ func (tl *Timeline) startPeriodicFlush() {
 	tl.flushStop = make(chan struct{})
 	tl.flushDone = make(chan struct{})
 	tl.flushNotify = make(chan struct{}, 1)
-	go tl.periodicFlushLoop()
+	ctx, cancel := context.WithCancel(context.Background())
+	tl.flushCancel = cancel
+	go tl.periodicFlushLoop(ctx)
 }
 
-func (tl *Timeline) periodicFlushLoop() {
+func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
 	defer close(tl.flushDone)
 	timer := time.NewTimer(tl.config.FlushInterval)
 	defer timer.Stop()
@@ -1625,16 +1638,37 @@ func (tl *Timeline) periodicFlushLoop() {
 		default:
 		}
 
-		if err := tl.flushFrozenLayers(context.Background()); err != nil {
-			slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+		// Use TryLock to avoid blocking on flushMu. Under synctest,
+		// a goroutine blocked on a mutex is not "idle", so if an inline
+		// Flush holds flushMu and waits on a retry timer, synctest
+		// cannot advance fake time — deadlock. TryLock sidesteps this:
+		// if someone else is flushing, we skip and retry next interval.
+		if tl.flushMu.TryLock() {
+			err := tl.flushFrozenLayersLocked(ctx, 1)
+			tl.flushMu.Unlock()
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+			}
 		}
 
 		tl.mu.RLock()
 		ml := tl.memLayer
 		tl.mu.RUnlock()
 		if !ml.isEmpty() {
-			if err := tl.Flush(context.Background()); err != nil {
-				slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+			if err := tl.freezeMemLayer(); err == nil {
+				if tl.flushMu.TryLock() {
+					err := tl.flushFrozenLayersLocked(ctx, 1)
+					tl.flushMu.Unlock()
+					if err != nil {
+						if ctx.Err() != nil {
+							return
+						}
+						slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+					}
+				}
 			}
 		}
 		// Wait another interval after the flush completes.
@@ -1645,6 +1679,7 @@ func (tl *Timeline) periodicFlushLoop() {
 func (tl *Timeline) close(ctx context.Context) {
 	// Stop periodic flush and wait for any in-progress flush to finish.
 	if tl.flushStop != nil {
+		tl.flushCancel() // cancel in-flight S3 ops so the loop exits promptly
 		close(tl.flushStop)
 		<-tl.flushDone
 	}
