@@ -204,6 +204,38 @@ func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 	}
 	m.mu.Unlock()
 
+	ref, err := m.getVolumeRef(ctx, name)
+	if err != nil {
+		return fmt.Errorf("resolve volume %q: %w", name, err)
+	}
+
+	// Acquire lease on the timeline to ensure no other daemon is using it.
+	if m.lease != nil {
+		if err := m.lease.EnsureStarted(ctx); err != nil {
+			return fmt.Errorf("start lease: %w", err)
+		}
+		tlStore := m.timelines.At(ref.TimelineID)
+		err := loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(meta *TimelineMeta) error {
+			if err := m.lease.CheckAvailable(ctx, meta.LeaseToken); err != nil {
+				return fmt.Errorf("timeline %s: %w", ref.TimelineID, err)
+			}
+			meta.LeaseToken = m.lease.Token()
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("acquire lease for %q: %w", name, err)
+		}
+		// Release the lease after deleting the ref.
+		defer func() {
+			_ = loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(meta *TimelineMeta) error {
+				if meta.LeaseToken == m.lease.Token() {
+					meta.LeaseToken = ""
+				}
+				return nil
+			})
+		}()
+	}
+
 	if err := m.volRefs.DeleteObject(ctx, name); err != nil {
 		return fmt.Errorf("delete volume ref %q: %w", name, err)
 	}

@@ -211,6 +211,47 @@ func findRepoRoot(t *testing.T) string {
 	}
 }
 
+// TestGitCloneExecutableModeClean verifies that after cloning a repo with
+// executable files, git status reports a clean worktree (no mode mismatches).
+func TestGitCloneExecutableModeClean(t *testing.T) {
+	srcDir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = srcDir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "cmd %v: %s", args, out)
+	}
+	run("git", "init")
+	run("git", "config", "user.email", "test@test.com")
+	run("git", "config", "user.name", "Test")
+
+	// Create a regular file, an executable script, and a symlink.
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "readme.txt"), []byte("hello\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "run.sh"), []byte("#!/bin/sh\necho hi\n"), 0o755))
+	require.NoError(t, os.Symlink("readme.txt", filepath.Join(srcDir, "link.md")))
+	run("git", "add", ".")
+	run("git", "commit", "-m", "initial")
+
+	fsys := newTestLwext4FS(t)
+	worktree := newBillyFS(fsys, "/repo")
+	dotgit, err := worktree.Chroot(".git")
+	require.NoError(t, err)
+
+	storage := filesystem.NewStorageWithOptions(dotgit, cache.NewObjectLRUDefault(), filesystem.Options{})
+	_, err = git.Clone(storage, worktree, &git.CloneOptions{URL: srcDir})
+	require.NoError(t, err)
+
+	// Re-open and check status — should be clean.
+	repo, err := git.Open(storage, worktree)
+	require.NoError(t, err)
+	wt, err := repo.Worktree()
+	require.NoError(t, err)
+	status, err := wt.Status()
+	require.NoError(t, err)
+	require.True(t, status.IsClean(), "worktree should be clean, got:\n%s", status)
+}
+
 // TestBillyStatNotFound verifies that billyFS.Stat returns os.ErrNotExist
 // for missing files, which go-git depends on.
 func TestBillyStatNotFound(t *testing.T) {

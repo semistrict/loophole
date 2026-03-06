@@ -3,11 +3,11 @@ package filecmd
 import (
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	billy "github.com/go-git/go-billy/v5"
 
@@ -81,6 +81,9 @@ func (b *billyFS) OpenFile(filename string, flag int, perm os.FileMode) (billy.F
 			f, err := b.fs.Create(p)
 			if err != nil {
 				return nil, err
+			}
+			if perm != 0 && perm != 0o644 {
+				_ = b.fs.Chmod(p, perm)
 			}
 			return &billyFile{f: f, name: filename}, nil
 		}
@@ -216,5 +219,31 @@ func (f *billyFile) Truncate(size int64) error                    { return f.f.T
 func (f *billyFile) Lock() error                                  { return nil }
 func (f *billyFile) Unlock() error                                { return nil }
 
-// Ensure the FS interface includes what we need for chmod.
-var _ fs.FileInfo = (os.FileInfo)(nil)
+// Change interface — lets go-git set file modes/ownership during checkout.
+var _ billy.Change = (*billyFS)(nil)
+
+func (b *billyFS) Chmod(name string, mode os.FileMode) error {
+	return b.fs.Chmod(b.abs(name), mode)
+}
+
+func (b *billyFS) Lchown(name string, uid, gid int) error {
+	return b.fs.Lchown(b.abs(name), uid, gid)
+}
+
+func (b *billyFS) Chown(name string, uid, gid int) error {
+	// Follow symlinks: resolve then lchown the target.
+	p := b.abs(name)
+	target, err := b.fs.Readlink(p)
+	if err == nil {
+		// It's a symlink — chown the target.
+		if !path.IsAbs(target) {
+			target = path.Join(path.Dir(p), target)
+		}
+		return b.fs.Lchown(target, uid, gid)
+	}
+	return b.fs.Lchown(p, uid, gid)
+}
+
+func (b *billyFS) Chtimes(name string, atime time.Time, mtime time.Time) error {
+	return b.fs.Chtimes(b.abs(name), mtime.Unix())
+}

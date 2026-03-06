@@ -287,7 +287,7 @@ func (f *lwext4FSImpl) Symlink(target, name string) error {
 }
 
 func (f *lwext4FSImpl) Readlink(name string) (string, error) {
-	ino, err := f.resolve(name)
+	ino, err := f.resolveLstat(name)
 	if err != nil {
 		return "", err
 	}
@@ -299,7 +299,13 @@ func (f *lwext4FSImpl) Chmod(name string, mode fs.FileMode) error {
 	if err != nil {
 		return err
 	}
-	return f.ext4.SetAttr(ino, &lwext4.Attr{Mode: uint32(mode & 0o7777)}, lwext4.AttrMode)
+	// Read current mode to preserve file type bits (S_IFREG, S_IFDIR, etc.).
+	attr, err := f.ext4.GetAttr(ino)
+	if err != nil {
+		return err
+	}
+	newMode := (attr.Mode & syscall.S_IFMT) | uint32(mode&0o7777)
+	return f.ext4.SetAttr(ino, &lwext4.Attr{Mode: newMode}, lwext4.AttrMode)
 }
 
 func (f *lwext4FSImpl) Lchown(name string, uid, gid int) error {

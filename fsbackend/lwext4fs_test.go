@@ -157,6 +157,21 @@ func TestResolveTooManySymlinks(t *testing.T) {
 	require.Contains(t, err.Error(), "too many symlinks")
 }
 
+func TestReadlinkRoundTrip(t *testing.T) {
+	fs := newTestLwext4FS(t)
+
+	require.NoError(t, fs.WriteFile("/target.txt", []byte("hello"), 0o644))
+	require.NoError(t, fs.Symlink("target.txt", "/link"))
+
+	target, err := fs.Readlink("/link")
+	require.NoError(t, err)
+	require.Equal(t, "target.txt", target)
+
+	info, err := fs.Lstat("/link")
+	require.NoError(t, err)
+	require.Equal(t, int64(len("target.txt")), info.Size())
+}
+
 func TestStatNotFoundWrapsErrNotExist(t *testing.T) {
 	fs := newTestLwext4FS(t)
 
