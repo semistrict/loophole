@@ -63,6 +63,9 @@ e2e.test: liblwext4
 # Install loophole CLI into $GOPATH/bin
 install: loophole
 	cp $(BINDIR)/loophole-$(GOOS)-$(GOARCH) $(shell go env GOPATH)/bin/loophole
+ifeq ($(GOOS),darwin)
+	codesign -s - $(shell go env GOPATH)/bin/loophole
+endif
 
 # Static checks: lint + vet + build
 check: liblwext4

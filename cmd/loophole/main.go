@@ -35,7 +35,7 @@ func rootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVarP(&globalProfile, "profile", "p", "default", "Named profile from ~/.loophole/config.toml")
+	root.PersistentFlags().StringVarP(&globalProfile, "profile", "p", "", "Named profile (default: default_profile from config, or first defined)")
 
 	root.AddCommand(startCmd())
 	addCommands(root)
@@ -44,7 +44,7 @@ func rootCmd() *cobra.Command {
 }
 
 func startCmd() *cobra.Command {
-	var daemonize bool
+	var foreground bool
 	var socketMode uint32
 
 	cmd := &cobra.Command{
@@ -58,24 +58,29 @@ func startCmd() *cobra.Command {
 				return err
 			}
 
-			running, err := checkExistingDaemon(dir, inst)
+			if foreground {
+				running, err := checkExistingDaemon(dir, inst)
+				if err != nil {
+					return err
+				}
+				if running {
+					return nil
+				}
+				ctx := context.Background()
+				return startDaemon(ctx, inst, dir, os.FileMode(socketMode))
+			}
+
+			// Background: use resolveClient which calls EnsureDaemon.
+			_, err = resolveClient()
 			if err != nil {
 				return err
 			}
-			if running {
-				return nil
-			}
-
-			if daemonize {
-				return startDaemonBackground(inst, dir)
-			}
-
-			ctx := context.Background()
-			return startDaemon(ctx, inst, dir, os.FileMode(socketMode))
+			fmt.Printf("loophole started (%s)\n", inst.URL())
+			return nil
 		},
 	}
 
-	cmd.Flags().BoolVarP(&daemonize, "daemon", "d", false, "Run in background")
+	cmd.Flags().BoolVarP(&foreground, "foreground", "f", false, "Run in foreground instead of daemonizing")
 	cmd.Flags().Uint32Var(&socketMode, "socket-mode", 0, "Socket file permissions (e.g. 0666); 0 means use default umask")
 
 	return cmd
@@ -91,6 +96,7 @@ func resolveProfile(dir loophole.Dir) (loophole.Instance, error) {
 }
 
 // checkExistingDaemon checks whether a daemon is already running for this profile.
+// If the socket file exists but no daemon is listening, it is removed with a warning.
 func checkExistingDaemon(dir loophole.Dir, inst loophole.Instance) (running bool, err error) {
 	sockPath := dir.Socket(inst.ProfileName)
 	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
@@ -101,7 +107,9 @@ func checkExistingDaemon(dir loophole.Dir, inst loophole.Instance) (running bool
 	defer cancel()
 	status, err := c.Status(ctx)
 	if err != nil {
-		return false, fmt.Errorf("stale socket at %s (rm it to start a new daemon)", sockPath)
+		fmt.Fprintf(os.Stderr, "warning: removing stale socket %s\n", sockPath)
+		_ = os.Remove(sockPath)
+		return false, nil
 	}
 	fmt.Fprintf(os.Stderr, "loophole already running (%s)\n", status.S3)
 	return true, nil

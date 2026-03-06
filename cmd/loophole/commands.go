@@ -35,6 +35,7 @@ func addCommands(root *cobra.Command) {
 		deviceCmd(),
 		fileCmd(),
 		dbCmd(),
+		breakLeaseCmd(),
 	)
 }
 
@@ -46,32 +47,20 @@ func startDaemon(ctx context.Context, inst loophole.Instance, dir loophole.Dir, 
 	return d.Serve(ctx)
 }
 
-func startDaemonBackground(inst loophole.Instance, dir loophole.Dir) error {
-	c := client.New(dir, inst)
-	c.Bin = selfBin
-	c.Sudo = runtime.GOOS == "linux" && inst.Mode.NeedsRoot()
-	c.Profile = globalProfile
-	if err := c.EnsureDaemon(); err != nil {
-		return err
-	}
-	fmt.Printf("loophole started (%s)\n", inst.URL())
-	return nil
-}
-
 func stopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "Stop the daemon",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveClientOnly()
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
 			status, _ := c.Status(ctx)
 			if err := c.Shutdown(ctx); err != nil {
-				return err
+				return fmt.Errorf("no daemon running (socket %s)", c.Socket())
 			}
 			if status != nil {
 				fmt.Printf("loophole stopped (%s)\n", status.S3)
@@ -319,7 +308,7 @@ func statusCmd() *cobra.Command {
 		Short: "Show daemon status",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveClientOnly()
 			if err != nil {
 				return err
 			}
@@ -413,8 +402,9 @@ func deviceCmd() *cobra.Command {
 func deviceStartCmd() *cobra.Command {
 	cmd := startCmd()
 	cmd.Short = "Start daemon in foreground"
-	// Remove the --daemon flag — device start is always foreground.
-	_ = cmd.Flags().MarkHidden("daemon")
+	// device start is always foreground — hide the flag and set it.
+	_ = cmd.Flags().MarkHidden("foreground")
+	_ = cmd.Flags().Set("foreground", "true")
 	return cmd
 }
 
@@ -554,14 +544,62 @@ func extractProfileFlag(args []string) []string {
 	return out
 }
 
-// resolveClient returns a client for the current profile's daemon.
-func resolveClient() (*client.Client, error) {
+// resolveClientOnly returns a client for the current profile without
+// starting the daemon. Used by commands like stop that shouldn't auto-start.
+func resolveClientOnly() (*client.Client, error) {
 	dir := loophole.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
 		return nil, err
 	}
 	return client.New(dir, inst), nil
+}
+
+// resolveClient returns a client for the current profile's daemon,
+// auto-starting it if necessary.
+func resolveClient() (*client.Client, error) {
+	dir := loophole.DefaultDir()
+	inst, err := resolveProfile(dir)
+	if err != nil {
+		return nil, err
+	}
+	c := client.New(dir, inst)
+	c.Bin = selfBin
+	c.Sudo = runtime.GOOS == "linux" && inst.Mode.NeedsRoot()
+	c.Profile = inst.ProfileName
+	if err := c.EnsureDaemon(); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func breakLeaseCmd() *cobra.Command {
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "break-lease <volume>",
+		Short: "Request the lease holder to release a volume",
+		Long:  "Sends a release request to the remote lease holder. With -f, forcibly clears the lease if the holder doesn't respond.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
+			volume := args[0]
+			graceful, err := c.BreakLease(cmd.Context(), volume, force)
+			if err != nil {
+				return err
+			}
+			if graceful {
+				fmt.Printf("lease released gracefully for volume %q\n", volume)
+			} else {
+				fmt.Printf("lease forcibly broken for volume %q (holder did not respond)\n", volume)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "forcibly clear the lease if the holder doesn't respond")
+	return cmd
 }
 
 func socketFromMountpoint(mountpoint string) (string, error) {

@@ -20,7 +20,7 @@ func statsCmd() *cobra.Command {
 		Short: "Show daemon metrics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveClientOnly()
 			if err != nil {
 				return err
 			}

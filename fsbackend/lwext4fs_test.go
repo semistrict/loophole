@@ -3,6 +3,7 @@ package fsbackend
 import (
 	"context"
 	"io"
+	"os"
 	"testing"
 
 	"github.com/semistrict/loophole/lwext4"
@@ -154,4 +155,20 @@ func TestResolveTooManySymlinks(t *testing.T) {
 	_, err := fs.Open("/a")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "too many symlinks")
+}
+
+func TestStatNotFoundWrapsErrNotExist(t *testing.T) {
+	fs := newTestLwext4FS(t)
+
+	_, err := fs.Stat("/nonexistent")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	// Nested path where parent exists but child doesn't.
+	require.NoError(t, fs.MkdirAll("/a/b", 0o755))
+	_, err = fs.Stat("/a/b/c")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
+	// Nested path where intermediate component doesn't exist.
+	_, err = fs.Stat("/a/b/c/d/e")
+	require.ErrorIs(t, err, os.ErrNotExist)
 }

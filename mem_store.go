@@ -352,6 +352,19 @@ func (m *MemStore) GetRange(_ context.Context, key string, offset, length int64)
 	return io.NopCloser(bytes.NewReader(cp)), etag, nil
 }
 
+// Keys returns all keys under the given full-key prefix. For test assertions.
+func (m *MemStore) Keys(prefix string) []string {
+	m.shared.mu.RLock()
+	defer m.shared.mu.RUnlock()
+	var keys []string
+	for k := range m.shared.objects {
+		if strings.HasPrefix(k, prefix) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
 // GetObject returns raw bytes for a full key (not scoped). For test assertions.
 func (m *MemStore) GetObject(fullKey string) ([]byte, bool) {
 	m.shared.mu.RLock()

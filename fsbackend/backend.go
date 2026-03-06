@@ -92,15 +92,15 @@ type Service interface {
 	Freeze(ctx context.Context, mountpoint string) error
 	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
-	// FSForVolume returns an FS for a volume by name. The volume must
-	// already be mounted.
-	FSForVolume(volume string) (FS, error)
+	// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
+	FSForVolume(ctx context.Context, volume string) (FS, error)
 	DeviceAttach(ctx context.Context, volume string) (string, error)
 	DeviceDetach(ctx context.Context, volume string) error
 	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
 	DeviceClone(ctx context.Context, volume, clone string) (string, error)
 	DevicePath(volume string) (string, error)
 	IsMounted(mountpoint string) bool
+	IsVolumeMounted(volume string) bool
 	VolumeAt(mountpoint string) string
 	Mounts() map[string]string
 	VM() loophole.VolumeManager
@@ -240,6 +240,9 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 			}
 			return fmt.Errorf("format: %w", err)
 		}
+		if err := vol.Flush(ctx); err != nil {
+			return fmt.Errorf("flush after format: %w", err)
+		}
 	}
 	slog.Debug("backend: create done", "volume", p.Volume)
 	return nil
@@ -360,9 +363,22 @@ func (b *Backend) FS(mountpoint string) (FS, error) {
 	return entry.driver.FS(entry.handle)
 }
 
-// FSForVolume returns an FS for a volume by name. The volume must already
-// be mounted.
-func (b *Backend) FSForVolume(volume string) (FS, error) {
+// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
+func (b *Backend) FSForVolume(ctx context.Context, volume string) (FS, error) {
+	b.mu.Lock()
+	for _, entry := range b.mounts {
+		if entry.vol.Name() == volume {
+			b.mu.Unlock()
+			return entry.driver.FS(entry.handle)
+		}
+	}
+	b.mu.Unlock()
+
+	slog.Info("auto-mounting volume", "volume", volume)
+	if err := b.Mount(ctx, volume, volume); err != nil {
+		return nil, fmt.Errorf("auto-mount %q: %w", volume, err)
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, entry := range b.mounts {
@@ -370,7 +386,7 @@ func (b *Backend) FSForVolume(volume string) (FS, error) {
 			return entry.driver.FS(entry.handle)
 		}
 	}
-	return nil, fmt.Errorf("volume %q is not mounted", volume)
+	return nil, fmt.Errorf("volume %q not found after auto-mount", volume)
 }
 
 // --- Device-level operations (raw block device access) ---
@@ -482,6 +498,18 @@ func (b *Backend) IsMounted(mountpoint string) bool {
 	defer b.mu.Unlock()
 	_, ok := b.mounts[mountpoint]
 	return ok
+}
+
+// IsVolumeMounted returns true if the named volume is currently mounted.
+func (b *Backend) IsVolumeMounted(volume string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, entry := range b.mounts {
+		if entry.vol.Name() == volume {
+			return true
+		}
+	}
+	return false
 }
 
 // VolumeAt returns the volume name mounted at mountpoint, or "" if none.

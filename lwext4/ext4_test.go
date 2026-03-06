@@ -99,6 +99,14 @@ func TestMknodAndLookup(t *testing.T) {
 	require.Equal(t, ino, found)
 }
 
+func TestLookupNotFoundWrapsErrNotExist(t *testing.T) {
+	fs := newTestFS(t)
+
+	_, err := fs.Lookup(RootIno, "nonexistent")
+	require.Error(t, err)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestCreateReadWrite(t *testing.T) {
 	fs := newTestFS(t)
 

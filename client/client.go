@@ -63,10 +63,20 @@ func httpClient(sock string) *http.Client {
 	}
 }
 
+// Socket returns the Unix socket path for this client.
+func (c *Client) Socket() string { return c.sock }
+
 // EnsureDaemon starts the daemon if it isn't already running.
+// If a stale socket exists (file present but no daemon listening), it is
+// removed automatically with a warning.
 func (c *Client) EnsureDaemon() error {
 	if isSocketAlive(c.sock) {
 		return nil
+	}
+	// Socket file exists but nobody is listening — stale socket.
+	if _, err := os.Stat(c.sock); err == nil {
+		fmt.Fprintf(os.Stderr, "warning: removing stale socket %s\n", c.sock)
+		_ = os.Remove(c.sock)
 	}
 	return c.startDaemon()
 }
@@ -79,6 +89,23 @@ type CreateParams = loophole.CreateParams
 func (c *Client) Create(ctx context.Context, p CreateParams) error {
 	_, err := c.rpc(ctx, "POST", "/create", p)
 	return err
+}
+
+// BreakLease clears a lease on a volume. Returns true if the holder
+// released gracefully, false if it timed out and was force-cleared.
+func (c *Client) BreakLease(ctx context.Context, volume string, force bool) (graceful bool, err error) {
+	resp, err := c.rpc(ctx, "POST", "/break-lease", map[string]any{
+		"volume": volume,
+		"force":  force,
+	})
+	if err != nil {
+		return false, err
+	}
+	var result struct{ Graceful bool }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return false, fmt.Errorf("decode break-lease response: %w", err)
+	}
+	return result.Graceful, nil
 }
 
 // Delete removes a volume.
@@ -508,12 +535,13 @@ func (c *Client) startDaemon() error {
 		}
 	}
 
-	// Build the start command args.
+	// Build the start command args. Always use --foreground since we handle
+	// backgrounding ourselves via cmd.Start() + Process.Release().
 	var args []string
 	if c.Profile != "" {
-		args = append(args, "-p", c.Profile, "start")
+		args = append(args, "-p", c.Profile, "start", "--foreground")
 	} else {
-		args = append(args, "start", c.Inst.URL())
+		args = append(args, "start", "--foreground", c.Inst.URL())
 	}
 
 	var cmd *exec.Cmd

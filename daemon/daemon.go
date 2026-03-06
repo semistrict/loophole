@@ -110,6 +110,26 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		return nil, err
 	}
 
+	// When a remote break-lease arrives, properly unmount/detach via the backend.
+	vm.SetOnRelease(func(ctx context.Context, volumeName string) {
+		// Unmount if mounted.
+		for mp, vol := range backend.Mounts() {
+			if vol == volumeName {
+				logger.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
+				if err := backend.Unmount(ctx, mp); err != nil {
+					logger.Warn("release: unmount failed", "volume", volumeName, "error", err)
+				}
+			}
+		}
+		// Detach device if attached (and not already closed by Unmount).
+		if v := vm.GetVolume(volumeName); v != nil {
+			logger.Info("release: detaching device", "volume", volumeName)
+			if err := backend.DeviceDetach(ctx, volumeName); err != nil {
+				logger.Warn("release: device detach failed", "volume", volumeName, "error", err)
+			}
+		}
+	})
+
 	sockPath := dir.Socket(inst.ProfileName)
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		return nil, err
@@ -215,6 +235,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /delete", d.handleDelete)
+	mux.HandleFunc("POST /break-lease", d.handleBreakLease)
 	mux.HandleFunc("POST /mount", d.handleMount)
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
@@ -318,6 +339,26 @@ func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Volume string `json:"volume"`
+		Force  bool   `json:"force"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+
+	d.log.Info("break-lease", "volume", req.Volume, "force", req.Force)
+	graceful, err := d.backend.VM().BreakLease(r.Context(), req.Volume, req.Force)
+	if err != nil {
+		d.log.Error("break-lease failed", "err", err)
+		writeError(w, 500, err)
+		return
+	}
+	writeJSON(w, map[string]any{"status": "ok", "graceful": graceful})
 }
 
 func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {

@@ -24,6 +24,11 @@ func newLwext4FS(ext4fs *lwext4.FS) *lwext4FSImpl {
 	return &lwext4FSImpl{ext4: ext4fs}
 }
 
+// NewLwext4FS returns an FS backed by an in-process lwext4 instance.
+func NewLwext4FS(ext4fs *lwext4.FS) FS {
+	return newLwext4FS(ext4fs)
+}
+
 // splitPath splits a cleaned path into its components.
 // "" and "/" both return nil (root directory).
 func splitPath(name string) []string {

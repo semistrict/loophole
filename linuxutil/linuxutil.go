@@ -91,6 +91,38 @@ func FindMount(mountpoint string) (string, error) {
 	return "", scanner.Err()
 }
 
+// FindMountBySource returns the mountpoint for a given source device
+// (e.g. "/dev/nbd0") by reading /proc/self/mountinfo. Returns "" if not found.
+func FindMountBySource(source string) string {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		mp := fields[4]
+		for i, f := range fields {
+			if f == "-" && i+2 < len(fields) {
+				if fields[i+2] == source {
+					return mp
+				}
+				break
+			}
+		}
+	}
+	return ""
+}
+
 const (
 	fiFreeze = 0xC0045877
 	fiThaw   = 0xC0045878

@@ -43,6 +43,8 @@ type Manager struct {
 	mu         sync.Mutex
 	volumes    map[string]*volume // open volumes by name
 	openFlight singleflight.Group // deduplicates concurrent OpenVolume calls
+
+	onRelease func(ctx context.Context, volumeName string) // called before storage-layer close
 }
 
 // NewVolumeManager creates and initializes an LSM Manager.
@@ -53,19 +55,28 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 	if fs == nil {
 		fs = OSLocalFS{}
 	}
+	lease := loophole.NewLeaseManager(store.At("leases"))
 	m := &Manager{
 		store:     store,
 		cacheDir:  cacheDir,
 		config:    config,
 		diskCache: diskCache,
-		lease:     loophole.NewLeaseManager(store.At("leases")),
+		lease:     lease,
 		fs:        fs,
 		idGen:     uuid.NewString,
 		timelines: store.At("timelines"),
 		volRefs:   store.At("volumes"),
 		volumes:   make(map[string]*volume),
 	}
+	lease.Handle("release", m.handleRelease)
 	return m
+}
+
+// SetOnRelease sets a callback invoked when a remote break-lease request
+// is received, before the volume is closed at the storage layer. The
+// callback should unmount/detach the volume via the backend.
+func (m *Manager) SetOnRelease(fn func(ctx context.Context, volumeName string)) {
+	m.onRelease = fn
 }
 
 func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volType string) (loophole.Volume, error) {
@@ -281,4 +292,100 @@ func (m *Manager) closeVolume(name string) {
 	m.mu.Lock()
 	delete(m.volumes, name)
 	m.mu.Unlock()
+}
+
+// handleRelease is the lease RPC handler for "release" requests.
+// It unmounts/detaches the volume via the onRelease callback (if set),
+// then flushes and closes the volume at the storage layer.
+func (m *Manager) handleRelease(ctx context.Context, params json.RawMessage) (any, error) {
+	var req struct {
+		Volume string `json:"volume"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fmt.Errorf("decode release params: %w", err)
+	}
+
+	slog.Info("release: releasing volume", "volume", req.Volume)
+
+	// Let the backend unmount/detach first (kernel unmount, NBD disconnect, etc.).
+	// This may close the volume via ReleaseRef, removing it from m.volumes.
+	if m.onRelease != nil {
+		m.onRelease(ctx, req.Volume)
+	}
+
+	m.mu.Lock()
+	v, ok := m.volumes[req.Volume]
+	if ok {
+		delete(m.volumes, req.Volume)
+	}
+	m.mu.Unlock()
+
+	if !ok {
+		// Already closed by onRelease — that's fine.
+		return map[string]string{"status": "ok"}, nil
+	}
+
+	if err := v.Flush(ctx); err != nil {
+		slog.Warn("release: flush failed", "volume", req.Volume, "error", err)
+	}
+	_ = v.timeline.releaseLease(ctx, m.lease.Token())
+	v.timeline.close(ctx)
+	return map[string]string{"status": "ok"}, nil
+}
+
+// BreakLease requests the remote holder to release a volume. If the
+// holder responds, the lease is cleanly handed over (graceful=true).
+// If force is true and the holder doesn't respond, the lease is
+// force-cleared. If force is false, an error is returned instead.
+func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool) (bool, error) {
+	ref, err := m.getVolumeRef(ctx, volumeName)
+	if err != nil {
+		return false, fmt.Errorf("read volume ref %q: %w", volumeName, err)
+	}
+
+	tlStore := m.timelines.At(ref.TimelineID)
+	meta, _, err := loophole.ReadJSON[TimelineMeta](ctx, tlStore, "meta.json")
+	if err != nil {
+		return false, fmt.Errorf("read timeline meta: %w", err)
+	}
+
+	if meta.LeaseToken == "" {
+		return false, fmt.Errorf("volume %q has no active lease", volumeName)
+	}
+
+	oldToken := meta.LeaseToken
+
+	if m.lease != nil && oldToken == m.lease.Token() {
+		return false, fmt.Errorf("volume %q is leased by this daemon; use unmount or stop instead", volumeName)
+	}
+
+	// Try the polite RPC first.
+	slog.Info("break-lease: requesting release", "volume", volumeName, "token", oldToken)
+	_, rpcErr := m.lease.Call(ctx, oldToken, "release", map[string]string{"volume": volumeName})
+	graceful := rpcErr == nil
+	if rpcErr != nil {
+		if !force {
+			return false, fmt.Errorf("holder did not respond for volume %q (use -f to force): %w", volumeName, rpcErr)
+		}
+		slog.Warn("break-lease: holder did not respond, force-clearing", "volume", volumeName, "err", rpcErr)
+	}
+
+	// Clear the token if the holder didn't do it.
+	if err := loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(m *TimelineMeta) error {
+		if m.LeaseToken == "" {
+			return nil // already cleared
+		}
+		if m.LeaseToken != oldToken {
+			return fmt.Errorf("lease token changed unexpectedly (expected %q, got %q)", oldToken, m.LeaseToken)
+		}
+		m.LeaseToken = ""
+		return nil
+	}); err != nil {
+		return false, fmt.Errorf("clear lease token: %w", err)
+	}
+
+	// Delete the lease file (best-effort — it may already be gone).
+	_ = m.store.At("leases").DeleteObject(ctx, oldToken+".json")
+
+	return graceful, nil
 }

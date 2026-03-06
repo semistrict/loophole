@@ -4,13 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/BurntSushi/toml"
 )
 
 // Config is the top-level ~/.loophole/config.toml structure.
 type Config struct {
-	Profiles map[string]Profile `toml:"profiles"`
+	DefaultProfile string             `toml:"default_profile"`
+	Profiles       map[string]Profile `toml:"profiles"`
 }
 
 // Profile is a named set of connection parameters.
@@ -46,13 +48,31 @@ func LoadConfig(dir Dir) (*Config, error) {
 }
 
 // Resolve looks up a profile by name and returns the Instance.
+// If name is empty, it uses DefaultProfile from the config, or falls back
+// to the first profile (sorted alphabetically).
 func (c *Config) Resolve(name string) (Instance, error) {
+	if len(c.Profiles) == 0 {
+		return Instance{}, fmt.Errorf("no profiles defined in config")
+	}
+	if name == "" {
+		name = c.DefaultProfile
+	}
+	if name == "" {
+		// Fall back to first profile alphabetically.
+		var names []string
+		for k := range c.Profiles {
+			names = append(names, k)
+		}
+		sort.Strings(names)
+		name = names[0]
+	}
 	p, ok := c.Profiles[name]
 	if !ok {
 		var names []string
 		for k := range c.Profiles {
 			names = append(names, k)
 		}
+		sort.Strings(names)
 		return Instance{}, fmt.Errorf("unknown profile %q (available: %v)", name, names)
 	}
 	if p.Bucket == "" && p.LocalDir == "" {

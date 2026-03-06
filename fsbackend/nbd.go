@@ -97,6 +97,16 @@ func (n *NBDDriver) ConnectDevice(ctx context.Context, vol loophole.Volume) (str
 }
 
 func (n *NBDDriver) DisconnectDevice(ctx context.Context, volumeName string) error {
+	// Unmount any kernel filesystem on this device before disconnecting.
+	dev := n.nbd.DevicePath(volumeName)
+	if dev != "" {
+		if mp := linuxutil.FindMountBySource(dev); mp != "" {
+			slog.Info("nbd: unmounting before disconnect", "device", dev, "mountpoint", mp)
+			if err := linuxutil.Unmount(mp); err != nil {
+				slog.Warn("nbd: unmount before disconnect failed", "mountpoint", mp, "error", err)
+			}
+		}
+	}
 	return n.nbd.Disconnect(ctx, volumeName)
 }
 

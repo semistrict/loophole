@@ -22,8 +22,16 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"unsafe"
 )
+
+// rcError converts a C errno return code into a Go error, wrapping
+// well-known errno values so that errors.Is works (e.g. os.ErrNotExist).
+func rcError(prefix string, rc C.int) error {
+	errno := syscall.Errno(rc)
+	return fmt.Errorf("%s: %w", prefix, errno)
+}
 
 // Ino is an inode number.
 type Ino uint32
@@ -267,7 +275,7 @@ func (fs *FS) Lookup(parent Ino, name string) (Ino, error) {
 	var child C.uint32_t
 	rc := C.lh_lookup(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)), &child)
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: lookup(%d, %s): %d", parent, name, rc)
+		return 0, rcError(fmt.Sprintf("lwext4: lookup(%d, %s)", parent, name), rc)
 	}
 	return Ino(child), nil
 }
@@ -277,7 +285,7 @@ func (fs *FS) GetAttr(ino Ino) (*Attr, error) {
 	var ca C.struct_inode_attr
 	rc := C.lh_getattr(fs.mp, C.uint32_t(ino), &ca)
 	if rc != 0 {
-		return nil, fmt.Errorf("lwext4: getattr(%d): %d", ino, rc)
+		return nil, rcError(fmt.Sprintf("lwext4: getattr(%d)", ino), rc)
 	}
 	return &Attr{
 		Ino:   Ino(ca.ino),
@@ -304,7 +312,7 @@ func (fs *FS) SetAttr(ino Ino, attr *Attr, mask uint32) error {
 	}
 	rc := C.lh_setattr(fs.mp, C.uint32_t(ino), &ca, C.uint32_t(mask))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: setattr(%d): %d", ino, rc)
+		return rcError(fmt.Sprintf("lwext4: setattr(%d)", ino), rc)
 	}
 	return nil
 }
@@ -317,7 +325,7 @@ func (fs *FS) Mknod(parent Ino, name string, mode uint32) (Ino, error) {
 	rc := C.lh_mknod(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)),
 		C.uint32_t(mode), C.int(TypeRegFile), &child)
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: mknod(%d, %s): %d", parent, name, rc)
+		return 0, rcError(fmt.Sprintf("lwext4: mknod(%d, %s)", parent, name), rc)
 	}
 	return Ino(child), nil
 }
@@ -330,7 +338,7 @@ func (fs *FS) Mkdir(parent Ino, name string, mode uint32) (Ino, error) {
 	rc := C.lh_mkdir(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)),
 		C.uint32_t(mode), &child)
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: mkdir(%d, %s): %d", parent, name, rc)
+		return 0, rcError(fmt.Sprintf("lwext4: mkdir(%d, %s)", parent, name), rc)
 	}
 	return Ino(child), nil
 }
@@ -341,7 +349,7 @@ func (fs *FS) Unlink(parent Ino, name string) error {
 	defer C.free(unsafe.Pointer(cName))
 	rc := C.lh_unlink(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: unlink(%d, %s): %d", parent, name, rc)
+		return rcError(fmt.Sprintf("lwext4: unlink(%d, %s)", parent, name), rc)
 	}
 	return nil
 }
@@ -355,7 +363,7 @@ func (fs *FS) UnlinkOrphan(parent Ino, name string) (Ino, error) {
 	var child C.uint32_t
 	rc := C.lh_unlink_orphan(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)), &child)
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: unlink_orphan(%d, %s): %d", parent, name, rc)
+		return 0, rcError(fmt.Sprintf("lwext4: unlink_orphan(%d, %s)", parent, name), rc)
 	}
 	return Ino(child), nil
 }
@@ -365,7 +373,7 @@ func (fs *FS) UnlinkOrphan(parent Ino, name string) (Ino, error) {
 func (fs *FS) FreeOrphan(ino Ino) error {
 	rc := C.lh_free_orphan(fs.mp, C.uint32_t(ino))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: free_orphan(%d): %d", ino, rc)
+		return rcError(fmt.Sprintf("lwext4: free_orphan(%d)", ino), rc)
 	}
 	return nil
 }
@@ -375,7 +383,7 @@ func (fs *FS) FreeOrphan(ino Ino) error {
 func (fs *FS) OrphanRecover() error {
 	rc := C.lh_orphan_recover(fs.mp)
 	if rc != 0 {
-		return fmt.Errorf("lwext4: orphan_recover: %d", rc)
+		return rcError("lwext4: orphan_recover", rc)
 	}
 	return nil
 }
@@ -386,7 +394,7 @@ func (fs *FS) Rmdir(parent Ino, name string) error {
 	defer C.free(unsafe.Pointer(cName))
 	rc := C.lh_rmdir(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: rmdir(%d, %s): %d", parent, name, rc)
+		return rcError(fmt.Sprintf("lwext4: rmdir(%d, %s)", parent, name), rc)
 	}
 	return nil
 }
@@ -401,8 +409,8 @@ func (fs *FS) Rename(srcParent Ino, srcName string, dstParent Ino, dstName strin
 		C.uint32_t(srcParent), cSrc, C.uint32_t(len(srcName)),
 		C.uint32_t(dstParent), cDst, C.uint32_t(len(dstName)))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: rename(%d/%s -> %d/%s): %d",
-			srcParent, srcName, dstParent, dstName, rc)
+		return rcError(fmt.Sprintf("lwext4: rename(%d/%s -> %d/%s)",
+			srcParent, srcName, dstParent, dstName), rc)
 	}
 	return nil
 }
@@ -414,7 +422,7 @@ func (fs *FS) Link(ino Ino, newParent Ino, newName string) error {
 	rc := C.lh_link(fs.mp, C.uint32_t(ino), C.uint32_t(newParent),
 		cName, C.uint32_t(len(newName)))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: link(%d -> %d/%s): %d", ino, newParent, newName, rc)
+		return rcError(fmt.Sprintf("lwext4: link(%d -> %d/%s)", ino, newParent, newName), rc)
 	}
 	return nil
 }
@@ -429,7 +437,7 @@ func (fs *FS) Symlink(parent Ino, name string, target string) (Ino, error) {
 	rc := C.lh_symlink(fs.mp, C.uint32_t(parent), cName, C.uint32_t(len(name)),
 		cTarget, C.uint32_t(len(target)), &child)
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: symlink(%d, %s): %d", parent, name, rc)
+		return 0, rcError(fmt.Sprintf("lwext4: symlink(%d, %s)", parent, name), rc)
 	}
 	return Ino(child), nil
 }
@@ -441,7 +449,7 @@ func (fs *FS) Readlink(ino Ino) (string, error) {
 	rc := C.lh_readlink(fs.mp, C.uint32_t(ino), (*C.char)(unsafe.Pointer(&buf[0])),
 		C.size_t(len(buf)), &rcnt)
 	if rc != 0 {
-		return "", fmt.Errorf("lwext4: readlink(%d): %d", ino, rc)
+		return "", rcError(fmt.Sprintf("lwext4: readlink(%d)", ino), rc)
 	}
 	return string(buf[:rcnt]), nil
 }
@@ -495,7 +503,7 @@ func (fs *FS) Readdir(ino Ino) ([]DirEntry, error) {
 
 	rc := C.lh_readdir_bridge(fs.mp, C.uint32_t(ino), C.uintptr_t(id))
 	if rc != 0 {
-		return nil, fmt.Errorf("lwext4: readdir(%d): %d", ino, rc)
+		return nil, rcError(fmt.Sprintf("lwext4: readdir(%d)", ino), rc)
 	}
 	return state.entries, nil
 }
@@ -539,7 +547,7 @@ func (f *File) Read(p []byte) (int, error) {
 	var rcnt C.size_t
 	rc := C.lh_file_read(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &rcnt)
 	if rc != 0 {
-		return int(rcnt), fmt.Errorf("lwext4: fread: %d", rc)
+		return int(rcnt), rcError("lwext4: fread", rc)
 	}
 	if rcnt == 0 {
 		return 0, io.EOF
@@ -553,12 +561,12 @@ func (f *File) ReadAt(p []byte, off int64) (int, error) {
 	}
 	rc := C.lh_file_seek(f.f, C.int64_t(off), 0) // SEEK_SET
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: fseek: %d", rc)
+		return 0, rcError("lwext4: fseek", rc)
 	}
 	var rcnt C.size_t
 	rc = C.lh_file_read(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &rcnt)
 	if rc != 0 {
-		return int(rcnt), fmt.Errorf("lwext4: fread: %d", rc)
+		return int(rcnt), rcError("lwext4: fread", rc)
 	}
 	if int(rcnt) < len(p) {
 		return int(rcnt), io.EOF
@@ -573,7 +581,7 @@ func (f *File) Write(p []byte) (int, error) {
 	var wcnt C.size_t
 	rc := C.lh_file_write(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &wcnt)
 	if rc != 0 {
-		return int(wcnt), fmt.Errorf("lwext4: fwrite: %d", rc)
+		return int(wcnt), rcError("lwext4: fwrite", rc)
 	}
 	return int(wcnt), nil
 }
@@ -593,12 +601,12 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 	}
 	rc := C.lh_file_seek(f.f, C.int64_t(off), 0) // SEEK_SET
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: fseek: %d", rc)
+		return 0, rcError("lwext4: fseek", rc)
 	}
 	var wcnt C.size_t
 	rc = C.lh_file_write(f.f, unsafe.Pointer(&p[0]), C.size_t(len(p)), &wcnt)
 	if rc != 0 {
-		return int(wcnt), fmt.Errorf("lwext4: fwrite: %d", rc)
+		return int(wcnt), rcError("lwext4: fwrite", rc)
 	}
 	return int(wcnt), nil
 }
@@ -607,7 +615,7 @@ func (f *File) WriteAt(p []byte, off int64) (int, error) {
 func (f *File) zeroFill(offset, length int64) error {
 	rc := C.lh_file_seek(f.f, C.int64_t(offset), 0)
 	if rc != 0 {
-		return fmt.Errorf("lwext4: fseek (zerofill): %d", rc)
+		return rcError("lwext4: fseek (zerofill)", rc)
 	}
 	var zeros [4096]byte
 	for length > 0 {
@@ -618,7 +626,7 @@ func (f *File) zeroFill(offset, length int64) error {
 		var wcnt C.size_t
 		rc = C.lh_file_write(f.f, unsafe.Pointer(&zeros[0]), C.size_t(n), &wcnt)
 		if rc != 0 {
-			return fmt.Errorf("lwext4: fwrite (zerofill): %d", rc)
+			return rcError("lwext4: fwrite (zerofill)", rc)
 		}
 		length -= int64(wcnt)
 	}
@@ -628,7 +636,7 @@ func (f *File) zeroFill(offset, length int64) error {
 func (f *File) Seek(offset int64, whence int) (int64, error) {
 	rc := C.lh_file_seek(f.f, C.int64_t(offset), C.uint32_t(whence))
 	if rc != 0 {
-		return 0, fmt.Errorf("lwext4: fseek: %d", rc)
+		return 0, rcError("lwext4: fseek", rc)
 	}
 	pos := C.lh_file_tell(f.f)
 	return int64(pos), nil
@@ -638,7 +646,7 @@ func (f *File) Truncate(size int64) error {
 	curSize := f.Size()
 	rc := C.lh_file_truncate(f.f, C.uint64_t(size))
 	if rc != 0 {
-		return fmt.Errorf("lwext4: ftruncate: %d", rc)
+		return rcError("lwext4: ftruncate", rc)
 	}
 	// If extending, zero-fill the new region. lwext4 allocates blocks
 	// but may leave stale data in them.
@@ -659,7 +667,7 @@ func (f *File) Sync() error { return f.fs.CacheFlush() }
 func (f *File) Close() error {
 	rc := C.lh_file_close(f.f)
 	if rc != 0 {
-		return fmt.Errorf("lwext4: fclose: %d", rc)
+		return rcError("lwext4: fclose", rc)
 	}
 	return nil
 }

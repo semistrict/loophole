@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -63,6 +64,7 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 	mux := streammux.NewWriter(wsOut)
 
 	sess := &wsSession{
+		ctx:     r.Context(),
 		backend: d.backend,
 		conn:    conn,
 		mux:     mux,
@@ -82,6 +84,7 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 
 // wsSession implements filecmd.Session over a websocket connection.
 type wsSession struct {
+	ctx     context.Context
 	backend fsbackend.Service
 	conn    *websocket.Conn
 	mux     *streammux.Writer
@@ -100,7 +103,15 @@ type wsSession struct {
 }
 
 func (s *wsSession) FS(volume string) (fsbackend.FS, error) {
-	return s.backend.FSForVolume(volume)
+	wasMounted := s.backend.IsVolumeMounted(volume)
+	fs, err := s.backend.FSForVolume(s.ctx, volume)
+	if err != nil {
+		return nil, err
+	}
+	if !wasMounted {
+		_, _ = fmt.Fprintf(s.mux.Stderr(), "auto-mounted volume %q\n", volume)
+	}
+	return fs, nil
 }
 
 func (s *wsSession) Read(path string) (io.ReadCloser, error) {

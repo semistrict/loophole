@@ -26,6 +26,11 @@ type VolumeManager interface {
 	ListAllVolumes(ctx context.Context) ([]string, error)
 	ListVolumesByType(ctx context.Context, volType string) ([]string, error)
 	DeleteVolume(ctx context.Context, name string) error
+	// BreakLease attempts to release a volume's lease. If force is false,
+	// only the polite RPC is tried; if the holder doesn't respond, an error
+	// is returned. If force is true, the lease is cleared regardless.
+	// Returns true if the holder responded gracefully.
+	BreakLease(ctx context.Context, name string, force bool) (graceful bool, err error)
 	PageSize() int
 	Close(ctx context.Context) error
 }
