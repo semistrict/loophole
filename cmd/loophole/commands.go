@@ -359,6 +359,12 @@ func makeFileSubcmd(reg filecmd.Command) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			args = extractProfileFlag(args)
 
+			for _, a := range args {
+				if a == "-h" || a == "--help" {
+					return cmd.Help()
+				}
+			}
+
 			c, err := resolveClient()
 			if err != nil {
 				return err

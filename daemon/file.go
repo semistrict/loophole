@@ -51,6 +51,10 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 	cmd := filecmd.Lookup(cmdName)
 	if cmd == nil {
 		d.log.Error("unknown file command", "cmd", cmdName)
+		wsOut := &wsWriter{conn: conn}
+		mux := streammux.NewWriter(wsOut)
+		_, _ = fmt.Fprintf(mux.Stderr(), "unknown file command: %s", cmdName)
+		_ = mux.Exit(1)
 		return
 	}
 

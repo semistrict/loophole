@@ -6,7 +6,6 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createS3Adapter } from "./s3.mjs";
-import { initSQLite } from "./sqlite-bridge.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -56,9 +55,6 @@ export async function getLoophole(): Promise<any> {
     del: (key: string) => s3.del(prefix + key),
     list: (pfx: string) => s3.list(prefix + pfx),
   };
-
-  // Initialize wa-sqlite bridge.
-  await initSQLite();
 
   // Start Go WASM.
   const wasmBytes = fs.readFileSync(wasmPath);

@@ -11,7 +11,6 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/jsutil"
 	"github.com/semistrict/loophole/lsm"
-	"github.com/semistrict/loophole/lwext4"
 )
 
 var backend fsbackend.Service
@@ -21,13 +20,6 @@ func main() {
 
 	s3 := jsutil.MustGetS3()
 	store := jsutil.NewJSObjectStore(s3, "")
-
-	// Initialize lwext4 WASM module if available.
-	ext4JS := js.Global().Get("__loophole_ext4")
-	if !ext4JS.IsUndefined() && !ext4JS.IsNull() {
-		lwext4.Init(ext4JS)
-		fmt.Println("loophole wasm: lwext4 initialized")
-	}
 
 	vm := lsm.NewVolumeManager(store, "", lsm.Config{}, nil, nil)
 	drivers := map[string]fsbackend.AnyDriver{

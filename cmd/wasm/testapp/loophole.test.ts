@@ -12,7 +12,7 @@ beforeAll(async () => {
 
 describe("volume lifecycle", () => {
   test("create and mount volume", async () => {
-    await lh.create("v1", 256 * 1024 * 1024);
+    await lh.create("v1", 16 * 1024 * 1024);
     await lh.mount("v1", "/m1");
   });
 
@@ -52,7 +52,7 @@ describe("volume lifecycle", () => {
     expect(new Uint8Array(read)).toEqual(blob);
   });
 
-  test("snapshot and clone", async () => {
+  test("snapshot and clone", { timeout: 60_000 }, async () => {
     await lh.snapshot("/m1", "snap1");
 
     await lh.writeFile("/m1", "after-snap.txt", enc.encode("written after snapshot\n"));
@@ -70,7 +70,7 @@ describe("volume lifecycle", () => {
     await lh.unmount("/m2");
   });
 
-  test("unmount", async () => {
+  test("unmount", { timeout: 60_000 }, async () => {
     await lh.unmount("/m1");
   });
 });

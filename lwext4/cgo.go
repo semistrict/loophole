@@ -1,19 +1,7 @@
 package lwext4
 
-// #cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../build/darwin-arm64/lwext4
-// #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../build/linux-arm64/lwext4
-// #cgo linux,amd64 LDFLAGS: -L${SRCDIR}/../build/linux-amd64/lwext4
 // #cgo LDFLAGS: -llwext4
-// #cgo CFLAGS: -DCONFIG_USE_DEFAULT_CFG=1
-// #cgo CFLAGS: -DCONFIG_EXT4_BLOCKDEVS_COUNT=16
-// #cgo CFLAGS: -DCONFIG_EXT4_MOUNTPOINTS_COUNT=16
-// #cgo CFLAGS: -DCONFIG_HAVE_OWN_OFLAGS=1
-// #cgo CFLAGS: -DCONFIG_HAVE_OWN_ERRNO=0
-// #cgo CFLAGS: -DCONFIG_HAVE_OWN_ASSERT=1
-// #cgo CFLAGS: -DCONFIG_DEBUG_PRINTF=0
-// #cgo CFLAGS: -DCONFIG_DEBUG_ASSERT=0
-// #cgo CFLAGS: -I${SRCDIR}/../third_party/lwext4/include
-// #include "blockdev.h"
+// #include "lwext4_cgo.h"
 import "C"
 import (
 	"context"
@@ -102,9 +90,9 @@ func goBlockdevClose(handle C.int) C.int {
 	return 0
 }
 
-func createBlockdev(dev BlockDevice, phBsize uint32, phBcnt uint64) (*C.struct_ext4_blockdev, int) {
+func createBlockdev(dev BlockDevice, phBsize uint32, phBcnt uint64) (C.lh_bdev, int) {
 	handle := registerDev(dev)
-	bdev := C.create_blockdev(C.int(handle), C.uint32_t(phBsize), C.uint64_t(phBcnt))
+	bdev := C.lh_create_blockdev(C.int(handle), C.uint32_t(phBsize), C.uint64_t(phBcnt))
 	if bdev == nil {
 		unregisterDev(handle)
 		return nil, 0
@@ -112,7 +100,7 @@ func createBlockdev(dev BlockDevice, phBsize uint32, phBcnt uint64) (*C.struct_e
 	return bdev, handle
 }
 
-func destroyBlockdev(bdev *C.struct_ext4_blockdev, handle int) {
-	C.destroy_blockdev(bdev)
+func destroyBlockdev(bdev C.lh_bdev, handle int) {
+	C.lh_destroy_blockdev(bdev)
 	unregisterDev(handle)
 }

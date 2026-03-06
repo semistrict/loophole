@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite bench-fuse liblwext4 clean-lwext4 wasm wasm-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -142,10 +142,34 @@ e2e-sqlite: liblwext4
 bench-fuse: liblwext4
 	LOG_LEVEL=error go test -tags "$(BUILDTAGS)" -bench=. -run=^$$ -benchmem -count=$(or $(COUNT),1) -timeout 600s ./e2e/
 
-# Build WASM binary with standard Go (no TinyGo, no CGO).
-# SQLite runs separately via wa-sqlite on the JS side.
-wasm:
-	GOOS=js GOARCH=wasm go build -tags "$(BUILDTAGS) nos3 tos" -o $(BINDIR)/loophole.wasm ./cmd/wasm/
+# --- lwext4 for wasm32 (TinyGo CGO) ---
+WASM_CC      ?= /opt/homebrew/opt/llvm/bin/clang
+WASM_AR      ?= /opt/homebrew/opt/llvm/bin/llvm-ar
+WASM_SYSROOT ?= /opt/homebrew/share/wasi-sysroot
+WASM_LWEXT4_BUILDDIR := build/js-wasm/lwext4
+WASM_LWEXT4_OBJDIR   := $(WASM_LWEXT4_BUILDDIR)/obj
+WASM_LWEXT4_LIB      := $(WASM_LWEXT4_BUILDDIR)/liblwext4.a
+
+WASM_LWEXT4_OBJS := $(patsubst $(LWEXT4_SRCDIR)/%.c,$(WASM_LWEXT4_OBJDIR)/%.o,$(LWEXT4_SRCS))
+
+liblwext4-wasm: $(WASM_LWEXT4_LIB)
+
+$(WASM_LWEXT4_LIB): $(WASM_LWEXT4_OBJS)
+	$(WASM_AR) rcs $@ $^
+
+$(WASM_LWEXT4_OBJDIR)/%.o: $(LWEXT4_SRCDIR)/%.c | $(WASM_LWEXT4_OBJDIR)
+	$(WASM_CC) --target=wasm32-wasi --sysroot=$(WASM_SYSROOT) $(LWEXT4_CFLAGS) -c $< -o $@
+
+$(WASM_LWEXT4_OBJDIR):
+	mkdir -p $(WASM_LWEXT4_OBJDIR)
+
+# Build WASM binary with TinyGo.
+# TinyGo CGO doesn't support ${SRCDIR}, so we generate a file with absolute paths.
+GOROOT_TINYGO ?= $(HOME)/sdk/go1.25.2
+wasm: liblwext4-wasm
+	@printf '//go:build tinygo\n\npackage lwext4\n\n// #cgo CFLAGS: -I$(CURDIR)/third_party/lwext4/include\n// #cgo LDFLAGS: -L$(CURDIR)/build/js-wasm/lwext4\nimport "C"\n' > lwext4/cgo_generated.go
+	PATH=$(GOROOT_TINYGO)/bin:$(PATH) GOROOT=$(GOROOT_TINYGO) tinygo build -target=wasm -tags "$(BUILDTAGS) nos3 tos" -o $(BINDIR)/loophole.wasm ./cmd/wasm/
+	@rm -f lwext4/cgo_generated.go
 
 # Run containerstorage integration tests (FUSE mode)
 test-containerstorage: install

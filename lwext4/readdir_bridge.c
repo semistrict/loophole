@@ -1,5 +1,7 @@
 #include "readdir_bridge.h"
-#include "_cgo_export.h"
+
+// Go-exported callback (defined in ext4.go).
+extern int goReaddirCallback(struct inode_dirent *de, uintptr_t ctx);
 
 typedef struct {
     uintptr_t ctx;
