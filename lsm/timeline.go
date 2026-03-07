@@ -85,7 +85,9 @@ type Timeline struct {
 	flushStop   chan struct{}
 	flushDone   chan struct{}
 	flushNotify chan struct{}
+	writeNotify chan struct{}      // poked on every write; triggers early flush if stale
 	flushCancel context.CancelFunc // cancels the flush loop's context
+	lastFlushAt atomic.Int64       // UnixMilli of last successful flush
 
 	// Debug logging for compact/flush tracing. Set in tests.
 	debugLog func(string)
@@ -416,6 +418,14 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 	}
 	if err != nil {
 		return err
+	}
+
+	// Notify flush loop that a write happened (non-blocking).
+	if tl.writeNotify != nil {
+		select {
+		case tl.writeNotify <- struct{}{}:
+		default:
+		}
 	}
 
 	// Backpressure: if frozen layers are at capacity, flush them now.
@@ -1615,10 +1625,16 @@ func (tl *Timeline) startPeriodicFlush() {
 	tl.flushStop = make(chan struct{})
 	tl.flushDone = make(chan struct{})
 	tl.flushNotify = make(chan struct{}, 1)
+	tl.writeNotify = make(chan struct{}, 1)
+	tl.lastFlushAt.Store(time.Now().UnixMilli())
 	ctx, cancel := context.WithCancel(context.Background())
 	tl.flushCancel = cancel
 	go tl.periodicFlushLoop(ctx)
 }
+
+// flushWriteDelay is how long to wait after a write-triggered flush
+// before actually flushing, to batch nearby writes.
+const flushWriteDelay = 2 * time.Second
 
 func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
 	defer close(tl.flushDone)
@@ -1630,6 +1646,26 @@ func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
 			return
 		case <-timer.C:
 		case <-tl.flushNotify:
+		case <-tl.writeNotify:
+			// A write arrived. If the last flush was longer than FlushInterval
+			// ago, schedule a flush after a short delay to batch nearby writes.
+			sinceFlush := time.Since(time.UnixMilli(tl.lastFlushAt.Load()))
+			if sinceFlush < tl.config.FlushInterval {
+				continue // not stale, let the regular timer handle it
+			}
+			// Drain any extra write notifications.
+			select {
+			case <-tl.writeNotify:
+			default:
+			}
+			// Wait a short delay to batch writes, but still listen for stop.
+			delay := time.NewTimer(flushWriteDelay)
+			select {
+			case <-tl.flushStop:
+				delay.Stop()
+				return
+			case <-delay.C:
+			}
 		}
 
 		// Drain any pending notifications so we don't loop unnecessarily.
@@ -1637,43 +1673,55 @@ func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
 		case <-tl.flushNotify:
 		default:
 		}
-
-		// Use TryLock to avoid blocking on flushMu. Under synctest,
-		// a goroutine blocked on a mutex is not "idle", so if an inline
-		// Flush holds flushMu and waits on a retry timer, synctest
-		// cannot advance fake time — deadlock. TryLock sidesteps this:
-		// if someone else is flushing, we skip and retry next interval.
-		if tl.flushMu.TryLock() {
-			err := tl.flushFrozenLayersLocked(ctx, 1)
-			tl.flushMu.Unlock()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
-			}
+		select {
+		case <-tl.writeNotify:
+		default:
 		}
 
-		tl.mu.RLock()
-		ml := tl.memLayer
-		tl.mu.RUnlock()
-		if !ml.isEmpty() {
-			if err := tl.freezeMemLayer(); err == nil {
-				if tl.flushMu.TryLock() {
-					err := tl.flushFrozenLayersLocked(ctx, 1)
-					tl.flushMu.Unlock()
-					if err != nil {
-						if ctx.Err() != nil {
-							return
-						}
-						slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
-					}
-				}
-			}
+		tl.doPeriodicFlush(ctx)
+		if ctx.Err() != nil {
+			return
 		}
 		// Wait another interval after the flush completes.
 		timer.Reset(tl.config.FlushInterval)
 	}
+}
+
+func (tl *Timeline) doPeriodicFlush(ctx context.Context) {
+	// Use TryLock to avoid blocking on flushMu. Under synctest,
+	// a goroutine blocked on a mutex is not "idle", so if an inline
+	// Flush holds flushMu and waits on a retry timer, synctest
+	// cannot advance fake time — deadlock. TryLock sidesteps this:
+	// if someone else is flushing, we skip and retry next interval.
+	if tl.flushMu.TryLock() {
+		err := tl.flushFrozenLayersLocked(ctx, 1)
+		tl.flushMu.Unlock()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+		}
+	}
+
+	tl.mu.RLock()
+	ml := tl.memLayer
+	tl.mu.RUnlock()
+	if !ml.isEmpty() {
+		if err := tl.freezeMemLayer(); err == nil {
+			if tl.flushMu.TryLock() {
+				err := tl.flushFrozenLayersLocked(ctx, 1)
+				tl.flushMu.Unlock()
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					slog.Warn("periodic flush failed", "timeline", tl.id, "error", err)
+				}
+			}
+		}
+	}
+	tl.lastFlushAt.Store(time.Now().UnixMilli())
 }
 
 func (tl *Timeline) close(ctx context.Context) {

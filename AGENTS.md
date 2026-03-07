@@ -10,8 +10,9 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make build` — build all packages
 - `make test` — run all unit tests
 - `make test RUN=TestName` — run a specific test across all packages
-- `make clean-lwext4` — when cgo C source changes, clean to avoid stale builds
-- E2E tests require Linux (FUSE). Run in Docker: `docker compose run --rm go bash -c 'make clean-lwext4 && make e2e-lwext4fuse'`
+- `make e2e-inprocess` — run e2e tests in-process (no FUSE/NBD/root required, works on macOS)
+- `make e2e-inprocess RUN=TestName` — run a specific e2e test
+- E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e-lwext4fuse'`
 - Set `LOG_LEVEL=debug` to enable slog debug output in e2e tests
 
 ## Utilities

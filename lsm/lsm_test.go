@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -4845,4 +4846,76 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 	if buf[0] != 0xEE {
 		t.Fatalf("expected 0xEE, got 0x%02X", buf[0])
 	}
+}
+
+// TestWriteTriggersEarlyFlushWhenStale verifies that a write triggers a
+// flush after a 2s delay when the last flush was more than FlushInterval ago.
+func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := loophole.NewMemStore()
+		cfg := Config{
+			FlushThreshold:  64 * PageSize, // large so writes don't trigger freeze
+			MaxFrozenLayers: 10,
+			PageCacheBytes:  64 * PageSize,
+			FlushInterval:   1 * time.Hour, // long enough that the regular timer never fires
+		}
+		m := newTestManager(t, store, cfg)
+		ctx := t.Context()
+
+		v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		vol := v.(*volume)
+
+		// Write some data.
+		page := make([]byte, PageSize)
+		page[0] = 0xAA
+		if err := v.Write(ctx, page, 0); err != nil {
+			t.Fatal(err)
+		}
+
+		// No delta layers yet — regular timer is 1 hour away.
+		if len(vol.timeline.layers.Deltas) != 0 {
+			t.Fatalf("expected 0 delta layers initially, got %d", len(vol.timeline.layers.Deltas))
+		}
+
+		// Simulate stale state: pretend the last flush was over FlushInterval ago.
+		vol.timeline.lastFlushAt.Store(time.Now().Add(-2 * time.Hour).UnixMilli())
+
+		// Write again — should trigger the early flush path because
+		// sinceFlush > FlushInterval.
+		page[0] = 0xBB
+		if err := v.Write(ctx, page, PageSize); err != nil {
+			t.Fatal(err)
+		}
+
+		// Advance 1s — flush hasn't happened yet (2s delay).
+		time.Sleep(1 * time.Second)
+		if len(vol.timeline.layers.Deltas) != 0 {
+			t.Fatalf("expected 0 delta layers during 2s delay, got %d", len(vol.timeline.layers.Deltas))
+		}
+
+		// Advance past the 2s delay — flush should complete.
+		time.Sleep(2 * time.Second)
+
+		if len(vol.timeline.layers.Deltas) == 0 {
+			t.Fatal("expected delta layers after write-triggered early flush")
+		}
+
+		// Verify data.
+		buf := make([]byte, PageSize)
+		if _, err := v.Read(ctx, buf, 0); err != nil {
+			t.Fatal(err)
+		}
+		if buf[0] != 0xAA {
+			t.Fatalf("page 0: expected 0xAA, got 0x%02X", buf[0])
+		}
+		if _, err := v.Read(ctx, buf, PageSize); err != nil {
+			t.Fatal(err)
+		}
+		if buf[0] != 0xBB {
+			t.Fatalf("page 1: expected 0xBB, got 0x%02X", buf[0])
+		}
+	})
 }
