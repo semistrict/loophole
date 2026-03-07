@@ -12,3 +12,4 @@ vmlinuz
 /old/
 node_modules/
 docker-config/
+cmd/wasm/web/public/loophole.wasm

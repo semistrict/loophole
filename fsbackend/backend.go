@@ -125,6 +125,9 @@ type FS interface {
 	Chmod(name string, mode fs.FileMode) error
 	Lchown(name string, uid, gid int) error
 	Chtimes(name string, mtime int64) error
+	Rename(oldName, newName string) error
+	Link(existingPath, newPath string) error
+	RemoveAll(name string) error
 }
 
 // File is an open file handle.

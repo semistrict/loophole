@@ -117,7 +117,16 @@ func TestCheckAvailableLiveHolder(t *testing.T) {
 		require.NoError(t, holder.EnsureStarted(t.Context()))
 
 		challenger := NewLeaseManager(leases)
-		err := challenger.CheckAvailable(t.Context(), holder.Token())
+
+		done := make(chan error, 1)
+		go func() {
+			done <- challenger.CheckAvailable(t.Context(), holder.Token())
+		}()
+
+		// Advance past poll interval so holder sees the check_alive RPC.
+		time.Sleep(leasePollInterval + 2*time.Second)
+
+		err := <-done
 		assert.ErrorContains(t, err, "lease held by")
 
 		require.NoError(t, holder.Close(t.Context()))
@@ -139,7 +148,7 @@ func TestCheckAvailableAfterCleanShutdown(t *testing.T) {
 	})
 }
 
-func TestCheckAvailableAfterCrash(t *testing.T) {
+func TestCheckAvailableAfterCrashAutoBreaks(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := NewMemStore()
 		leases := store.At("leases")
@@ -153,13 +162,94 @@ func TestCheckAvailableAfterCrash(t *testing.T) {
 		holder.mu.Unlock()
 		<-holder.done
 
-		// File still exists — lease is still held.
+		// File still exists.
 		_, ok := store.GetObject("leases/" + holderToken + ".json")
 		assert.True(t, ok)
 
 		challenger := NewLeaseManager(leases)
-		err := challenger.CheckAvailable(t.Context(), holderToken)
+		require.NoError(t, challenger.EnsureStarted(t.Context()))
+
+		// CheckAvailable sends check_alive, waits 20s, then auto-breaks.
+		done := make(chan error, 1)
+		go func() {
+			done <- challenger.CheckAvailable(t.Context(), holderToken)
+		}()
+
+		// Advance past the 20s check_alive timeout.
+		time.Sleep(21 * time.Second)
+
+		err := <-done
+		assert.NoError(t, err, "stale lease should be auto-broken")
+
+		// Lease file should be deleted.
+		_, ok = store.GetObject("leases/" + holderToken + ".json")
+		assert.False(t, ok, "stale lease file should be deleted")
+
+		require.NoError(t, challenger.Close(t.Context()))
+	})
+}
+
+func TestCheckAvailableLiveHolderNotBroken(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := NewMemStore()
+		leases := store.At("leases")
+
+		holder := NewLeaseManager(leases)
+		require.NoError(t, holder.EnsureStarted(t.Context()))
+
+		challenger := NewLeaseManager(leases)
+		require.NoError(t, challenger.EnsureStarted(t.Context()))
+
+		// CheckAvailable sends check_alive; holder responds → lease is held.
+		done := make(chan error, 1)
+		go func() {
+			done <- challenger.CheckAvailable(t.Context(), holder.Token())
+		}()
+
+		// Advance past poll interval so holder sees the RPC.
+		time.Sleep(leasePollInterval + 2*time.Second)
+
+		err := <-done
 		assert.ErrorContains(t, err, "lease held by")
+
+		// Holder's lease file should still exist.
+		_, ok := store.GetObject("leases/" + holder.Token() + ".json")
+		assert.True(t, ok)
+
+		require.NoError(t, holder.Close(t.Context()))
+		require.NoError(t, challenger.Close(t.Context()))
+	})
+}
+
+func TestCheckAvailableAutoBreakCleansUpLeaseFile(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := NewMemStore()
+		leases := store.At("leases")
+
+		// Simulate a dead holder: create lease file manually, no poll loop.
+		deadToken := "dead-holder-token"
+		data, _ := json.Marshal(leaseFile{})
+		_, err := leases.PutIfNotExists(t.Context(), deadToken+".json", data)
+		require.NoError(t, err)
+
+		challenger := NewLeaseManager(leases)
+		require.NoError(t, challenger.EnsureStarted(t.Context()))
+
+		done := make(chan error, 1)
+		go func() {
+			done <- challenger.CheckAvailable(t.Context(), deadToken)
+		}()
+
+		// Advance past the 20s check_alive timeout.
+		time.Sleep(21 * time.Second)
+
+		assert.NoError(t, <-done)
+
+		// Dead holder's lease file should be cleaned up.
+		_, ok := store.GetObject("leases/" + deadToken + ".json")
+		assert.False(t, ok)
+
+		require.NoError(t, challenger.Close(t.Context()))
 	})
 }
 
@@ -525,6 +615,70 @@ func TestPollLoopDispatchesDirectInboxWrite(t *testing.T) {
 		assert.Equal(t, "test-id-123", lf.Outbox.ID)
 		assert.Empty(t, lf.Outbox.Error)
 		assert.JSONEq(t, `{"status":"released"}`, string(lf.Outbox.Result))
+
+		require.NoError(t, holder.Close(t.Context()))
+	})
+}
+
+func TestPollFastAfterRPCThenDecay(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := NewMemStore()
+		leases := store.At("leases")
+
+		var callCount int
+		holder := NewLeaseManager(leases)
+		holder.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) {
+			callCount++
+			return map[string]string{"pong": "ok"}, nil
+		})
+		require.NoError(t, holder.EnsureStarted(t.Context()))
+
+		caller := NewLeaseManager(leases)
+
+		// First call — must wait for the slow poll interval.
+		type callResult struct {
+			result json.RawMessage
+			err    error
+		}
+		done := make(chan callResult, 1)
+		go func() {
+			r, err := caller.Call(t.Context(), holder.Token(), "ping", nil)
+			done <- callResult{r, err}
+		}()
+		time.Sleep(leasePollInterval + time.Second)
+		r := <-done
+		require.NoError(t, r.err)
+		assert.Equal(t, 1, callCount)
+
+		// Second call immediately after — should be handled within the
+		// fast poll interval (1s), not the slow one (10s).
+		go func() {
+			r, err := caller.Call(t.Context(), holder.Token(), "ping", nil)
+			done <- callResult{r, err}
+		}()
+		time.Sleep(leasePollFast + time.Second)
+		r = <-done
+		require.NoError(t, r.err)
+		assert.Equal(t, 2, callCount)
+
+		// Wait for decay (20s with no RPCs) then send another call.
+		// It should take the slow interval again.
+		time.Sleep(leasePollDecay + leasePollInterval)
+		beforeSlow := callCount
+		go func() {
+			r, err := caller.Call(t.Context(), holder.Token(), "ping", nil)
+			done <- callResult{r, err}
+		}()
+		// After fast interval, the call should NOT be handled yet
+		// (we decayed back to slow).
+		time.Sleep(leasePollFast + 500*time.Millisecond)
+		assert.Equal(t, beforeSlow, callCount, "should not have been handled in fast interval after decay")
+
+		// But after the full slow interval, it should be handled.
+		time.Sleep(leasePollInterval)
+		r = <-done
+		require.NoError(t, r.err)
+		assert.Equal(t, beforeSlow+1, callCount)
 
 		require.NoError(t, holder.Close(t.Context()))
 	})

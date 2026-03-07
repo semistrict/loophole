@@ -12,8 +12,14 @@ import (
 )
 
 const (
-	// leasePollInterval is how often the holder GET-polls its lease file.
+	// leasePollInterval is the default (idle) poll interval.
 	leasePollInterval = 10 * time.Second
+
+	// leasePollFast is the poll interval after receiving an RPC message.
+	leasePollFast = 1 * time.Second
+
+	// leasePollDecay is how long to stay in fast mode after the last RPC.
+	leasePollDecay = 20 * time.Second
 
 	// leaseCallTimeout is how long Call waits for a response.
 	leaseCallTimeout = 30 * time.Second
@@ -69,12 +75,16 @@ type LeaseManager struct {
 // NewLeaseManager creates a manager with a fresh token. No S3 writes
 // happen until EnsureStarted is called.
 func NewLeaseManager(leases ObjectStore) *LeaseManager {
-	return &LeaseManager{
+	lm := &LeaseManager{
 		token:    uuid.NewString(),
 		leases:   leases,
 		handlers: make(map[string]LeaseHandler),
 		done:     make(chan struct{}),
 	}
+	lm.handlers["check_alive"] = func(_ context.Context, _ json.RawMessage) (any, error) {
+		return map[string]string{"status": "alive"}, nil
+	}
+	return lm
 }
 
 // Token returns the process-wide lease token.
@@ -105,7 +115,9 @@ func (lm *LeaseManager) EnsureStarted(ctx context.Context) error {
 }
 
 // CheckAvailable returns nil if the given token's lease file is absent
-// or belongs to us. Returns an error if the file exists (lease is held).
+// or belongs to us. If the lease file exists, sends a check_alive RPC
+// and waits up to 20s. If the holder responds, returns an error (lease
+// is actively held). If no response, auto-breaks the lease and returns nil.
 func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string) error {
 	if existingToken == "" || existingToken == lm.token {
 		return nil
@@ -114,7 +126,38 @@ func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string
 	if err != nil {
 		return nil // missing → available
 	}
-	return fmt.Errorf("lease held by %q", existingToken)
+
+	// Lease file exists — check if the holder is still alive.
+	slog.Info("lease: checking if holder is alive", "token", existingToken)
+	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	_, rpcErr := lm.Call(checkCtx, existingToken, "check_alive", nil)
+	if rpcErr == nil {
+		// Holder responded successfully — lease is actively held.
+		return fmt.Errorf("lease held by %q", existingToken)
+	}
+	if checkCtx.Err() == nil {
+		// Context is not expired, so the error is a response from the holder
+		// (e.g. remote error, or file deleted). Either way, holder is reachable
+		// or gone cleanly — not a stale lease.
+		// File deleted → available (Call returns nil, nil for that case, handled above).
+		// Remote error → holder is alive but returned an error.
+		return fmt.Errorf("lease held by %q", existingToken)
+	}
+
+	// Timed out waiting for response — holder is dead.
+	slog.Warn("lease: holder not responding, auto-breaking stale lease", "token", existingToken)
+	if err := lm.forceBreakLease(ctx, existingToken); err != nil {
+		return fmt.Errorf("auto-break lease %q: %w", existingToken, err)
+	}
+	return nil
+}
+
+// forceBreakLease clears a lease token and deletes the lease file.
+func (lm *LeaseManager) forceBreakLease(ctx context.Context, token string) error {
+	// Delete the stale lease file (best-effort).
+	_ = lm.leases.DeleteObject(ctx, token+".json")
+	return nil
 }
 
 // Call sends an RPC request to another token's inbox and waits for a
@@ -215,33 +258,43 @@ func (lm *LeaseManager) createLease(ctx context.Context) error {
 }
 
 // pollLoop GET-polls the lease file to check for inbox messages.
+// After handling an RPC, poll frequency increases to 1s for 20s,
+// then decays back to the default 10s interval.
 func (lm *LeaseManager) pollLoop(ctx context.Context) {
 	defer close(lm.done)
 	ticker := time.NewTicker(leasePollInterval)
 	defer ticker.Stop()
+	var lastRPC time.Time
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			lm.checkInbox(ctx)
+			handled := lm.checkInbox(ctx)
+			if handled {
+				lastRPC = time.Now()
+				ticker.Reset(leasePollFast)
+			} else if !lastRPC.IsZero() && time.Since(lastRPC) > leasePollDecay {
+				lastRPC = time.Time{}
+				ticker.Reset(leasePollInterval)
+			}
 		}
 	}
 }
 
-// lastHandledID tracks the last request we processed to avoid re-handling.
 // checkInbox reads the lease file and dispatches any inbox message.
-func (lm *LeaseManager) checkInbox(ctx context.Context) {
+// Returns true if a new RPC was handled.
+func (lm *LeaseManager) checkInbox(ctx context.Context) bool {
 	lf, _, err := ReadJSON[leaseFile](ctx, lm.leases, lm.token+".json")
 	if err != nil {
-		return
+		return false
 	}
 	if lf.Inbox == nil {
-		return
+		return false
 	}
 	// Skip if we already responded to this request.
 	if lf.Outbox != nil && lf.Outbox.ID == lf.Inbox.ID {
-		return
+		return false
 	}
 
 	req := lf.Inbox
@@ -266,4 +319,5 @@ func (lm *LeaseManager) checkInbox(ctx context.Context) {
 		lf.Outbox = resp
 		return nil
 	})
+	return true
 }

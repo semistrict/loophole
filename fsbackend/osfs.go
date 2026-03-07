@@ -90,3 +90,15 @@ func (f *osFS) Chtimes(name string, mtime int64) error {
 	t := time.Unix(mtime, 0)
 	return os.Chtimes(f.path(name), t, t)
 }
+
+func (f *osFS) Rename(oldName, newName string) error {
+	return os.Rename(f.path(oldName), f.path(newName))
+}
+
+func (f *osFS) Link(existingPath, newPath string) error {
+	return os.Link(f.path(existingPath), f.path(newPath))
+}
+
+func (f *osFS) RemoveAll(name string) error {
+	return os.RemoveAll(f.path(name))
+}

@@ -354,6 +354,58 @@ func (f *lwext4FSImpl) Create(name string) (File, error) {
 	return file, nil
 }
 
+func (f *lwext4FSImpl) Rename(oldName, newName string) error {
+	srcParent, srcBase, err := f.resolveParent(oldName)
+	if err != nil {
+		return err
+	}
+	dstParent, dstBase, err := f.resolveParent(newName)
+	if err != nil {
+		return err
+	}
+	return f.ext4.Rename(srcParent, srcBase, dstParent, dstBase)
+}
+
+func (f *lwext4FSImpl) Link(existingPath, newPath string) error {
+	ino, err := f.resolve(existingPath)
+	if err != nil {
+		return err
+	}
+	parentIno, baseName, err := f.resolveParent(newPath)
+	if err != nil {
+		return err
+	}
+	return f.ext4.Link(ino, parentIno, baseName)
+}
+
+func (f *lwext4FSImpl) RemoveAll(name string) error {
+	ino, err := f.resolve(name)
+	if err != nil {
+		return err
+	}
+	attr, err := f.ext4.GetAttr(ino)
+	if err != nil {
+		return err
+	}
+	if attr.Mode&0o40000 != 0 {
+		// Directory — remove contents recursively first.
+		entries, err := f.ext4.Readdir(ino)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if e.Name == "." || e.Name == ".." {
+				continue
+			}
+			childPath := path.Join(name, e.Name)
+			if err := f.RemoveAll(childPath); err != nil {
+				return err
+			}
+		}
+	}
+	return f.Remove(name)
+}
+
 // lwext4FileInfo implements fs.FileInfo from lwext4 attributes.
 type lwext4FileInfo struct {
 	name string

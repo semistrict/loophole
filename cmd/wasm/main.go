@@ -30,6 +30,18 @@ func main() {
 
 	api := js.Global().Get("Object").New()
 
+	api.Set("listVolumes", jsutil.Async(func(args []js.Value) (any, error) {
+		names, err := vm.ListVolumesByType(context.Background(), loophole.VolumeTypeExt4)
+		if err != nil {
+			return nil, err
+		}
+		arr := js.Global().Get("Array").New(len(names))
+		for i, name := range names {
+			arr.SetIndex(i, name)
+		}
+		return arr, nil
+	}))
+
 	api.Set("create", jsutil.Async(func(args []js.Value) (any, error) {
 		name := jsutil.MustString(args, 0)
 		size := uint64(jsutil.MustInt(args, 1))
@@ -201,6 +213,77 @@ func main() {
 			return nil, err
 		}
 		return nil, vol.WriteFile(path, data, fs.FileMode(mode))
+	}))
+
+	api.Set("rename", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		oldPath := jsutil.MustString(args, 1)
+		newPath := jsutil.MustString(args, 2)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.Rename(oldPath, newPath)
+	}))
+
+	api.Set("link", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		existingPath := jsutil.MustString(args, 1)
+		newPath := jsutil.MustString(args, 2)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.Link(existingPath, newPath)
+	}))
+
+	api.Set("removeAll", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.RemoveAll(path)
+	}))
+
+	api.Set("utimes", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		mtimeMs := args[2].Float()
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.Chtimes(path, int64(mtimeMs/1000))
+	}))
+
+	api.Set("readDirWithTypes", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		dirPath := jsutil.MustString(args, 1)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		names, err := vol.ReadDir(dirPath)
+		if err != nil {
+			return nil, err
+		}
+		arr := js.Global().Get("Array").New(len(names))
+		for i, name := range names {
+			childPath := dirPath + "/" + name
+			info, err := vol.Lstat(childPath)
+			if err != nil {
+				return nil, err
+			}
+			obj := js.Global().Get("Object").New()
+			obj.Set("name", name)
+			obj.Set("isFile", info.Mode().IsRegular())
+			obj.Set("isDirectory", info.IsDir())
+			obj.Set("isSymbolicLink", info.Mode()&fs.ModeSymlink != 0)
+			arr.SetIndex(i, obj)
+		}
+		return arr, nil
 	}))
 
 	api.Set("snapshot", jsutil.Async(func(args []js.Value) (any, error) {
