@@ -2,7 +2,7 @@ NB: this is a completely new system with no users. Don't worry about backwards c
 
 ## Third-party dependencies
 
-Third-party C/Go deps live in `third_party/` and are committed directly to the repo.
+Third-party C/Go deps live in `third_party/` and are committed directly to the repo. A `go.work` workspace file includes them as local modules — imports like `github.com/klauspost/compress` resolve to the local `third_party/compress` copy, not the upstream module.
 
 ## Building and testing
 

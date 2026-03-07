@@ -3,6 +3,7 @@ package lsm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -40,9 +41,10 @@ type Manager struct {
 	timelines loophole.ObjectStore // store.At("timelines")
 	volRefs   loophole.ObjectStore // store.At("volumes")
 
-	mu         sync.Mutex
-	volumes    map[string]*volume // open volumes by name
-	openFlight singleflight.Group // deduplicates concurrent OpenVolume calls
+	mu            sync.Mutex
+	volumes       map[string]*volume   // open volumes by name
+	timelineCache map[string]*timeline // cached read-only ancestor timelines by ID
+	openFlight    singleflight.Group   // deduplicates concurrent OpenVolume calls
 
 	onRelease func(ctx context.Context, volumeName string) // called before storage-layer close
 }
@@ -57,16 +59,17 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 	}
 	lease := loophole.NewLeaseManager(store.At("leases"))
 	m := &Manager{
-		store:     store,
-		cacheDir:  cacheDir,
-		config:    config,
-		diskCache: diskCache,
-		lease:     lease,
-		fs:        fs,
-		idGen:     uuid.NewString,
-		timelines: store.At("timelines"),
-		volRefs:   store.At("volumes"),
-		volumes:   make(map[string]*volume),
+		store:         store,
+		cacheDir:      cacheDir,
+		config:        config,
+		diskCache:     diskCache,
+		lease:         lease,
+		fs:            fs,
+		idGen:         uuid.NewString,
+		timelines:     store.At("timelines"),
+		volRefs:       store.At("volumes"),
+		volumes:       make(map[string]*volume),
+		timelineCache: make(map[string]*timeline),
 	}
 	lease.Handle("release", m.handleRelease)
 	return m
@@ -88,14 +91,14 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volTy
 	timelineID := m.idGen()
 
 	// Write timeline meta.json.
-	meta := TimelineMeta{
+	meta := timelineMeta{
 		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
 	metaData, err := json.Marshal(meta)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := m.timelines.At(timelineID).PutIfNotExists(ctx, "meta.json", metaData); err != nil {
+	if err := m.timelines.At(timelineID).PutIfNotExists(ctx, "meta.json", metaData); err != nil {
 		return nil, fmt.Errorf("create timeline meta: %w", err)
 	}
 
@@ -105,12 +108,11 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volTy
 	if err != nil {
 		return nil, err
 	}
-	created, err := m.volRefs.PutIfNotExists(ctx, name, refData)
-	if err != nil {
+	if err := m.volRefs.PutIfNotExists(ctx, name, refData); err != nil {
+		if errors.Is(err, loophole.ErrExists) {
+			return nil, fmt.Errorf("volume %q already exists", name)
+		}
 		return nil, fmt.Errorf("create volume ref: %w", err)
-	}
-	if !created {
-		return nil, fmt.Errorf("volume %q already exists", name)
 	}
 
 	return m.openVolume(ctx, name, ref)
@@ -215,7 +217,7 @@ func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 			return fmt.Errorf("start lease: %w", err)
 		}
 		tlStore := m.timelines.At(ref.TimelineID)
-		err := loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(meta *TimelineMeta) error {
+		err := loophole.ModifyJSON[timelineMeta](ctx, tlStore, "meta.json", func(meta *timelineMeta) error {
 			if err := m.lease.CheckAvailable(ctx, meta.LeaseToken); err != nil {
 				return fmt.Errorf("timeline %s: %w", ref.TimelineID, err)
 			}
@@ -227,7 +229,7 @@ func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 		}
 		// Release the lease after deleting the ref.
 		defer func() {
-			_ = loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(meta *TimelineMeta) error {
+			_ = loophole.ModifyJSON[timelineMeta](ctx, tlStore, "meta.json", func(meta *timelineMeta) error {
 				if meta.LeaseToken == m.lease.Token() {
 					meta.LeaseToken = ""
 				}
@@ -254,13 +256,21 @@ func (m *Manager) Close(ctx context.Context) error {
 		vols = append(vols, v)
 	}
 	m.volumes = make(map[string]*volume)
+	cached := make([]*timeline, 0, len(m.timelineCache))
+	for _, tl := range m.timelineCache {
+		cached = append(cached, tl)
+	}
+	m.timelineCache = make(map[string]*timeline)
 	m.mu.Unlock()
 
 	for _, v := range vols {
-		if m.lease != nil {
+		if m.lease != nil && !v.readOnly.Load() {
 			_ = v.timeline.releaseLease(ctx, m.lease.Token())
 		}
 		v.timeline.close(ctx)
+	}
+	for _, tl := range cached {
+		tl.close(ctx)
 	}
 	if m.lease != nil {
 		if err := m.lease.Close(ctx); err != nil {
@@ -281,7 +291,7 @@ func (m *Manager) getVolumeRef(ctx context.Context, name string) (volumeRef, err
 }
 
 func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*volume, error) {
-	tl, err := m.openTimeline(ctx, m.timelines.At(ref.TimelineID), ref.TimelineID)
+	tl, meta, metaEtag, err := m.openTimeline(ctx, m.timelines.At(ref.TimelineID), ref.TimelineID, ref.ReadOnly)
 	if err != nil {
 		return nil, fmt.Errorf("open timeline %q: %w", ref.TimelineID, err)
 	}
@@ -291,13 +301,13 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*
 		tl.startPeriodicFlush()
 	}
 
-	// Acquire write lease if lease manager is configured.
-	if m.lease != nil {
+	// Acquire write lease if lease manager is configured (skip for read-only volumes).
+	if m.lease != nil && !ref.ReadOnly {
 		if err := m.lease.EnsureStarted(ctx); err != nil {
 			tl.close(ctx)
 			return nil, fmt.Errorf("start lease: %w", err)
 		}
-		if err := tl.acquireLease(ctx, m.lease); err != nil {
+		if err := tl.acquireLease(ctx, m.lease, meta, metaEtag); err != nil {
 			tl.close(ctx)
 			return nil, fmt.Errorf("acquire lease for %q: %w", name, err)
 		}
@@ -376,7 +386,7 @@ func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool)
 	}
 
 	tlStore := m.timelines.At(ref.TimelineID)
-	meta, _, err := loophole.ReadJSON[TimelineMeta](ctx, tlStore, "meta.json")
+	meta, _, err := loophole.ReadJSON[timelineMeta](ctx, tlStore, "meta.json")
 	if err != nil {
 		return false, fmt.Errorf("read timeline meta: %w", err)
 	}
@@ -403,7 +413,7 @@ func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool)
 	}
 
 	// Clear the token if the holder didn't do it.
-	if err := loophole.ModifyJSON[TimelineMeta](ctx, tlStore, "meta.json", func(m *TimelineMeta) error {
+	if err := loophole.ModifyJSON[timelineMeta](ctx, tlStore, "meta.json", func(m *timelineMeta) error {
 		if m.LeaseToken == "" {
 			return nil // already cleared
 		}

@@ -225,6 +225,8 @@ func (ml *MemLayer) cleanup() {
 		_ = unix.Munmap(ml.mmap)
 		ml.mmap = nil
 	}
-	_ = ml.file.Close()
-	_ = os.Remove(ml.path)
+	if ml.file != nil {
+		_ = ml.file.Close()
+		_ = os.Remove(ml.path)
+	}
 }

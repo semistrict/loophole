@@ -29,8 +29,8 @@ import (
 // This prevents absurd mmap file sizes when FlushThreshold is set very high.
 const maxMemLayerSlots = 65536
 
-// TimelineMeta is the S3-persisted metadata for a timeline.
-type TimelineMeta struct {
+// timelineMeta is the S3-persisted metadata for a timeline.
+type timelineMeta struct {
 	Ancestor     string        `json:"ancestor,omitempty"`
 	AncestorSeq  uint64        `json:"ancestor_seq,omitempty"`
 	BranchPoints []BranchPoint `json:"branch_points,omitempty"`
@@ -44,9 +44,9 @@ type BranchPoint struct {
 	Seq   uint64 `json:"seq"`
 }
 
-// Timeline is the storage backing a single volume — an ordered set of
+// timeline is the storage backing a single volume — an ordered set of
 // layers plus an optional ancestor pointer.
-type Timeline struct {
+type timeline struct {
 	id            string
 	store         loophole.ObjectStore // rooted at timelines/<id>/
 	timelinesRoot loophole.ObjectStore // rooted at timelines/
@@ -55,7 +55,7 @@ type Timeline struct {
 	diskCache     *diskcache.DiskCache
 	fs            LocalFS
 
-	ancestor    *Timeline // nil for root timelines
+	ancestor    *timeline // nil for root timelines
 	ancestorSeq uint64    // read from ancestor only at seq <= this value
 
 	mu       sync.RWMutex
@@ -88,19 +88,20 @@ type Timeline struct {
 	writeNotify chan struct{}      // poked on every write; triggers early flush if stale
 	flushCancel context.CancelFunc // cancels the flush loop's context
 	lastFlushAt atomic.Int64       // UnixMilli of last successful flush
+	closeOnce   sync.Once
 
 	// Debug logging for compact/flush tracing. Set in tests.
 	debugLog func(string)
 }
 
 // openTimeline loads a timeline from S3 and initializes its local state.
-func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, id string) (*Timeline, error) {
-	meta, _, err := loophole.ReadJSON[TimelineMeta](ctx, store, "meta.json")
+func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, id string, readOnly bool) (*timeline, timelineMeta, string, error) {
+	meta, metaEtag, err := loophole.ReadJSON[timelineMeta](ctx, store, "meta.json")
 	if err != nil {
-		return nil, fmt.Errorf("read timeline meta: %w", err)
+		return nil, timelineMeta{}, "", fmt.Errorf("read timeline meta: %w", err)
 	}
 
-	tl := &Timeline{
+	tl := &timeline{
 		id:            id,
 		store:         store,
 		timelinesRoot: m.timelines,
@@ -112,45 +113,79 @@ func (m *Manager) openTimeline(ctx context.Context, store loophole.ObjectStore, 
 		imageCache:    newLayerCache[parsedImageLayer](m.config.MaxLayerCacheEntries),
 	}
 
-	// Load ancestor chain.
+	// Load ancestor chain. Ancestors are always read-only and cached
+	// on the Manager so that siblings/cousins share one instance.
+	// We only cache ancestors that aren't actively used by a writable
+	// volume, since writable timelines flush new layers that would make
+	// a cached copy stale.
 	if meta.Ancestor != "" {
 		tl.ancestorSeq = meta.AncestorSeq
-		ancestorStore := m.timelines.At(meta.Ancestor)
-		ancestor, err := m.openTimeline(ctx, ancestorStore, meta.Ancestor)
-		if err != nil {
-			return nil, fmt.Errorf("open ancestor %s: %w", meta.Ancestor, err)
+		m.mu.Lock()
+		cached, ok := m.timelineCache[meta.Ancestor]
+		// Check if any open volume is still writing to this timeline.
+		writable := false
+		if !ok {
+			for _, v := range m.volumes {
+				if v.timeline.id == meta.Ancestor {
+					writable = true
+					break
+				}
+			}
 		}
-		tl.ancestor = ancestor
+		m.mu.Unlock()
+		if ok {
+			tl.ancestor = cached
+		} else {
+			ancestorStore := m.timelines.At(meta.Ancestor)
+			ancestor, _, _, err := m.openTimeline(ctx, ancestorStore, meta.Ancestor, true)
+			if err != nil {
+				return nil, timelineMeta{}, "", fmt.Errorf("open ancestor %s: %w", meta.Ancestor, err)
+			}
+			if !writable {
+				m.mu.Lock()
+				if existing, ok := m.timelineCache[meta.Ancestor]; ok {
+					ancestor = existing // another goroutine won the race
+				} else {
+					m.timelineCache[meta.Ancestor] = ancestor
+				}
+				m.mu.Unlock()
+			}
+			tl.ancestor = ancestor
+		}
 	}
 
 	// Reconstruct layer map from S3.
 	if err := tl.loadLayerMap(ctx); err != nil {
-		return nil, fmt.Errorf("load layer map: %w", err)
+		return nil, timelineMeta{}, "", fmt.Errorf("load layer map: %w", err)
 	}
 
-	memDir := filepath.Join(tl.cacheDir, "mem")
-	if err := ensureMemDir(memDir); err != nil {
-		return nil, fmt.Errorf("create mem dir: %w", err)
+	if readOnly {
+		// Read-only timelines don't need a mmap-backed memLayer.
+		tl.memLayer = &MemLayer{index: make(map[uint64]memEntry)}
+	} else {
+		memDir := filepath.Join(tl.cacheDir, "mem")
+		if err := ensureMemDir(memDir); err != nil {
+			return nil, timelineMeta{}, "", fmt.Errorf("create mem dir: %w", err)
+		}
+		tl.memLayer, err = newMemLayer(memDir, tl.nextSeq.Load(), tl.config.maxMemLayerPages())
+		if err != nil {
+			return nil, timelineMeta{}, "", fmt.Errorf("create memlayer: %w", err)
+		}
 	}
 
-	tl.memLayer, err = newMemLayer(memDir, tl.nextSeq.Load(), tl.config.maxMemLayerPages())
-	if err != nil {
-		return nil, fmt.Errorf("create memlayer: %w", err)
-	}
-
-	return tl, nil
+	return tl, meta, metaEtag, nil
 }
 
-func (tl *Timeline) pageCacheKey(pageAddr uint64) diskcache.CacheKey {
+func (tl *timeline) pageCacheKey(pageAddr uint64) diskcache.CacheKey {
 	return diskcache.CacheKey{Timeline: tl.id, PageAddr: pageAddr}
 }
 
-func (tl *Timeline) blobCacheKey(key string) string {
+func (tl *timeline) blobCacheKey(key string) string {
 	return tl.id + ":" + key
 }
 
 // Read reads data from the timeline's layers into buf at the given byte offset.
-func (tl *Timeline) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
+func (tl *timeline) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
 	// Snapshot layer state once for the entire read, avoiding repeated lock
 	// acquisitions for each page (a 1MB read touches 256 × 4KB pages).
 	snap := tl.snapshotLayers()
@@ -181,12 +216,12 @@ type layerSnapshot struct {
 	frozen      []*MemLayer
 	deltas      []DeltaLayerMeta
 	images      []ImageLayerMeta
-	ancestor    *Timeline
+	ancestor    *timeline
 	ancestorSeq uint64
 }
 
 // snapshotLayers captures the current layer state under the appropriate locks.
-func (tl *Timeline) snapshotLayers() layerSnapshot {
+func (tl *timeline) snapshotLayers() layerSnapshot {
 	tl.mu.RLock()
 	snap := layerSnapshot{
 		memLayer:    tl.memLayer,
@@ -208,7 +243,7 @@ func (tl *Timeline) snapshotLayers() layerSnapshot {
 // readPageWith reads a single page using a pre-captured layer snapshot.
 // This avoids re-acquiring locks and re-snapshotting state for each page
 // in a batched read.
-func (tl *Timeline) readPageWith(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, error) {
+func (tl *timeline) readPageWith(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, error) {
 	const beforeSeq = math.MaxUint64
 
 	// 1. Active memLayer.
@@ -290,7 +325,7 @@ func (tl *Timeline) readPageWith(ctx context.Context, snap *layerSnapshot, pageA
 // slice points directly into the mmap and the release function unlocks the
 // RWMutex. For all other sources (delta/image/cache/ancestor) the data is
 // heap-allocated and release is a no-op.
-func (tl *Timeline) readPagePinned(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, func(), error) {
+func (tl *timeline) readPagePinned(ctx context.Context, snap *layerSnapshot, pageAddr uint64) ([]byte, func(), error) {
 	const beforeSeq = math.MaxUint64
 
 	// 1. Active memLayer.
@@ -328,7 +363,7 @@ func (tl *Timeline) readPagePinned(ctx context.Context, snap *layerSnapshot, pag
 // release function. For single-page aligned reads that hit the memLayer, the
 // returned slice is zero-copy from the mmap. Callers MUST call release when
 // done with the data.
-func (tl *Timeline) ReadPinned(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
+func (tl *timeline) ReadPinned(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
 	pageAddr := offset / PageSize
 	pageOff := offset % PageSize
 
@@ -348,7 +383,7 @@ func (tl *Timeline) ReadPinned(ctx context.Context, offset uint64, n int) ([]byt
 }
 
 // Write writes data to the timeline's active memLayer at the given byte offset.
-func (tl *Timeline) Write(ctx context.Context, data []byte, offset uint64) error {
+func (tl *timeline) Write(ctx context.Context, data []byte, offset uint64) error {
 	written := 0
 	for written < len(data) {
 		if err := ctx.Err(); err != nil {
@@ -370,7 +405,7 @@ func (tl *Timeline) Write(ctx context.Context, data []byte, offset uint64) error
 // writePage writes a chunk of data into a single page, handling the
 // read-modify-write cycle under a per-page lock to prevent lost updates
 // from concurrent sub-page writes.
-func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chunk []byte) error {
+func (tl *timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chunk []byte) error {
 	pageLock := &tl.pageLocks[pageAddr%uint64(len(tl.pageLocks))]
 
 	// Hold the per-page lock only for the read-modify-write + memLayer put.
@@ -449,7 +484,7 @@ func (tl *Timeline) writePage(ctx context.Context, pageAddr, pageOff uint64, chu
 }
 
 // PunchHole records tombstones for all pages fully covered by the range.
-func (tl *Timeline) PunchHole(ctx context.Context, offset, length uint64) error {
+func (tl *timeline) PunchHole(ctx context.Context, offset, length uint64) error {
 	end := offset + length
 
 	// Page boundaries for the fully-covered interior.
@@ -509,7 +544,7 @@ func (tl *Timeline) PunchHole(ctx context.Context, offset, length uint64) error 
 }
 
 // Flush freezes the current memLayer and uploads it as a delta layer to S3.
-func (tl *Timeline) Flush(ctx context.Context) error {
+func (tl *timeline) Flush(ctx context.Context) error {
 	if err := tl.freezeMemLayer(); err != nil {
 		return err
 	}
@@ -518,7 +553,7 @@ func (tl *Timeline) Flush(ctx context.Context) error {
 
 // readPage searches layers for the given page. Only entries with seq < beforeSeq
 // are visible (exclusive upper bound).
-func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([]byte, error) {
+func (tl *timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([]byte, error) {
 	// Snapshot mutable state under the lock, then release before S3 I/O.
 	tl.mu.RLock()
 	memLayer := tl.memLayer
@@ -621,11 +656,14 @@ func (tl *Timeline) readPage(ctx context.Context, pageAddr, beforeSeq uint64) ([
 }
 
 // freezeMemLayer freezes the current memLayer and starts a new one.
-func (tl *Timeline) freezeMemLayer() error {
+func (tl *timeline) freezeMemLayer() error {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 
 	memDir := filepath.Join(tl.cacheDir, "mem")
+	if err := ensureMemDir(memDir); err != nil {
+		return fmt.Errorf("ensure mem dir: %w", err)
+	}
 	ml, err := newMemLayer(memDir, tl.nextSeq.Load(), tl.config.maxMemLayerPages())
 	if err != nil {
 		return fmt.Errorf("create new memlayer: %w", err)
@@ -646,7 +684,7 @@ func (tl *Timeline) freezeMemLayer() error {
 // flush loop to upload it. The write path never blocks on S3 here;
 // backpressure is applied separately when frozen layer count is too high.
 // If no flush loop is running (FlushInterval <= 0), falls back to inline flush.
-func (tl *Timeline) maybeFreezeAndFlush(ctx context.Context) error {
+func (tl *timeline) maybeFreezeAndFlush(ctx context.Context) error {
 	if err := tl.freezeMemLayer(); err != nil {
 		return err
 	}
@@ -664,7 +702,7 @@ func (tl *Timeline) maybeFreezeAndFlush(ctx context.Context) error {
 
 // flushFrozenLayers uploads all frozen memLayers as delta layers to S3.
 // Serialized by flushMu to prevent concurrent flushes from racing.
-func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
+func (tl *timeline) flushFrozenLayers(ctx context.Context) error {
 	tl.flushMu.Lock()
 	defer tl.flushMu.Unlock()
 	return tl.flushFrozenLayersLocked(ctx, 5)
@@ -672,7 +710,7 @@ func (tl *Timeline) flushFrozenLayers(ctx context.Context) error {
 
 // flushFrozenLayersLocked is the inner loop of flushFrozenLayers.
 // Caller must hold flushMu.
-func (tl *Timeline) flushFrozenLayersLocked(ctx context.Context, maxRetries int) error {
+func (tl *timeline) flushFrozenLayersLocked(ctx context.Context, maxRetries int) error {
 	for {
 		tl.frozenMu.RLock()
 		if len(tl.frozenLayers) == 0 {
@@ -697,7 +735,7 @@ func (tl *Timeline) flushFrozenLayersLocked(ctx context.Context, maxRetries int)
 }
 
 // flushMemLayer serializes a frozen memLayer as a delta layer and uploads to S3.
-func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer, maxRetries int) error {
+func (tl *timeline) flushMemLayer(ctx context.Context, ml *MemLayer, maxRetries int) error {
 	// Build delta layer from memLayer entries.
 	entries := ml.entries()
 	if len(entries) == 0 {
@@ -769,10 +807,10 @@ func (tl *Timeline) flushMemLayer(ctx context.Context, ml *MemLayer, maxRetries 
 }
 
 // createChild creates a new child timeline branching at branchSeq.
-func (tl *Timeline) createChild(ctx context.Context, childID string, branchSeq uint64) error {
+func (tl *timeline) createChild(ctx context.Context, childID string, branchSeq uint64) error {
 	childStore := tl.timelinesRoot.At(childID)
 
-	meta := TimelineMeta{
+	meta := timelineMeta{
 		Ancestor:    tl.id,
 		AncestorSeq: branchSeq,
 		CreatedAt:   time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
@@ -781,13 +819,24 @@ func (tl *Timeline) createChild(ctx context.Context, childID string, branchSeq u
 	if err != nil {
 		return err
 	}
-	if _, err := childStore.PutIfNotExists(ctx, "meta.json", data); err != nil {
+	if err := childStore.PutIfNotExists(ctx, "meta.json", data); err != nil {
 		return fmt.Errorf("create child meta: %w", err)
+	}
+
+	// Write an empty layers.json so that openTimeline's loadLayerMap
+	// hits the fast path instead of falling back to ListKeys.
+	emptyLayers := layersJSON{NextSeq: branchSeq}
+	layersData, err := json.Marshal(emptyLayers)
+	if err != nil {
+		return err
+	}
+	if err := childStore.PutIfNotExists(ctx, "layers.json", layersData); err != nil {
+		return fmt.Errorf("create child layers.json: %w", err)
 	}
 
 	// Update parent's meta.json to record the branch point (CAS to avoid
 	// dropping concurrent branch point additions).
-	if err := loophole.ModifyJSON[TimelineMeta](ctx, tl.store, "meta.json", func(m *TimelineMeta) error {
+	if err := loophole.ModifyJSON[timelineMeta](ctx, tl.store, "meta.json", func(m *timelineMeta) error {
 		m.BranchPoints = append(m.BranchPoints, BranchPoint{
 			Child: childID,
 			Seq:   branchSeq,
@@ -801,7 +850,7 @@ func (tl *Timeline) createChild(ctx context.Context, childID string, branchSeq u
 }
 
 // loadLayerMap reconstructs the layer map from S3 listing.
-func (tl *Timeline) loadLayerMap(ctx context.Context) error {
+func (tl *timeline) loadLayerMap(ctx context.Context) error {
 	// Try loading layers.json first (fast path).
 	lm, _, err := loophole.ReadJSON[layersJSON](ctx, tl.store, "layers.json")
 	if err == nil {
@@ -893,14 +942,14 @@ func (tl *Timeline) loadLayerMap(ctx context.Context) error {
 
 // Refresh re-reads the layer map from S3 to pick up new layers written by
 // another writer. This is used for read-only "follow" mode.
-func (tl *Timeline) Refresh(ctx context.Context) error {
+func (tl *timeline) Refresh(ctx context.Context) error {
 	tl.mu.Lock()
 	defer tl.mu.Unlock()
 	return tl.loadLayerMap(ctx)
 }
 
 // saveLayerMap writes the current layer map as layers.json.
-func (tl *Timeline) saveLayerMap(ctx context.Context) error {
+func (tl *timeline) saveLayerMap(ctx context.Context) error {
 	tl.mu.RLock()
 	lm := layersJSON{
 		NextSeq: tl.nextSeq.Load(),
@@ -918,7 +967,7 @@ func (tl *Timeline) saveLayerMap(ctx context.Context) error {
 
 // readFromDeltaLayer reads a page from a delta layer on S3.
 // Caller must hold tl.mu.RLock.
-func (tl *Timeline) readFromDeltaLayer(ctx context.Context, dl *DeltaLayerMeta, pageAddr, beforeSeq uint64) ([]byte, bool, error) {
+func (tl *timeline) readFromDeltaLayer(ctx context.Context, dl *DeltaLayerMeta, pageAddr, beforeSeq uint64) ([]byte, bool, error) {
 	parsed, err := tl.getDeltaLayer(ctx, dl.Key)
 	if err != nil {
 		return nil, false, fmt.Errorf("get delta layer %s: %w", dl.Key, err)
@@ -972,7 +1021,7 @@ func (lc *layerCache[T]) evict(key string) {
 // Concurrent requests for the same key are deduplicated.
 func getLayer[T any](
 	ctx context.Context,
-	tl *Timeline,
+	tl *timeline,
 	cache *layerCache[T],
 	flightPrefix string,
 	key string,
@@ -1019,7 +1068,7 @@ func getLayer[T any](
 }
 
 // downloadLayer downloads a complete layer blob from S3 and caches it locally.
-func (tl *Timeline) downloadLayer(ctx context.Context, key string) ([]byte, error) {
+func (tl *timeline) downloadLayer(ctx context.Context, key string) ([]byte, error) {
 	if tl.diskCache != nil {
 		if data := tl.diskCache.GetBlob(tl.blobCacheKey(key)); data != nil {
 			return data, nil
@@ -1039,29 +1088,29 @@ func (tl *Timeline) downloadLayer(ctx context.Context, key string) ([]byte, erro
 	return data, nil
 }
 
-func (tl *Timeline) cacheBlob(key string, data []byte) {
+func (tl *timeline) cacheBlob(key string, data []byte) {
 	if tl.diskCache != nil {
 		tl.diskCache.PutBlob(tl.blobCacheKey(key), data)
 	}
 }
 
-func (tl *Timeline) cacheDelta(key string, data []byte) {
+func (tl *timeline) cacheDelta(key string, data []byte) {
 	if parsed, err := parseDeltaLayer(data); err == nil {
 		tl.deltaCache.put(key, parsed)
 	}
 	tl.cacheBlob(key, data)
 }
 
-func (tl *Timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
+func (tl *timeline) getDeltaLayer(ctx context.Context, key string) (*parsedDeltaLayer, error) {
 	return getLayer(ctx, tl, &tl.deltaCache, "delta:", key, parseDeltaLayer)
 }
 
-func (tl *Timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
+func (tl *timeline) getImageLayer(ctx context.Context, key string) (*parsedImageLayer, error) {
 	return getLayer(ctx, tl, &tl.imageCache, "image:", key, parseImageLayer)
 }
 
 // readFromImageLayer reads a page from the correct segment of an image layer.
-func (tl *Timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, pageAddr uint64) ([]byte, bool, error) {
+func (tl *timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, pageAddr uint64) ([]byte, bool, error) {
 	seg := il.FindSegment(pageAddr)
 	if seg == nil {
 		return nil, false, nil
@@ -1075,7 +1124,7 @@ func (tl *Timeline) readFromImageLayer(ctx context.Context, il *ImageLayerMeta, 
 
 // cleanupOldLayers deletes replaced layer blobs from S3 (best-effort) and
 // evicts their entries from the in-memory index caches.
-func (tl *Timeline) cleanupOldLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) {
+func (tl *timeline) cleanupOldLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) {
 	for _, dl := range deltas {
 		_ = tl.store.DeleteObject(ctx, dl.Key)
 	}
@@ -1094,7 +1143,7 @@ func (tl *Timeline) cleanupOldLayers(ctx context.Context, deltas []DeltaLayerMet
 	}
 }
 
-func (tl *Timeline) compactLog(format string, args ...any) {
+func (tl *timeline) compactLog(format string, args ...any) {
 	if tl.debugLog != nil {
 		tl.debugLog(fmt.Sprintf(format, args...))
 	}
@@ -1106,7 +1155,7 @@ func (tl *Timeline) compactLog(format string, args ...any) {
 //   - If no image exists yet, or total delta size > 50% of image size,
 //     do a full image promotion (compactToImage).
 //   - Otherwise, merge all compactable deltas into one (compactMergeDeltas).
-func (tl *Timeline) Compact(ctx context.Context) error {
+func (tl *timeline) Compact(ctx context.Context) error {
 	tl.compactMu.Lock()
 	defer tl.compactMu.Unlock()
 
@@ -1116,7 +1165,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 	}
 
 	// Read branch points to determine the safe compaction boundary.
-	parentMeta, _, err := loophole.ReadJSON[TimelineMeta](ctx, tl.store, "meta.json")
+	parentMeta, _, err := loophole.ReadJSON[timelineMeta](ctx, tl.store, "meta.json")
 	if err != nil {
 		return fmt.Errorf("read meta for compact: %w", err)
 	}
@@ -1196,7 +1245,7 @@ func (tl *Timeline) Compact(ctx context.Context) error {
 
 // compactMergeDeltas merges multiple delta layers into a single merged delta.
 // Cost is O(sum of delta sizes) — does not touch image layers.
-func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerMeta, remainingDeltas []DeltaLayerMeta) error {
+func (tl *timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerMeta, remainingDeltas []DeltaLayerMeta) error {
 	// Download and parse all delta layers concurrently.
 	parsed := make([]*parsedDeltaLayer, len(deltas))
 	g, gctx := errgroup.WithContext(ctx)
@@ -1268,7 +1317,7 @@ func (tl *Timeline) compactMergeDeltas(ctx context.Context, deltas []DeltaLayerM
 }
 
 // downloadDeltaLayer downloads a complete delta layer blob from S3 or shared disk cache.
-func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte, error) {
+func (tl *timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte, error) {
 	if tl.diskCache != nil {
 		if data := tl.diskCache.GetBlob(tl.blobCacheKey(key)); data != nil {
 			return data, nil
@@ -1292,7 +1341,7 @@ func (tl *Timeline) downloadDeltaLayer(ctx context.Context, key string) ([]byte,
 
 // collectPageAddrs returns all unique page addresses across the given delta and
 // image layers, sorted ascending.
-func (tl *Timeline) collectPageAddrs(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) ([]uint64, error) {
+func (tl *timeline) collectPageAddrs(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta) ([]uint64, error) {
 	pageSet := make(map[uint64]struct{})
 	for _, dl := range deltas {
 		parsed, err := tl.getDeltaLayer(ctx, dl.Key)
@@ -1325,7 +1374,7 @@ func (tl *Timeline) collectPageAddrs(ctx context.Context, deltas []DeltaLayerMet
 
 // compactRemoveAllLayers handles the special case where all pages are zero after
 // compaction: removes all compacted deltas and images from the layer map.
-func (tl *Timeline) compactRemoveAllLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta, remainingDeltas []DeltaLayerMeta) error {
+func (tl *timeline) compactRemoveAllLayers(ctx context.Context, deltas []DeltaLayerMeta, images []ImageLayerMeta, remainingDeltas []DeltaLayerMeta) error {
 	tl.compactLog("  ALL ZERO PATH: removing %d compacted deltas, keeping %d remaining", len(deltas), len(remainingDeltas))
 	tl.mu.Lock()
 	oldDeltas := tl.layers.Deltas
@@ -1348,7 +1397,7 @@ func (tl *Timeline) compactRemoveAllLayers(ctx context.Context, deltas []DeltaLa
 
 // compactToImage builds an image layer from all compactable deltas + existing
 // images. This is the original full-compaction behavior.
-func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta, existingImages []ImageLayerMeta, remainingDeltas []DeltaLayerMeta, compactSeq uint64) error {
+func (tl *timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta, existingImages []ImageLayerMeta, remainingDeltas []DeltaLayerMeta, compactSeq uint64) error {
 	addrs, err := tl.collectPageAddrs(ctx, deltas, existingImages)
 	if err != nil {
 		return err
@@ -1439,7 +1488,7 @@ func (tl *Timeline) compactToImage(ctx context.Context, deltas []DeltaLayerMeta,
 // contains. Unlike readPage it does NOT short-circuit — it shows the full
 // picture so you can see exactly why a read returns what it returns.
 // Returns the debug trace as a string. Safe to call from tests.
-func (tl *Timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq uint64) string {
+func (tl *timeline) DebugPage(ctx context.Context, pageAddr uint64, beforeSeq uint64) string {
 	tl.mu.RLock()
 	defer tl.mu.RUnlock()
 
@@ -1601,19 +1650,24 @@ func splitLines(s string) []string {
 }
 
 // acquireLease checks the existing lease token in meta.json and writes ours.
-func (tl *Timeline) acquireLease(ctx context.Context, lm *loophole.LeaseManager) error {
-	return loophole.ModifyJSON[TimelineMeta](ctx, tl.store, "meta.json", func(m *TimelineMeta) error {
-		if err := lm.CheckAvailable(ctx, m.LeaseToken); err != nil {
-			return fmt.Errorf("timeline %s: %w", tl.id, err)
-		}
-		m.LeaseToken = lm.Token()
-		return nil
-	})
+// meta and etag should come from the initial read in openTimeline to avoid
+// a redundant re-read.
+func (tl *timeline) acquireLease(ctx context.Context, lm *loophole.LeaseManager, meta timelineMeta, etag string) error {
+	if err := lm.CheckAvailable(ctx, meta.LeaseToken); err != nil {
+		return fmt.Errorf("timeline %s: %w", tl.id, err)
+	}
+	meta.LeaseToken = lm.Token()
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	_, err = tl.store.PutBytesCAS(ctx, "meta.json", data, etag)
+	return err
 }
 
 // releaseLease clears the lease token from meta.json if it matches ours.
-func (tl *Timeline) releaseLease(ctx context.Context, token string) error {
-	return loophole.ModifyJSON[TimelineMeta](ctx, tl.store, "meta.json", func(m *TimelineMeta) error {
+func (tl *timeline) releaseLease(ctx context.Context, token string) error {
+	return loophole.ModifyJSON[timelineMeta](ctx, tl.store, "meta.json", func(m *timelineMeta) error {
 		if m.LeaseToken == token {
 			m.LeaseToken = ""
 		}
@@ -1621,7 +1675,7 @@ func (tl *Timeline) releaseLease(ctx context.Context, token string) error {
 	})
 }
 
-func (tl *Timeline) startPeriodicFlush() {
+func (tl *timeline) startPeriodicFlush() {
 	tl.flushStop = make(chan struct{})
 	tl.flushDone = make(chan struct{})
 	tl.flushNotify = make(chan struct{}, 1)
@@ -1636,7 +1690,7 @@ func (tl *Timeline) startPeriodicFlush() {
 // before actually flushing, to batch nearby writes.
 const flushWriteDelay = 2 * time.Second
 
-func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
+func (tl *timeline) periodicFlushLoop(ctx context.Context) {
 	defer close(tl.flushDone)
 	timer := time.NewTimer(tl.config.FlushInterval)
 	defer timer.Stop()
@@ -1687,7 +1741,7 @@ func (tl *Timeline) periodicFlushLoop(ctx context.Context) {
 	}
 }
 
-func (tl *Timeline) doPeriodicFlush(ctx context.Context) {
+func (tl *timeline) doPeriodicFlush(ctx context.Context) {
 	// Use TryLock to avoid blocking on flushMu. Under synctest,
 	// a goroutine blocked on a mutex is not "idle", so if an inline
 	// Flush holds flushMu and waits on a retry timer, synctest
@@ -1724,35 +1778,37 @@ func (tl *Timeline) doPeriodicFlush(ctx context.Context) {
 	tl.lastFlushAt.Store(time.Now().UnixMilli())
 }
 
-func (tl *Timeline) close(ctx context.Context) {
-	// Stop periodic flush and wait for any in-progress flush to finish.
-	if tl.flushStop != nil {
-		tl.flushCancel() // cancel in-flight S3 ops so the loop exits promptly
-		close(tl.flushStop)
-		<-tl.flushDone
-	}
+func (tl *timeline) close(ctx context.Context) {
+	tl.closeOnce.Do(func() {
+		// Stop periodic flush and wait for any in-progress flush to finish.
+		if tl.flushStop != nil {
+			tl.flushCancel() // cancel in-flight S3 ops so the loop exits promptly
+			close(tl.flushStop)
+			<-tl.flushDone
+		}
 
-	// Flush all dirty data to S3 before cleaning up ephemeral files.
-	if err := tl.Flush(ctx); err != nil {
-		slog.Warn("flush on close failed", "timeline", tl.id, "error", err)
-	}
+		// Flush all dirty data to S3 before cleaning up ephemeral files.
+		// Read-only timelines (ancestors) have no mmap-backed memLayer,
+		// so skip the flush to avoid creating one.
+		if tl.memLayer != nil && tl.memLayer.file != nil {
+			if err := tl.Flush(ctx); err != nil {
+				slog.Warn("flush on close failed", "timeline", tl.id, "error", err)
+			}
+		}
 
-	tl.mu.Lock()
-	if tl.memLayer != nil {
-		tl.memLayer.cleanup()
-	}
-	tl.mu.Unlock()
+		tl.mu.Lock()
+		if tl.memLayer != nil {
+			tl.memLayer.cleanup()
+		}
+		tl.mu.Unlock()
 
-	tl.frozenMu.Lock()
-	for _, ml := range tl.frozenLayers {
-		ml.cleanup()
-	}
-	tl.frozenLayers = nil
-	tl.frozenMu.Unlock()
-
-	if tl.ancestor != nil {
-		tl.ancestor.close(ctx)
-	}
+		tl.frozenMu.Lock()
+		for _, ml := range tl.frozenLayers {
+			ml.cleanup()
+		}
+		tl.frozenLayers = nil
+		tl.frozenMu.Unlock()
+	})
 }
 
 // layersJSON is the S3-persisted layer map checkpoint.

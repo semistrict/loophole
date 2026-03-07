@@ -100,7 +100,7 @@ func (r *RetryStore) PutReader(ctx context.Context, key string, rd io.Reader) er
 	return r.inner.PutReader(ctx, key, rd)
 }
 
-func (r *RetryStore) PutIfNotExists(ctx context.Context, key string, data []byte) (bool, error) {
+func (r *RetryStore) PutIfNotExists(ctx context.Context, key string, data []byte) error {
 	return r.inner.PutIfNotExists(ctx, key, data)
 }
 

@@ -1,9 +1,9 @@
-package lsm
+//go:build !js
+
+package storage2
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -11,10 +11,8 @@ import (
 	"github.com/semistrict/loophole"
 )
 
-// Compile-time check.
 var _ loophole.Volume = (*volume)(nil)
 
-// volume wraps a Timeline to implement IVolume.
 type volume struct {
 	name     string
 	size     uint64
@@ -22,22 +20,22 @@ type volume struct {
 	readOnly atomic.Bool
 	refs     atomic.Int32
 
-	mu       sync.RWMutex
-	timeline *timeline
+	mu    sync.RWMutex
+	layer *layer
 
 	manager *Manager
 }
 
-func newVolume(name string, size uint64, volType string, tl *timeline, m *Manager) *volume {
+func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) *volume {
 	if size == 0 {
 		size = DefaultVolumeSize
 	}
 	v := &volume{
-		name:     name,
-		size:     size,
-		volType:  volType,
-		timeline: tl,
-		manager:  m,
+		name:    name,
+		size:    size,
+		volType: volType,
+		layer:   ly,
+		manager: m,
 	}
 	v.refs.Store(1)
 	return v
@@ -51,13 +49,19 @@ func (v *volume) VolumeType() string { return v.volType }
 func (v *volume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.timeline.Read(ctx, buf, offset)
+	return v.layer.Read(ctx, buf, offset)
 }
 
 func (v *volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
+	// No zero-copy path yet — allocate and copy.
+	buf := make([]byte, n)
 	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.timeline.ReadPinned(ctx, offset, n)
+	got, err := v.layer.Read(ctx, buf, offset)
+	v.mu.RUnlock()
+	if err != nil {
+		return nil, nil, err
+	}
+	return buf[:got], func() {}, nil
 }
 
 func (v *volume) Write(ctx context.Context, data []byte, offset uint64) error {
@@ -66,7 +70,7 @@ func (v *volume) Write(ctx context.Context, data []byte, offset uint64) error {
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.timeline.Write(ctx, data, offset)
+	return v.layer.Write(ctx, data, offset)
 }
 
 func (v *volume) PunchHole(ctx context.Context, offset, length uint64) error {
@@ -75,44 +79,30 @@ func (v *volume) PunchHole(ctx context.Context, offset, length uint64) error {
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.timeline.PunchHole(ctx, offset, length)
+	return v.layer.PunchHole(ctx, offset, length)
 }
 
 func (v *volume) ZeroRange(ctx context.Context, offset, length uint64) error {
-	if v.readOnly.Load() {
-		return fmt.Errorf("volume %q is read-only", v.name)
-	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.timeline.PunchHole(ctx, offset, length)
+	return v.PunchHole(ctx, offset, length)
 }
 
 func (v *volume) Flush(ctx context.Context) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.timeline.Flush(ctx)
+	return v.layer.Flush(ctx)
 }
 
-// branch freezes the current memLayer (if writable), flushes all frozen layers
-// to S3, and creates a child timeline. Returns the child timeline ID.
-// Caller must hold v.mu.Lock.
 func (v *volume) branch(ctx context.Context) (string, error) {
-	branchSeq := v.timeline.nextSeq.Load()
+	// Flush everything to S3.
 	if !v.readOnly.Load() {
-		if err := v.timeline.freezeMemLayer(); err != nil {
-			return "", fmt.Errorf("freeze memlayer: %w", err)
+		if err := v.layer.Flush(ctx); err != nil {
+			return "", fmt.Errorf("flush for branch: %w", err)
 		}
 	}
 
-	// Flush all frozen layers to S3 so that the child's ancestor view
-	// includes all parent data.
-	if err := v.timeline.flushFrozenLayers(ctx); err != nil {
-		return "", fmt.Errorf("flush for branch: %w", err)
-	}
-
 	childID := v.manager.idGen()
-	if err := v.timeline.createChild(ctx, childID, branchSeq); err != nil {
-		return "", fmt.Errorf("create child timeline: %w", err)
+	if err := v.layer.Snapshot(ctx, childID); err != nil {
+		return "", fmt.Errorf("snapshot: %w", err)
 	}
 	return childID, nil
 }
@@ -127,7 +117,7 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 
 	childID, err := v.branch(ctx)
 	if err != nil {
-		return fmt.Errorf("snapshot: %w", err)
+		return err
 	}
 
 	if snapshotName != "" {
@@ -136,7 +126,6 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 			return fmt.Errorf("create snapshot ref: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -146,7 +135,7 @@ func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, 
 
 	childID, err := v.branch(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("clone: %w", err)
+		return nil, err
 	}
 
 	ref := volumeRef{TimelineID: childID, Size: v.size, Type: v.volType}
@@ -162,7 +151,6 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 		return 0, fmt.Errorf("volume %q is read-only", v.name)
 	}
 
-	// Read pages from src, write to dst through the normal path.
 	var copied uint64
 	buf := make([]byte, PageSize)
 	for copied < length {
@@ -172,19 +160,11 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 			return copied, err
 		}
 		if err := v.Write(ctx, buf[:n], dstOff+copied); err != nil {
-			// Write puts data into the memLayer before auto-flush runs.
-			// Count it as copied so callers know the data exists.
 			return copied + uint64(n), err
 		}
 		copied += uint64(n)
 	}
 	return copied, nil
-}
-
-func (v *volume) Refresh(ctx context.Context) error {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	return v.timeline.Refresh(ctx)
 }
 
 func (v *volume) Freeze(ctx context.Context) error {
@@ -193,10 +173,14 @@ func (v *volume) Freeze(ctx context.Context) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if err := v.timeline.Flush(ctx); err != nil {
+	if err := v.layer.Flush(ctx); err != nil {
 		return err
 	}
 	v.readOnly.Store(true)
+	return nil
+}
+
+func (v *volume) Refresh(ctx context.Context) error {
 	return nil
 }
 
@@ -223,26 +207,7 @@ func (v *volume) ReleaseRef(ctx context.Context) error {
 func (v *volume) destroy(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if v.manager.lease != nil && !v.readOnly.Load() {
-		_ = v.timeline.releaseLease(ctx, v.manager.lease.Token())
-	}
 	v.manager.closeVolume(v.name)
-	v.timeline.close(ctx)
-	return nil
-}
-
-// --- manager helper ---
-
-func (m *Manager) putVolumeRef(ctx context.Context, name string, ref volumeRef) error {
-	data, err := json.Marshal(ref)
-	if err != nil {
-		return err
-	}
-	if err := m.volRefs.PutIfNotExists(ctx, name, data); err != nil {
-		if errors.Is(err, loophole.ErrExists) {
-			return fmt.Errorf("volume %q already exists", name)
-		}
-		return err
-	}
+	v.layer.Close()
 	return nil
 }

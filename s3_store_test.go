@@ -70,13 +70,11 @@ func TestS3GetRange(t *testing.T) {
 func TestS3PutIfNotExists(t *testing.T) {
 	store := newS3TestStore(t)
 
-	created, err := store.PutIfNotExists(t.Context(), "unique", []byte("first"))
+	err := store.PutIfNotExists(t.Context(), "unique", []byte("first"))
 	require.NoError(t, err)
-	assert.True(t, created)
 
-	created, err = store.PutIfNotExists(t.Context(), "unique", []byte("second"))
-	require.NoError(t, err)
-	assert.False(t, created, "should not overwrite existing key")
+	err = store.PutIfNotExists(t.Context(), "unique", []byte("second"))
+	assert.ErrorIs(t, err, ErrExists, "should not overwrite existing key")
 
 	// Verify first value is preserved.
 	body, _, err := store.Get(t.Context(), "unique")
