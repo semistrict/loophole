@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-inprocess e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4
 
 .DEFAULT_GOAL := loophole
 
@@ -127,6 +127,11 @@ e2e-nbd: liblwext4
 # Usage: make e2e-testnbdtcp [RUN=TestName]
 e2e-testnbdtcp: liblwext4
 	LOOPHOLE_MODE=testnbdtcp go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+
+# Run e2e tests (in-process lwext4, no FUSE/NBD/root required)
+# Usage: make e2e-inprocess [RUN=TestName]
+e2e-inprocess: liblwext4
+	LOOPHOLE_MODE=inprocess go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run e2e tests (lwext4 + FUSE, no root required)
 # Usage: make e2e-lwext4fuse [RUN=TestName]

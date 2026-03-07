@@ -111,7 +111,7 @@ async function initWasm(): Promise<void> {
 
 async function showVolumePicker(): Promise<string> {
   status.textContent = "loading volumes...";
-  pickerError.textContent = "";
+  // Preserve any error from a failed mount attempt (cleared on next interaction)
   actionsEl.style.display = "none";
   pickerEl.style.display = "flex";
   termEl.style.display = "none";
@@ -160,10 +160,11 @@ async function showVolumePicker(): Promise<string> {
 
     function onListClick(e: Event) {
       const li = (e.target as HTMLElement).closest("li");
-      if (li) { cleanup(); resolve(li.textContent!); }
+      if (li) { pickerError.textContent = ""; cleanup(); resolve(li.textContent!); }
     }
 
     function doCreate() {
+      pickerError.textContent = "";
       const name = newVolumeInput.value.trim();
       if (!name) { pickerError.textContent = "Enter a volume name."; return; }
       if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
@@ -229,7 +230,13 @@ async function startShell(volumeName: string) {
   }
 
   status.textContent = "mounting...";
-  await lh.mount(volumeName, mountpoint);
+  try {
+    await lh.mount(volumeName, mountpoint);
+  } catch (err: any) {
+    term.dispose();
+    window.removeEventListener("resize", onResize);
+    throw new Error(`Mount failed: ${err.message}`);
+  }
 
   // Set up just-bash with loophole FS
   const fs = new LoopholeFs(lh, mountpoint);
@@ -396,9 +403,17 @@ async function startShell(volumeName: string) {
 let cleanupShell: (() => void) | null = null;
 
 async function loop() {
-  if (cleanupShell) { cleanupShell(); cleanupShell = null; }
-  const volumeName = await showVolumePicker();
-  cleanupShell = await startShell(volumeName);
+  for (;;) {
+    if (cleanupShell) { cleanupShell(); cleanupShell = null; }
+    const volumeName = await showVolumePicker();
+    try {
+      cleanupShell = await startShell(volumeName);
+      return; // shell is running
+    } catch (err: any) {
+      pickerError.textContent = err.message;
+      // Show picker again
+    }
+  }
 }
 
 async function init() {

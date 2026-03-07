@@ -147,6 +147,14 @@ func Format(dev BlockDevice, size int64, opts *FormatOptions) (*FS, error) {
 
 // Open mounts an existing ext4 filesystem from dev.
 func Mount(dev BlockDevice, size int64) (*FS, error) {
+	return mount(dev, size, false)
+}
+
+func MountReadOnly(dev BlockDevice, size int64) (*FS, error) {
+	return mount(dev, size, true)
+}
+
+func mount(dev BlockDevice, size int64, readOnly bool) (*FS, error) {
 	phBsize := uint32(512)
 	phBcnt := uint64(size) / uint64(phBsize)
 
@@ -170,7 +178,11 @@ func Mount(dev BlockDevice, size int64) (*FS, error) {
 		return nil, fmt.Errorf("lwext4: ext4_device_register: %d", rc)
 	}
 
-	rc = C.lh_mount(cDevName, cMountPoint, 0)
+	var roFlag C.int
+	if readOnly {
+		roFlag = 1
+	}
+	rc = C.lh_mount(cDevName, cMountPoint, roFlag)
 	if rc != 0 {
 		C.lh_device_unregister(cDevName)
 		destroyBlockdev(bdev, handle)

@@ -60,6 +60,35 @@ func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 	require.Equal(t, "from child\n", string(childFS.ReadFile(t, "child.txt")))
 }
 
+func TestE2E_SnapshotMountsReadOnly(t *testing.T) {
+	b := newBackend(t)
+	ctx := t.Context()
+	parentMP := mountpoint(t, "parent")
+
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
+	require.NoError(t, b.Mount(ctx, "parent", parentMP))
+
+	tfs := newTestFS(t, b, parentMP)
+	tfs.WriteFile(t, "hello.txt", []byte("snapshot test\n"))
+
+	// Snapshot the volume (this freezes, branches, and thaws).
+	require.NoError(t, b.Snapshot(ctx, parentMP, "snap"))
+
+	// Unmount parent so the snapshot can acquire the timeline lease.
+	require.NoError(t, b.Unmount(ctx, parentMP))
+
+	// Mount the snapshot — should succeed (read-only lwext4 mount).
+	snapMP := mountpoint(t, "snap")
+	require.NoError(t, b.Mount(ctx, "snap", snapMP))
+
+	// Data from before the snapshot should be readable.
+	snapFS := newTestFS(t, b, snapMP)
+	data := snapFS.ReadFile(t, "hello.txt")
+	require.Equal(t, "snapshot test\n", string(data))
+
+	require.NoError(t, b.Unmount(ctx, snapMP))
+}
+
 func TestE2E_DeviceSnapshotParentStaysWritable(t *testing.T) {
 	skipKernelOnly(t)
 

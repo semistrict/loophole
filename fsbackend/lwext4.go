@@ -38,7 +38,13 @@ func (l *Lwext4Driver) Format(ctx context.Context, vol loophole.Volume) error {
 }
 
 func (l *Lwext4Driver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (lwext4Mount, error) {
-	fs, err := lwext4.Mount(vol, int64(vol.Size()))
+	var fs *lwext4.FS
+	var err error
+	if vol.ReadOnly() {
+		fs, err = lwext4.MountReadOnly(vol, int64(vol.Size()))
+	} else {
+		fs, err = lwext4.Mount(vol, int64(vol.Size()))
+	}
 	if err != nil {
 		return lwext4Mount{}, fmt.Errorf("lwext4: mount: %w", err)
 	}
