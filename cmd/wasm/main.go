@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"syscall/js"
 
 	"github.com/semistrict/loophole"
@@ -126,6 +127,82 @@ func main() {
 		return nil, fs.Remove(path)
 	}))
 
+	api.Set("stat", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		fs, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		info, err := fs.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		return fileInfoToJS(info), nil
+	}))
+
+	api.Set("lstat", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		fs, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		info, err := fs.Lstat(path)
+		if err != nil {
+			return nil, err
+		}
+		return fileInfoToJS(info), nil
+	}))
+
+	api.Set("symlink", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		target := jsutil.MustString(args, 1)
+		linkPath := jsutil.MustString(args, 2)
+		fs, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, fs.Symlink(target, linkPath)
+	}))
+
+	api.Set("readlink", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		fs, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		target, err := fs.Readlink(path)
+		if err != nil {
+			return nil, err
+		}
+		return target, nil
+	}))
+
+	api.Set("chmod", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		mode := jsutil.MustInt(args, 2)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.Chmod(path, fs.FileMode(mode))
+	}))
+
+	api.Set("writeFileMode", jsutil.Async(func(args []js.Value) (any, error) {
+		mountpoint := jsutil.MustString(args, 0)
+		path := jsutil.MustString(args, 1)
+		data := jsutil.MustBytes(args, 2)
+		mode := jsutil.MustInt(args, 3)
+		vol, err := backend.FS(mountpoint)
+		if err != nil {
+			return nil, err
+		}
+		return nil, vol.WriteFile(path, data, fs.FileMode(mode))
+	}))
+
 	api.Set("snapshot", jsutil.Async(func(args []js.Value) (any, error) {
 		mountpoint := jsutil.MustString(args, 0)
 		name := jsutil.MustString(args, 1)
@@ -147,4 +224,22 @@ func main() {
 
 	// Block forever — keep the Go runtime alive for callbacks.
 	select {}
+}
+
+func fileInfoToJS(info fs.FileInfo) js.Value {
+	obj := js.Global().Get("Object").New()
+	obj.Set("name", info.Name())
+	obj.Set("size", int64ToJS(info.Size()))
+	obj.Set("mode", int(info.Mode()))
+	obj.Set("isDirectory", info.IsDir())
+	obj.Set("isSymbolicLink", info.Mode()&fs.ModeSymlink != 0)
+	obj.Set("mtimeMs", info.ModTime().UnixMilli())
+	return obj
+}
+
+func int64ToJS(v int64) any {
+	if v <= 1<<53-1 && v >= -(1<<53-1) {
+		return v // safe as JS number
+	}
+	return js.ValueOf(v) // fallback
 }

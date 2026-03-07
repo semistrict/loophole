@@ -9,6 +9,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1002.0",
+    "isomorphic-git": "^1.37.2",
     "wa-sqlite": "^1.0.0"
   },
   "devDependencies": {
