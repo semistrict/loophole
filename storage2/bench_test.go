@@ -1,4 +1,4 @@
-package lsm
+package storage2
 
 import (
 	"context"
@@ -23,7 +23,10 @@ func randomPage(rng *rand.Rand, buf []byte) {
 func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Manager {
 	b.Helper()
 	cacheDir := b.TempDir()
-	dc := newTestDiskCacheAt(b, filepath.Join(cacheDir, "diskcache"))
+	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
+	if err != nil {
+		b.Fatalf("create page cache: %v", err)
+	}
 	m := NewVolumeManager(store, cacheDir, config, NewSimLocalFS(), dc)
 	b.Cleanup(func() {
 		_ = m.Close(b.Context())
@@ -34,8 +37,7 @@ func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Man
 
 var defaultBenchConfig = Config{
 	FlushThreshold:  64 * PageSize,
-	MaxFrozenLayers: 2,
-	PageCacheBytes:  16 * PageSize,
+	MaxFrozenTables: 2,
 }
 
 // BenchmarkS3Ops measures S3 operation counts for various workloads.
@@ -172,8 +174,7 @@ func BenchmarkS3Ops(b *testing.B) {
 			store := loophole.NewMemStore()
 			m := newBenchManager(b, store, Config{
 				FlushThreshold:  4 * PageSize,
-				MaxFrozenLayers: 2,
-				PageCacheBytes:  16 * PageSize,
+				MaxFrozenTables: 2,
 			})
 			ctx := context.Background()
 
@@ -196,7 +197,7 @@ func BenchmarkS3Ops(b *testing.B) {
 			}
 
 			store.ResetCounts()
-			if err := vol.timeline.Compact(ctx); err != nil {
+			if err := vol.layer.CompactL0(ctx); err != nil {
 				b.Fatal(err)
 			}
 			reportS3Counts(b, store, 1)

@@ -237,7 +237,7 @@ func (s *seekableCountingReader) Seek(offset int64, whence int) (int64, error) {
 	return s.r.(io.Seeker).Seek(offset, whence)
 }
 
-func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte) (bool, error) {
+func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte) error {
 	// Use S3 conditional writes (If-None-Match: *) for atomic create-if-not-exists.
 	// Supported by AWS S3 since August 2024.
 	done := metrics.S3Op("put_if_not_exists")
@@ -252,12 +252,12 @@ func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte) (
 	if err != nil {
 		// S3 returns 412 Precondition Failed if the object already exists.
 		if strings.Contains(err.Error(), "PreconditionFailed") || strings.Contains(err.Error(), "412") {
-			return false, nil
+			return ErrExists
 		}
-		return false, fmt.Errorf("put-if-not-exists %s: %w", s.fullKey(key), err)
+		return fmt.Errorf("put-if-not-exists %s: %w", s.fullKey(key), err)
 	}
 	metrics.S3Transfer("put_if_not_exists", "tx", int64(len(data)))
-	return true, nil
+	return nil
 }
 
 func (s *S3Store) DeleteObject(ctx context.Context, key string) error {

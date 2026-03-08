@@ -21,11 +21,10 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
-	"github.com/semistrict/loophole/internal/diskcache"
-	"github.com/semistrict/loophole/lsm"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
 	"github.com/semistrict/loophole/sqlitevfs"
+	"github.com/semistrict/loophole/storage2"
 )
 
 // Daemon serves the loophole HTTP API over a Unix socket.
@@ -33,7 +32,7 @@ type Daemon struct {
 	inst      loophole.Instance
 	dir       loophole.Dir
 	backend   fsbackend.Service
-	diskCache *diskcache.DiskCache
+	diskCache *storage2.PageCache
 	ln        net.Listener
 	log       *slog.Logger
 
@@ -96,13 +95,13 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		}
 	}
 
-	// Create LSM volume manager
+	// Create volume manager
 	cacheDir := dir.Cache(inst.ProfileName)
-	diskCache, err := diskcache.New(filepath.Join(cacheDir, "diskcache"))
+	diskCache, err := storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
 	if err != nil {
-		return nil, fmt.Errorf("create disk cache: %w", err)
+		return nil, fmt.Errorf("create page cache: %w", err)
 	}
-	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil, diskCache)
+	vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, diskCache)
 
 	backend, err := createBackend(vm, inst, dir)
 	if err != nil {

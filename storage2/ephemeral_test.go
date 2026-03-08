@@ -1,4 +1,4 @@
-package lsm
+package storage2
 
 import (
 	"bytes"
@@ -10,17 +10,16 @@ import (
 // TestFlushAfterCloneEphemeralEOF reproduces the "read ephemeral at N: EOF" bug.
 // Scenario from TestE2E_Torture:
 //  1. Write many pages (triggers auto-flush cycles)
-//  2. Clone (freezes memLayer)
+//  2. Clone (freezes memtable)
 //  3. Write more pages to parent
-//  4. Flush parent → fails reading frozen memLayer's ephemeral file
+//  4. Flush parent → fails reading frozen memtable's ephemeral file
 func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	// Use a small flush threshold to trigger multiple freeze/flush cycles
 	// during the initial writes, matching the e2e behavior where mkfs.ext4
 	// + file writes generate hundreds of pages.
 	cfg := Config{
 		FlushThreshold:  4 * PageSize,
-		MaxFrozenLayers: 2,
-		PageCacheBytes:  16 * PageSize,
+		MaxFrozenTables: 2,
 	}
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
@@ -94,8 +93,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	cfg := Config{
 		FlushThreshold:  4 * PageSize,
-		MaxFrozenLayers: 1, // aggressive: flush after every 4 pages
-		PageCacheBytes:  16 * PageSize,
+		MaxFrozenTables: 1, // aggressive: flush after every 4 pages
 	}
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()

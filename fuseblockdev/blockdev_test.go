@@ -7,7 +7,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
-	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/storage2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -31,7 +31,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	skipWithoutFuse(t)
 
 	store := loophole.NewMemStore()
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil, nil)
+	vm := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{}, nil, nil)
 	t.Cleanup(func() { vm.Close(t.Context()) })
 
 	vol, err := vm.NewVolume(t.Context(), "testvol", 4096, "")

@@ -57,7 +57,10 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Debug("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
-	loopDev, err := linuxutil.MountFS(ctx, devPath, mountpoint, vol.VolumeType(), f.pageSize)
+	loopDev, err := linuxutil.MountFS(ctx, devPath, mountpoint, vol.VolumeType(), linuxutil.LoopAttachOpts{
+		OptimalIOSize: f.pageSize,
+		ReadOnly:      vol.ReadOnly(),
+	})
 	if err != nil {
 		slog.Debug("fuse: mount failed", "volume", vol.Name(), "error", err)
 		return fuseMount{}, err

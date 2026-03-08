@@ -1,8 +1,7 @@
-package lsm
+package storage2
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 )
@@ -29,7 +28,7 @@ func (s *SimLocalFS) Remove(path string) error {
 	return nil
 }
 
-func (s *SimLocalFS) MkdirAll(path string, _ os.FileMode) error {
+func (s *SimLocalFS) MkdirAll(path string, _ uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dirs[path] = true
@@ -48,7 +47,7 @@ func (s *SimLocalFS) ReadFile(path string) ([]byte, error) {
 	return cp, nil
 }
 
-func (s *SimLocalFS) WriteFile(path string, data []byte, _ os.FileMode) error {
+func (s *SimLocalFS) WriteFile(path string, data []byte, _ uint32) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]byte, len(data))

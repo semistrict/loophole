@@ -93,12 +93,15 @@ func (s *JSObjectStore) PutReader(_ context.Context, key string, r io.Reader) er
 	return err
 }
 
-func (s *JSObjectStore) PutIfNotExists(_ context.Context, key string, data []byte) (bool, error) {
+func (s *JSObjectStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
 	result, err := Await(s.s3.Call("putIfNotExists", s.fullKey(key), JSBytes(data)))
 	if err != nil {
-		return false, err
+		return err
 	}
-	return result.Bool(), nil
+	if !result.Bool() {
+		return loophole.ErrExists
+	}
+	return nil
 }
 
 func (s *JSObjectStore) DeleteObject(_ context.Context, key string) error {

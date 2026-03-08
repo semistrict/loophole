@@ -3,6 +3,7 @@ package loophole
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -238,12 +239,11 @@ func (lm *LeaseManager) Close(ctx context.Context) error {
 
 func (lm *LeaseManager) createLease(ctx context.Context) error {
 	data, _ := json.Marshal(leaseFile{})
-	created, err := lm.leases.PutIfNotExists(ctx, lm.token+".json", data)
-	if err != nil {
+	if err := lm.leases.PutIfNotExists(ctx, lm.token+".json", data); err != nil {
+		if errors.Is(err, ErrExists) {
+			return fmt.Errorf("lease token %s already exists", lm.token)
+		}
 		return err
-	}
-	if !created {
-		return fmt.Errorf("lease token %s already exists", lm.token)
 	}
 	// Read back to get the etag for subsequent CAS writes.
 	body, etag, err := lm.leases.Get(ctx, lm.token+".json")

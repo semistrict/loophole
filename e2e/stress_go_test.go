@@ -214,7 +214,8 @@ func TestE2E_GoFioSequentialWriteVerify(t *testing.T) {
 	size := 16 * 1024 * 1024
 	numBlocks := size / blockSize
 
-	f := createFile(t, tfs, "seqwrite.0")
+	f, err := tfs.fs.Create("seqwrite.0")
+	require.NoError(t, err)
 
 	hashes := make([][32]byte, numBlocks)
 	buf := make([]byte, blockSize)
@@ -228,7 +229,7 @@ func TestE2E_GoFioSequentialWriteVerify(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.NoError(t, f.Sync())
-	f.Close()
+	require.NoError(t, f.Close())
 
 	// Verify phase.
 	f2 := openFile(t, tfs, "seqwrite.0")
