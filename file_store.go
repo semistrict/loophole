@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -111,7 +112,7 @@ func (f *FileStore) PutReader(_ context.Context, key string, r io.Reader) error 
 	return os.WriteFile(p, data, 0644)
 }
 
-func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
+func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, meta ...map[string]string) error {
 	p := f.path(key)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
@@ -137,6 +138,12 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) e
 		}
 		return err
 	}
+	if len(meta) > 0 && meta[0] != nil {
+		metaData, _ := json.Marshal(meta[0])
+		if werr := os.WriteFile(f.metaPath(key), metaData, 0644); werr != nil {
+			slog.Warn("write metadata sidecar failed", "path", f.metaPath(key), "error", werr)
+		}
+	}
 	return nil
 }
 
@@ -147,6 +154,42 @@ func (f *FileStore) DeleteObject(_ context.Context, key string) error {
 		return nil
 	}
 	return err
+}
+
+func (f *FileStore) metaPath(key string) string {
+	return f.path(key) + ".meta.json"
+}
+
+func (f *FileStore) HeadMeta(_ context.Context, key string) (map[string]string, error) {
+	p := f.path(key)
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		return nil, fmt.Errorf("head %s: %w", key, ErrNotFound)
+	}
+	mp := f.metaPath(key)
+	data, err := os.ReadFile(mp)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]string{}, nil
+		}
+		return nil, err
+	}
+	var meta map[string]string
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return nil, err
+	}
+	return meta, nil
+}
+
+func (f *FileStore) SetMeta(_ context.Context, key string, meta map[string]string) error {
+	p := f.path(key)
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		return fmt.Errorf("set meta %s: %w", key, ErrNotFound)
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(f.metaPath(key), data, 0644)
 }
 
 func (f *FileStore) ListKeys(_ context.Context, prefix string) ([]ObjectInfo, error) {
@@ -164,7 +207,7 @@ func (f *FileStore) ListKeys(_ context.Context, prefix string) ([]ObjectInfo, er
 			}
 			return err
 		}
-		if info.IsDir() {
+		if info.IsDir() || strings.HasSuffix(path, ".meta.json") {
 			return nil
 		}
 		rel, _ := filepath.Rel(f.root, path)

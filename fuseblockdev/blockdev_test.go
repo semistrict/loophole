@@ -238,7 +238,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	require.NoError(t, err)
 	defer dst.Close()
 
-	n, err := cloneVol.CopyFrom(t.Context(), env.vol, 0, 0, 256)
+	n, err := cloneVol.CopyFrom(env.vol, 0, 0, 256)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(256), n)
 
@@ -255,13 +255,13 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
 
-	require.NoError(t, env.vol.Flush(t.Context()))
+	require.NoError(t, env.vol.Flush())
 
 	dstVol, err := env.vm.NewVolume(t.Context(), "refclone", 4096, "")
 	require.NoError(t, err)
 	env.srv.Add("refclone", dstVol)
 
-	n, err := dstVol.CopyFrom(t.Context(), env.vol, 0, 0, 192)
+	n, err := dstVol.CopyFrom(env.vol, 0, 0, 192)
 	require.NoError(t, err)
 	assert.Equal(t, uint64(192), n)
 

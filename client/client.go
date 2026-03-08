@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+
+	godaemon "github.com/sevlyar/go-daemon"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -144,6 +146,12 @@ func (c *Client) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMount
 }
 
 // Snapshot creates a snapshot of the volume at mountpoint.
+// Freeze makes a volume permanently immutable.
+func (c *Client) Freeze(ctx context.Context, volume string) error {
+	_, err := c.rpc(ctx, "POST", "/freeze", map[string]string{"volume": volume})
+	return err
+}
+
 func (c *Client) Snapshot(ctx context.Context, mountpoint, name string) error {
 	_, err := c.rpc(ctx, "POST", "/snapshot", map[string]string{
 		"mountpoint": mountpoint,
@@ -349,6 +357,12 @@ func (c *Client) Shutdown(ctx context.Context) error {
 	return err
 }
 
+// ShutdownWait blocks until the daemon has finished flushing and releasing leases.
+func (c *Client) ShutdownWait(ctx context.Context) error {
+	_, err := c.rpc(ctx, "GET", "/shutdown/wait", nil)
+	return err
+}
+
 type StatusResponse struct {
 	S3      string            `json:"s3"`
 	Mode    string            `json:"mode"`
@@ -544,7 +558,7 @@ func (c *Client) startDaemon() error {
 	}
 
 	// Build the start command args. Always use --foreground since we handle
-	// backgrounding ourselves via cmd.Start() + Process.Release().
+	// backgrounding via go-daemon / cmd.Start().
 	var args []string
 	if c.Profile != "" {
 		args = append(args, "-p", c.Profile, "start", "--foreground")
@@ -552,24 +566,41 @@ func (c *Client) startDaemon() error {
 		args = append(args, "start", "--foreground", c.Inst.URL())
 	}
 
-	var cmd *exec.Cmd
+	logPath := c.Dir.Log(c.Inst.ProfileName)
+
 	if c.Sudo && os.Getuid() != 0 {
-		args = append([]string{"-E", bin}, args...)
+		sudoArgs := append([]string{"-E", bin}, args...)
 		if c.Profile == "" {
-			args = append(args, "--socket-mode", fmt.Sprintf("%d", 0o666))
+			sudoArgs = append(sudoArgs, "--socket-mode", fmt.Sprintf("%d", 0o666))
 		}
-		cmd = exec.Command("sudo", args...)
+		cmd := exec.Command("sudo", sudoArgs...)
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			return fmt.Errorf("open log file: %w", err)
+		}
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		cmd.SysProcAttr = daemonSysProcAttr()
+		if err := cmd.Start(); err != nil {
+			_ = logFile.Close()
+			return fmt.Errorf("start daemon: %w", err)
+		}
+		_ = logFile.Close()
+		if err := cmd.Process.Release(); err != nil {
+			slog.Warn("process release failed", "error", err)
+		}
 	} else {
-		cmd = exec.Command(bin, args...)
-	}
-	cmd.Stdout = nil
-	cmd.Stderr = nil
-	cmd.SysProcAttr = daemonSysProcAttr()
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start daemon: %w", err)
-	}
-	if err := cmd.Process.Release(); err != nil {
-		slog.Warn("process release failed", "error", err)
+		cntxt := &godaemon.Context{
+			LogFileName: logPath,
+			Args:        append([]string{bin}, args...),
+		}
+		child, err := cntxt.Reborn()
+		if err != nil {
+			return fmt.Errorf("start daemon: %w", err)
+		}
+		if child != nil {
+			_ = child.Release()
+		}
 	}
 
 	for range 300 {

@@ -21,11 +21,19 @@ var _ loophole.VolumeManager = (*Manager)(nil)
 
 // volumeRef is the S3-persisted mapping from volume name to layer ID.
 type volumeRef struct {
-	TimelineID string `json:"timeline_id"` // kept as timeline_id for compat
+	LayerID    string `json:"layer_id"`
 	Size       uint64 `json:"size,omitempty"`
 	ReadOnly   bool   `json:"read_only,omitempty"`
 	Type       string `json:"type,omitempty"`
 	LeaseToken string `json:"lease_token,omitempty"`
+}
+
+// managedVolume is the internal interface for volumes tracked by the Manager.
+type managedVolume interface {
+	loophole.Volume
+	isReadOnly() bool
+	flush() error
+	close()
 }
 
 // Manager manages volumes backed by storage2 layers.
@@ -41,8 +49,8 @@ type Manager struct {
 	volRefs loophole.ObjectStore // store.At("volumes")
 
 	mu         sync.Mutex
-	volumes    map[string]*volume
-	openFlight singleflight[*volume]
+	volumes    map[string]managedVolume
+	openFlight singleflight[managedVolume]
 	onRelease  func(ctx context.Context, volumeName string)
 }
 
@@ -75,7 +83,7 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 		fs:        fs,
 		idGen:     uuid.NewString,
 		volRefs:   store.At("volumes"),
-		volumes:   make(map[string]*volume),
+		volumes:   make(map[string]managedVolume),
 	}
 	lease.Handle("release", m.handleRelease)
 	return m
@@ -95,21 +103,21 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volTy
 
 	layerID := m.idGen()
 
-	// Write layer meta.json.
-	meta := layerMeta{
-		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
-	}
-	metaData, err := json.Marshal(meta)
+	// Write initial index.json with created_at in object metadata.
+	idx := layerIndex{NextSeq: 1}
+	idxData, err := json.Marshal(idx)
 	if err != nil {
 		return nil, err
 	}
 	layerStore := m.store.At("layers/" + layerID)
-	if err := layerStore.PutIfNotExists(ctx, "meta.json", metaData); err != nil {
-		return nil, fmt.Errorf("create layer meta: %w", err)
+	if err := layerStore.PutIfNotExists(ctx, "index.json", idxData, map[string]string{
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		return nil, fmt.Errorf("create layer index: %w", err)
 	}
 
 	// Write volume ref (with lease token).
-	ref := volumeRef{TimelineID: layerID, Size: size, Type: volType}
+	ref := volumeRef{LayerID: layerID, Size: size, Type: volType}
 	if err := m.putVolumeRefNew(ctx, name, ref); err != nil {
 		return nil, err
 	}
@@ -125,7 +133,7 @@ func (m *Manager) OpenVolume(ctx context.Context, name string) (loophole.Volume,
 	}
 	m.mu.Unlock()
 
-	v, err := m.openFlight.do(name, func() (*volume, error) {
+	v, err := m.openFlight.do(name, func() (managedVolume, error) {
 		// Re-check under singleflight in case another caller just opened it.
 		m.mu.Lock()
 		if v, ok := m.volumes[name]; ok {
@@ -222,21 +230,21 @@ func (m *Manager) PageSize() int {
 
 func (m *Manager) Close(ctx context.Context) error {
 	m.mu.Lock()
-	vols := make([]*volume, 0, len(m.volumes))
+	vols := make([]managedVolume, 0, len(m.volumes))
 	for _, v := range m.volumes {
 		vols = append(vols, v)
 	}
-	m.volumes = make(map[string]*volume)
+	m.volumes = make(map[string]managedVolume)
 	m.mu.Unlock()
 
 	for _, v := range vols {
-		if !v.readOnly.Load() {
-			if err := v.layer.Flush(ctx); err != nil {
-				slog.Warn("flush on close failed", "volume", v.name, "error", err)
+		if !v.isReadOnly() {
+			if err := v.flush(); err != nil {
+				slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
 			}
-			m.releaseVolumeLease(ctx, v.name)
+			m.releaseVolumeLease(ctx, v.Name())
 		}
-		v.layer.Close()
+		v.close()
 	}
 	if err := m.lease.Close(ctx); err != nil {
 		return err
@@ -283,7 +291,9 @@ func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool)
 	}
 
 	// Delete the lease file (best-effort).
-	_ = m.store.At("leases").DeleteObject(ctx, oldToken+".json")
+	if err := m.store.At("leases").DeleteObject(ctx, oldToken+".json"); err != nil {
+		slog.Warn("delete stale lease file", "token", oldToken, "error", err)
+	}
 
 	return graceful, nil
 }
@@ -298,19 +308,26 @@ func (m *Manager) getVolumeRef(ctx context.Context, name string) (volumeRef, err
 	return ref, nil
 }
 
-func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*volume, error) {
-	cacheDir := m.cacheDir + "/layers/" + ref.TimelineID
-	ly, err := openLayer(ctx, m.store, ref.TimelineID, m.config, m.diskCache, cacheDir)
+func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (managedVolume, error) {
+	// Check object metadata on index.json (HEAD, no body) to see if frozen.
+	layerStore := m.store.At("layers/" + ref.LayerID)
+	meta, _ := layerStore.HeadMeta(ctx, "index.json")
+	if meta["frozen_at"] != "" {
+		return m.openFrozenVolume(ctx, name, ref)
+	}
+
+	cacheDir := m.cacheDir + "/layers/" + ref.LayerID
+	ly, err := openLayer(ctx, m.store, ref.LayerID, m.config, m.diskCache, cacheDir)
 	if err != nil {
-		return nil, fmt.Errorf("open layer %q: %w", ref.TimelineID, err)
+		return nil, fmt.Errorf("open layer %q: %w", ref.LayerID, err)
 	}
 
 	if m.config.FlushInterval > 0 {
 		ly.startPeriodicFlush(ctx)
 	}
 
-	// Acquire write lease (skip for read-only volumes).
-	if !ref.ReadOnly {
+	// Acquire write lease (skip for read-only volumes or if we already hold it).
+	if !ref.ReadOnly && ref.LeaseToken != m.lease.Token() {
 		if err := m.acquireVolumeLease(ctx, name); err != nil {
 			ly.Close()
 			return nil, fmt.Errorf("acquire lease for %q: %w", name, err)
@@ -329,6 +346,26 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (*
 		if !ref.ReadOnly {
 			m.releaseVolumeLease(ctx, name)
 		}
+		return existing, nil
+	}
+	m.volumes[name] = v
+	m.mu.Unlock()
+
+	return v, nil
+}
+
+func (m *Manager) openFrozenVolume(ctx context.Context, name string, ref volumeRef) (managedVolume, error) {
+	ly, err := openFrozenLayer(ctx, m.store, ref.LayerID, m.config, m.diskCache)
+	if err != nil {
+		return nil, fmt.Errorf("open frozen layer %q: %w", ref.LayerID, err)
+	}
+
+	v := newFrozenVolume(name, ref.Size, ref.Type, ly, m)
+
+	m.mu.Lock()
+	if existing, ok := m.volumes[name]; ok {
+		m.mu.Unlock()
+		ly.Close()
 		return existing, nil
 	}
 	m.volumes[name] = v
@@ -387,12 +424,14 @@ func (m *Manager) acquireVolumeLease(ctx context.Context, name string) error {
 
 // releaseVolumeLease clears the lease token from the volume ref if it matches ours.
 func (m *Manager) releaseVolumeLease(ctx context.Context, name string) {
-	_ = loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
+	if err := loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
 		if ref.LeaseToken == m.lease.Token() {
 			ref.LeaseToken = ""
 		}
 		return nil
-	})
+	}); err != nil {
+		slog.Warn("release volume lease", "volume", name, "error", err)
+	}
 }
 
 // handleRelease is the lease RPC handler for "release" requests.
@@ -422,10 +461,12 @@ func (m *Manager) handleRelease(ctx context.Context, params json.RawMessage) (an
 		return map[string]string{"status": "ok"}, nil
 	}
 
-	if err := v.Flush(ctx); err != nil {
+	if err := v.flush(); err != nil {
 		slog.Warn("release: flush failed", "volume", req.Volume, "error", err)
 	}
-	m.releaseVolumeLease(ctx, req.Volume)
-	v.layer.Close()
+	if !v.isReadOnly() {
+		m.releaseVolumeLease(ctx, req.Volume)
+	}
+	v.close()
 	return map[string]string{"status": "ok"}, nil
 }

@@ -60,7 +60,7 @@ func FormatVolume(ctx context.Context, vol loophole.Volume) error {
 	if size < MinVolumeSize {
 		return fmt.Errorf("volume too small: %d bytes (minimum %d)", size, MinVolumeSize)
 	}
-	return writeHeader(ctx, vol, &Header{})
+	return writeHeader(vol, &Header{})
 }
 
 // ReadHeader reads and validates the header from a volume.
@@ -89,13 +89,13 @@ func parseHeader(buf []byte) (*Header, error) {
 	}, nil
 }
 
-func writeHeader(ctx context.Context, vol loophole.Volume, h *Header) error {
+func writeHeader(vol loophole.Volume, h *Header) error {
 	buf := make([]byte, headerSize)
 	copy(buf[0:8], magic)
 	binary.LittleEndian.PutUint32(buf[8:12], version)
 	binary.LittleEndian.PutUint64(buf[16:24], h.MainDBSize)
 	binary.LittleEndian.PutUint64(buf[24:32], h.WALSize)
-	return vol.Write(ctx, buf, 0)
+	return vol.Write(buf, 0)
 }
 
 // memBuffer is an in-memory file buffer used for WAL, journal, and SHM files.

@@ -101,7 +101,7 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 	return sim
 }
 
-func (sim *Simulation) nextTimelineID() string {
+func (sim *Simulation) nextLayerID() string {
 	id := fmt.Sprintf("%08x-simtl-%08x", sim.nextTLID, sim.nextTLID)
 	sim.nextTLID++
 	return id
@@ -128,7 +128,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS) *Manager {
 		fs,
 		dc,
 	)
-	m.idGen = sim.nextTimelineID
+	m.idGen = sim.nextLayerID
 	return m
 }
 
@@ -182,7 +182,7 @@ func (sim *Simulation) Run() {
 			if v == nil {
 				continue
 			}
-			if err := v.Flush(ctx); err == nil {
+			if err := v.Flush(); err == nil {
 				timelineID := sim.volumeTimelines[volName]
 				sim.oracle.RecordFlush(node.id, timelineID)
 			}
@@ -265,7 +265,7 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 		data := make([]byte, PageSize)
 		sim.fillRandomBytes(data)
 
-		err := v.Write(ctx, data, pageIdx.ByteOffset())
+		err := v.Write(data, pageIdx.ByteOffset())
 
 		// Always record: for full-page writes, data enters the memLayer
 		// before auto-flush runs. If Write returns an error it's from
@@ -283,7 +283,7 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
@@ -327,7 +327,7 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	copy(expected[writeOff:writeOff+writeLen], data)
 
 	offset := pageIdx.ByteOffset() + uint64(writeOff)
-	err := v.Write(ctx, data, offset)
+	err := v.Write(data, offset)
 
 	// Always record: writePage puts the full-page result into the memLayer
 	// before auto-flush runs. The data persists even if Write returns an
@@ -338,7 +338,7 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	if err != nil {
 		return
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
@@ -388,15 +388,15 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, 
 	for _, e := range sim.oracle.events {
 		switch e.Kind {
 		case EventWrite:
-			if e.TimelineID == timelineID {
+			if e.LayerID == timelineID {
 				writeCount++
 			}
 		case EventFlush:
-			if e.TimelineID == timelineID {
+			if e.LayerID == timelineID {
 				flushCount++
 			}
 		case EventBranch:
-			if e.TimelineID == timelineID || e.ParentID == timelineID {
+			if e.LayerID == timelineID || e.ParentID == timelineID {
 				branchCount++
 			}
 		}
@@ -454,7 +454,7 @@ func (sim *Simulation) opFlush(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	err := v.Flush(ctx)
+	err := v.Flush()
 	if err != nil {
 		return
 	}
@@ -476,7 +476,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 
 	// Flush parent before snapshotting so unflushed writes are visible
 	// to the child. Snapshot freezes the memLayer but doesn't flush to S3.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	parentTL := sim.volumeTimelines[volName]
@@ -491,7 +491,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 	snapName := fmt.Sprintf("%s-snap-%d", volName, sim.nextVolID)
 	sim.nextVolID++
 
-	err := v.Snapshot(ctx, snapName)
+	err := v.Snapshot(snapName)
 	if err != nil {
 		return
 	}
@@ -503,14 +503,14 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	sim.volumeTimelines[snapName] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, branchSeq)
+	sim.volumeTimelines[snapName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
+	sim.oracle.RecordBranch(ref.LayerID, parentTL, branchSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
-	sim.timelineChildren[parentTL][ref.TimelineID] = true
+	sim.timelineChildren[parentTL][ref.LayerID] = true
 }
 
 func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
@@ -530,7 +530,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	// Flush parent before cloning so unflushed writes are visible to the child.
 	// Clone freezes the memLayer but doesn't flush to S3, so the child
 	// (loaded from S3) won't see unflushed data unless we flush first.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	parentTL := sim.volumeTimelines[volName]
@@ -542,7 +542,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := v.Clone(ctx, cloneName)
+	clone, err := v.Clone(cloneName)
 	if err != nil {
 		return
 	}
@@ -556,19 +556,19 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	// Log the clone's ancestorSeq for diagnostics.
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
+			node.id, parentTL[:8], parentNextSeq, ref.LayerID[:8], cv.layer.nextSeq.Load())
 	}
 
-	sim.volumeTimelines[cloneName] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[cloneName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[cloneName] = node.id
 	node.volumes = append(node.volumes, cloneName)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+	sim.oracle.RecordBranch(ref.LayerID, parentTL, parentNextSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
-	sim.timelineChildren[parentTL][ref.TimelineID] = true
+	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
 	_ = clone
@@ -598,7 +598,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 
 	// No pre-flush! Clone's internal freezeMemLayer + flushFrozenLayers
 	// persists unflushed data, so the child sees everything.
-	clone, err := v.Clone(ctx, cloneName)
+	clone, err := v.Clone(cloneName)
 	if err != nil {
 		return
 	}
@@ -613,19 +613,19 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] CLONE-NOFLUSH parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
+			node.id, parentTL[:8], parentNextSeq, ref.LayerID[:8], cv.layer.nextSeq.Load())
 	}
 
-	sim.volumeTimelines[cloneName] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[cloneName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[cloneName] = node.id
 	node.volumes = append(node.volumes, cloneName)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+	sim.oracle.RecordBranch(ref.LayerID, parentTL, parentNextSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
-	sim.timelineChildren[parentTL][ref.TimelineID] = true
+	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
 	_ = clone
@@ -654,7 +654,7 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 
 	offset := startPage.ByteOffset()
 	length := uint64(numPages) * PageSize
-	if err := v.PunchHole(ctx, offset, length); err != nil {
+	if err := v.PunchHole(offset, length); err != nil {
 		return
 	}
 
@@ -662,7 +662,7 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 	for pg := startPage; pg < startPage+numPages; pg++ {
 		sim.oracle.RecordPunchHole(node.id, timelineID, pg)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
@@ -685,7 +685,7 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 	}
 
 	// Flush first so oracle is consistent.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	timelineID := sim.volumeTimelines[volName]
@@ -730,11 +730,11 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	sim.volumeTimelines[name] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[name] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[name] = node.id
 	node.volumes = append(node.volumes, name)
-	sim.t.Logf("[%s] CREATE %s tl=%s", node.id, name, ref.TimelineID[:8])
+	sim.t.Logf("[%s] CREATE %s tl=%s", node.id, name, ref.LayerID[:8])
 }
 
 func (sim *Simulation) opFreeze(ctx context.Context, node *SimNode) {
@@ -750,7 +750,7 @@ func (sim *Simulation) opFreeze(ctx context.Context, node *SimNode) {
 
 	timelineID := sim.volumeTimelines[volName]
 
-	if err := v.Freeze(ctx); err != nil {
+	if err := v.Freeze(); err != nil {
 		return
 	}
 	// Freeze flushes internally, so record the flush in oracle.
@@ -793,7 +793,7 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	srcTL := sim.volumeTimelines[srcName]
 	dstTL := sim.volumeTimelines[dstName]
 
-	copied, err := dst.CopyFrom(ctx, src, srcOff, dstOff, length)
+	copied, err := dst.CopyFrom(src, srcOff, dstOff, length)
 
 	// Record in oracle: pages that were actually copied. Write enters the
 	// memLayer before auto-flush, so always record based on copied (which
@@ -807,14 +807,14 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	if err != nil {
 		// Some pages were written (in memLayer) but auto-flush failed.
 		// Try to flush what's there so oracle stays consistent.
-		if fErr := dst.Flush(ctx); fErr != nil {
+		if fErr := dst.Flush(); fErr != nil {
 			return
 		}
 		sim.oracle.RecordFlush(node.id, dstTL)
 		return
 	}
 
-	if err := dst.Flush(ctx); err != nil {
+	if err := dst.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, dstTL)
@@ -861,7 +861,7 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		go func() {
 			defer wg.Done()
 			for _, op := range writerOps[w] {
-				v.Write(ctx, op.data, op.pageIdx.ByteOffset())
+				v.Write(op.data, op.pageIdx.ByteOffset())
 			}
 		}()
 	}
@@ -884,7 +884,7 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, buf)
 	}
 
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
@@ -908,12 +908,12 @@ func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
 		data := make([]byte, PageSize)
 		sim.fillRandomBytes(data)
 
-		err := v.Write(ctx, data, pageIdx.ByteOffset())
+		err := v.Write(data, pageIdx.ByteOffset())
 		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
 
 		if err != nil {
 			// Auto-flush error — data is in frozen layer, try to flush.
-			if fErr := v.Flush(ctx); fErr != nil {
+			if fErr := v.Flush(); fErr != nil {
 				return
 			}
 			sim.oracle.RecordFlush(node.id, timelineID)
@@ -921,7 +921,7 @@ func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
 		}
 	}
 
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
@@ -969,13 +969,13 @@ func (sim *Simulation) opCloseVolume(ctx context.Context, node *SimNode) {
 
 	// Flush before closing so oracle stays consistent.
 	timelineID := sim.volumeTimelines[volName]
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	sim.oracle.RecordFlush(node.id, timelineID)
 
 	// ReleaseRef → destroy → closeVolume when refcount hits zero.
-	v.ReleaseRef(ctx)
+	v.ReleaseRef()
 
 	// Remove from node's volume list and release lease.
 	node.volumes = append(node.volumes[:idx], node.volumes[idx+1:]...)
@@ -1002,7 +1002,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 	sim.nextVolID++
 
 	// Flush parent before cloning.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		return
 	}
 	parentTL := sim.volumeTimelines[srcName]
@@ -1013,7 +1013,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := v.Clone(ctx, cloneName)
+	clone, err := v.Clone(cloneName)
 	if err != nil {
 		return
 	}
@@ -1025,19 +1025,19 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] DEEP-CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
+			node.id, parentTL[:8], parentNextSeq, ref.LayerID[:8], cv.layer.nextSeq.Load())
 	}
 
-	sim.volumeTimelines[cloneName] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[cloneName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[cloneName] = node.id
 	node.volumes = append(node.volumes, cloneName)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+	sim.oracle.RecordBranch(ref.LayerID, parentTL, parentNextSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
-	sim.timelineChildren[parentTL][ref.TimelineID] = true
+	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
 	_ = clone
@@ -1085,36 +1085,36 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := snapVol.Clone(ctx, cloneName)
+	clone, err := snapVol.Clone(cloneName)
 	if err != nil {
 		// Close the snapshot.
-		snapVol.ReleaseRef(ctx)
+		snapVol.ReleaseRef()
 		delete(sim.leases, snapName)
 		return
 	}
 
 	ref, err := sim.getVolRef(ctx, cloneName)
 	if err != nil {
-		snapVol.ReleaseRef(ctx)
+		snapVol.ReleaseRef()
 		delete(sim.leases, snapName)
 		return
 	}
 
-	sim.t.Logf("[%s] CLONE-FROM-SNAP snap=%s -> child=%s", node.id, parentTL[:8], ref.TimelineID[:8])
+	sim.t.Logf("[%s] CLONE-FROM-SNAP snap=%s -> child=%s", node.id, parentTL[:8], ref.LayerID[:8])
 
-	sim.volumeTimelines[cloneName] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[cloneName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[cloneName] = node.id
 	node.volumes = append(node.volumes, cloneName)
-	sim.oracle.RecordBranch(ref.TimelineID, parentTL, parentNextSeq)
+	sim.oracle.RecordBranch(ref.LayerID, parentTL, parentNextSeq)
 
 	if sim.timelineChildren[parentTL] == nil {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
-	sim.timelineChildren[parentTL][ref.TimelineID] = true
+	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	// Close the snapshot volume.
-	snapVol.ReleaseRef(ctx)
+	snapVol.ReleaseRef()
 	delete(sim.leases, snapName)
 
 	sim.lastClonedVolume = cloneName
@@ -1252,8 +1252,8 @@ func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name str
 		sim.t.Fatalf("get vol ref %s: %v", name, err)
 	}
 
-	sim.volumeTimelines[name] = ref.TimelineID
-	sim.timelineIDs = append(sim.timelineIDs, ref.TimelineID)
+	sim.volumeTimelines[name] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
 	sim.leases[name] = node.id
 	node.volumes = append(node.volumes, name)
 	sim.setTimelineDebugLog(node, name)
@@ -1324,8 +1324,8 @@ func (sim *Simulation) FullScan() {
 			sim.t.Logf("full scan: cannot read vol ref for %s: %v", volName, refErr)
 			continue
 		}
-		if ref.TimelineID != timelineID {
-			sim.t.Fatalf("full scan: vol %s timeline mismatch: oracle=%s s3=%s", volName, timelineID, ref.TimelineID)
+		if ref.LayerID != timelineID {
+			sim.t.Fatalf("full scan: vol %s timeline mismatch: oracle=%s s3=%s", volName, timelineID, ref.LayerID)
 		}
 
 		v, err := m.OpenVolume(ctx, volName)

@@ -37,7 +37,7 @@ func TestConcurrentPartialPageWrites(t *testing.T) {
 			defer wg.Done()
 			data := bytes.Repeat([]byte{byte(i + 1)}, chunkSize)
 			offset := uint64(i) * chunkSize
-			errs[i] = vol.Write(ctx, data, offset)
+			errs[i] = vol.Write(data, offset)
 		}()
 	}
 	wg.Wait()
@@ -97,7 +97,7 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 	// Target page 0 (offset 0..PageSize-1).
 	// First seed the page with known data so we can detect clobbering.
 	seed := bytes.Repeat([]byte{0xAA}, PageSize)
-	if err := vol.Write(ctx, seed, 0); err != nil {
+	if err := vol.Write(seed, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,7 +112,7 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 
 	for iter := range iterations {
 		// Re-seed the full page.
-		if err := vol.Write(ctx, seed, 0); err != nil {
+		if err := vol.Write(seed, 0); err != nil {
 			t.Fatal(err)
 		}
 
@@ -124,12 +124,12 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			// PunchHole the full page (offset 0, length PageSize).
-			punchErr = vol.PunchHole(ctx, 0, PageSize)
+			punchErr = vol.PunchHole(0, PageSize)
 		}()
 		go func() {
 			defer wg.Done()
 			// Write 4KB at offset 0 of the same page.
-			writeErr = vol.Write(ctx, writeData, 0)
+			writeErr = vol.Write(writeData, 0)
 		}()
 		wg.Wait()
 

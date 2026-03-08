@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/metrics"
@@ -42,6 +43,8 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 	v.refs.Store(1)
 	return v
 }
+
+var _ managedVolume = (*volume)(nil)
 
 func (v *volume) Name() string       { return v.name }
 func (v *volume) Size() uint64       { return v.size }
@@ -82,50 +85,50 @@ func (v *volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, func
 	return buf[:got], func() {}, nil
 }
 
-func (v *volume) Write(ctx context.Context, data []byte, offset uint64) error {
+func (v *volume) Write(data []byte, offset uint64) error {
 	if v.readOnly.Load() {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.layer.Write(ctx, data, offset)
+	return v.layer.Write(data, offset)
 }
 
-func (v *volume) PunchHole(ctx context.Context, offset, length uint64) error {
+func (v *volume) PunchHole(offset, length uint64) error {
 	if v.readOnly.Load() {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.layer.PunchHole(ctx, offset, length)
+	return v.layer.PunchHole(offset, length)
 }
 
-func (v *volume) ZeroRange(ctx context.Context, offset, length uint64) error {
-	return v.PunchHole(ctx, offset, length)
+func (v *volume) ZeroRange(offset, length uint64) error {
+	return v.PunchHole(offset, length)
 }
 
-func (v *volume) Flush(ctx context.Context) error {
+func (v *volume) Flush() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	return v.layer.Flush(ctx)
+	return v.layer.Flush()
 }
 
-func (v *volume) branch(ctx context.Context) (string, error) {
+func (v *volume) branch() (string, error) {
 	// Flush everything to S3.
 	if !v.readOnly.Load() {
-		if err := v.layer.Flush(ctx); err != nil {
+		if err := v.layer.Flush(); err != nil {
 			return "", fmt.Errorf("flush for branch: %w", err)
 		}
 	}
 
 	childID := v.manager.idGen()
-	if err := v.layer.Snapshot(ctx, childID); err != nil {
+	if err := v.layer.Snapshot(childID); err != nil {
 		return "", fmt.Errorf("snapshot: %w", err)
 	}
 	return childID, nil
 }
 
-func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
+func (v *volume) Snapshot(snapshotName string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -133,30 +136,31 @@ func (v *volume) Snapshot(ctx context.Context, snapshotName string) error {
 		return fmt.Errorf("cannot snapshot read-only volume %q", v.name)
 	}
 
-	childID, err := v.branch(ctx)
+	childID, err := v.branch()
 	if err != nil {
 		return err
 	}
 
 	if snapshotName != "" {
-		ref := volumeRef{TimelineID: childID, Size: v.size, ReadOnly: true, Type: v.volType}
-		if err := v.manager.putVolumeRef(ctx, snapshotName, ref); err != nil {
+		ref := volumeRef{LayerID: childID, Size: v.size, ReadOnly: true, Type: v.volType}
+		if err := v.manager.putVolumeRef(context.Background(), snapshotName, ref); err != nil {
 			return fmt.Errorf("create snapshot ref: %w", err)
 		}
 	}
 	return nil
 }
 
-func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, error) {
+func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	childID, err := v.branch(ctx)
+	childID, err := v.branch()
 	if err != nil {
 		return nil, err
 	}
 
-	ref := volumeRef{TimelineID: childID, Size: v.size, Type: v.volType}
+	ctx := context.Background()
+	ref := volumeRef{LayerID: childID, Size: v.size, Type: v.volType}
 	if err := v.manager.putVolumeRef(ctx, cloneName, ref); err != nil {
 		return nil, fmt.Errorf("create clone ref: %w", err)
 	}
@@ -164,11 +168,12 @@ func (v *volume) Clone(ctx context.Context, cloneName string) (loophole.Volume, 
 	return v.manager.OpenVolume(ctx, cloneName)
 }
 
-func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstOff, length uint64) (uint64, error) {
+func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (uint64, error) {
 	if v.readOnly.Load() {
 		return 0, fmt.Errorf("volume %q is read-only", v.name)
 	}
 
+	ctx := context.Background()
 	var copied uint64
 	buf := make([]byte, PageSize)
 	for copied < length {
@@ -177,7 +182,7 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 		if err != nil {
 			return copied, err
 		}
-		if err := v.Write(ctx, buf[:n], dstOff+copied); err != nil {
+		if err := v.Write(buf[:n], dstOff+copied); err != nil {
 			return copied + uint64(n), err
 		}
 		copied += uint64(n)
@@ -185,16 +190,38 @@ func (v *volume) CopyFrom(ctx context.Context, src loophole.Volume, srcOff, dstO
 	return copied, nil
 }
 
-func (v *volume) Freeze(ctx context.Context) error {
+func (v *volume) Freeze() error {
 	if v.readOnly.Load() {
 		return nil
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if err := v.layer.Flush(ctx); err != nil {
+	slog.Info("freeze: flushing layer", "volume", v.name)
+	if err := v.layer.Flush(); err != nil {
 		return err
 	}
+	slog.Info("freeze: flush complete, checking metadata", "volume", v.name)
+	ctx := context.Background()
+	// Check current metadata to ensure not already frozen.
+	meta, err := v.layer.layerStore.HeadMeta(ctx, "index.json")
+	if err != nil {
+		return fmt.Errorf("read layer metadata: %w", err)
+	}
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	if meta["frozen_at"] != "" {
+		return fmt.Errorf("layer %q is already frozen (at %s)", v.layer.id, meta["frozen_at"])
+	}
+	// Set frozen_at in object metadata (no body rewrite).
+	now := time.Now().UTC().Format(time.RFC3339)
+	meta["frozen_at"] = now
+	slog.Info("freeze: setting frozen_at metadata", "volume", v.name, "frozen_at", now)
+	if err := v.layer.layerStore.SetMeta(ctx, "index.json", meta); err != nil {
+		return fmt.Errorf("set frozen metadata: %w", err)
+	}
 	v.readOnly.Store(true)
+	slog.Info("freeze: done", "volume", v.name)
 	return nil
 }
 
@@ -217,23 +244,27 @@ func (v *volume) AcquireRef() error {
 	panic("refs cas contention")
 }
 
-func (v *volume) ReleaseRef(ctx context.Context) error {
+func (v *volume) ReleaseRef() error {
 	if v.refs.Add(-1) == 0 {
-		return v.destroy(ctx)
+		return v.destroy()
 	}
 	return nil
 }
 
-func (v *volume) destroy(ctx context.Context) error {
+func (v *volume) destroy() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.readOnly.Load() {
-		if err := v.layer.Flush(ctx); err != nil {
+		if err := v.layer.Flush(); err != nil {
 			slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
 		}
-		v.manager.releaseVolumeLease(ctx, v.name)
+		v.manager.releaseVolumeLease(context.Background(), v.name)
 	}
 	v.manager.closeVolume(v.name)
 	v.layer.Close()
 	return nil
 }
+
+func (v *volume) isReadOnly() bool { return v.readOnly.Load() }
+func (v *volume) flush() error     { return v.layer.Flush() }
+func (v *volume) close()           { v.layer.Close() }

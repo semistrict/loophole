@@ -22,9 +22,9 @@ func startTestNBDServer(t *testing.T) string {
 	require.NoError(t, err)
 
 	// Write some known data after the superblock so we can verify reads.
-	require.NoError(t, vol.Write(t.Context(), []byte("HELLO NBD TEST"), 65536))
-	require.NoError(t, vol.Flush(t.Context()))
-	require.NoError(t, vol.ReleaseRef(t.Context()))
+	require.NoError(t, vol.Write([]byte("HELLO NBD TEST"), 65536))
+	require.NoError(t, vol.Flush())
+	require.NoError(t, vol.ReleaseRef())
 
 	// Start NBD server.
 	srv := nbdserve.NewServer(mgr)
@@ -42,7 +42,7 @@ func TestNBDVolumeReadWrite(t *testing.T) {
 
 	vol, err := DialNBD(t.Context(), sock, "testdb")
 	require.NoError(t, err)
-	defer vol.ReleaseRef(t.Context())
+	defer vol.ReleaseRef()
 
 	require.Equal(t, "testdb", vol.Name())
 	require.Equal(t, uint64(256*1024*1024), vol.Size())
@@ -55,14 +55,14 @@ func TestNBDVolumeReadWrite(t *testing.T) {
 	require.Equal(t, "HELLO NBD TEST", string(buf))
 
 	// Write new data and read it back.
-	require.NoError(t, vol.Write(t.Context(), []byte("WRITTEN VIA NBD"), 65536+4096))
+	require.NoError(t, vol.Write([]byte("WRITTEN VIA NBD"), 65536+4096))
 	buf2 := make([]byte, 15)
 	_, err = vol.Read(t.Context(), buf2, 65536+4096)
 	require.NoError(t, err)
 	require.Equal(t, "WRITTEN VIA NBD", string(buf2))
 
 	// Flush should succeed.
-	require.NoError(t, vol.Flush(t.Context()))
+	require.NoError(t, vol.Flush())
 }
 
 func TestNBDVolumeHeader(t *testing.T) {
@@ -70,7 +70,7 @@ func TestNBDVolumeHeader(t *testing.T) {
 
 	vol, err := DialNBD(t.Context(), sock, "testdb")
 	require.NoError(t, err)
-	defer vol.ReleaseRef(t.Context())
+	defer vol.ReleaseRef()
 
 	// Should be able to read and parse the header.
 	h, err := ReadHeader(t.Context(), vol)
@@ -83,7 +83,7 @@ func TestNBDVolumeVFS(t *testing.T) {
 
 	vol, err := DialNBD(t.Context(), sock, "testdb")
 	require.NoError(t, err)
-	defer vol.ReleaseRef(t.Context())
+	defer vol.ReleaseRef()
 
 	// Open a VolumeVFS on top of the NBD volume.
 	vfs, err := NewVolumeVFS(t.Context(), vol, SyncModeSync)
@@ -120,7 +120,7 @@ func TestNBDVolumeReadZeros(t *testing.T) {
 
 	vol, err := DialNBD(t.Context(), sock, "testdb")
 	require.NoError(t, err)
-	defer vol.ReleaseRef(t.Context())
+	defer vol.ReleaseRef()
 
 	// Read from an area that was never written — should be zeros.
 	buf := make([]byte, 4096)

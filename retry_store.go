@@ -100,8 +100,8 @@ func (r *RetryStore) PutReader(ctx context.Context, key string, rd io.Reader) er
 	return r.inner.PutReader(ctx, key, rd)
 }
 
-func (r *RetryStore) PutIfNotExists(ctx context.Context, key string, data []byte) error {
-	return r.inner.PutIfNotExists(ctx, key, data)
+func (r *RetryStore) PutIfNotExists(ctx context.Context, key string, data []byte, meta ...map[string]string) error {
+	return r.inner.PutIfNotExists(ctx, key, data, meta...)
 }
 
 func (r *RetryStore) DeleteObject(ctx context.Context, key string) error {
@@ -110,4 +110,12 @@ func (r *RetryStore) DeleteObject(ctx context.Context, key string) error {
 
 func (r *RetryStore) ListKeys(ctx context.Context, prefix string) ([]ObjectInfo, error) {
 	return r.inner.ListKeys(ctx, prefix)
+}
+
+func (r *RetryStore) HeadMeta(ctx context.Context, key string) (map[string]string, error) {
+	return r.inner.HeadMeta(ctx, key)
+}
+
+func (r *RetryStore) SetMeta(ctx context.Context, key string, meta map[string]string) error {
+	return r.inner.SetMeta(ctx, key, meta)
 }

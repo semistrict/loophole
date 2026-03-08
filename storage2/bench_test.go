@@ -60,11 +60,11 @@ func BenchmarkS3Ops(b *testing.B) {
 		for range b.N {
 			for pg := 0; pg < 64; pg++ {
 				randomPage(rng, page)
-				if err := v.Write(ctx, page, uint64(pg)*PageSize); err != nil {
+				if err := v.Write(page, uint64(pg)*PageSize); err != nil {
 					b.Fatal(err)
 				}
 			}
-			if err := v.Flush(ctx); err != nil {
+			if err := v.Flush(); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -85,11 +85,11 @@ func BenchmarkS3Ops(b *testing.B) {
 		page := make([]byte, PageSize)
 		for pg := uint64(0); pg < 256; pg++ {
 			randomPage(rng, page)
-			if err := v.Write(ctx, page, pg*PageSize); err != nil {
+			if err := v.Write(page, pg*PageSize); err != nil {
 				b.Fatal(err)
 			}
 		}
-		if err := v.Flush(ctx); err != nil {
+		if err := v.Flush(); err != nil {
 			b.Fatal(err)
 		}
 
@@ -119,17 +119,17 @@ func BenchmarkS3Ops(b *testing.B) {
 		page := make([]byte, PageSize)
 		for pg := uint64(0); pg < 256; pg++ {
 			randomPage(rng, page)
-			if err := v.Write(ctx, page, pg*PageSize); err != nil {
+			if err := v.Write(page, pg*PageSize); err != nil {
 				b.Fatal(err)
 			}
 		}
-		if err := v.Flush(ctx); err != nil {
+		if err := v.Flush(); err != nil {
 			b.Fatal(err)
 		}
 
 		store.ResetCounts()
 		for i := range b.N {
-			if err := v.Snapshot(ctx, fmt.Sprintf("snap-%d", i)); err != nil {
+			if err := v.Snapshot(fmt.Sprintf("snap-%d", i)); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -151,17 +151,17 @@ func BenchmarkS3Ops(b *testing.B) {
 			page := make([]byte, PageSize)
 			for pg := uint64(0); pg < 256; pg++ {
 				randomPage(rng, page)
-				if err := v.Write(ctx, page, pg*PageSize); err != nil {
+				if err := v.Write(page, pg*PageSize); err != nil {
 					b.Fatal(err)
 				}
 			}
-			if err := v.Flush(ctx); err != nil {
+			if err := v.Flush(); err != nil {
 				b.Fatal(err)
 			}
 
 			store.ResetCounts()
 			for i := range 100 {
-				if err := v.Snapshot(ctx, fmt.Sprintf("snap-%d", i)); err != nil {
+				if err := v.Snapshot(fmt.Sprintf("snap-%d", i)); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -188,11 +188,11 @@ func BenchmarkS3Ops(b *testing.B) {
 			page := make([]byte, PageSize)
 			for pg := 0; pg < 128; pg++ {
 				randomPage(rng, page)
-				if err := v.Write(ctx, page, uint64(pg)*PageSize); err != nil {
+				if err := v.Write(page, uint64(pg)*PageSize); err != nil {
 					b.Fatal(err)
 				}
 			}
-			if err := v.Flush(ctx); err != nil {
+			if err := v.Flush(); err != nil {
 				b.Fatal(err)
 			}
 
@@ -246,11 +246,11 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 	page := make([]byte, PageSize)
 	for pg := 0; pg < totalPages; pg++ {
 		randomPage(rng, page)
-		if err := v.Write(ctx, page, uint64(pg)*PageSize); err != nil {
+		if err := v.Write(page, uint64(pg)*PageSize); err != nil {
 			b.Fatal(err)
 		}
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		b.Fatal(err)
 	}
 

@@ -93,8 +93,17 @@ func (s *JSObjectStore) PutReader(_ context.Context, key string, r io.Reader) er
 	return err
 }
 
-func (s *JSObjectStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
-	result, err := Await(s.s3.Call("putIfNotExists", s.fullKey(key), JSBytes(data)))
+func (s *JSObjectStore) PutIfNotExists(_ context.Context, key string, data []byte, meta ...map[string]string) error {
+	var metaJS js.Value
+	if len(meta) > 0 && meta[0] != nil {
+		metaJS = js.Global().Get("Object").New()
+		for k, v := range meta[0] {
+			metaJS.Set(k, v)
+		}
+	} else {
+		metaJS = js.Undefined()
+	}
+	result, err := Await(s.s3.Call("putIfNotExists", s.fullKey(key), JSBytes(data), metaJS))
 	if err != nil {
 		return err
 	}
@@ -132,6 +141,32 @@ func (s *JSObjectStore) ListKeys(_ context.Context, prefix string) ([]loophole.O
 		}
 	}
 	return infos, nil
+}
+
+func (s *JSObjectStore) HeadMeta(_ context.Context, key string) (map[string]string, error) {
+	result, err := Await(s.s3.Call("headMeta", s.fullKey(key)))
+	if err != nil {
+		return nil, err
+	}
+	if result.IsNull() || result.IsUndefined() {
+		return nil, loophole.ErrNotFound
+	}
+	meta := make(map[string]string)
+	keys := js.Global().Get("Object").Call("keys", result)
+	for i := range keys.Get("length").Int() {
+		k := keys.Index(i).String()
+		meta[k] = result.Get(k).String()
+	}
+	return meta, nil
+}
+
+func (s *JSObjectStore) SetMeta(_ context.Context, key string, meta map[string]string) error {
+	obj := js.Global().Get("Object").New()
+	for k, v := range meta {
+		obj.Set(k, v)
+	}
+	_, err := Await(s.s3.Call("setMeta", s.fullKey(key), obj))
+	return err
 }
 
 // MustGetS3 returns the globalThis.__loophole_s3 object or panics.

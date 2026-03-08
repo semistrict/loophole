@@ -56,7 +56,7 @@ func (fs *SimpleFS) WriteFile(ctx context.Context, name string, off uint64, data
 	if off+uint64(len(data)) > fs.slotSize {
 		return fmt.Errorf("write exceeds file slot size")
 	}
-	return fs.vol.Write(ctx, data, base+off)
+	return fs.vol.Write(data, base+off)
 }
 
 // ReadFile reads data at the given offset within the file's region.

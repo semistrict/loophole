@@ -222,25 +222,25 @@ func (v *NBDVolume) ReadAt(_ context.Context, offset uint64, n int) ([]byte, fun
 	return buf, func() {}, nil
 }
 
-func (v *NBDVolume) Write(_ context.Context, data []byte, offset uint64) error {
+func (v *NBDVolume) Write(data []byte, offset uint64) error {
 	_, err := v.sendRequest(nbdCmdWrite, offset, data, 0)
 	return err
 }
 
-func (v *NBDVolume) Flush(_ context.Context) error {
+func (v *NBDVolume) Flush() error {
 	_, err := v.sendRequest(nbdCmdFlush, 0, nil, 0)
 	return err
 }
 
-func (v *NBDVolume) PunchHole(_ context.Context, _, _ uint64) error {
+func (v *NBDVolume) PunchHole(_, _ uint64) error {
 	return nil
 }
 
-func (v *NBDVolume) ZeroRange(_ context.Context, _, _ uint64) error {
+func (v *NBDVolume) ZeroRange(_, _ uint64) error {
 	return nil
 }
 
-func (v *NBDVolume) ReleaseRef(_ context.Context) error {
+func (v *NBDVolume) ReleaseRef() error {
 	// Send disconnect and close the connection.
 	v.writeMu.Lock()
 	hdr := make([]byte, 28)
@@ -252,16 +252,16 @@ func (v *NBDVolume) ReleaseRef(_ context.Context) error {
 }
 
 // Operations not supported over NBD — use HTTP RPCs for these.
-func (v *NBDVolume) Snapshot(_ context.Context, _ string) error {
+func (v *NBDVolume) Snapshot(_ string) error {
 	return fmt.Errorf("snapshot not supported on NBD volume; use HTTP RPC")
 }
-func (v *NBDVolume) Clone(_ context.Context, _ string) (loophole.Volume, error) {
+func (v *NBDVolume) Clone(_ string) (loophole.Volume, error) {
 	return nil, fmt.Errorf("clone not supported on NBD volume; use HTTP RPC")
 }
-func (v *NBDVolume) CopyFrom(_ context.Context, _ loophole.Volume, _, _, _ uint64) (uint64, error) {
+func (v *NBDVolume) CopyFrom(_ loophole.Volume, _, _, _ uint64) (uint64, error) {
 	return 0, fmt.Errorf("copyFrom not supported on NBD volume")
 }
-func (v *NBDVolume) Freeze(_ context.Context) error {
+func (v *NBDVolume) Freeze() error {
 	return nil
 }
 func (v *NBDVolume) Refresh(_ context.Context) error {

@@ -94,7 +94,7 @@ type volumeNBD struct {
 }
 
 func (d volumeNBD) WriteAt(p []byte, off int64) (int, error) {
-	if err := d.vol.Write(context.Background(), p, uint64(off)); err != nil {
+	if err := d.vol.Write(p, uint64(off)); err != nil {
 		slog.Error("volumeNBD.WriteAt failed", "volume", d.vol.Name(), "offset", off, "len", len(p), "error", err)
 		return 0, err
 	}
@@ -110,7 +110,7 @@ func (d volumeNBD) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (d volumeNBD) Sync() error {
-	err := d.vol.Flush(context.Background())
+	err := d.vol.Flush()
 	if err != nil {
 		slog.Error("volumeNBD.Sync failed", "volume", d.vol.Name(), "error", err)
 	}
@@ -118,9 +118,9 @@ func (d volumeNBD) Sync() error {
 }
 
 func (d volumeNBD) Trim(offset, length int64) error {
-	return d.vol.PunchHole(context.Background(), uint64(offset), uint64(length))
+	return d.vol.PunchHole(uint64(offset), uint64(length))
 }
 
 func (d volumeNBD) WriteZeroes(offset, length int64, _ bool) error {
-	return d.vol.PunchHole(context.Background(), uint64(offset), uint64(length))
+	return d.vol.PunchHole(uint64(offset), uint64(length))
 }

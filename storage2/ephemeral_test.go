@@ -34,17 +34,17 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	nPages := 20
 	for i := 0; i < nPages; i++ {
 		data := bytes.Repeat([]byte{byte(i + 1)}, PageSize)
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatalf("write page %d: %v", i, err)
 		}
 	}
 
 	// Phase 2: Flush to clear all frozen layers, then clone.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("pre-clone flush: %v", err)
 	}
 
-	snap, err := v.Clone(ctx, "child")
+	snap, err := v.Clone("child")
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -52,13 +52,13 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	// Phase 3: Write more pages to parent after clone.
 	for i := 0; i < 5; i++ {
 		data := bytes.Repeat([]byte{byte(0xF0 + i)}, PageSize)
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatalf("post-clone write page %d: %v", i, err)
 		}
 	}
 
 	// Phase 4: Flush parent — this must flush the frozen memLayer from the clone.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("post-clone flush: %v", err)
 	}
 
@@ -106,13 +106,13 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	// Write 50 pages — triggers ~12 freeze+flush cycles.
 	for i := 0; i < 50; i++ {
 		data := bytes.Repeat([]byte{byte(i + 1)}, PageSize)
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatalf("write page %d: %v", i, err)
 		}
 	}
 
 	// Clone.
-	child, err := v.Clone(ctx, "child")
+	child, err := v.Clone("child")
 	if err != nil {
 		t.Fatalf("clone: %v", err)
 	}
@@ -120,18 +120,18 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	// Write to parent after clone.
 	for i := 0; i < 10; i++ {
 		data := bytes.Repeat([]byte{0xFF}, PageSize)
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatalf("post-clone write %d: %v", i, err)
 		}
 	}
 
 	// Flush parent.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("flush parent: %v", err)
 	}
 
 	// Flush child (should be a no-op since it has no writes).
-	if err := child.Flush(ctx); err != nil {
+	if err := child.Flush(); err != nil {
 		t.Fatalf("flush child: %v", err)
 	}
 

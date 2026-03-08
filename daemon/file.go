@@ -22,6 +22,9 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
+	if d.rejectIfShuttingDown(w) {
+		return
+	}
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		d.log.Error("websocket upgrade failed", "err", err)
@@ -112,6 +115,14 @@ func (s *wsSession) FS(volume string) (fsbackend.FS, error) {
 		_, _ = fmt.Fprintf(s.mux.Stderr(), "auto-mounted volume %q\n", volume)
 	}
 	return fs, nil
+}
+
+func (s *wsSession) Sync(volume string) error {
+	vol := s.backend.VM().GetVolume(volume)
+	if vol == nil {
+		return fmt.Errorf("volume %q not open", volume)
+	}
+	return vol.Flush()
 }
 
 func (s *wsSession) Read(path string) (io.ReadCloser, error) {

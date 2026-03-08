@@ -136,7 +136,7 @@ func TestWriteFlushRead(t *testing.T) {
 	// Write data across multiple pages.
 	data := make([]byte, PageSize*3)
 	rand.Read(data)
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -154,7 +154,7 @@ func TestWriteFlushRead(t *testing.T) {
 	}
 
 	// Flush to S3.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -196,10 +196,10 @@ func TestWriteFlushReopenRead(t *testing.T) {
 
 	data := make([]byte, PageSize*2)
 	rand.Read(data)
-	if err := v1.Write(ctx, data, 0); err != nil {
+	if err := v1.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v1.Flush(ctx); err != nil {
+	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if err := m1.Close(ctx); err != nil {
@@ -242,7 +242,7 @@ func TestPartialPageWrite(t *testing.T) {
 	// Write at an offset within a page.
 	data := []byte("hello world")
 	offset := uint64(100)
-	if err := v.Write(ctx, data, offset); err != nil {
+	if err := v.Write(data, offset); err != nil {
 		t.Fatal(err)
 	}
 
@@ -288,12 +288,12 @@ func TestPunchHole(t *testing.T) {
 	// Write two pages.
 	data := make([]byte, PageSize*2)
 	rand.Read(data)
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// Punch hole covering the first page exactly.
-	if err := v.PunchHole(ctx, 0, PageSize); err != nil {
+	if err := v.PunchHole(0, PageSize); err != nil {
 		t.Fatal(err)
 	}
 
@@ -334,12 +334,12 @@ func TestPunchHoleSubPage(t *testing.T) {
 
 	// Write one full page of 'X'.
 	data := bytes.Repeat([]byte("X"), PageSize)
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// Punch hole covering only the first 4096 bytes (sub-page).
-	if err := v.PunchHole(ctx, 0, 4096); err != nil {
+	if err := v.PunchHole(0, 4096); err != nil {
 		t.Fatal(err)
 	}
 
@@ -374,22 +374,22 @@ func TestPunchHoleFlushBetweenWriteAndPunch(t *testing.T) {
 
 	// Write one page of 'Y'.
 	data := bytes.Repeat([]byte("Y"), PageSize)
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// Flush write to S3.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Punch hole.
-	if err := v.PunchHole(ctx, 0, PageSize); err != nil {
+	if err := v.PunchHole(0, PageSize); err != nil {
 		t.Fatal(err)
 	}
 
 	// Flush tombstone to S3.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -418,17 +418,17 @@ func TestPunchHoleAfterFlush(t *testing.T) {
 
 	// Write one page of 'X'.
 	data := bytes.Repeat([]byte("X"), PageSize)
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// Punch hole.
-	if err := v.PunchHole(ctx, 0, PageSize); err != nil {
+	if err := v.PunchHole(0, PageSize); err != nil {
 		t.Fatal(err)
 	}
 
 	// Flush to S3 (moves tombstone from memLayer to delta layer).
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -458,18 +458,18 @@ func TestSnapshotThenFlush(t *testing.T) {
 	// Write 5 pages to fill the memLayer with some data.
 	for i := 0; i < 5; i++ {
 		data := bytes.Repeat([]byte{byte('A' + i)}, PageSize)
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Snapshot freezes the memLayer.
-	if err := v.Snapshot(ctx, "snap"); err != nil {
+	if err := v.Snapshot("snap"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Flush should succeed — the frozen memLayer's ephemeral file should be readable.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("flush after snapshot failed: %v", err)
 	}
 
@@ -499,19 +499,19 @@ func TestMultipleFlushes(t *testing.T) {
 	// Write, flush, write more, flush again.
 	data1 := make([]byte, PageSize)
 	rand.Read(data1)
-	if err := v.Write(ctx, data1, 0); err != nil {
+	if err := v.Write(data1, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	data2 := make([]byte, PageSize)
 	rand.Read(data2)
-	if err := v.Write(ctx, data2, PageSize); err != nil {
+	if err := v.Write(data2, PageSize); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -544,18 +544,18 @@ func TestSnapshot(t *testing.T) {
 	// Write data to parent.
 	data := make([]byte, PageSize)
 	data[0] = 0xAA
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	// Snapshot.
-	if err := v.Snapshot(ctx, "snap1"); err != nil {
+	if err := v.Snapshot("snap1"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Write more to parent after snapshot.
 	data[0] = 0xBB
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -581,15 +581,15 @@ func TestClone(t *testing.T) {
 	// Write data.
 	data := make([]byte, PageSize)
 	data[0] = 0xCC
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Clone.
-	clone, err := v.Clone(ctx, "clone1")
+	clone, err := v.Clone("clone1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +605,7 @@ func TestClone(t *testing.T) {
 
 	// Write to clone should not affect parent.
 	data[0] = 0xDD
-	if err := clone.Write(ctx, data, 0); err != nil {
+	if err := clone.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -638,16 +638,16 @@ func TestOverwriteAfterFlush(t *testing.T) {
 	// Write page 0, flush, overwrite page 0, read.
 	data1 := make([]byte, PageSize)
 	data1[0] = 0x11
-	if err := v.Write(ctx, data1, 0); err != nil {
+	if err := v.Write(data1, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	data2 := make([]byte, PageSize)
 	data2[0] = 0x22
-	if err := v.Write(ctx, data2, 0); err != nil {
+	if err := v.Write(data2, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -684,14 +684,14 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 
 	data := make([]byte, PageSize)
 	data[0] = 0xAA
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := v.Snapshot(ctx, "snap1"); err != nil {
+	if err := v.Snapshot("snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -731,35 +731,35 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 
 	data := make([]byte, PageSize)
 	data[0] = 0x11
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Snapshot parent -> snap1
-	if err := v.Snapshot(ctx, "snap1"); err != nil {
+	if err := v.Snapshot("snap1"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Open snap1 as writable clone so we can write to it.
-	snap1, err := v.Clone(ctx, "snap1-clone")
+	snap1, err := v.Clone("snap1-clone")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Write to snap1-clone, flush.
 	data[0] = 0x22
-	if err := snap1.Write(ctx, data, PageSize); err != nil {
+	if err := snap1.Write(data, PageSize); err != nil {
 		t.Fatal(err)
 	}
-	if err := snap1.Flush(ctx); err != nil {
+	if err := snap1.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Snapshot snap1-clone -> snap2
-	if err := snap1.Snapshot(ctx, "snap2"); err != nil {
+	if err := snap1.Snapshot("snap2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -809,16 +809,16 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 	for i := byte(0); i < 5; i++ {
 		data := make([]byte, PageSize)
 		data[0] = i + 1
-		if err := v.Write(ctx, data, uint64(i)*PageSize); err != nil {
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
-		if err := v.Flush(ctx); err != nil {
+		if err := v.Flush(); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Snapshot before compaction.
-	if err := v.Snapshot(ctx, "snap-pre"); err != nil {
+	if err := v.Snapshot("snap-pre"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -829,7 +829,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot after compaction.
-	if err := v.Snapshot(ctx, "snap-post"); err != nil {
+	if err := v.Snapshot("snap-post"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -883,13 +883,13 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 
 	data := make([]byte, PageSize)
 	data[0] = 0xCC
-	if err := v.Write(ctx, data, 0); err != nil {
+	if err := v.Write(data, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Snapshot(ctx, "snap1"); err != nil {
+	if err := v.Snapshot("snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -900,7 +900,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloneVol, err := snapVol.Clone(ctx, "snap1-clone")
+	cloneVol, err := snapVol.Clone("snap1-clone")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -932,43 +932,43 @@ func TestVolumeReadOnlyGuards(t *testing.T) {
 	// Write some data then freeze.
 	page := make([]byte, PageSize)
 	page[0] = 0x42
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Freeze(ctx); err != nil {
+	if err := v.Freeze(); err != nil {
 		t.Fatal(err)
 	}
 
 	t.Run("Write", func(t *testing.T) {
-		err := v.Write(ctx, page, 0)
+		err := v.Write(page, 0)
 		if err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Fatalf("expected read-only error, got: %v", err)
 		}
 	})
 
 	t.Run("PunchHole", func(t *testing.T) {
-		err := v.PunchHole(ctx, 0, PageSize)
+		err := v.PunchHole(0, PageSize)
 		if err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Fatalf("expected read-only error, got: %v", err)
 		}
 	})
 
 	t.Run("CopyFrom", func(t *testing.T) {
-		_, err := v.CopyFrom(ctx, src, 0, 0, PageSize)
+		_, err := v.CopyFrom(src, 0, 0, PageSize)
 		if err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Fatalf("expected read-only error, got: %v", err)
 		}
 	})
 
 	t.Run("Snapshot", func(t *testing.T) {
-		err := v.Snapshot(ctx, "snap")
+		err := v.Snapshot("snap")
 		if err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Fatalf("expected read-only error, got: %v", err)
 		}
 	})
 
 	t.Run("FreezeIdempotent", func(t *testing.T) {
-		if err := v.Freeze(ctx); err != nil {
+		if err := v.Freeze(); err != nil {
 			t.Fatalf("freeze on already-frozen volume should be nil, got: %v", err)
 		}
 	})
@@ -1067,7 +1067,7 @@ func TestDeleteVolumeThenList(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Close the volume so it can be deleted.
-	if err := v.ReleaseRef(ctx); err != nil {
+	if err := v.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1167,7 +1167,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	// Write data.
 	page := make([]byte, PageSize)
 	page[0] = 0xAA
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1177,14 +1177,14 @@ func TestFlushPutReaderFail(t *testing.T) {
 	})
 
 	// Flush should fail.
-	err = v.Flush(ctx)
+	err = v.Flush()
 	if err == nil {
 		t.Fatal("expected flush to fail with PutReader fault")
 	}
 
 	// Clear fault and retry — data in frozen layer should still be flushable.
 	store.ClearAllFaults()
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("retry flush failed: %v", err)
 	}
 
@@ -1214,10 +1214,10 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 	}
 	page := make([]byte, PageSize)
 	page[0] = 0xCC
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	vol := v.(*volume)
@@ -1228,10 +1228,10 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 	// Write another page and flush so we have both delta and image layers.
 	page2 := make([]byte, PageSize)
 	page2[0] = 0xDD
-	if err := v.Write(ctx, page2, PageSize); err != nil {
+	if err := v.Write(page2, PageSize); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1309,7 +1309,7 @@ func TestAcquireRefAndRelease(t *testing.T) {
 	}
 
 	// Now refs=2. Release once → refs=1 (no destroy).
-	if err := v.ReleaseRef(ctx); err != nil {
+	if err := v.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1320,7 +1320,7 @@ func TestAcquireRefAndRelease(t *testing.T) {
 	}
 
 	// Release again → refs=0 → destroy.
-	if err := v.ReleaseRef(ctx); err != nil {
+	if err := v.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1374,7 +1374,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Close the volume so it can be deleted.
-	if err := v.ReleaseRef(ctx); err != nil {
+	if err := v.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1419,7 +1419,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Close so it's not cached.
-	if err := v.ReleaseRef(ctx); err != nil {
+	if err := v.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1447,10 +1447,10 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	// Write a full page first, then flush so the data is on S3.
 	page := make([]byte, PageSize)
 	page[0] = 0xAA
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1470,14 +1470,14 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	})
 
 	// Write 1 byte at offset 1 — partial page, triggers read-modify-write.
-	err = v2.Write(ctx, []byte{0xBB}, 1)
+	err = v2.Write([]byte{0xBB}, 1)
 	if err == nil || !strings.Contains(err.Error(), "simulated read failure") {
 		t.Fatalf("expected read failure on partial write, got: %v", err)
 	}
 
 	// Clear fault — full page writes should still work (no read needed).
 	store.ClearAllFaults()
-	if err := v2.Write(ctx, page, 0); err != nil {
+	if err := v2.Write(page, 0); err != nil {
 		t.Fatalf("full page write after clearing fault: %v", err)
 	}
 }
@@ -1495,10 +1495,10 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0x55
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1506,14 +1506,14 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated createChild failure"),
 	})
-	err = v.Snapshot(ctx, "snap")
+	err = v.Snapshot("snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated createChild failure") {
 		t.Fatalf("expected createChild failure, got: %v", err)
 	}
 
 	// Clear — snapshot should work.
 	store.ClearAllFaults()
-	if err := v.Snapshot(ctx, "snap"); err != nil {
+	if err := v.Snapshot("snap"); err != nil {
 		t.Fatalf("snapshot retry: %v", err)
 	}
 }
@@ -1531,10 +1531,10 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0x66
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1544,7 +1544,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
-	err = v.Snapshot(ctx, "snap")
+	err = v.Snapshot("snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated putVolumeRef failure") {
 		t.Fatalf("expected putVolumeRef failure, got: %v", err)
 	}
@@ -1563,10 +1563,10 @@ func TestCloneCreateChildFail(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0x88
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1574,7 +1574,7 @@ func TestCloneCreateChildFail(t *testing.T) {
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated clone createChild failure"),
 	})
-	_, err = v.Clone(ctx, "clone")
+	_, err = v.Clone("clone")
 	if err == nil || !strings.Contains(err.Error(), "simulated clone createChild failure") {
 		t.Fatalf("expected clone createChild failure, got: %v", err)
 	}
@@ -1592,10 +1592,10 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0x99
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1604,7 +1604,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated clone putVolumeRef failure"),
 	})
 
-	_, err = v.Clone(ctx, "clone")
+	_, err = v.Clone("clone")
 	if err == nil || !strings.Contains(err.Error(), "simulated clone putVolumeRef failure") {
 		t.Fatalf("expected clone putVolumeRef failure, got: %v", err)
 	}
@@ -1622,14 +1622,14 @@ func TestFreezeFlushFail(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xAA
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
 	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
 		Err: fmt.Errorf("simulated freeze flush failure"),
 	})
-	err = v.Freeze(ctx)
+	err = v.Freeze()
 	if err == nil || !strings.Contains(err.Error(), "simulated freeze flush failure") {
 		t.Fatalf("expected freeze flush failure, got: %v", err)
 	}
@@ -1641,7 +1641,7 @@ func TestFreezeFlushFail(t *testing.T) {
 
 	// Clear and freeze should work.
 	store.ClearAllFaults()
-	if err := v.Freeze(ctx); err != nil {
+	if err := v.Freeze(); err != nil {
 		t.Fatalf("freeze retry: %v", err)
 	}
 	if !v.ReadOnly() {
@@ -1670,7 +1670,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	for i := range page0 {
 		page0[i] = 0xAA
 	}
-	if err := v.Write(ctx, page0, 0); err != nil {
+	if err := v.Write(page0, 0); err != nil {
 		t.Fatalf("write page 0: %v", err)
 	}
 
@@ -1684,7 +1684,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 	// Write returns error from auto-flush, but data should be in frozen layer.
-	_ = v.Write(ctx, page1, PageSize)
+	_ = v.Write(page1, PageSize)
 
 	// Step 3: Write page 2 — frozen layers are at capacity, so backpressure
 	// flush kicks in. With the fault still active, this flush fails. The bug
@@ -1693,11 +1693,11 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	for i := range page2 {
 		page2[i] = 0xCC
 	}
-	_ = v.Write(ctx, page2, 2*PageSize)
+	_ = v.Write(page2, 2*PageSize)
 
 	// Step 4: Clear faults and flush everything.
 	store.ClearAllFaults()
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
@@ -1753,11 +1753,11 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	srcPages := make([][]byte, 4)
 	for i := range srcPages {
 		srcPages[i] = bytes.Repeat([]byte{byte(0xA0 + i)}, PageSize)
-		if err := src.Write(ctx, srcPages[i], uint64(i)*PageSize); err != nil {
+		if err := src.Write(srcPages[i], uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := src.Flush(ctx); err != nil {
+	if err := src.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1776,7 +1776,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	// triggering flush. When the memLayer crosses FlushThreshold, the
 	// auto-flush fires and hits the PUT fault. CopyFrom returns an error
 	// with `copied` not counting the page whose Write triggered the flush.
-	copied, err := dst.CopyFrom(ctx, src, 0, 0, 4*PageSize)
+	copied, err := dst.CopyFrom(src, 0, 0, 4*PageSize)
 	if err == nil {
 		t.Fatal("expected CopyFrom to fail due to S3 fault")
 	}
@@ -1795,7 +1795,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	// Clear faults and flush — the data in the memLayer/frozen layers
 	// should now persist to S3.
 	store.ClearAllFaults()
-	if err := dst.Flush(ctx); err != nil {
+	if err := dst.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1853,16 +1853,16 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 	parentData := bytes.Repeat([]byte{0xDD}, PageSize)
 	for i := 0; i < 4; i++ {
-		if err := parent.Write(ctx, parentData, uint64(i)*PageSize); err != nil {
+		if err := parent.Write(parentData, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := parent.Flush(ctx); err != nil {
+	if err := parent.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Clone parent → dst. dst inherits parent's data for pages 0-3.
-	dst, err := parent.Clone(ctx, "dst")
+	dst, err := parent.Clone("dst")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1880,13 +1880,13 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	})
 
 	// CopyFrom zeros (src) over dst's inherited data.
-	copied, copyErr := dst.CopyFrom(ctx, src, 0, 0, 4*PageSize)
+	copied, copyErr := dst.CopyFrom(src, 0, 0, 4*PageSize)
 	pagesReported := copied / PageSize
 	t.Logf("CopyFrom: copied=%d (%d pages), err=%v", copied, pagesReported, copyErr)
 
 	// Clear faults, flush dst to persist everything in memLayer.
 	store.ClearAllFaults()
-	if err := dst.Flush(ctx); err != nil {
+	if err := dst.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1969,15 +1969,15 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 
 	// Write a full page to page 0 to put some data in memLayer.
 	fullPage := bytes.Repeat([]byte{0xAA}, PageSize)
-	if err := v.Write(ctx, fullPage, 0); err != nil {
+	if err := v.Write(fullPage, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Now write page 1 to get near the flush threshold.
-	if err := v.Write(ctx, fullPage, PageSize); err != nil {
+	if err := v.Write(fullPage, PageSize); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1991,13 +1991,13 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	// writePage will: read zeros, copy partialData at offset 100, put full page in memLayer.
 	// Then auto-flush fails -> Write returns error.
 	partialData := bytes.Repeat([]byte{0xBB}, 200)
-	writeErr := v.Write(ctx, partialData, 5*PageSize+100)
+	writeErr := v.Write(partialData, 5*PageSize+100)
 	t.Logf("partial write err: %v", writeErr)
 
 	// The data IS in memLayer despite the error.
 	// Clear faults and flush.
 	store.ClearAllFaults()
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2156,24 +2156,24 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	pages := make([][]byte, 8)
 	for i := range pages {
 		pages[i] = bytes.Repeat([]byte{byte('A' + i)}, PageSize)
-		if err := v1.Write(ctx, pages[i], uint64(i)*PageSize); err != nil {
+		if err := v1.Write(pages[i], uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Punch holes over pages 2-4 (simulating ext4 zero_range during mkfs).
-	if err := v1.PunchHole(ctx, 2*PageSize, 3*PageSize); err != nil {
+	if err := v1.PunchHole(2*PageSize, 3*PageSize); err != nil {
 		t.Fatal(err)
 	}
 
 	// Overwrite page 1 with new data (simulating ext4 updating metadata).
 	pages[1] = bytes.Repeat([]byte{byte('Z')}, PageSize)
-	if err := v1.Write(ctx, pages[1], PageSize); err != nil {
+	if err := v1.Write(pages[1], PageSize); err != nil {
 		t.Fatal(err)
 	}
 
 	// Flush everything to S3.
-	if err := v1.Flush(ctx); err != nil {
+	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if err := m1.Close(ctx); err != nil {
@@ -2245,13 +2245,13 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 		page := make([]byte, PageSize)
 		rand.Read(page)
 		expected[i] = page
-		if err := v1.Write(ctx, page, uint64(i)*PageSize); err != nil {
+		if err := v1.Write(page, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Phase 2: punch holes on pages 8-15.
-	if err := v1.PunchHole(ctx, 8*PageSize, 8*PageSize); err != nil {
+	if err := v1.PunchHole(8*PageSize, 8*PageSize); err != nil {
 		t.Fatal(err)
 	}
 	for i := 8; i < 16; i++ {
@@ -2263,7 +2263,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 		page := make([]byte, PageSize)
 		rand.Read(page)
 		expected[i] = page
-		if err := v1.Write(ctx, page, uint64(i)*PageSize); err != nil {
+		if err := v1.Write(page, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -2274,13 +2274,13 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 		rand.Read(subPage)
 		off := PageSize / 4
 		copy(expected[i][off:off+len(subPage)], subPage)
-		if err := v1.Write(ctx, subPage, uint64(i)*PageSize+uint64(off)); err != nil {
+		if err := v1.Write(subPage, uint64(i)*PageSize+uint64(off)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Flush and close.
-	if err := v1.Flush(ctx); err != nil {
+	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
 	if err := m1.Close(ctx); err != nil {
@@ -2346,13 +2346,13 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 		var page [PageSize]byte
 		// Store page index as a 4-byte little-endian value.
 		binary.LittleEndian.PutUint32(page[:4], uint32(i))
-		if err := v.Write(ctx, page[:], uint64(i)*PageSize); err != nil {
+		if err := v.Write(page[:], uint64(i)*PageSize); err != nil {
 			t.Fatalf("write page %d: %v", i, err)
 		}
 	}
 
 	// Flush and verify a sample of pages can be read back correctly.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2390,11 +2390,11 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 	for i := range numPages {
 		page := make([]byte, PageSize)
 		binary.LittleEndian.PutUint32(page, uint32(i))
-		if err := v.Write(ctx, page, uint64(i)*PageSize); err != nil {
+		if err := v.Write(page, uint64(i)*PageSize); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2432,12 +2432,12 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 				page := make([]byte, PageSize)
 				binary.LittleEndian.PutUint32(page, uint32(1000*w+i))
 				pageIdx := mathrand.IntN(numPages)
-				if err := v.Write(ctx, page, uint64(pageIdx)*PageSize); err != nil {
+				if err := v.Write(page, uint64(pageIdx)*PageSize); err != nil {
 					t.Errorf("write: %v", err)
 					return
 				}
 				if i%10 == 0 {
-					if err := v.Flush(ctx); err != nil {
+					if err := v.Flush(); err != nil {
 						t.Errorf("flush: %v", err)
 						return
 					}
@@ -2477,7 +2477,7 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	page := make([]byte, PageSize)
 	for i := range 5 {
 		page[0] = byte(i + 1)
-		err := v.Write(ctx, page, uint64(i)*PageSize)
+		err := v.Write(page, uint64(i)*PageSize)
 		if err != nil {
 			t.Fatalf("write %d failed (should not block on S3): %v", i, err)
 		}
@@ -2500,7 +2500,7 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify data survives after flush by closing and reopening.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("final flush: %v", err)
 	}
 
@@ -2530,7 +2530,7 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	// Write a page — triggers freeze + notify.
 	page := make([]byte, PageSize)
 	page[0] = 0xDD
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2589,7 +2589,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 	var writeErr error
 	for i := range 20 {
 		page[0] = byte(i)
-		writeErr = v.Write(ctx, page, uint64(i)*PageSize)
+		writeErr = v.Write(page, uint64(i)*PageSize)
 		if writeErr != nil {
 			break
 		}
@@ -2604,7 +2604,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 
 	// Clear fault — data in frozen layers should be flushable.
 	store.ClearAllFaults()
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("flush after clearing fault: %v", err)
 	}
 }
@@ -2627,7 +2627,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xEE
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2641,7 +2641,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 	})
 
 	// Flush should succeed after retries.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatalf("flush should succeed after retries: %v", err)
 	}
 
@@ -2677,7 +2677,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 		// Write data — not stale yet, so no early flush.
 		page := make([]byte, PageSize)
 		page[0] = 0xAA
-		if err := v.Write(ctx, page, 0); err != nil {
+		if err := v.Write(page, 0); err != nil {
 			t.Fatal(err)
 		}
 		time.Sleep(1 * time.Second)
@@ -2694,7 +2694,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 
 		// Write again — triggers early flush path.
 		page[0] = 0xBB
-		if err := v.Write(ctx, page, PageSize); err != nil {
+		if err := v.Write(page, PageSize); err != nil {
 			t.Fatal(err)
 		}
 
@@ -2753,10 +2753,10 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 	// Write and flush to create L0.
 	page := make([]byte, PageSize)
 	page[0] = 0xCC
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2847,10 +2847,10 @@ func TestRefreshFollowMode(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xDD
-	if err := wv.Write(ctx, page, 0); err != nil {
+	if err := wv.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := wv.Flush(ctx); err != nil {
+	if err := wv.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2873,10 +2873,10 @@ func TestRefreshFollowMode(t *testing.T) {
 
 	// Writer writes more data and flushes.
 	page[0] = 0xEE
-	if err := wv.Write(ctx, page, PageSize); err != nil {
+	if err := wv.Write(page, PageSize); err != nil {
 		t.Fatal(err)
 	}
-	if err := wv.Flush(ctx); err != nil {
+	if err := wv.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2922,10 +2922,10 @@ func TestFlushReportsMetrics(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xFF
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2956,7 +2956,7 @@ func TestReadAtZeroCopyMemtable(t *testing.T) {
 	page := make([]byte, PageSize)
 	page[0] = 0xAA
 	page[PageSize-1] = 0xBB
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2997,10 +2997,10 @@ func TestReadAtZeroCopyAfterFlush(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xCC
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3037,7 +3037,7 @@ func TestReadAtSubPageFallback(t *testing.T) {
 	for i := range page {
 		page[i] = byte(i % 256)
 	}
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3079,7 +3079,7 @@ func TestReadAtPinPreventsCleanup(t *testing.T) {
 
 	page := make([]byte, PageSize)
 	page[0] = 0xDD
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -3090,7 +3090,7 @@ func TestReadAtPinPreventsCleanup(t *testing.T) {
 	}
 
 	// Flush — this freezes and flushes the memtable.
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 

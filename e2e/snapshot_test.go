@@ -12,17 +12,17 @@ import (
 func TestE2E_SnapshotPreservesData(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint(t, "parent")
+	parentMP := mountpoint(t, "snap-pres-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
-	err := b.Mount(ctx, "parent", parentMP)
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "snap-pres-parent"}))
+	err := b.Mount(ctx, "snap-pres-parent", parentMP)
 	require.NoError(t, err)
 
 	tfs := newTestFS(t, b, parentMP)
 	randomMD5 := writeTestFiles(t, tfs)
 
-	childMP := mountpoint(t, "child")
-	err = b.Clone(t.Context(), parentMP, "child", childMP)
+	childMP := mountpoint(t, "snap-pres-child")
+	err = b.Clone(t.Context(), parentMP, "snap-pres-child", childMP)
 	require.NoError(t, err)
 
 	err = b.Unmount(t.Context(), parentMP)
@@ -34,10 +34,10 @@ func TestE2E_SnapshotPreservesData(t *testing.T) {
 func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint(t, "parent")
+	parentMP := mountpoint(t, "cwr-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
-	err := b.Mount(ctx, "parent", parentMP)
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cwr-parent"}))
+	err := b.Mount(ctx, "cwr-parent", parentMP)
 	require.NoError(t, err)
 
 	parentFS := newTestFS(t, b, parentMP)
@@ -46,8 +46,8 @@ func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 		syncFS(t, parentMP)
 	}
 
-	childMP := mountpoint(t, "child")
-	err = b.Clone(t.Context(), parentMP, "child", childMP)
+	childMP := mountpoint(t, "cwr-child")
+	err = b.Clone(t.Context(), parentMP, "cwr-child", childMP)
 	require.NoError(t, err)
 
 	err = b.Unmount(t.Context(), parentMP)
@@ -63,23 +63,23 @@ func TestE2E_ChildCanWriteIndependently(t *testing.T) {
 func TestE2E_SnapshotMountsReadOnly(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
-	parentMP := mountpoint(t, "parent")
+	parentMP := mountpoint(t, "sro-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "parent"}))
-	require.NoError(t, b.Mount(ctx, "parent", parentMP))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "sro-parent"}))
+	require.NoError(t, b.Mount(ctx, "sro-parent", parentMP))
 
 	tfs := newTestFS(t, b, parentMP)
 	tfs.WriteFile(t, "hello.txt", []byte("snapshot test\n"))
 
 	// Snapshot the volume (this freezes, branches, and thaws).
-	require.NoError(t, b.Snapshot(ctx, parentMP, "snap"))
+	require.NoError(t, b.Snapshot(ctx, parentMP, "sro-snap"))
 
 	// Unmount parent so the snapshot can acquire the timeline lease.
 	require.NoError(t, b.Unmount(ctx, parentMP))
 
 	// Mount the snapshot — should succeed (read-only lwext4 mount).
-	snapMP := mountpoint(t, "snap")
-	require.NoError(t, b.Mount(ctx, "snap", snapMP))
+	snapMP := mountpoint(t, "sro-snap")
+	require.NoError(t, b.Mount(ctx, "sro-snap", snapMP))
 
 	// Data from before the snapshot should be readable.
 	snapFS := newTestFS(t, b, snapMP)

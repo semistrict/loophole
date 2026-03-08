@@ -20,6 +20,9 @@ type Session interface {
 	// The path is sent to the client which opens and streams the file back.
 	Read(path string) (io.ReadCloser, error)
 
+	// Sync flushes a volume's data to persistent storage.
+	Sync(volume string) error
+
 	// Stdout returns a writer for standard output.
 	Stdout() io.Writer
 

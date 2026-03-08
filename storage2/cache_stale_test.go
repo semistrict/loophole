@@ -40,10 +40,10 @@ func TestStalePageCacheAfterFlush(t *testing.T) {
 
 		// Step 1: Write A, flush to S3.
 		dataA := bytes.Repeat([]byte{valA}, PageSize)
-		if err := vol.Write(ctx, dataA, 0); err != nil {
+		if err := vol.Write(dataA, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := vol.Flush(ctx); err != nil {
+		if err := vol.Flush(); err != nil {
 			t.Fatal(err)
 		}
 
@@ -58,10 +58,10 @@ func TestStalePageCacheAfterFlush(t *testing.T) {
 
 		// Step 3: Write B, flush to S3.
 		dataB := bytes.Repeat([]byte{valB}, PageSize)
-		if err := vol.Write(ctx, dataB, 0); err != nil {
+		if err := vol.Write(dataB, 0); err != nil {
 			t.Fatal(err)
 		}
-		if err := vol.Flush(ctx); err != nil {
+		if err := vol.Flush(); err != nil {
 			t.Fatal(err)
 		}
 

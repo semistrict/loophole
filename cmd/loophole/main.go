@@ -10,6 +10,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/daemon"
 )
 
 var selfBin string
@@ -46,6 +47,7 @@ func rootCmd() *cobra.Command {
 func startCmd() *cobra.Command {
 	var foreground bool
 	var socketMode uint32
+	var listenAddr string
 
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -67,7 +69,11 @@ func startCmd() *cobra.Command {
 					return nil
 				}
 				ctx := context.Background()
-				return startDaemon(ctx, inst, dir, os.FileMode(socketMode))
+				return startDaemon(ctx, inst, dir, daemon.Options{
+					Foreground: true,
+					SocketMode: os.FileMode(socketMode),
+					ListenAddr: listenAddr,
+				})
 			}
 
 			// Background: use resolveClient which calls EnsureDaemon.
@@ -82,6 +88,7 @@ func startCmd() *cobra.Command {
 
 	cmd.Flags().BoolVarP(&foreground, "foreground", "f", false, "Run in foreground instead of daemonizing")
 	cmd.Flags().Uint32Var(&socketMode, "socket-mode", 0, "Socket file permissions (e.g. 0666); 0 means use default umask")
+	cmd.Flags().StringVar(&listenAddr, "listen", "", "Listen address (e.g. tcp://0.0.0.0:8080); default is Unix socket")
 
 	return cmd
 }

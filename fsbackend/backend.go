@@ -243,7 +243,7 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 			}
 			return fmt.Errorf("format: %w", err)
 		}
-		if err := vol.Flush(ctx); err != nil {
+		if err := vol.Flush(); err != nil {
 			return fmt.Errorf("flush after format: %w", err)
 		}
 	}
@@ -286,7 +286,7 @@ func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
 		vr.UnregisterVolume(entry.vol.Name())
 	}
 
-	return entry.vol.ReleaseRef(ctx)
+	return entry.vol.ReleaseRef()
 }
 
 // Snapshot freezes the filesystem, takes a snapshot, and thaws.
@@ -299,7 +299,7 @@ func (b *Backend) Snapshot(ctx context.Context, mountpoint string, name string) 
 	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
-	err = entry.vol.Snapshot(ctx, name)
+	err = entry.vol.Snapshot(name)
 	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
 		slog.Error("thaw failed after snapshot", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
@@ -322,7 +322,7 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 		return fmt.Errorf("freeze: %w", err)
 	}
 	slog.Debug("backend: frozen, cloning volume", "clone", cloneName)
-	cloneVol, err := entry.vol.Clone(ctx, cloneName)
+	cloneVol, err := entry.vol.Clone(cloneName)
 	slog.Debug("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
 	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
@@ -438,7 +438,7 @@ func (b *Backend) DeviceDetach(ctx context.Context, volume string) error {
 	if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
 		vr.UnregisterVolume(volume)
 	}
-	return vol.ReleaseRef(ctx)
+	return vol.ReleaseRef()
 }
 
 // DeviceSnapshot takes a snapshot of a volume by name (no freeze/thaw).
@@ -447,7 +447,7 @@ func (b *Backend) DeviceSnapshot(ctx context.Context, volume string, snapshot st
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
 	}
-	return vol.Snapshot(ctx, snapshot)
+	return vol.Snapshot(snapshot)
 }
 
 // DeviceClone clones a volume and returns the clone's device path.
@@ -460,7 +460,7 @@ func (b *Backend) DeviceClone(ctx context.Context, volume string, clone string) 
 	if err != nil {
 		return "", err
 	}
-	cloneVol, err := vol.Clone(ctx, clone)
+	cloneVol, err := vol.Clone(clone)
 	if err != nil {
 		return "", err
 	}
@@ -537,17 +537,29 @@ func (b *Backend) Mounts() map[string]string {
 	return cp
 }
 
-// Close unmounts all volumes and releases all resources.
+// Close shuts down all mounted volumes concurrently, then closes drivers and
+// the volume manager. Each volume independently goes through:
+//
+//  1. fsfreeze (quiesce filesystem so no new writes land)
+//  2. flush (persist dirty data to S3)
+//  3. unmount (detach the filesystem)
+//  4. flush again (catch any writes that landed between freeze and unmount)
+//
+// Every step is best-effort: failures are logged but never prevent later steps
+// or other volumes from proceeding.
 func (b *Backend) Close(ctx context.Context) error {
-	var firstErr error
-	for mountpoint := range b.Mounts() {
-		if err := b.Unmount(ctx, mountpoint); err != nil {
-			slog.Warn("unmount failed during close", "mountpoint", mountpoint, "error", err)
-			if firstErr == nil {
-				firstErr = err
-			}
-		}
+	mounts := b.Mounts() // snapshot: mountpoint → volume name
+
+	var wg sync.WaitGroup
+	for mp, vol := range mounts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			b.closeMount(ctx, mp, vol)
+		}()
 	}
+	wg.Wait()
+
 	// Close each unique driver once.
 	closed := make(map[AnyDriver]bool)
 	for _, d := range b.drivers {
@@ -557,18 +569,55 @@ func (b *Backend) Close(ctx context.Context) error {
 		closed[d] = true
 		if err := d.Close(ctx); err != nil {
 			slog.Warn("driver close failed", "error", err)
-			if firstErr == nil {
-				firstErr = err
-			}
 		}
 	}
 	if err := b.vm.Close(ctx); err != nil {
 		slog.Warn("volume manager close failed", "error", err)
-		if firstErr == nil {
-			firstErr = err
-		}
+		return err
 	}
-	return firstErr
+	return nil
+}
+
+// closeMount shuts down a single mount. Every step is best-effort.
+func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
+	b.mu.Lock()
+	entry, ok := b.mounts[mountpoint]
+	b.mu.Unlock()
+	if !ok {
+		return
+	}
+
+	// 1. Freeze — quiesce the filesystem so ext4 flushes its dirty pages
+	//    through FUSE before we flush the volume to S3.
+	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
+		slog.Warn("freeze failed during close", "mountpoint", mountpoint, "error", err)
+	}
+
+	// 2. Flush — persist all dirty data to S3.
+	if err := entry.vol.Flush(); err != nil {
+		slog.Warn("flush failed during close", "volume", volume, "error", err)
+	}
+
+	// 3. Unmount — detach the filesystem and loop device.
+	if err := entry.driver.Unmount(ctx, entry.handle); err != nil {
+		slog.Warn("unmount failed during close", "mountpoint", mountpoint, "error", err)
+	}
+	b.mu.Lock()
+	delete(b.mounts, mountpoint)
+	b.mu.Unlock()
+	if vr, ok := entry.driver.Unwrap().(VolumeRegistrar); ok {
+		vr.UnregisterVolume(volume)
+	}
+
+	// 4. Flush again — catch any writes that squeezed in between freeze and unmount.
+	if err := entry.vol.Flush(); err != nil {
+		slog.Warn("post-unmount flush failed during close", "volume", volume, "error", err)
+	}
+
+	// Release the volume ref (may trigger destroy).
+	if err := entry.vol.ReleaseRef(); err != nil {
+		slog.Warn("release ref failed during close", "volume", volume, "error", err)
+	}
 }
 
 // --- internal ---

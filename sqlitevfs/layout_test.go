@@ -24,7 +24,7 @@ func testVolume(t *testing.T, size uint64) loophole.Volume {
 	m := testManager(t)
 	vol, err := m.NewVolume(t.Context(), t.Name(), size, "")
 	require.NoError(t, err)
-	t.Cleanup(func() { vol.ReleaseRef(t.Context()) })
+	t.Cleanup(func() { vol.ReleaseRef() })
 	return vol
 }
 
@@ -40,7 +40,7 @@ func TestHeaderRoundTrip(t *testing.T) {
 
 	// Update and re-read.
 	h.MainDBSize = 4096
-	require.NoError(t, writeHeader(t.Context(), vol, h))
+	require.NoError(t, writeHeader(vol, h))
 
 	h2, err := ReadHeader(t.Context(), vol)
 	require.NoError(t, err)

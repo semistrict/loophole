@@ -47,8 +47,9 @@ type faultKey struct {
 
 // memStoreShared holds state shared across all sub-scoped MemStores.
 type memStoreShared struct {
-	mu      sync.RWMutex
-	objects map[string][]byte
+	mu       sync.RWMutex
+	objects  map[string][]byte
+	metadata map[string]map[string]string // key → user metadata
 
 	faultMu sync.RWMutex
 	faults  map[faultKey]Fault
@@ -68,8 +69,9 @@ type MemStore struct {
 func NewMemStore() *MemStore {
 	return &MemStore{
 		shared: &memStoreShared{
-			objects: make(map[string][]byte),
-			faults:  make(map[faultKey]Fault),
+			objects:  make(map[string][]byte),
+			metadata: make(map[string]map[string]string),
+			faults:   make(map[faultKey]Fault),
 		},
 	}
 }
@@ -264,7 +266,7 @@ func (m *MemStore) PutReader(_ context.Context, key string, r io.Reader) error {
 	return nil
 }
 
-func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
+func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte, meta ...map[string]string) error {
 	fk := m.fullKey(key)
 	m.count(OpPutIfNotExists)
 	if err := m.checkFault(OpPutIfNotExists, fk); err != nil {
@@ -279,6 +281,13 @@ func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte) er
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.shared.objects[fk] = cp
+	if len(meta) > 0 && meta[0] != nil {
+		mc := make(map[string]string, len(meta[0]))
+		for k, v := range meta[0] {
+			mc[k] = v
+		}
+		m.shared.metadata[fk] = mc
+	}
 	m.shared.mu.Unlock()
 	if err := m.checkPostFault(OpPutIfNotExists, fk); err != nil {
 		return err
@@ -350,6 +359,39 @@ func (m *MemStore) GetRange(_ context.Context, key string, offset, length int64)
 	copy(cp, data[offset:end])
 	m.shared.bytesRx.Add(int64(len(cp)))
 	return io.NopCloser(bytes.NewReader(cp)), etag, nil
+}
+
+func (m *MemStore) HeadMeta(_ context.Context, key string) (map[string]string, error) {
+	fk := m.fullKey(key)
+	m.shared.mu.RLock()
+	defer m.shared.mu.RUnlock()
+	if _, ok := m.shared.objects[fk]; !ok {
+		return nil, fmt.Errorf("%s: %w", fk, ErrNotFound)
+	}
+	meta := m.shared.metadata[fk]
+	if meta == nil {
+		return map[string]string{}, nil
+	}
+	cp := make(map[string]string, len(meta))
+	for k, v := range meta {
+		cp[k] = v
+	}
+	return cp, nil
+}
+
+func (m *MemStore) SetMeta(_ context.Context, key string, meta map[string]string) error {
+	fk := m.fullKey(key)
+	m.shared.mu.Lock()
+	defer m.shared.mu.Unlock()
+	if _, ok := m.shared.objects[fk]; !ok {
+		return fmt.Errorf("%s: %w", fk, ErrNotFound)
+	}
+	cp := make(map[string]string, len(meta))
+	for k, v := range meta {
+		cp[k] = v
+	}
+	m.shared.metadata[fk] = cp
+	return nil
 }
 
 // Keys returns all keys under the given full-key prefix. For test assertions.

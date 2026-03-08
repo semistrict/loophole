@@ -1,3 +1,5 @@
+//go:build !nosqlite
+
 package main
 
 import (
@@ -19,6 +21,10 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/sqlitevfs"
 )
+
+func addDBCommands(root *cobra.Command) {
+	root.AddCommand(dbCmd())
+}
 
 func dbCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -216,7 +222,7 @@ func dbFollowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer func() { _ = vol.ReleaseRef(cmd.Context()) }()
+			defer func() { _ = vol.ReleaseRef() }()
 
 			dbVFS, err := sqlitevfs.NewVolumeVFS(cmd.Context(), vol, sqlitevfs.SyncModeSync)
 			if err != nil {
@@ -383,14 +389,14 @@ func (cfg *replConfig) openDB(name string) error {
 
 	dbVFS, err := sqlitevfs.NewVolumeVFS(cfg.ctx, vol, cfg.syncMode)
 	if err != nil {
-		_ = vol.ReleaseRef(cfg.ctx)
+		_ = vol.ReleaseRef()
 		return err
 	}
 
 	cfg.vfsSeq++
 	vfsName := fmt.Sprintf("loophole-repl-%s-%d", name, cfg.vfsSeq)
 	if err := sqlite3vfs.RegisterVFS(vfsName, dbVFS); err != nil {
-		_ = vol.ReleaseRef(cfg.ctx)
+		_ = vol.ReleaseRef()
 		return fmt.Errorf("register VFS: %w", err)
 	}
 
@@ -400,7 +406,7 @@ func (cfg *replConfig) openDB(name string) error {
 	}
 	sqlDB, err := sql.Open("sqlite3", uri)
 	if err != nil {
-		_ = vol.ReleaseRef(cfg.ctx)
+		_ = vol.ReleaseRef()
 		return fmt.Errorf("open SQLite: %w", err)
 	}
 
@@ -409,7 +415,7 @@ func (cfg *replConfig) openDB(name string) error {
 	cfg.name = name
 	cfg.cleanup = func() {
 		util.SafeClose(sqlDB, "close repl db")
-		_ = vol.ReleaseRef(cfg.ctx)
+		_ = vol.ReleaseRef()
 	}
 	return nil
 }

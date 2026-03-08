@@ -34,7 +34,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 
 	// Fill the memtable to near capacity so the next write triggers errMemtableFull.
 	page0 := bytes.Repeat([]byte{0xAA}, PageSize)
-	require.NoError(t, ly.Write(ctx, page0, 0))
+	require.NoError(t, ly.Write(page0, 0))
 
 	// Now race two writes to the SAME page (page 0).
 	// Writer A will fill the last slot, trigger freeze, and retry.
@@ -51,8 +51,8 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 		// Writer A writes page 1 to fill the memtable, then writes page 0.
 		// The page 0 write will likely hit errMemtableFull and retry.
 		filler := bytes.Repeat([]byte{0xDD}, PageSize)
-		_ = ly.Write(ctx, filler, PageSize) // page 1 — fills memtable
-		err := ly.Write(ctx, writerA, 0)    // page 0 — may trigger retry
+		_ = ly.Write(filler, PageSize) // page 1 — fills memtable
+		err := ly.Write(writerA, 0)    // page 0 — may trigger retry
 		assert.NoError(t, err)
 		writerADone.Store(true)
 	}()
@@ -60,7 +60,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Writer B writes page 0 concurrently.
-		err := ly.Write(ctx, writerB, 0)
+		err := ly.Write(writerB, 0)
 		assert.NoError(t, err)
 		writerBDone.Store(true)
 	}()
@@ -155,7 +155,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 
 	// Write a page so there's data to read.
 	page := bytes.Repeat([]byte{0xEE}, PageSize)
-	require.NoError(t, ly.Write(ctx, page, 0))
+	require.NoError(t, ly.Write(page, 0))
 
 	var wg sync.WaitGroup
 	const iterations = 1000
@@ -166,8 +166,8 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 		defer wg.Done()
 		for range iterations {
 			newPage := bytes.Repeat([]byte{0xFF}, PageSize)
-			_ = ly.Write(ctx, newPage, PageSize) // write to page 1
-			_ = ly.Flush(ctx)
+			_ = ly.Write(newPage, PageSize) // write to page 1
+			_ = ly.Flush()
 		}
 	}()
 
@@ -217,7 +217,7 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 
 	// Write a distinctive value to page 0.
 	expected := bytes.Repeat([]byte{0x42}, PageSize)
-	require.NoError(t, ly.Write(ctx, expected, 0))
+	require.NoError(t, ly.Write(expected, 0))
 
 	var wg sync.WaitGroup
 	var zeroReads atomic.Int64
@@ -230,8 +230,8 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 		for range iterations {
 			// Write something to trigger a non-empty flush.
 			filler := bytes.Repeat([]byte{0x99}, PageSize)
-			_ = ly.Write(ctx, filler, PageSize) // page 1
-			_ = ly.Flush(ctx)
+			_ = ly.Write(filler, PageSize) // page 1
+			_ = ly.Flush()
 		}
 	}()
 
@@ -311,7 +311,7 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 
 	// Write page 0 with known data.
 	expected := bytes.Repeat([]byte{0x42}, PageSize)
-	require.NoError(t, ly.Write(ctx, expected, 0))
+	require.NoError(t, ly.Write(expected, 0))
 
 	// Take a snapshot that includes the current memtable.
 	snap := ly.snapshotLayers()
@@ -323,7 +323,7 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 
 	// Now flush — this freezes the memtable, uploads L0, then cleans up
 	// the frozen memtable (munmaps it).
-	require.NoError(t, ly.Flush(ctx))
+	require.NoError(t, ly.Flush())
 
 	// The snapshot still holds a reference to the old (now cleaned up) memtable.
 	// readPageWith should handle errmemtableCleanedUp gracefully and find the
