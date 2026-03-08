@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/metrics"
 )
 
 var _ loophole.Volume = (*volume)(nil)
@@ -54,7 +55,23 @@ func (v *volume) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 }
 
 func (v *volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
-	// No zero-copy path yet — allocate and copy.
+	pageIdx, pageOff := PageIdxOf(offset)
+
+	// Fast path: single full page, page-aligned — zero-copy.
+	if pageOff == 0 && n == PageSize {
+		metrics.ReadAtZeroCopy.Inc()
+		v.mu.RLock()
+		snap := v.layer.snapshotLayers()
+		data, release, err := v.layer.readPagePinned(ctx, &snap, pageIdx)
+		v.mu.RUnlock()
+		if err != nil {
+			return nil, nil, err
+		}
+		return data, release, nil
+	}
+
+	// Slow path: sub-page, cross-page, or non-aligned — allocate and copy.
+	metrics.ReadAtCopy.Inc()
 	buf := make([]byte, n)
 	v.mu.RLock()
 	got, err := v.layer.Read(ctx, buf, offset)
@@ -182,7 +199,9 @@ func (v *volume) Freeze(ctx context.Context) error {
 }
 
 func (v *volume) Refresh(ctx context.Context) error {
-	return nil
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	return v.layer.refresh(ctx)
 }
 
 func (v *volume) AcquireRef() error {

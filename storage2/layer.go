@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/metrics"
 )
 
 // layerMeta is the S3-persisted metadata for a layer.
@@ -45,11 +46,13 @@ type layer struct {
 	flushMu      sync.Mutex // serializes flushFrozenTables
 	compactMu    sync.Mutex // serializes compaction
 
-	// L0 cache: parsed L0 files keyed by S3 key.
-	l0Cache sync.Map // string → *parsedL0
+	// L0 cache: parsed L0 files keyed by S3 key (bounded).
+	l0Cache  boundedCache[*parsedL0]
+	l0Flight singleflight[*parsedL0]
 
-	// Block header cache: parsed block headers keyed by S3 key.
-	blockCache sync.Map // string → *parsedBlock
+	// Block header cache: parsed block headers keyed by S3 key (bounded).
+	blockCache  boundedCache[*parsedBlock]
+	blockFlight singleflight[*parsedBlock]
 
 	// L1/L2 range maps (rebuilt from index on load).
 	l1Map *blockRangeMap
@@ -97,6 +100,8 @@ func openLayer(ctx context.Context, store loophole.ObjectStore, id string, confi
 		diskCache:  diskCache,
 		cacheDir:   cacheDir,
 	}
+	ly.l0Cache.init(config.MaxCacheEntries)
+	ly.blockCache.init(config.MaxCacheEntries)
 
 	// Load index.json.
 	if err := ly.loadIndex(ctx); err != nil {
@@ -132,6 +137,33 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 	ly.nextSeq.Store(idx.NextSeq)
 	ly.l1Map = newBlockRangeMap(idx.L1)
 	ly.l2Map = newBlockRangeMap(idx.L2)
+	return nil
+}
+
+// refresh re-reads index.json from S3 to pick up changes written by
+// another writer. Used for read-only "follow" mode.
+func (ly *layer) refresh(ctx context.Context) error {
+	idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	if err != nil {
+		return fmt.Errorf("refresh index: %w", err)
+	}
+
+	l1Map := newBlockRangeMap(idx.L1)
+	l2Map := newBlockRangeMap(idx.L2)
+
+	ly.mu.Lock()
+	ly.index = idx
+	if idx.NextSeq > ly.nextSeq.Load() {
+		ly.nextSeq.Store(idx.NextSeq)
+	}
+	ly.l1Map = l1Map
+	ly.l2Map = l2Map
+	ly.mu.Unlock()
+
+	// Clear parsed caches — stale entries may reference replaced blobs.
+	ly.l0Cache.clear()
+	ly.blockCache.clear()
+
 	return nil
 }
 
@@ -189,6 +221,48 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 		total += n
 	}
 	return total, nil
+}
+
+// readPagePinned returns a zero-copy slice for a single page-aligned read.
+// The returned release function must be called when the caller is done.
+// Falls back to allocating for S3-sourced data.
+func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, func(), error) {
+	// 1. Active memtable — zero-copy.
+	staleSnapshot := false
+	if entry, ok := snap.memtable.get(pageIdx); ok {
+		data, release, err := snap.memtable.readDataPinned(entry)
+		if err == nil {
+			return data, release, nil
+		}
+		staleSnapshot = true
+	}
+
+	// 2. Frozen memtables — zero-copy.
+	for i := len(snap.frozen) - 1; i >= 0; i-- {
+		if entry, ok := snap.frozen[i].get(pageIdx); ok {
+			data, release, err := snap.frozen[i].readDataPinned(entry)
+			if err == nil {
+				return data, release, nil
+			}
+			staleSnapshot = true
+			break
+		}
+	}
+
+	// 3. Page cache — zero-copy.
+	if ly.diskCache != nil {
+		if data, release := ly.diskCache.GetPagePinned(ly.pageCacheKey(pageIdx)); data != nil {
+			return data, release, nil
+		}
+	}
+
+	// 4+. L0/L1/L2/zeros — allocating path (data comes from S3 or is zeros).
+	_ = staleSnapshot // readPageWith handles stale snapshot refresh internally
+	data, err := ly.readPageWith(ctx, snap, pageIdx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, func() {}, nil
 }
 
 // readPageWith reads a single page using a pre-captured layer snapshot.
@@ -320,29 +394,35 @@ func (ly *layer) readFromL0(ctx context.Context, l0e *l0Entry, pageIdx PageIdx) 
 }
 
 func (ly *layer) getParsedL0(ctx context.Context, l0e *l0Entry) (*parsedL0, error) {
-	if cached, ok := ly.l0Cache.Load(l0e.Key); ok {
-		return cached.(*parsedL0), nil
+	if cached, ok := ly.l0Cache.get(l0e.Key); ok {
+		return cached, nil
 	}
 
-	body, _, err := ly.store.Get(ctx, l0e.Key)
-	if err != nil {
-		return nil, fmt.Errorf("get L0 %s: %w", l0e.Key, err)
-	}
-	data, err := readAll(body)
-	if err != nil {
-		return nil, fmt.Errorf("read L0 %s: %w", l0e.Key, err)
-	}
+	return ly.l0Flight.do(l0e.Key, func() (*parsedL0, error) {
+		// Double-check after winning the singleflight race.
+		if cached, ok := ly.l0Cache.get(l0e.Key); ok {
+			return cached, nil
+		}
 
-	p, err := parseL0(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse L0 %s: %w", l0e.Key, err)
-	}
-	// For range reads, set the store and key.
-	p.store = ly.store
-	p.key = l0e.Key
+		body, _, err := ly.store.Get(ctx, l0e.Key)
+		if err != nil {
+			return nil, fmt.Errorf("get L0 %s: %w", l0e.Key, err)
+		}
+		data, err := readAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("read L0 %s: %w", l0e.Key, err)
+		}
 
-	ly.l0Cache.Store(l0e.Key, p)
-	return p, nil
+		p, err := parseL0(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse L0 %s: %w", l0e.Key, err)
+		}
+		p.store = ly.store
+		p.key = l0e.Key
+
+		ly.l0Cache.put(l0e.Key, p)
+		return p, nil
+	})
 }
 
 // readFromBlock reads a page from an L1 or L2 block.
@@ -358,28 +438,33 @@ func (ly *layer) readFromBlock(ctx context.Context, level, layerID string, pageI
 }
 
 func (ly *layer) getParsedBlock(ctx context.Context, key string) (*parsedBlock, error) {
-	if cached, ok := ly.blockCache.Load(key); ok {
-		return cached.(*parsedBlock), nil
+	if cached, ok := ly.blockCache.get(key); ok {
+		return cached, nil
 	}
 
-	// Download full block. In production we'd fetch header+dict+index only
-	// and use GetRange for individual pages, but for now download the whole thing.
-	body, _, err := ly.store.Get(ctx, key)
-	if err != nil {
-		return nil, fmt.Errorf("get block %s: %w", key, err)
-	}
-	data, err := readAll(body)
-	if err != nil {
-		return nil, fmt.Errorf("read block %s: %w", key, err)
-	}
+	return ly.blockFlight.do(key, func() (*parsedBlock, error) {
+		// Double-check after winning the singleflight race.
+		if cached, ok := ly.blockCache.get(key); ok {
+			return cached, nil
+		}
 
-	pb, err := parseBlock(data)
-	if err != nil {
-		return nil, fmt.Errorf("parse block %s: %w", key, err)
-	}
+		body, _, err := ly.store.Get(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("get block %s: %w", key, err)
+		}
+		data, err := readAll(body)
+		if err != nil {
+			return nil, fmt.Errorf("read block %s: %w", key, err)
+		}
 
-	ly.blockCache.Store(key, pb)
-	return pb, nil
+		pb, err := parseBlock(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse block %s: %w", key, err)
+		}
+
+		ly.blockCache.put(key, pb)
+		return pb, nil
+	})
 }
 
 // Write writes data to the layer at the given byte offset.
@@ -628,12 +713,14 @@ func (ly *layer) flushMemtable(ctx context.Context, mt *memtable, maxRetries int
 		slog.Warn("retrying L0 upload", "key", l0entry.Key, "attempt", attempt+1, "error", err)
 	}
 
+	metrics.FlushBytes.Add(float64(len(data)))
+
 	// Pre-cache the parsed L0.
 	p, _ := parseL0(data)
 	if p != nil {
 		p.store = ly.store
 		p.key = l0entry.Key
-		ly.l0Cache.Store(l0entry.Key, p)
+		ly.l0Cache.put(l0entry.Key, p)
 	}
 
 	// Update page cache with flushed data so L0 reads hit the cache.
@@ -987,7 +1074,7 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 		// Cache the new block.
 		pb, _ := parseBlock(blockData)
 		if pb != nil {
-			ly.blockCache.Store(key, pb)
+			ly.blockCache.put(key, pb)
 		}
 	}
 
@@ -1049,7 +1136,7 @@ func (ly *layer) promoteL1toL2(ctx context.Context, blockAddr BlockIdx, l1Pages 
 	// Cache new block.
 	pb, _ := parseBlock(blockData)
 	if pb != nil {
-		ly.blockCache.Store(key, pb)
+		ly.blockCache.put(key, pb)
 	}
 
 	return nil

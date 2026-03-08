@@ -166,6 +166,24 @@ func (mt *memtable) readData(e memEntry) ([]byte, error) {
 	return buf, nil
 }
 
+// readDataPinned returns a zero-copy slice into the mmap and a release
+// function that must be called when the caller is done with the data.
+// The pin prevents cleanup (munmap) until released.
+func (mt *memtable) readDataPinned(e memEntry) ([]byte, func(), error) {
+	if e.tombstone {
+		return zeroPage[:], func() {}, nil
+	}
+
+	mt.pins.Add(1)
+	if mt.closed.Load() {
+		mt.pins.Add(-1)
+		return nil, nil, errmemtableCleanedUp
+	}
+
+	off := e.slot * PageSize
+	return mt.mmap[off : off+PageSize], func() { mt.pins.Add(-1) }, nil
+}
+
 func (mt *memtable) freeze(endSeq uint64) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
