@@ -40,9 +40,10 @@ type Manager struct {
 
 	volRefs loophole.ObjectStore // store.At("volumes")
 
-	mu        sync.Mutex
-	volumes   map[string]*volume
-	onRelease func(ctx context.Context, volumeName string)
+	mu         sync.Mutex
+	volumes    map[string]*volume
+	openFlight singleflight[*volume]
+	onRelease  func(ctx context.Context, volumeName string)
 }
 
 // LocalFS abstracts local filesystem operations for memtable backing files.
@@ -124,11 +125,25 @@ func (m *Manager) OpenVolume(ctx context.Context, name string) (loophole.Volume,
 	}
 	m.mu.Unlock()
 
-	ref, err := m.getVolumeRef(ctx, name)
+	v, err := m.openFlight.do(name, func() (*volume, error) {
+		// Re-check under singleflight in case another caller just opened it.
+		m.mu.Lock()
+		if v, ok := m.volumes[name]; ok {
+			m.mu.Unlock()
+			return v, nil
+		}
+		m.mu.Unlock()
+
+		ref, err := m.getVolumeRef(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve volume %q: %w", name, err)
+		}
+		return m.openVolume(ctx, name, ref)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("resolve volume %q: %w", name, err)
+		return nil, err
 	}
-	return m.openVolume(ctx, name, ref)
+	return v, nil
 }
 
 func (m *Manager) GetVolume(name string) loophole.Volume {

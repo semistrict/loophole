@@ -15,8 +15,17 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/metrics"
 )
+
+func promCounterValue(c prometheus.Counter) float64 {
+	var m dto.Metric
+	_ = c.(prometheus.Metric).Write(&m)
+	return m.GetCounter().GetValue()
+}
 
 // testManager creates a Manager backed by a MemStore for testing.
 // The manager is automatically closed when the test finishes.
@@ -2722,4 +2731,374 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 			t.Fatalf("page 1: expected 0xBB, got 0x%02X", buf[0])
 		}
 	})
+}
+
+// TestSingleflightDeduplicatesL0Downloads verifies that concurrent reads
+// for the same uncached L0 blob only trigger one S3 download.
+func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write and flush to create L0.
+	page := make([]byte, PageSize)
+	page[0] = 0xCC
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clear the in-memory L0 cache to force re-download.
+	vol := v.(*volume)
+	vol.layer.l0Cache.clear()
+
+	// Record S3 Get count before concurrent reads.
+	getBefore := store.Count(loophole.OpGet)
+
+	// Launch concurrent reads for the same page (same L0 blob).
+	var wg sync.WaitGroup
+	errs := make([]error, 10)
+	for i := range 10 {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			buf := make([]byte, PageSize)
+			_, errs[idx] = v.Read(ctx, buf, 0)
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+	}
+
+	// Without singleflight, we'd see up to 10 Gets. With it, should be ≤2
+	// (1 for the L0 blob + possibly 1 for index.json or other metadata).
+	getAfter := store.Count(loophole.OpGet)
+	gets := getAfter - getBefore
+	if gets > 2 {
+		t.Fatalf("expected ≤2 S3 Gets with singleflight, got %d", gets)
+	}
+}
+
+// TestBoundedCacheEviction verifies that the L0/block caches don't
+// grow beyond MaxCacheEntries.
+func TestBoundedCacheEviction(t *testing.T) {
+	var c boundedCache[int]
+	c.init(3)
+
+	c.put("a", 1)
+	c.put("b", 2)
+	c.put("c", 3)
+
+	// All three should be present.
+	for _, k := range []string{"a", "b", "c"} {
+		if _, ok := c.get(k); !ok {
+			t.Fatalf("expected key %q to be present", k)
+		}
+	}
+
+	// Adding a 4th should evict one.
+	c.put("d", 4)
+	c.mu.RLock()
+	n := len(c.entries)
+	c.mu.RUnlock()
+	if n != 3 {
+		t.Fatalf("expected 3 entries after eviction, got %d", n)
+	}
+
+	// "d" should always be present (never evicts the just-inserted key).
+	if _, ok := c.get("d"); !ok {
+		t.Fatal("expected key 'd' to be present after insert")
+	}
+}
+
+// TestRefreshFollowMode verifies that a reader can see data written by
+// another writer after calling Refresh().
+func TestRefreshFollowMode(t *testing.T) {
+	store := loophole.NewMemStore()
+	ctx := t.Context()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+
+	// Writer creates a volume and writes data.
+	writer := newTestManager(t, store, cfg)
+	wv, err := writer.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	page[0] = 0xDD
+	if err := wv.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := wv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reader opens the same layer directly (simulating read-only follower).
+	writerVol := wv.(*volume)
+	readerLayer, err := openLayer(ctx, store, writerVol.layer.id, cfg, nil, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readerLayer.Close()
+
+	// Reader should see the flushed data (loaded from index.json on open).
+	buf := make([]byte, PageSize)
+	if _, err := readerLayer.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xDD {
+		t.Fatalf("expected 0xDD on initial open, got 0x%02X", buf[0])
+	}
+
+	// Writer writes more data and flushes.
+	page[0] = 0xEE
+	if err := wv.Write(ctx, page, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := wv.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reader doesn't see new data before refresh.
+	buf2 := make([]byte, PageSize)
+	if _, err := readerLayer.Read(ctx, buf2, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf2[0] == 0xEE {
+		t.Fatal("reader should not see new data before refresh()")
+	}
+
+	// After refresh, reader sees the new data.
+	if err := readerLayer.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readerLayer.Read(ctx, buf2, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf2[0] != 0xEE {
+		t.Fatalf("expected 0xEE after refresh, got 0x%02X", buf2[0])
+	}
+}
+
+// TestFlushReportsMetrics verifies that FlushBytes metric is incremented.
+func TestFlushReportsMetrics(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read current metric value.
+	before := promCounterValue(metrics.FlushBytes)
+
+	page := make([]byte, PageSize)
+	page[0] = 0xFF
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	after := promCounterValue(metrics.FlushBytes)
+	if after <= before {
+		t.Fatalf("expected FlushBytes to increase, before=%f after=%f", before, after)
+	}
+}
+
+// TestReadAtZeroCopyMemtable verifies that ReadAt returns a pinned
+// zero-copy slice when reading a page-aligned full page from the memtable.
+func TestReadAtZeroCopyMemtable(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  64 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a page.
+	page := make([]byte, PageSize)
+	page[0] = 0xAA
+	page[PageSize-1] = 0xBB
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// ReadAt page-aligned full page — should be zero-copy from memtable.
+	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if len(data) != PageSize {
+		t.Fatalf("expected %d bytes, got %d", PageSize, len(data))
+	}
+	if data[0] != 0xAA {
+		t.Fatalf("expected 0xAA, got 0x%02X", data[0])
+	}
+	if data[PageSize-1] != 0xBB {
+		t.Fatalf("expected 0xBB, got 0x%02X", data[PageSize-1])
+	}
+}
+
+// TestReadAtZeroCopyAfterFlush verifies that ReadAt works after data
+// has been flushed to L0 (falls back to allocating path).
+func TestReadAtZeroCopyAfterFlush(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	page[0] = 0xCC
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// ReadAt after flush — data comes from L0/cache.
+	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if data[0] != 0xCC {
+		t.Fatalf("expected 0xCC, got 0x%02X", data[0])
+	}
+}
+
+// TestReadAtSubPageFallback verifies that sub-page or unaligned ReadAt
+// falls back to the allocating path correctly.
+func TestReadAtSubPageFallback(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  64 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	for i := range page {
+		page[i] = byte(i % 256)
+	}
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sub-page read at offset 100, length 200.
+	data, release, err := v.ReadAt(ctx, 100, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if len(data) != 200 {
+		t.Fatalf("expected 200 bytes, got %d", len(data))
+	}
+	for i := range 200 {
+		expected := byte((100 + i) % 256)
+		if data[i] != expected {
+			t.Fatalf("byte %d: expected 0x%02X, got 0x%02X", i, expected, data[i])
+			break
+		}
+	}
+}
+
+// TestReadAtPinPreventsCleanup verifies that a pinned read prevents
+// memtable cleanup until released.
+func TestReadAtPinPreventsCleanup(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  PageSize, // freeze after 1 page
+		MaxFrozenTables: 10,
+		FlushInterval:   -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	page[0] = 0xDD
+	if err := v.Write(ctx, page, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pin the page via ReadAt before flushing.
+	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Flush — this freezes and flushes the memtable.
+	if err := v.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// Data should still be valid while pinned.
+	if data[0] != 0xDD {
+		t.Fatalf("expected 0xDD while pinned, got 0x%02X", data[0])
+	}
+
+	// Release the pin.
+	release()
 }

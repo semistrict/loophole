@@ -137,6 +137,10 @@ type Config struct {
 	// FlushInterval is how often the background goroutine flushes dirty
 	// memtables to S3. 0 = default (30s). Negative = disabled.
 	FlushInterval time.Duration
+
+	// MaxCacheEntries caps the number of in-memory parsed L0/block entries.
+	// 0 = default (256).
+	MaxCacheEntries int
 }
 
 func (c *Config) setDefaults() {
