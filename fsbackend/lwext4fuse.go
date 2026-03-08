@@ -1,4 +1,4 @@
-//go:build !js
+//go:build !js && !nolwext4
 
 package fsbackend
 

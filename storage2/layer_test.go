@@ -50,7 +50,7 @@ func TestLayerReadWrite(t *testing.T) {
 
 	// Write some data.
 	data := bytes.Repeat([]byte("hello world!"), 400)
-	require.NoError(t, ly.Write(ctx, data, 0))
+	require.NoError(t, ly.Write(data, 0))
 
 	// Read it back.
 	buf := make([]byte, len(data))
@@ -85,8 +85,8 @@ func TestLayerFlushAndReadFromL0(t *testing.T) {
 	for i := range page {
 		page[i] = byte(i % 251)
 	}
-	require.NoError(t, ly.Write(ctx, page, 0))
-	require.NoError(t, ly.Flush(ctx))
+	require.NoError(t, ly.Write(page, 0))
+	require.NoError(t, ly.Flush())
 
 	// Read back — should come from L0 now.
 	buf := make([]byte, PageSize)
@@ -112,10 +112,10 @@ func TestLayerPunchHole(t *testing.T) {
 
 	// Write 2 pages.
 	data := bytes.Repeat([]byte{0xFF}, 2*PageSize)
-	require.NoError(t, ly.Write(ctx, data, 0))
+	require.NoError(t, ly.Write(data, 0))
 
 	// Punch hole over the first page.
-	require.NoError(t, ly.PunchHole(ctx, 0, PageSize))
+	require.NoError(t, ly.PunchHole(0, PageSize))
 
 	// First page should be zeros.
 	buf := make([]byte, PageSize)
@@ -152,11 +152,11 @@ func TestLayerCompactL0(t *testing.T) {
 			page[j] = byte((i + j) % 256)
 		}
 		pageAddr := uint64(i)
-		require.NoError(t, ly.Write(ctx, page, pageAddr*PageSize))
+		require.NoError(t, ly.Write(page, pageAddr*PageSize))
 		expected[pageAddr] = page
 	}
 
-	require.NoError(t, ly.Flush(ctx))
+	require.NoError(t, ly.Flush())
 
 	ly.mu.RLock()
 	l0Count := len(ly.index.L0)
@@ -195,10 +195,10 @@ func TestLayerSnapshot(t *testing.T) {
 	for i := range page {
 		page[i] = byte(i % 200)
 	}
-	require.NoError(t, parent.Write(ctx, page, 0))
+	require.NoError(t, parent.Write(page, 0))
 
 	// Snapshot → child.
-	require.NoError(t, parent.Snapshot(ctx, "child"))
+	require.NoError(t, parent.Snapshot("child"))
 
 	// Open child layer and verify it can read the data.
 	child, err := openLayer(ctx, store, "child", cfg, nil, t.TempDir())
@@ -213,7 +213,7 @@ func TestLayerSnapshot(t *testing.T) {
 
 	// Write new data to child — should not affect parent.
 	newPage := bytes.Repeat([]byte{0xAB}, PageSize)
-	require.NoError(t, child.Write(ctx, newPage, 0))
+	require.NoError(t, child.Write(newPage, 0))
 
 	// Reopen parent to verify L0 data persisted.
 	parent2, err := openLayer(ctx, store, "parent", cfg, nil, t.TempDir())

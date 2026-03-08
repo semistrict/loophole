@@ -29,6 +29,7 @@ RUN apt-get update && apt-get install -y \
     procps \
     iproute2 \
     curl \
+    busybox-static \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx

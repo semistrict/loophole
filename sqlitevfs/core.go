@@ -88,7 +88,7 @@ func (c *fileCore) FlushHeader() error {
 	walData := c.wal.snapshot()
 	walSize := uint64(len(walData))
 	if walSize > 0 {
-		if err := c.vol.Write(context.Background(), walData, c.vol.Size()-walSize); err != nil {
+		if err := c.vol.Write(walData, c.vol.Size()-walSize); err != nil {
 			return fmt.Errorf("persist WAL: %w", err)
 		}
 	}
@@ -100,7 +100,7 @@ func (c *fileCore) FlushHeader() error {
 	if !c.dirty {
 		return nil
 	}
-	if err := writeHeader(context.Background(), c.vol, c.header); err != nil {
+	if err := writeHeader(c.vol, c.header); err != nil {
 		return err
 	}
 	c.dirty = false
@@ -210,7 +210,7 @@ func (c *fileCore) WriteFile(fileID int, p []byte, offset int64) error {
 	if offset+int64(len(p)) > volCap {
 		return errVolumeFull
 	}
-	if err := c.vol.Write(context.Background(), p, mainDBOffset+uint64(offset)); err != nil {
+	if err := c.vol.Write(p, mainDBOffset+uint64(offset)); err != nil {
 		return fmt.Errorf("write at %d: %w", offset, err)
 	}
 
@@ -256,7 +256,7 @@ func (c *fileCore) TruncateFile(fileID int, size int64) error {
 	c.mu.Unlock()
 
 	if uint64(size) < oldSize {
-		if err := c.vol.PunchHole(context.Background(), mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
+		if err := c.vol.PunchHole(mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
 			return fmt.Errorf("truncate punch hole: %w", err)
 		}
 	}
@@ -270,7 +270,7 @@ func (c *fileCore) SyncFile() error {
 	if err := c.FlushHeader(); err != nil {
 		return err
 	}
-	return c.vol.Flush(context.Background())
+	return c.vol.Flush()
 }
 
 func (c *fileCore) DeleteFile(filename string) error {
@@ -286,7 +286,7 @@ func (c *fileCore) DeleteFile(filename string) error {
 			return nil
 		}
 		if c.header.MainDBSize > 0 {
-			if err := c.vol.PunchHole(context.Background(), mainDBOffset, c.header.MainDBSize); err != nil {
+			if err := c.vol.PunchHole(mainDBOffset, c.header.MainDBSize); err != nil {
 				return err
 			}
 		}

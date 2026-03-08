@@ -19,17 +19,12 @@ import (
 	"github.com/semistrict/loophole/metrics"
 )
 
-// layerMeta is the S3-persisted metadata for a layer.
-type layerMeta struct {
-	CreatedAt string `json:"created_at"`
-}
-
 // layer is a writable storage layer backed by a tiered LSM.
 // Data flows: memtable → frozen memtables → L0 → L1 → L2 → zeros.
 type layer struct {
 	id         string
 	store      loophole.ObjectStore // global root (for reading blobs by full key)
-	layerStore loophole.ObjectStore // rooted at layers/<id>/ (for index.json, meta.json)
+	layerStore loophole.ObjectStore // rooted at layers/<id>/ (for index.json)
 
 	config    Config
 	diskCache *PageCache
@@ -120,6 +115,70 @@ func openLayer(ctx context.Context, store loophole.ObjectStore, id string, confi
 	ly.memtable = mt
 
 	return ly, nil
+}
+
+// openFrozenLayer loads a frozen (immutable) layer. Reads index.json but
+// creates no memtable.
+func openFrozenLayer(ctx context.Context, store loophole.ObjectStore, id string, config Config, diskCache *PageCache) (*layer, error) {
+	idx, _, err := loophole.ReadJSON[layerIndex](ctx, store.At("layers/"+id), "index.json")
+	if err != nil {
+		return nil, fmt.Errorf("read frozen layer index: %w", err)
+	}
+	return initFrozenLayerFromIndex(store, id, config, diskCache, idx), nil
+}
+
+// initLayerFromIndex creates a mutable layer from a pre-loaded index.
+// No S3 reads — the caller already has the index. Used by Clone to avoid
+// re-reading the child index that was just written.
+func initLayerFromIndex(store loophole.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string, idx layerIndex) (*layer, error) {
+	config.setDefaults()
+	ly := &layer{
+		id:         id,
+		store:      store,
+		layerStore: store.At("layers/" + id),
+		config:     config,
+		diskCache:  diskCache,
+		cacheDir:   cacheDir,
+	}
+	ly.l0Cache.init(config.MaxCacheEntries)
+	ly.blockCache.init(config.MaxCacheEntries)
+
+	ly.index = idx
+	ly.nextSeq.Store(idx.NextSeq)
+	ly.l1Map = newBlockRangeMap(idx.L1)
+	ly.l2Map = newBlockRangeMap(idx.L2)
+
+	memDir := filepath.Join(cacheDir, "mem")
+	if err := ensureDir(memDir); err != nil {
+		return nil, fmt.Errorf("create mem dir: %w", err)
+	}
+	mt, err := newMemtable(memDir, ly.nextSeq.Load(), config.maxMemtablePages())
+	if err != nil {
+		return nil, fmt.Errorf("create memtable: %w", err)
+	}
+	ly.memtable = mt
+	return ly, nil
+}
+
+// initFrozenLayerFromIndex creates a frozen (immutable) layer from a pre-loaded
+// index. No S3 reads required — the caller already has the index.
+func initFrozenLayerFromIndex(store loophole.ObjectStore, id string, config Config, diskCache *PageCache, idx layerIndex) *layer {
+	config.setDefaults()
+	ly := &layer{
+		id:         id,
+		store:      store,
+		layerStore: store.At("layers/" + id),
+		config:     config,
+		diskCache:  diskCache,
+	}
+	ly.l0Cache.init(config.MaxCacheEntries)
+	ly.blockCache.init(config.MaxCacheEntries)
+
+	ly.index = idx
+	ly.nextSeq.Store(idx.NextSeq)
+	ly.l1Map = newBlockRangeMap(idx.L1)
+	ly.l2Map = newBlockRangeMap(idx.L2)
+	return ly
 }
 
 func (ly *layer) loadIndex(ctx context.Context) error {
@@ -227,14 +286,16 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 // The returned release function must be called when the caller is done.
 // Falls back to allocating for S3-sourced data.
 func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, func(), error) {
-	// 1. Active memtable — zero-copy.
+	// 1. Active memtable — zero-copy (nil for frozen layers).
 	staleSnapshot := false
-	if entry, ok := snap.memtable.get(pageIdx); ok {
-		data, release, err := snap.memtable.readDataPinned(entry)
-		if err == nil {
-			return data, release, nil
+	if snap.memtable != nil {
+		if entry, ok := snap.memtable.get(pageIdx); ok {
+			data, release, err := snap.memtable.readDataPinned(entry)
+			if err == nil {
+				return data, release, nil
+			}
+			staleSnapshot = true
 		}
-		staleSnapshot = true
 	}
 
 	// 2. Frozen memtables — zero-copy.
@@ -267,18 +328,20 @@ func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageId
 
 // readPageWith reads a single page using a pre-captured layer snapshot.
 func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, error) {
-	// 1. Active memtable.
+	// 1. Active memtable (nil for frozen layers).
 	staleSnapshot := false
-	if entry, ok := snap.memtable.get(pageIdx); ok {
-		if entry.tombstone {
-			return zeroPage[:], nil
+	if snap.memtable != nil {
+		if entry, ok := snap.memtable.get(pageIdx); ok {
+			if entry.tombstone {
+				return zeroPage[:], nil
+			}
+			data, err := snap.memtable.readData(entry)
+			if err == nil {
+				return data, nil
+			}
+			// Memtable was cleaned up — its data was flushed to L0.
+			staleSnapshot = true
 		}
-		data, err := snap.memtable.readData(entry)
-		if err == nil {
-			return data, nil
-		}
-		// Memtable was cleaned up — its data was flushed to L0.
-		staleSnapshot = true
 	}
 
 	// 2. Frozen memtables (newest first).
@@ -468,16 +531,13 @@ func (ly *layer) getParsedBlock(ctx context.Context, key string) (*parsedBlock, 
 }
 
 // Write writes data to the layer at the given byte offset.
-func (ly *layer) Write(ctx context.Context, data []byte, offset uint64) error {
+func (ly *layer) Write(data []byte, offset uint64) error {
 	written := 0
 	for written < len(data) {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		pageIdx, pageOff := PageIdxOf(offset + uint64(written))
 		chunk := min(uint64(len(data)-written), PageSize-pageOff)
 
-		if err := ly.writePage(ctx, pageIdx, pageOff, data[written:written+int(chunk)]); err != nil {
+		if err := ly.writePage(pageIdx, pageOff, data[written:written+int(chunk)]); err != nil {
 			return err
 		}
 		written += int(chunk)
@@ -485,7 +545,8 @@ func (ly *layer) Write(ctx context.Context, data []byte, offset uint64) error {
 	return nil
 }
 
-func (ly *layer) writePage(ctx context.Context, pageIdx PageIdx, pageOff uint64, chunk []byte) error {
+func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error {
+	ctx := context.Background()
 	pageLock := ly.pageLock(pageIdx)
 	pageLock.Lock()
 
@@ -514,7 +575,7 @@ func (ly *layer) writePage(ctx context.Context, pageIdx PageIdx, pageOff uint64,
 
 	// Backpressure: if the memtable is full, freeze and flush.
 	for errors.Is(err, errMemtableFull) {
-		if err := ly.maybeFreezeAndFlush(ctx); err != nil {
+		if err := ly.maybeFreezeAndFlush(); err != nil {
 			return err
 		}
 		ly.mu.RLock()
@@ -539,14 +600,14 @@ func (ly *layer) writePage(ctx context.Context, pageIdx PageIdx, pageOff uint64,
 	nfrozen := len(ly.frozenTables)
 	ly.frozenMu.RUnlock()
 	if nfrozen >= ly.config.MaxFrozenTables {
-		if err := ly.flushFrozenTables(ctx); err != nil {
+		if err := ly.flushFrozenTables(); err != nil {
 			return err
 		}
 	}
 
 	// Check if memtable needs freezing.
 	if mt.size.Load() >= ly.config.FlushThreshold {
-		if err := ly.maybeFreezeAndFlush(ctx); err != nil {
+		if err := ly.maybeFreezeAndFlush(); err != nil {
 			return err
 		}
 	}
@@ -555,7 +616,7 @@ func (ly *layer) writePage(ctx context.Context, pageIdx PageIdx, pageOff uint64,
 }
 
 // PunchHole records tombstones for all pages fully covered by the range.
-func (ly *layer) PunchHole(ctx context.Context, offset, length uint64) error {
+func (ly *layer) PunchHole(offset, length uint64) error {
 	end := offset + length
 
 	firstFullPage := PageIdx((offset + PageSize - 1) / PageSize)
@@ -570,7 +631,7 @@ func (ly *layer) PunchHole(ctx context.Context, offset, length uint64) error {
 			clearEnd = end - pageIdx.ByteOffset()
 		}
 		zeros := make([]byte, clearEnd-startOff)
-		if err := ly.Write(ctx, zeros, offset); err != nil {
+		if err := ly.Write(zeros, offset); err != nil {
 			return err
 		}
 		if end <= nextPageByte {
@@ -582,16 +643,13 @@ func (ly *layer) PunchHole(ctx context.Context, offset, length uint64) error {
 	if endOff := end % PageSize; endOff != 0 {
 		pageIdx, _ := PageIdxOf(end)
 		zeros := make([]byte, endOff)
-		if err := ly.Write(ctx, zeros, pageIdx.ByteOffset()); err != nil {
+		if err := ly.Write(zeros, pageIdx.ByteOffset()); err != nil {
 			return err
 		}
 	}
 
 	// Tombstone fully-covered interior pages.
 	for pageIdx := firstFullPage; pageIdx < lastFullPage; pageIdx++ {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		pageLock := ly.pageLock(pageIdx)
 		pageLock.Lock()
 
@@ -609,11 +667,11 @@ func (ly *layer) PunchHole(ctx context.Context, offset, length uint64) error {
 }
 
 // Flush flushes all pending data to S3.
-func (ly *layer) Flush(ctx context.Context) error {
+func (ly *layer) Flush() error {
 	if err := ly.freezememtable(); err != nil {
 		return err
 	}
-	return ly.flushFrozenTables(ctx)
+	return ly.flushFrozenTables()
 }
 
 func (ly *layer) freezememtable() error {
@@ -644,7 +702,7 @@ func (ly *layer) freezememtable() error {
 	return nil
 }
 
-func (ly *layer) maybeFreezeAndFlush(ctx context.Context) error {
+func (ly *layer) maybeFreezeAndFlush() error {
 	if err := ly.freezememtable(); err != nil {
 		return err
 	}
@@ -655,16 +713,16 @@ func (ly *layer) maybeFreezeAndFlush(ctx context.Context) error {
 		}
 		return nil
 	}
-	return ly.flushFrozenTables(ctx)
+	return ly.flushFrozenTables()
 }
 
-func (ly *layer) flushFrozenTables(ctx context.Context) error {
+func (ly *layer) flushFrozenTables() error {
 	ly.flushMu.Lock()
 	defer ly.flushMu.Unlock()
-	return ly.flushFrozenTablesLocked(ctx, 5)
+	return ly.flushFrozenTablesLocked(5)
 }
 
-func (ly *layer) flushFrozenTablesLocked(ctx context.Context, maxRetries int) error {
+func (ly *layer) flushFrozenTablesLocked(maxRetries int) error {
 	for {
 		ly.frozenMu.RLock()
 		if len(ly.frozenTables) == 0 {
@@ -674,7 +732,7 @@ func (ly *layer) flushFrozenTablesLocked(ctx context.Context, maxRetries int) er
 		mt := ly.frozenTables[0]
 		ly.frozenMu.RUnlock()
 
-		if err := ly.flushMemtable(ctx, mt, maxRetries); err != nil {
+		if err := ly.flushMemtable(mt, maxRetries); err != nil {
 			return err
 		}
 
@@ -686,7 +744,8 @@ func (ly *layer) flushFrozenTablesLocked(ctx context.Context, maxRetries int) er
 	}
 }
 
-func (ly *layer) flushMemtable(ctx context.Context, mt *memtable, maxRetries int) error {
+func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
+	ctx := context.Background()
 	entries := mt.entries()
 	if len(entries) == 0 {
 		return nil
@@ -697,15 +756,15 @@ func (ly *layer) flushMemtable(ctx context.Context, mt *memtable, maxRetries int
 		return fmt.Errorf("build L0: %w", err)
 	}
 
+	slog.Info("flushing L0", "key", l0entry.Key, "entries", len(entries), "bytes", len(data))
+
 	// Upload with retry (no backoff — retries are immediate to avoid
 	// blocking the synctest bubble with timer waits while holding flushMu).
 	for attempt := range maxRetries {
 		err = ly.store.PutReader(ctx, l0entry.Key, bytes.NewReader(data))
 		if err == nil {
+			slog.Info("flushed L0", "key", l0entry.Key, "bytes", len(data))
 			break
-		}
-		if ctx.Err() != nil {
-			return fmt.Errorf("upload L0: %w", err)
 		}
 		if attempt == maxRetries-1 {
 			return fmt.Errorf("upload L0 (after %d attempts): %w", maxRetries, err)
@@ -752,12 +811,13 @@ func (ly *layer) flushMemtable(ctx context.Context, mt *memtable, maxRetries int
 
 // Snapshot freezes this layer and creates a child layer that inherits all
 // data via a copy of this layer's index.json.
-func (ly *layer) Snapshot(ctx context.Context, childID string) error {
+func (ly *layer) Snapshot(childID string) error {
 	// 1. Flush everything.
-	if err := ly.Flush(ctx); err != nil {
+	if err := ly.Flush(); err != nil {
 		return fmt.Errorf("flush before snapshot: %w", err)
 	}
 
+	ctx := context.Background()
 	childStore := ly.store.At("layers/" + childID)
 
 	// 2. Copy our index.json into the child — the child inherits everything.
@@ -772,20 +832,10 @@ func (ly *layer) Snapshot(ctx context.Context, childID string) error {
 	if err != nil {
 		return fmt.Errorf("marshal index for child: %w", err)
 	}
-	if err := childStore.PutIfNotExists(ctx, "index.json", idxData); err != nil {
+	if err := childStore.PutIfNotExists(ctx, "index.json", idxData, map[string]string{
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
 		return fmt.Errorf("create child index.json: %w", err)
-	}
-
-	// 3. Write child meta.json.
-	meta := layerMeta{
-		CreatedAt: time.Now().UTC().Format("2006-01-02T15:04:05Z07:00"),
-	}
-	metaData, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
-	if err := childStore.PutIfNotExists(ctx, "meta.json", metaData); err != nil {
-		return fmt.Errorf("create child meta.json: %w", err)
 	}
 
 	return nil
@@ -883,26 +933,20 @@ func (ly *layer) periodicFlushLoop(ctx context.Context) {
 		default:
 		}
 
-		ly.doPeriodicFlush(ctx)
-		if ctx.Err() != nil {
-			return
-		}
+		ly.doPeriodicFlush()
 		timer.Reset(ly.config.FlushInterval)
 	}
 }
 
-func (ly *layer) doPeriodicFlush(ctx context.Context) {
+func (ly *layer) doPeriodicFlush() {
 	// Flush frozen tables. TryLock avoids blocking if another goroutine
 	// (e.g. an explicit Flush call) already holds flushMu. Under synctest,
 	// a blocked goroutine prevents time from advancing, which deadlocks
 	// retry timers.
 	if ly.flushMu.TryLock() {
-		err := ly.flushFrozenTablesLocked(ctx, 5)
+		err := ly.flushFrozenTablesLocked(5)
 		ly.flushMu.Unlock()
 		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
 			slog.Error("periodic flush failed", "layer", ly.id, "error", err)
 		}
 	}
@@ -914,12 +958,9 @@ func (ly *layer) doPeriodicFlush(ctx context.Context) {
 	if !mt.isEmpty() {
 		if err := ly.freezememtable(); err == nil {
 			if ly.flushMu.TryLock() {
-				err := ly.flushFrozenTablesLocked(ctx, 5)
+				err := ly.flushFrozenTablesLocked(5)
 				ly.flushMu.Unlock()
 				if err != nil {
-					if ctx.Err() != nil {
-						return
-					}
 					slog.Error("periodic flush failed", "layer", ly.id, "error", err)
 				}
 			}

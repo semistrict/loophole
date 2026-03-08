@@ -28,10 +28,10 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	page := make([]byte, PageSize)
 	page[0] = 0xDE
 	page[1] = 0xAD
-	if err := v.Write(ctx, page, 0); err != nil {
+	if err := v.Write(page, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Flush(ctx); err != nil {
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -40,17 +40,17 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	prev := v
 	for i := range chainLen {
 		name := fmt.Sprintf("c%d", i)
-		next, err := prev.Clone(ctx, name)
+		next, err := prev.Clone(name)
 		if err != nil {
 			t.Fatalf("clone %d: %v", i, err)
 		}
-		if err := prev.ReleaseRef(ctx); err != nil {
+		if err := prev.ReleaseRef(); err != nil {
 			t.Fatalf("release %d: %v", i, err)
 		}
 		prev = next
 	}
 	// Release the leaf too.
-	if err := prev.ReleaseRef(ctx); err != nil {
+	if err := prev.ReleaseRef(); err != nil {
 		t.Fatal(err)
 	}
 

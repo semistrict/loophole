@@ -70,17 +70,26 @@ func NewS3Store(ctx context.Context, inst Instance) (*S3Store, error) {
 		o.UsePathStyle = true
 	})
 
-	// Ensure bucket exists.
-	_, err = client.CreateBucket(ctx, &s3.CreateBucketInput{
+	// Ensure bucket exists: check first, create only if missing.
+	// If HeadBucket returns AccessDenied, assume the bucket exists but the
+	// token lacks admin permissions (e.g. R2 read/write-only tokens).
+	_, err = client.HeadBucket(ctx, &s3.HeadBucketInput{
 		Bucket: aws.String(inst.Bucket),
 	})
-	if err != nil {
-		var owned *types.BucketAlreadyOwnedByYou
-		var exists *types.BucketAlreadyExists
-		if !errors.As(err, &owned) && !errors.As(err, &exists) &&
-			!strings.Contains(err.Error(), "BucketAlreadyOwnedByYou") &&
-			!strings.Contains(err.Error(), "BucketAlreadyExists") {
-			return nil, fmt.Errorf("create bucket %q: %w", inst.Bucket, err)
+	if err != nil && !strings.Contains(err.Error(), "AccessDenied") && !strings.Contains(err.Error(), "Forbidden") {
+		// Bucket doesn't exist or we can't tell — try to create it.
+		_, createErr := client.CreateBucket(ctx, &s3.CreateBucketInput{
+			Bucket: aws.String(inst.Bucket),
+		})
+		if createErr != nil {
+			var owned *types.BucketAlreadyOwnedByYou
+			var exists *types.BucketAlreadyExists
+			if !errors.As(createErr, &owned) && !errors.As(createErr, &exists) &&
+				!strings.Contains(createErr.Error(), "BucketAlreadyOwnedByYou") &&
+				!strings.Contains(createErr.Error(), "BucketAlreadyExists") &&
+				!strings.Contains(createErr.Error(), "AccessDenied") {
+				return nil, fmt.Errorf("create bucket %q: %w", inst.Bucket, createErr)
+			}
 		}
 	}
 
@@ -237,17 +246,21 @@ func (s *seekableCountingReader) Seek(offset int64, whence int) (int64, error) {
 	return s.r.(io.Seeker).Seek(offset, whence)
 }
 
-func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte) error {
+func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte, meta ...map[string]string) error {
 	// Use S3 conditional writes (If-None-Match: *) for atomic create-if-not-exists.
 	// Supported by AWS S3 since August 2024.
 	done := metrics.S3Op("put_if_not_exists")
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	input := &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(s.fullKey(key)),
 		Body:          bytes.NewReader(data),
 		ContentLength: aws.Int64(int64(len(data))),
 		IfNoneMatch:   aws.String("*"),
-	})
+	}
+	if len(meta) > 0 && meta[0] != nil {
+		input.Metadata = meta[0]
+	}
+	_, err := s.client.PutObject(ctx, input)
 	done(err)
 	if err != nil {
 		// S3 returns 412 Precondition Failed if the object already exists.
@@ -269,6 +282,41 @@ func (s *S3Store) DeleteObject(ctx context.Context, key string) error {
 	done(err)
 	if err != nil {
 		return fmt.Errorf("delete %s: %w", s.fullKey(key), err)
+	}
+	return nil
+}
+
+func (s *S3Store) HeadMeta(ctx context.Context, key string) (map[string]string, error) {
+	done := metrics.S3Op("head")
+	out, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(s.fullKey(key)),
+	})
+	done(err)
+	if err != nil {
+		var nsk *types.NotFound
+		if errors.As(err, &nsk) || strings.Contains(err.Error(), "NotFound") || strings.Contains(err.Error(), "404") {
+			return nil, fmt.Errorf("head %s: %w", s.fullKey(key), ErrNotFound)
+		}
+		return nil, fmt.Errorf("head %s: %w", s.fullKey(key), err)
+	}
+	return out.Metadata, nil
+}
+
+func (s *S3Store) SetMeta(ctx context.Context, key string, meta map[string]string) error {
+	fk := s.fullKey(key)
+	src := s.bucket + "/" + fk
+	done := metrics.S3Op("copy")
+	_, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:            aws.String(s.bucket),
+		Key:               aws.String(fk),
+		CopySource:        aws.String(src),
+		Metadata:          meta,
+		MetadataDirective: types.MetadataDirectiveReplace,
+	})
+	done(err)
+	if err != nil {
+		return fmt.Errorf("set meta %s: %w", fk, err)
 	}
 	return nil
 }

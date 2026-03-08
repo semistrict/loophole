@@ -1,3 +1,16 @@
 old/
 .claude/
 .git/
+bin/
+build/
+target/
+node_modules/
+cf-demo/node_modules/
+cf-demo/dist/
+*.img
+*.tar
+*.prof
+*.test
+vmlinuz
+boot/
+docker-config/

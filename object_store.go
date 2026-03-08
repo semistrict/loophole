@@ -34,16 +34,43 @@ type ObjectStore interface {
 	PutBytesCAS(ctx context.Context, key string, data []byte, etag string) (newEtag string, err error)
 	PutReader(ctx context.Context, key string, r io.Reader) error
 	// PutIfNotExists writes only if the key doesn't exist. Returns ErrExists if the key already exists.
-	PutIfNotExists(ctx context.Context, key string, data []byte) error
+	// Optional metadata is stored as S3 user-defined metadata (x-amz-meta-*).
+	PutIfNotExists(ctx context.Context, key string, data []byte, meta ...map[string]string) error
 
 	DeleteObject(ctx context.Context, key string) error
 	ListKeys(ctx context.Context, prefix string) ([]ObjectInfo, error)
+
+	// HeadMeta returns the user-defined metadata for an object without
+	// downloading the body. Returns ErrNotFound if the object doesn't exist.
+	HeadMeta(ctx context.Context, key string) (meta map[string]string, err error)
+	// SetMeta replaces the user-defined metadata on an existing object
+	// without re-uploading the body (S3 copy-to-self).
+	SetMeta(ctx context.Context, key string, meta map[string]string) error
 }
 
 // ObjectInfo is a key + size returned by ListKeys.
 type ObjectInfo struct {
 	Key  string
 	Size int64
+}
+
+// ReadBytes fetches the raw bytes of an object from the store.
+// Returns the data and the ETag (for CAS operations).
+func ReadBytes(ctx context.Context, objects ObjectStore, key string) ([]byte, string, error) {
+	body, etag, err := objects.Get(ctx, key)
+	if err != nil {
+		return nil, "", err
+	}
+	defer func() {
+		if err := body.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, etag, nil
 }
 
 // ReadJSON fetches a JSON object from the store and decodes it.

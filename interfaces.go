@@ -12,7 +12,7 @@ const (
 // CreateParams holds the parameters for creating a new volume.
 type CreateParams struct {
 	Volume   string `json:"volume"`
-	Size     uint64 `json:"size,omitempty"`
+	Size     uint64 `json:"size,omitempty,string"`
 	NoFormat bool   `json:"no_format,omitempty"`
 	Type     string `json:"type,omitempty"`
 }
@@ -46,15 +46,15 @@ type Volume interface {
 	// caller-provided buffer. The returned slice is pinned in the page
 	// cache until release is called. Callers must not modify the slice.
 	ReadAt(ctx context.Context, offset uint64, n int) (buf []byte, release func(), err error)
-	Write(ctx context.Context, data []byte, offset uint64) error
-	PunchHole(ctx context.Context, offset, length uint64) error
-	ZeroRange(ctx context.Context, offset, length uint64) error
-	Flush(ctx context.Context) error
-	Snapshot(ctx context.Context, snapshotName string) error
-	Clone(ctx context.Context, cloneName string) (Volume, error)
-	CopyFrom(ctx context.Context, src Volume, srcOff, dstOff, length uint64) (uint64, error)
-	Freeze(ctx context.Context) error
+	Write(data []byte, offset uint64) error
+	PunchHole(offset, length uint64) error
+	ZeroRange(offset, length uint64) error
+	Flush() error
+	Snapshot(snapshotName string) error
+	Clone(cloneName string) (Volume, error)
+	CopyFrom(src Volume, srcOff, dstOff, length uint64) (uint64, error)
+	Freeze() error
 	Refresh(ctx context.Context) error
 	AcquireRef() error
-	ReleaseRef(ctx context.Context) error
+	ReleaseRef() error
 }

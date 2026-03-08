@@ -196,11 +196,12 @@ type deviceHandle struct {
 func (h *deviceHandle) release(ctx context.Context) error {
 	var err error
 	h.once.Do(func() {
-		err = h.vol.ReleaseRef(ctx)
+		err = h.vol.ReleaseRef()
 	})
 	return err
 }
 
+var _ = (fs.NodeOnForgetter)((*deviceNode)(nil))
 var _ = (fs.NodeGetattrer)((*deviceNode)(nil))
 var _ = (fs.NodeSetattrer)((*deviceNode)(nil))
 var _ = (fs.NodeOpener)((*deviceNode)(nil))
@@ -211,6 +212,13 @@ var _ = (fs.NodeFlusher)((*deviceNode)(nil))
 var _ = (fs.NodeReleaser)((*deviceNode)(nil))
 var _ = (fs.NodeAllocater)((*deviceNode)(nil))
 var _ = (fs.NodeCopyFileRanger)((*deviceNode)(nil))
+
+// OnForget releases the ref acquired in Lookup when the kernel evicts this inode.
+func (d *deviceNode) OnForget() {
+	if err := d.vol.ReleaseRef(); err != nil {
+		slog.Warn("fuse forget: release ref", "error", err)
+	}
+}
 
 func (d *deviceNode) fillAttr(out *fuse.Attr) {
 	if d.vol.ReadOnly() {
@@ -232,7 +240,7 @@ func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetA
 	if mode, ok := in.GetMode(); ok {
 		writable := mode&0o200 != 0
 		if !writable && !d.vol.ReadOnly() {
-			if err := d.vol.Freeze(ctx); err != nil {
+			if err := d.vol.Freeze(); err != nil {
 				return syscall.EIO
 			}
 		}
@@ -312,7 +320,7 @@ func (d *deviceNode) Write(ctx context.Context, _ fs.FileHandle, data []byte, of
 		data = data[:d.vol.Size()-uint64(off)]
 	}
 
-	if err := d.vol.Write(ctx, data, uint64(off)); err != nil {
+	if err := d.vol.Write(data, uint64(off)); err != nil {
 		slog.Warn("blockdev: write error", "off", off, "len", len(data), "error", err)
 		done(syscall.EIO)
 		return 0, syscall.EIO
@@ -330,7 +338,7 @@ func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) sysc
 		done(syscall.EBADF)
 		return syscall.EBADF
 	}
-	if err := d.vol.Flush(ctx); err != nil {
+	if err := d.vol.Flush(); err != nil {
 		slog.Warn("blockdev: fsync error", "error", err)
 		done(syscall.EIO)
 		return syscall.EIO
@@ -347,7 +355,7 @@ func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno 
 		done(syscall.EBADF)
 		return syscall.EBADF
 	}
-	if err := d.vol.Flush(ctx); err != nil {
+	if err := d.vol.Flush(); err != nil {
 		slog.Warn("blockdev: flush error", "error", err)
 		done(syscall.EIO)
 		return syscall.EIO
@@ -391,7 +399,7 @@ func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, 
 	}
 
 	slog.Debug("blockdev: fallocate", "op", opName, "off", off, "end", end, "len", end-off)
-	if err := d.vol.PunchHole(ctx, off, end-off); err != nil {
+	if err := d.vol.PunchHole(off, end-off); err != nil {
 		done(syscall.EIO)
 		return syscall.EIO
 	}
@@ -426,7 +434,7 @@ func (d *deviceNode) CopyFileRange(ctx context.Context, _ fs.FileHandle, offIn u
 		length = dstNode.vol.Size() - offOut
 	}
 
-	n, err := dstNode.vol.CopyFrom(ctx, d.vol, offIn, offOut, length)
+	n, err := dstNode.vol.CopyFrom(d.vol, offIn, offOut, length)
 	if err != nil {
 		done(syscall.EIO)
 		return 0, syscall.EIO

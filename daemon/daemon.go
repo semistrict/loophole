@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,12 +19,12 @@ import (
 	"syscall"
 	"time"
 
+	axiomslog "github.com/axiomhq/axiom-go/adapters/slog"
+
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/nbdserve"
-	"github.com/semistrict/loophole/sqlitevfs"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -36,12 +37,30 @@ type Daemon struct {
 	ln        net.Listener
 	log       *slog.Logger
 
-	nbdSock string       // set once NBD server is started
-	nbdLn   net.Listener // NBD listener, closed on shutdown
+	nbdSock    string       // set once NBD server is started
+	nbdLn      net.Listener // NBD listener, closed on shutdown
+	startupErr string       // non-fatal startup error (e.g. bad S3 creds)
+
+	axiomClose func() // flushes and closes the axiom handler; nil if axiom is not configured
+
+	shutdownCh chan struct{} // closed when shutdown begins
+	doneCh     chan struct{} // closed when cleanup is complete
 }
 
+// Backend returns the underlying fsbackend.Service.
+func (d *Daemon) Backend() fsbackend.Service { return d.backend }
+
 // Start initializes everything and returns a Daemon ready to Serve.
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foreground bool, socketMode os.FileMode) (*Daemon, error) {
+// Options configures daemon startup.
+type Options struct {
+	Foreground bool
+	SocketMode os.FileMode
+	ListenAddr string // If set (e.g. "tcp://0.0.0.0:8080"), listen on this address instead of Unix socket.
+}
+
+func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
+	foreground := opts.Foreground
+	socketMode := opts.SocketMode
 	if inst.Mode == "" {
 		inst.Mode = loophole.DefaultMode()
 	}
@@ -57,6 +76,10 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		return nil, fmt.Errorf("open log file %s: %w", logPath, err)
 	}
 
+	// Redirect Go's standard log package (used by net/http for panic recovery)
+	// to the log file.
+	log.SetOutput(logFile)
+
 	var level slog.Level
 	switch strings.ToLower(inst.LogLevel) {
 	case "debug":
@@ -69,16 +92,30 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		level = slog.LevelInfo
 	}
 	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: level})
-	var handler slog.Handler = fileHandler
+	var axiomClose func()
+	handlers := multiHandler{fileHandler}
 	if foreground {
-		handler = multiHandler{fileHandler, &consoleHandler{level: level}}
+		handlers = append(handlers, &consoleHandler{level: level})
 	}
-	logger := slog.New(handler)
+	if os.Getenv("AXIOM_TOKEN") != "" {
+		ah, err := axiomslog.New(axiomslog.SetLevel(level))
+		if err != nil {
+			return nil, fmt.Errorf("create axiom handler: %w", err)
+		}
+		var h slog.Handler = ah
+		if doID := os.Getenv("CONTAINER_DO_ID"); doID != "" {
+			h = h.WithAttrs([]slog.Attr{slog.String("do_id", doID)})
+		}
+		handlers = append(handlers, h)
+		axiomClose = func() { ah.Close() }
+	}
+	logger := slog.New(handlers)
 	logger.Info("starting daemon", "s3", inst.URL(), "log", logPath)
 
 	tuneProcess(logger)
 
 	// Create object store
+	var startupErr string
 	var store loophole.ObjectStore
 	if inst.LocalDir != "" {
 		var err error
@@ -91,82 +128,105 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, foregr
 		var err error
 		store, err = loophole.NewS3Store(ctx, inst)
 		if err != nil {
-			return nil, fmt.Errorf("create S3 store: %w", err)
+			storeErr := fmt.Sprintf("create S3 store: %v", err)
+			logger.Error("S3 store init failed, daemon will start degraded", "error", err)
+			// Fall back to a nil store — volume operations will fail but daemon stays up.
+			store = nil
+			startupErr = storeErr
 		}
 	}
 
-	// Create volume manager
-	cacheDir := dir.Cache(inst.ProfileName)
-	diskCache, err := storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	if err != nil {
-		return nil, fmt.Errorf("create page cache: %w", err)
-	}
-	vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, diskCache)
+	var diskCache *storage2.PageCache
+	var backend fsbackend.Service
+	if store != nil {
+		// Create volume manager
+		cacheDir := dir.Cache(inst.ProfileName)
+		var err error
+		diskCache, err = storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
+		if err != nil {
+			return nil, fmt.Errorf("create page cache: %w", err)
+		}
+		vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, diskCache)
 
-	backend, err := createBackend(vm, inst, dir)
-	if err != nil {
-		_ = diskCache.Close()
-		return nil, err
-	}
+		backend, err = createBackend(vm, inst, dir)
+		if err != nil {
+			_ = diskCache.Close()
+			return nil, err
+		}
 
-	// When a remote break-lease arrives, properly unmount/detach via the backend.
-	vm.SetOnRelease(func(ctx context.Context, volumeName string) {
-		// Unmount if mounted.
-		for mp, vol := range backend.Mounts() {
-			if vol == volumeName {
-				logger.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
-				if err := backend.Unmount(ctx, mp); err != nil {
-					logger.Warn("release: unmount failed", "volume", volumeName, "error", err)
+		// When a remote break-lease arrives, properly unmount/detach via the backend.
+		vm.SetOnRelease(func(ctx context.Context, volumeName string) {
+			// Unmount if mounted.
+			for mp, vol := range backend.Mounts() {
+				if vol == volumeName {
+					logger.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
+					if err := backend.Unmount(ctx, mp); err != nil {
+						logger.Warn("release: unmount failed", "volume", volumeName, "error", err)
+					}
 				}
 			}
-		}
-		// Detach device if attached (and not already closed by Unmount).
-		if v := vm.GetVolume(volumeName); v != nil {
-			logger.Info("release: detaching device", "volume", volumeName)
-			if err := backend.DeviceDetach(ctx, volumeName); err != nil {
-				logger.Warn("release: device detach failed", "volume", volumeName, "error", err)
+			// Detach device if attached (and not already closed by Unmount).
+			if v := vm.GetVolume(volumeName); v != nil {
+				logger.Info("release: detaching device", "volume", volumeName)
+				if err := backend.DeviceDetach(ctx, volumeName); err != nil {
+					logger.Warn("release: device detach failed", "volume", volumeName, "error", err)
+				}
 			}
-		}
-	})
-
-	sockPath := dir.Socket(inst.ProfileName)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		return nil, err
-	}
-	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		logger.Warn("remove stale socket failed", "path", sockPath, "error", err)
+		})
 	}
 
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
-	}
-	if socketMode != 0 {
-		if err := os.Chmod(sockPath, socketMode); err != nil {
-			if closeErr := ln.Close(); closeErr != nil {
-				logger.Warn("listener close error", "error", closeErr)
+	var ln net.Listener
+	if strings.HasPrefix(opts.ListenAddr, "tcp://") {
+		addr := strings.TrimPrefix(opts.ListenAddr, "tcp://")
+		ln, err = net.Listen("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
+		}
+		logger.Info("listening on TCP", "addr", addr)
+	} else {
+		sockPath := dir.Socket(inst.ProfileName)
+		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+			logger.Warn("remove stale socket failed", "path", sockPath, "error", err)
+		}
+		ln, err = net.Listen("unix", sockPath)
+		if err != nil {
+			return nil, fmt.Errorf("listen %s: %w", sockPath, err)
+		}
+		if socketMode != 0 {
+			if err := os.Chmod(sockPath, socketMode); err != nil {
+				if closeErr := ln.Close(); closeErr != nil {
+					logger.Warn("listener close error", "error", closeErr)
+				}
+				return nil, fmt.Errorf("chmod socket: %w", err)
 			}
-			return nil, fmt.Errorf("chmod socket: %w", err)
 		}
 	}
 
 	d := &Daemon{
-		inst:      inst,
-		dir:       dir,
-		backend:   backend,
-		diskCache: diskCache,
-		ln:        ln,
-		log:       logger,
+		inst:       inst,
+		dir:        dir,
+		backend:    backend,
+		diskCache:  diskCache,
+		ln:         ln,
+		log:        logger,
+		axiomClose: axiomClose,
+		startupErr: startupErr,
+		shutdownCh: make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 
-	// Always start an NBD server for db commands.
-	// Use explicit nbd_socket config if set, otherwise derive from profile.
-	nbdSock := inst.NBDSocket
-	if nbdSock == "" {
-		nbdSock = dir.NBD(inst.ProfileName)
-	}
-	if err := d.startNBD(nbdSock); err != nil {
-		return nil, fmt.Errorf("start NBD server: %w", err)
+	// Always start an NBD server for db commands (requires a working backend).
+	if d.backend != nil {
+		nbdSock := inst.NBDSocket
+		if nbdSock == "" {
+			nbdSock = dir.NBD(inst.ProfileName)
+		}
+		if err := d.startNBD(nbdSock); err != nil {
+			return nil, fmt.Errorf("start NBD server: %w", err)
+		}
 	}
 
 	return d, nil
@@ -178,10 +238,30 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	defer stop()
 
 	srv := &http.Server{Handler: d.instrument(d.mux(stop))}
+
+	// When context cancels, begin graceful shutdown in background.
+	// The HTTP server stays running so clients can poll /status and /shutdown/wait.
 	go func() {
 		<-ctx.Done()
-		// Close NBD and HTTP sockets immediately so a new daemon
-		// can bind them without racing against our shutdown cleanup.
+		close(d.shutdownCh)
+
+		d.log.Info("shutting down: flushing and releasing leases")
+		if d.backend != nil {
+			if err := d.backend.Close(context.Background()); err != nil {
+				d.log.Warn("backend close error", "error", err)
+			}
+		}
+		if d.diskCache != nil {
+			if err := d.diskCache.Close(); err != nil {
+				d.log.Warn("disk cache close error", "error", err)
+			}
+		}
+		if d.axiomClose != nil {
+			d.axiomClose()
+		}
+		close(d.doneCh)
+
+		// Now stop accepting requests and remove sockets.
 		if d.nbdLn != nil {
 			if err := d.nbdLn.Close(); err != nil {
 				d.log.Warn("NBD listener close error", "error", err)
@@ -190,12 +270,12 @@ func (d *Daemon) Serve(ctx context.Context) error {
 				d.log.Warn("remove NBD socket", "path", d.nbdSock, "error", err)
 			}
 		}
+		if err := srv.Close(); err != nil {
+			d.log.Warn("http server close error", "error", err)
+		}
 		sockPath := d.dir.Socket(d.inst.ProfileName)
 		if err := os.Remove(sockPath); err != nil {
 			d.log.Warn("remove socket", "path", sockPath, "error", err)
-		}
-		if err := srv.Close(); err != nil {
-			d.log.Warn("http server close error", "error", err)
 		}
 	}()
 
@@ -205,17 +285,26 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		err = nil
 	}
 
-	d.log.Info("shutting down")
-	if err := d.backend.Close(context.Background()); err != nil {
-		d.log.Warn("backend close error", "error", err)
-	}
-	if d.diskCache != nil {
-		if err := d.diskCache.Close(); err != nil {
-			d.log.Warn("disk cache close error", "error", err)
-		}
-	}
 	d.log.Info("daemon stopped")
 	return err
+}
+
+func (d *Daemon) shuttingDown() bool {
+	select {
+	case <-d.shutdownCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// rejectIfShuttingDown returns true (and writes a 503) if the daemon is shutting down.
+func (d *Daemon) rejectIfShuttingDown(w http.ResponseWriter) bool {
+	if d.shuttingDown() {
+		writeError(w, 503, fmt.Errorf("daemon is shutting down"))
+		return true
+	}
+	return false
 }
 
 func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
@@ -226,25 +315,31 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 
-	mux.HandleFunc("POST /db/create", d.handleDBCreate)
-	mux.HandleFunc("POST /db/snapshot", d.handleDBSnapshot)
-	mux.HandleFunc("POST /db/branch", d.handleDBBranch)
-	mux.HandleFunc("POST /db/flush", d.handleDBFlush)
-	mux.HandleFunc("GET /db/ls", d.handleDBList)
+	d.registerDBRoutes(mux)
 
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /delete", d.handleDelete)
 	mux.HandleFunc("POST /break-lease", d.handleBreakLease)
 	mux.HandleFunc("POST /mount", d.handleMount)
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
+	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
 	mux.HandleFunc("POST /clone", d.handleClone)
 	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
 		d.log.Info("shutdown requested")
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeJSON(w, map[string]string{"status": "shutting_down"})
 		stop()
 	})
+	mux.HandleFunc("GET /shutdown/wait", func(w http.ResponseWriter, r *http.Request) {
+		<-d.doneCh
+		writeJSON(w, map[string]string{"status": "done"})
+	})
+
+	mux.HandleFunc("GET /sandbox/shell", d.handleShell)
+	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
+	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)
+	mux.HandleFunc("GET /sandbox/stat", d.handleStat)
 
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)
@@ -268,7 +363,7 @@ func (d *Daemon) instrument(next http.Handler) http.Handler {
 		}
 
 		// Skip endpoints that hijack the connection or don't need metrics.
-		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" {
+		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -309,26 +404,65 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 
 // --- High-level handlers ---
 
+const zygoteVolume = "zygote-ubuntu-2404"
+
 func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
-	var req client.CreateParams
+	if d.rejectIfShuttingDown(w) {
+		return
+	}
+	var req loophole.CreateParams
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, err)
 		return
 	}
-
-	if req.Type == "" {
-		req.Type = string(d.inst.DefaultFSType)
-	}
-	d.log.Info("create", "volume", req.Volume, "size", req.Size, "type", req.Type, "no_format", req.NoFormat)
-	if err := d.backend.Create(r.Context(), req); err != nil {
-		d.log.Error("create failed", "err", err)
-		writeError(w, 500, err)
+	if req.Volume == "" {
+		writeError(w, 400, fmt.Errorf("volume name is required"))
 		return
 	}
+
+	ctx := r.Context()
+
+	// If size is specified, create a fresh volume (used for zygote creation).
+	if req.Size > 0 {
+		d.log.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
+		if req.Type == "" {
+			req.Type = string(loophole.DefaultFSType())
+		}
+		if err := d.backend.Create(ctx, req); err != nil {
+			d.log.Error("create volume failed", "err", err)
+			writeError(w, 500, fmt.Errorf("create: %w", err))
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Otherwise clone from zygote.
+	d.log.Info("create (clone from zygote)", "volume", req.Volume, "zygote", zygoteVolume)
+
+	// Open the zygote volume (frozen layers need no lease).
+	zygote, err := d.backend.VM().OpenVolume(ctx, zygoteVolume)
+	if err != nil {
+		d.log.Error("open zygote failed", "err", err)
+		writeError(w, 500, fmt.Errorf("open zygote: %w", err))
+		return
+	}
+
+	// Clone from zygote to the requested name.
+	_, err = zygote.Clone(req.Volume)
+	if err != nil {
+		d.log.Error("clone from zygote failed", "err", err)
+		writeError(w, 500, fmt.Errorf("clone: %w", err))
+		return
+	}
+
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if d.rejectIfShuttingDown(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -367,6 +501,9 @@ func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
+	if d.rejectIfShuttingDown(w) {
+		return
+	}
 	var req struct {
 		Volume     string `json:"volume"`
 		Mountpoint string `json:"mountpoint"`
@@ -410,6 +547,35 @@ func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := os.Remove(d.dir.MountSymlink(req.Mountpoint)); err != nil && !os.IsNotExist(err) {
 		d.log.Warn("remove mount symlink failed", "error", err)
+	}
+	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
+	if d.rejectIfShuttingDown(w) {
+		return
+	}
+	var req struct {
+		Volume string `json:"volume"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
+	vol, err := d.backend.VM().OpenVolume(r.Context(), req.Volume)
+	if err != nil {
+		writeError(w, 500, fmt.Errorf("open volume: %w", err))
+		return
+	}
+	if vol.ReadOnly() {
+		writeError(w, 400, fmt.Errorf("volume %q is already read-only", req.Volume))
+		return
+	}
+	d.log.Info("freeze", "volume", req.Volume)
+	if err := vol.Freeze(); err != nil {
+		d.log.Error("freeze failed", "err", err)
+		writeError(w, 500, err)
+		return
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -532,128 +698,6 @@ func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"device": device})
 }
 
-// --- DB handlers ---
-
-func (d *Daemon) handleDBCreate(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Volume string `json:"volume"`
-		Size   uint64 `json:"size,omitempty"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	d.log.Info("db/create", "volume", req.Volume, "size", req.Size)
-
-	var opts []sqlitevfs.Option
-	if req.Size > 0 {
-		opts = append(opts, sqlitevfs.WithSize(req.Size))
-	}
-
-	db, err := sqlitevfs.Create(r.Context(), d.backend.VM(), req.Volume, opts...)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	if err := db.Close(r.Context()); err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDBSnapshot(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Volume   string `json:"volume"`
-		Snapshot string `json:"snapshot"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	d.log.Info("db/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
-
-	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	defer func() { _ = db.Close(r.Context()) }()
-
-	if err := db.Snapshot(r.Context(), req.Snapshot); err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDBBranch(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Volume string `json:"volume"`
-		Branch string `json:"branch"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	d.log.Info("db/branch", "volume", req.Volume, "branch", req.Branch)
-
-	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	defer func() { _ = db.Close(r.Context()) }()
-
-	branch, err := db.Branch(r.Context(), req.Branch)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	if err := branch.Close(r.Context()); err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDBFlush(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	d.log.Info("db/flush", "volume", req.Volume)
-
-	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	defer func() { _ = db.Close(r.Context()) }()
-
-	if err := db.Flush(r.Context()); err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDBList(w http.ResponseWriter, r *http.Request) {
-	volumes, err := d.backend.VM().ListVolumesByType(r.Context(), loophole.VolumeTypeSQLite)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]any{"volumes": volumes})
-}
-
 // --- NBD ---
 
 func (d *Daemon) startNBD(sockPath string) error {
@@ -688,18 +732,38 @@ func (d *Daemon) startNBD(sockPath string) error {
 // --- Status ---
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, map[string]any{
+	state := "running"
+	if d.shuttingDown() {
+		select {
+		case <-d.doneCh:
+			state = "stopped"
+		default:
+			state = "shutting_down"
+		}
+	}
+	status := map[string]any{
+		"state":    state,
 		"s3":       d.inst.URL(),
 		"mode":     string(d.inst.Mode),
 		"socket":   d.dir.Socket(d.inst.ProfileName),
 		"nbd_sock": d.nbdSock,
 		"log":      d.dir.Log(d.inst.ProfileName),
-		"volumes":  d.backend.VM().Volumes(),
-		"mounts":   d.backend.Mounts(),
-	})
+	}
+	if d.backend != nil {
+		status["volumes"] = d.backend.VM().Volumes()
+		status["mounts"] = d.backend.Mounts()
+	}
+	if d.startupErr != "" {
+		status["error"] = d.startupErr
+	}
+	writeJSON(w, status)
 }
 
 func (d *Daemon) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	if d.backend == nil {
+		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
+		return
+	}
 	names, err := d.backend.VM().ListAllVolumes(r.Context())
 	if err != nil {
 		writeError(w, 500, err)

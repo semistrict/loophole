@@ -44,28 +44,28 @@ func (k OracleEventKind) String() string {
 
 // OracleEvent records a single mutation for post-mortem analysis.
 type OracleEvent struct {
-	Seq        int // global event counter
-	Kind       OracleEventKind
-	NodeID     string
-	TimelineID string
-	PageIdx    PageIdx   // only for Write/PunchHole
-	Pages      []PageIdx // pages affected by a Flush
-	ParentID   string    // only for Branch
-	DataHash   uint32    // first 4 bytes of data, for quick visual matching
+	Seq      int // global event counter
+	Kind     OracleEventKind
+	NodeID   string
+	LayerID  string
+	PageIdx  PageIdx   // only for Write/PunchHole
+	Pages    []PageIdx // pages affected by a Flush
+	ParentID string    // only for Branch
+	DataHash uint32    // first 4 bytes of data, for quick visual matching
 }
 
 func (e OracleEvent) String() string {
 	switch e.Kind {
 	case EventWrite:
-		return fmt.Sprintf("[%04d] WRITE    node=%-8s tl=%s page=%d hash=%08x", e.Seq, e.NodeID, e.TimelineID[:8], e.PageIdx, e.DataHash)
+		return fmt.Sprintf("[%04d] WRITE    node=%-8s tl=%s page=%d hash=%08x", e.Seq, e.NodeID, e.LayerID[:8], e.PageIdx, e.DataHash)
 	case EventPunchHole:
-		return fmt.Sprintf("[%04d] PUNCH    node=%-8s tl=%s page=%d", e.Seq, e.NodeID, e.TimelineID[:8], e.PageIdx)
+		return fmt.Sprintf("[%04d] PUNCH    node=%-8s tl=%s page=%d", e.Seq, e.NodeID, e.LayerID[:8], e.PageIdx)
 	case EventFlush:
-		return fmt.Sprintf("[%04d] FLUSH    node=%-8s tl=%s pages=%v", e.Seq, e.NodeID, e.TimelineID[:8], e.Pages)
+		return fmt.Sprintf("[%04d] FLUSH    node=%-8s tl=%s pages=%v", e.Seq, e.NodeID, e.LayerID[:8], e.Pages)
 	case EventCrash:
 		return fmt.Sprintf("[%04d] CRASH    node=%-8s", e.Seq, e.NodeID)
 	case EventBranch:
-		return fmt.Sprintf("[%04d] BRANCH   parent=%s -> child=%s", e.Seq, e.ParentID[:8], e.TimelineID[:8])
+		return fmt.Sprintf("[%04d] BRANCH   parent=%s -> child=%s", e.Seq, e.ParentID[:8], e.LayerID[:8])
 	default:
 		return fmt.Sprintf("[%04d] ?", e.Seq)
 	}
@@ -123,7 +123,7 @@ func (o *Oracle) logEvent(e OracleEvent) {
 // RecordPunchHole records a punch hole (pages revert to zeros) for a node's timeline.
 func (o *Oracle) RecordPunchHole(nodeID, timelineID string, pageIdx PageIdx) {
 	o.mu.Lock()
-	o.logEvent(OracleEvent{Kind: EventPunchHole, NodeID: nodeID, TimelineID: timelineID, PageIdx: pageIdx})
+	o.logEvent(OracleEvent{Kind: EventPunchHole, NodeID: nodeID, LayerID: timelineID, PageIdx: pageIdx})
 	o.mu.Unlock()
 	o.RecordWrite(nodeID, timelineID, pageIdx, make([]byte, PageSize))
 }
@@ -137,7 +137,7 @@ func (o *Oracle) RecordWrite(nodeID, timelineID string, pageIdx PageIdx, data []
 	if len(data) >= 4 {
 		hash = uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
 	}
-	o.logEvent(OracleEvent{Kind: EventWrite, NodeID: nodeID, TimelineID: timelineID, PageIdx: pageIdx, DataHash: hash})
+	o.logEvent(OracleEvent{Kind: EventWrite, NodeID: nodeID, LayerID: timelineID, PageIdx: pageIdx, DataHash: hash})
 
 	if o.maybeFlushed[nodeID] == nil {
 		o.maybeFlushed[nodeID] = make(map[string]map[PageIdx][]byte)
@@ -171,7 +171,7 @@ func (o *Oracle) RecordFlush(nodeID, timelineID string) {
 		flushedPages = append(flushedPages, addr)
 	}
 	slices.Sort(flushedPages)
-	o.logEvent(OracleEvent{Kind: EventFlush, NodeID: nodeID, TimelineID: timelineID, Pages: flushedPages})
+	o.logEvent(OracleEvent{Kind: EventFlush, NodeID: nodeID, LayerID: timelineID, Pages: flushedPages})
 
 	if o.flushed[timelineID] == nil {
 		o.flushed[timelineID] = make(map[PageIdx][]byte)
@@ -212,7 +212,7 @@ func (o *Oracle) RecordCrash(nodeID string) {
 func (o *Oracle) RecordBranch(childID, parentID string, branchSeq uint64) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.logEvent(OracleEvent{Kind: EventBranch, TimelineID: childID, ParentID: parentID})
+	o.logEvent(OracleEvent{Kind: EventBranch, LayerID: childID, ParentID: parentID})
 	o.ancestors[childID] = AncestorRef{ParentID: parentID, AncestorSeq: branchSeq}
 
 	// The child starts with a copy of the parent's flushed state.
@@ -363,9 +363,9 @@ func (o *Oracle) PageHistory(timelineID string, pageIdx PageIdx) string {
 		relevant := false
 		switch e.Kind {
 		case EventWrite, EventPunchHole:
-			relevant = ancestors[e.TimelineID] && e.PageIdx == pageIdx
+			relevant = ancestors[e.LayerID] && e.PageIdx == pageIdx
 		case EventFlush:
-			if ancestors[e.TimelineID] {
+			if ancestors[e.LayerID] {
 				for _, p := range e.Pages {
 					if p == pageIdx {
 						relevant = true
@@ -376,7 +376,7 @@ func (o *Oracle) PageHistory(timelineID string, pageIdx PageIdx) string {
 		case EventCrash:
 			relevant = true
 		case EventBranch:
-			relevant = e.TimelineID == timelineID || ancestors[e.TimelineID]
+			relevant = e.LayerID == timelineID || ancestors[e.LayerID]
 		}
 		if relevant {
 			sb.WriteString("  ")

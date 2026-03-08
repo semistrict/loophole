@@ -75,7 +75,7 @@ func Create(ctx context.Context, mgr loophole.VolumeManager, name string, opts .
 
 	err = FormatVolume(ctx, vol)
 	if err != nil {
-		_ = vol.ReleaseRef(ctx)
+		_ = vol.ReleaseRef()
 		return nil, fmt.Errorf("format volume: %w", err)
 	}
 
@@ -100,7 +100,7 @@ func Open(ctx context.Context, mgr loophole.VolumeManager, name string, opts ...
 func openDB(ctx context.Context, vol loophole.Volume, mgr loophole.VolumeManager, o options) (*DB, error) {
 	vfs, err := NewVolumeVFS(ctx, vol, o.syncMode)
 	if err != nil {
-		_ = vol.ReleaseRef(ctx)
+		_ = vol.ReleaseRef()
 		return nil, err
 	}
 
@@ -127,7 +127,7 @@ func (db *DB) Flush(ctx context.Context) error {
 	if err := db.vfs.FlushHeader(); err != nil {
 		return err
 	}
-	return db.vol.Flush(ctx)
+	return db.vol.Flush()
 }
 
 // Snapshot flushes and creates a read-only snapshot of the database.
@@ -135,7 +135,7 @@ func (db *DB) Snapshot(ctx context.Context, name string) error {
 	if err := db.Flush(ctx); err != nil {
 		return fmt.Errorf("pre-snapshot flush: %w", err)
 	}
-	return db.vol.Snapshot(ctx, name)
+	return db.vol.Snapshot(name)
 }
 
 // OpenSnapshot opens a snapshot as a read-only DB.
@@ -147,7 +147,7 @@ func OpenSnapshot(ctx context.Context, mgr loophole.VolumeManager, name string) 
 
 	vfs, err := NewVolumeVFS(ctx, vol, SyncModeSync)
 	if err != nil {
-		_ = vol.ReleaseRef(ctx)
+		_ = vol.ReleaseRef()
 		return nil, err
 	}
 
@@ -163,7 +163,7 @@ func (db *DB) Branch(ctx context.Context, name string) (*DB, error) {
 	if err := db.Flush(ctx); err != nil {
 		return nil, fmt.Errorf("pre-branch flush: %w", err)
 	}
-	cloneVol, err := db.vol.Clone(ctx, name)
+	cloneVol, err := db.vol.Clone(name)
 	if err != nil {
 		return nil, fmt.Errorf("clone volume: %w", err)
 	}
@@ -172,7 +172,7 @@ func (db *DB) Branch(ctx context.Context, name string) (*DB, error) {
 	syncMode := db.vfs.SyncMode()
 	vfs, err := NewVolumeVFS(ctx, cloneVol, syncMode)
 	if err != nil {
-		_ = cloneVol.ReleaseRef(ctx)
+		_ = cloneVol.ReleaseRef()
 		return nil, err
 	}
 
@@ -201,7 +201,7 @@ func OpenFollow(ctx context.Context, mgr loophole.VolumeManager, name string, in
 
 	vfs, err := NewVolumeVFS(ctx, vol, SyncModeSync)
 	if err != nil {
-		_ = vol.ReleaseRef(ctx)
+		_ = vol.ReleaseRef()
 		return nil, err
 	}
 
@@ -263,7 +263,7 @@ func (db *DB) Close(ctx context.Context) error {
 			closeErr = err
 		}
 
-		if err := db.vol.ReleaseRef(ctx); err != nil && closeErr == nil {
+		if err := db.vol.ReleaseRef(); err != nil && closeErr == nil {
 			closeErr = err
 		}
 	})

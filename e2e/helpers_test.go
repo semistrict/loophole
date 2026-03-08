@@ -90,7 +90,7 @@ func skipKernelOnly(t *testing.T) {
 	}
 }
 
-// ---------- Volume manager + disk cache ----------
+// ---------- Volume manager + disk cache (for tests that bypass the daemon) ----------
 
 // newVolumeManager creates a VolumeManager with a real disk cache, matching
 // the production daemon configuration. The cache and manager are cleaned up
@@ -108,31 +108,128 @@ func newVolumeManager(t testing.TB, store loophole.ObjectStore) *storage2.Manage
 	return vm
 }
 
+// ---------- testBackend: wraps client + daemon for tests ----------
+
+// testBackend routes control operations (Create, Mount, Clone, etc.) through
+// the daemon's HTTP API via the client, while providing direct access to the
+// daemon's backend for FS and VolumeManager operations.
+type testBackend struct {
+	fsbackend.Service // embedded for FS(), VM(), etc.
+	c                 *client.Client
+	createdVols       []string
+	mountedMPs        []string
+}
+
+func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error {
+	// The daemon's handleCreate interprets Size==0 as "clone from zygote".
+	// Tests always want fresh volumes, so set a default size.
+	if p.Size == 0 {
+		p.Size = defaultVolumeSize
+	}
+	if err := b.c.Create(ctx, p); err != nil {
+		return err
+	}
+	b.createdVols = append(b.createdVols, p.Volume)
+	return nil
+}
+
+func (b *testBackend) Mount(ctx context.Context, volume, mountpoint string) error {
+	if err := b.c.Mount(ctx, volume, mountpoint); err != nil {
+		return err
+	}
+	b.mountedMPs = append(b.mountedMPs, mountpoint)
+	return nil
+}
+
+func (b *testBackend) Unmount(ctx context.Context, mountpoint string) error {
+	err := b.c.Unmount(ctx, mountpoint)
+	if err == nil {
+		// Remove from tracked list.
+		for i, mp := range b.mountedMPs {
+			if mp == mountpoint {
+				b.mountedMPs = append(b.mountedMPs[:i], b.mountedMPs[i+1:]...)
+				break
+			}
+		}
+	}
+	return err
+}
+
+func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMountpoint string) error {
+	if err := b.c.Clone(ctx, srcMountpoint, cloneName, cloneMountpoint); err != nil {
+		return err
+	}
+	b.createdVols = append(b.createdVols, cloneName)
+	b.mountedMPs = append(b.mountedMPs, cloneMountpoint)
+	return nil
+}
+
+func (b *testBackend) Snapshot(ctx context.Context, mountpoint, name string) error {
+	return b.c.Snapshot(ctx, mountpoint, name)
+}
+
+func (b *testBackend) Freeze(ctx context.Context, volume string) error {
+	return b.c.Freeze(ctx, volume)
+}
+
+func (b *testBackend) DeviceAttach(ctx context.Context, volume string) (string, error) {
+	return b.c.DeviceAttach(ctx, volume)
+}
+
+func (b *testBackend) DeviceDetach(ctx context.Context, volume string) error {
+	return b.c.DeviceDetach(ctx, volume)
+}
+
+func (b *testBackend) DeviceSnapshot(ctx context.Context, volume, snapshot string) error {
+	return b.c.DeviceSnapshot(ctx, volume, snapshot)
+}
+
+func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) (string, error) {
+	path, err := b.c.DeviceClone(ctx, volume, clone)
+	if err != nil {
+		return "", err
+	}
+	b.createdVols = append(b.createdVols, clone)
+	return path, nil
+}
+
+// Close is a no-op — the shared daemon owns the backend.
+func (b *testBackend) Close(ctx context.Context) error {
+	return nil
+}
+
+// cleanup unmounts and deletes all volumes created by this test.
+func (b *testBackend) cleanup() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, mp := range b.mountedMPs {
+		_ = b.c.Unmount(ctx, mp)
+		// Remove the mount directory (only relevant for real mounts).
+		if needsRealMount() {
+			_ = os.Remove(mp)
+		}
+	}
+	for _, vol := range b.createdVols {
+		_ = b.c.Delete(ctx, vol)
+	}
+}
+
 // ---------- Backend creation ----------
 
-// newBackend creates a fsbackend.Service for the current mode.
-func newBackend(t testing.TB) fsbackend.Service {
+// newBackend returns a testBackend that routes operations through the daemon's HTTP API.
+func newBackend(t testing.TB) *testBackend {
 	t.Helper()
 	skipE2E(t)
 	if tt, ok := t.(*testing.T); ok {
 		trackMetrics(tt)
 	}
 
-	inst := uniqueInstance(t)
-	ctx := t.Context()
-
-	store, err := loophole.NewS3Store(ctx, inst)
-	require.NoError(t, err)
-
-	vm := newVolumeManager(t, store)
-
-	backend := newBackendForMode(t, vm, inst)
-	t.Cleanup(func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = backend.Close(cleanupCtx)
-	})
-	return backend
+	b := &testBackend{
+		Service: testDaemon.Backend(),
+		c:       testClient,
+	}
+	t.Cleanup(b.cleanup)
+	return b
 }
 
 // ---------- testFS: unified file I/O ----------
@@ -143,7 +240,7 @@ type testFS struct {
 	mountpoint string
 }
 
-func newTestFS(t testing.TB, b fsbackend.Service, mountpoint string) testFS {
+func newTestFS(t testing.TB, b *testBackend, mountpoint string) testFS {
 	t.Helper()
 	f, err := b.FS(mountpoint)
 	require.NoError(t, err)
@@ -282,8 +379,8 @@ func runCmd(t *testing.T, name string, args ...string) {
 	require.NoError(t, err, "command failed: %s %v", name, args)
 }
 
-// mountVolume is a convenience: creates a backend, creates+formats a volume, mounts it, returns testFS + backend.
-func mountVolume(t testing.TB, name string) (testFS, fsbackend.Service) {
+// mountVolume is a convenience: creates a volume, mounts it, returns testFS + backend.
+func mountVolume(t testing.TB, name string) (testFS, *testBackend) {
 	t.Helper()
 	b := newBackend(t)
 	ctx := t.Context()
@@ -302,7 +399,12 @@ func mountVolume(t testing.TB, name string) (testFS, fsbackend.Service) {
 // For in-process lwext4 mode, returns a logical key.
 func mountpoint(t testing.TB, volume string) string {
 	if needsRealMount() {
-		dir := t.TempDir()
+		// Don't use t.TempDir() — its cleanup fires in LIFO order and would
+		// try to remove the directory before the FUSE unmount happens.
+		// Instead, create a temp dir manually. The testBackend.cleanup()
+		// unmounts first, then removes the mount dirs.
+		dir, err := os.MkdirTemp("", t.Name())
+		require.NoError(t, err)
 		return dir
 	}
 	return "/" + volume

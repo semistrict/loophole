@@ -1,3 +1,5 @@
+//go:build !nolwext4
+
 package fsbackend
 
 import (
@@ -21,12 +23,12 @@ func (m *memDev) Read(_ context.Context, buf []byte, offset uint64) (int, error)
 	return copy(buf, m.data[offset:]), nil
 }
 
-func (m *memDev) Write(_ context.Context, data []byte, offset uint64) error {
+func (m *memDev) Write(data []byte, offset uint64) error {
 	copy(m.data[offset:], data)
 	return nil
 }
 
-func (m *memDev) ZeroRange(_ context.Context, offset, length uint64) error {
+func (m *memDev) ZeroRange(offset, length uint64) error {
 	clear(m.data[offset : offset+length])
 	return nil
 }

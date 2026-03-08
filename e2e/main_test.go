@@ -1,7 +1,9 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
@@ -11,9 +13,18 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/google/uuid"
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/daemon"
 	"github.com/semistrict/loophole/metrics"
+)
+
+var (
+	testDaemon *daemon.Daemon
+	testClient *client.Client
 )
 
 func TestMain(m *testing.M) {
@@ -41,7 +52,41 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	go http.ListenAndServe(":9090", mux)
 	fmt.Println("metrics available on :9090/metrics")
-	os.Exit(m.Run())
+
+	// Start a shared daemon for all e2e tests.
+	tmpDir, err := os.MkdirTemp("", "loophole-e2e-*")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dir := loophole.Dir(tmpDir)
+	inst := loophole.Instance{
+		ProfileName:   "test",
+		Bucket:        envOrDefault("BUCKET", "testbucket"),
+		Prefix:        fmt.Sprintf("test-%s", uuid.NewString()[:8]),
+		Endpoint:      defaultEndpoint(),
+		AccessKey:     envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
+		SecretKey:     envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
+		Region:        envOrDefault("AWS_REGION", ""),
+		Mode:          loophole.DefaultMode(),
+		DefaultFSType: loophole.DefaultFSType(),
+		LogLevel:      os.Getenv("LOG_LEVEL"),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	d, err := daemon.Start(ctx, inst, dir, daemon.Options{Foreground: true})
+	if err != nil {
+		log.Fatal(err)
+	}
+	testDaemon = d
+	go d.Serve(ctx)
+
+	testClient = client.NewFromSocket(dir.Socket("test"))
+
+	code := m.Run()
+	cancel()
+	os.Exit(code)
 }
 
 // metricsSnapshot captures counter and gauge values keyed by "name{labels}".

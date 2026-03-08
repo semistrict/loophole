@@ -1,3 +1,5 @@
+//go:build !nolwext4
+
 package fsbackend
 
 import (

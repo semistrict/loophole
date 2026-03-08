@@ -120,7 +120,7 @@ func (v *VolumeVFS) Delete(name string, dirSync bool) error {
 			return nil
 		}
 		if v.header.MainDBSize > 0 {
-			if err := v.vol.PunchHole(context.Background(), mainDBOffset, v.header.MainDBSize); err != nil {
+			if err := v.vol.PunchHole(mainDBOffset, v.header.MainDBSize); err != nil {
 				return fmt.Errorf("punch hole: %w", err)
 			}
 		}
@@ -175,7 +175,7 @@ func (v *VolumeVFS) flushHeaderLocked() error {
 	walData := v.wal.snapshot()
 	walSize := uint64(len(walData))
 	if walSize > 0 {
-		if err := v.vol.Write(context.Background(), walData, v.vol.Size()-walSize); err != nil {
+		if err := v.vol.Write(walData, v.vol.Size()-walSize); err != nil {
 			return fmt.Errorf("persist WAL: %w", err)
 		}
 	}
@@ -187,7 +187,7 @@ func (v *VolumeVFS) flushHeaderLocked() error {
 	if !v.dirty {
 		return nil
 	}
-	if err := writeHeader(context.Background(), v.vol, v.header); err != nil {
+	if err := writeHeader(v.vol, v.header); err != nil {
 		return err
 	}
 	v.dirty = false
@@ -270,7 +270,7 @@ func (f *volumeFile) WriteAt(p []byte, off int64) (int, error) {
 		return 0, fmt.Errorf("write exceeds volume capacity (%d + %d > %d)", off, len(p), volCap)
 	}
 
-	if err := f.vfs.vol.Write(context.Background(), p, mainDBOffset+uint64(off)); err != nil {
+	if err := f.vfs.vol.Write(p, mainDBOffset+uint64(off)); err != nil {
 		return 0, fmt.Errorf("write at offset %d: %w", off, err)
 	}
 
@@ -298,7 +298,7 @@ func (f *volumeFile) Truncate(size int64) error {
 	f.vfs.mu.Unlock()
 
 	if uint64(size) < oldSize {
-		if err := f.vfs.vol.PunchHole(context.Background(), mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
+		if err := f.vfs.vol.PunchHole(mainDBOffset+uint64(size), oldSize-uint64(size)); err != nil {
 			return fmt.Errorf("truncate punch hole: %w", err)
 		}
 	}
@@ -312,7 +312,7 @@ func (f *volumeFile) Sync(flag sqlite3vfs.SyncType) error {
 	if err := f.vfs.FlushHeader(); err != nil {
 		return err
 	}
-	return f.vfs.vol.Flush(context.Background())
+	return f.vfs.vol.Flush()
 }
 
 func (f *volumeFile) FileSize() (int64, error) {

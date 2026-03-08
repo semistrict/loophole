@@ -106,6 +106,10 @@ podman:
 	go build -tags "exclude_graphdriver_btrfs exclude_graphdriver_devicemapper containers_image_openpgp" \
 	-o $(CURDIR)/$(BINDIR)/podman-$(GOOS)-$(GOARCH) ./cmd/podman/
 
+# Build linux/amd64 binary for cf-demo container (no CGo, no lwext4/sqlite)
+cf-demo-bin:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "nosqlite nolwext4" -o cf-demo/bin/loophole ./cmd/loophole
+
 # Download third-party dependencies
 deps:
 	./download-deps.sh
