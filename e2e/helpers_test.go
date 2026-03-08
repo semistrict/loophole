@@ -20,8 +20,7 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
-	"github.com/semistrict/loophole/internal/diskcache"
-	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/storage2"
 )
 
 // mode returns the LOOPHOLE_MODE for tests, using DefaultMode() as fallback.
@@ -96,12 +95,12 @@ func skipKernelOnly(t *testing.T) {
 // newVolumeManager creates a VolumeManager with a real disk cache, matching
 // the production daemon configuration. The cache and manager are cleaned up
 // automatically via t.Cleanup.
-func newVolumeManager(t testing.TB, store loophole.ObjectStore) *lsm.Manager {
+func newVolumeManager(t testing.TB, store loophole.ObjectStore) *storage2.Manager {
 	t.Helper()
 	cacheDir := t.TempDir()
-	dc, err := diskcache.New(filepath.Join(cacheDir, "diskcache"))
+	dc, err := storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
 	require.NoError(t, err)
-	vm := lsm.NewVolumeManager(store, cacheDir, lsm.Config{}, nil, dc)
+	vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, dc)
 	t.Cleanup(func() {
 		_ = vm.Close(t.Context())
 		_ = dc.Close()

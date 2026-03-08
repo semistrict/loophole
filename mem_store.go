@@ -264,26 +264,26 @@ func (m *MemStore) PutReader(_ context.Context, key string, r io.Reader) error {
 	return nil
 }
 
-func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte) (bool, error) {
+func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
 	fk := m.fullKey(key)
 	m.count(OpPutIfNotExists)
 	if err := m.checkFault(OpPutIfNotExists, fk); err != nil {
-		return false, err
+		return err
 	}
 
 	m.shared.mu.Lock()
 	if _, ok := m.shared.objects[fk]; ok {
 		m.shared.mu.Unlock()
-		return false, nil
+		return ErrExists
 	}
 	cp := make([]byte, len(data))
 	copy(cp, data)
 	m.shared.objects[fk] = cp
 	m.shared.mu.Unlock()
 	if err := m.checkPostFault(OpPutIfNotExists, fk); err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 func (m *MemStore) DeleteObject(_ context.Context, key string) error {

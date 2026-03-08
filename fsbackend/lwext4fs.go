@@ -341,7 +341,7 @@ func (f *lwext4FSImpl) Create(name string) (File, error) {
 		}
 	}
 
-	file, err := f.ext4.OpenFile(ino, os.O_WRONLY)
+	file, err := f.ext4.OpenFile(ino, os.O_RDWR)
 	if err != nil {
 		return nil, err
 	}

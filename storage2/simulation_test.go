@@ -1,11 +1,10 @@
-package lsm
+package storage2
 
 import (
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"math"
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
@@ -94,7 +93,7 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 			fs:    NewSimLocalFS(),
 			alive: true,
 		}
-		node.manager = sim.newManager(t.TempDir(), node.fs, PageSize)
+		node.manager = sim.newManager(t.TempDir(), node.fs)
 		sim.allManagers = append(sim.allManagers, node.manager)
 		sim.nodes = append(sim.nodes, node)
 	}
@@ -108,22 +107,26 @@ func (sim *Simulation) nextTimelineID() string {
 	return id
 }
 
-func (sim *Simulation) newManager(cacheDir string, fs LocalFS, pageCacheBytes int64) *Manager {
+func (sim *Simulation) newManager(cacheDir string, fs LocalFS) *Manager {
 	flushInterval := sim.config.FlushInterval
 	if flushInterval == 0 {
 		flushInterval = 5 * time.Millisecond // small interval so periodic flush fires under synctest
 	}
+	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
+	if err != nil {
+		sim.t.Fatalf("create disk cache: %v", err)
+	}
+	sim.t.Cleanup(func() { _ = dc.Close() })
 	m := NewVolumeManager(
 		sim.store.Store(),
 		cacheDir,
 		Config{
 			FlushThreshold:  sim.config.FlushThreshold,
-			MaxFrozenLayers: 2,
-			PageCacheBytes:  pageCacheBytes,
+			MaxFrozenTables: 2,
 			FlushInterval:   flushInterval,
 		},
 		fs,
-		newTestDiskCacheAt(sim.t, filepath.Join(cacheDir, "diskcache")),
+		dc,
 	)
 	m.idGen = sim.nextTimelineID
 	return m
@@ -254,22 +257,21 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 
 	// Write 1-10 random pages.
 	numPages := sim.rng.IntN(10) + 1
-	maxPage := uint64(sim.config.DevicePages)
+	maxPage := PageIdx(sim.config.DevicePages)
 
 	wrote := false
 	for range numPages {
-		pageAddr := sim.rng.Uint64N(maxPage)
+		pageIdx := PageIdx(sim.rng.Uint64N(uint64(maxPage)))
 		data := make([]byte, PageSize)
 		sim.fillRandomBytes(data)
 
-		offset := pageAddr * PageSize
-		err := v.Write(ctx, data, offset)
+		err := v.Write(ctx, data, pageIdx.ByteOffset())
 
 		// Always record: for full-page writes, data enters the memLayer
 		// before auto-flush runs. If Write returns an error it's from
 		// auto-flush, not from the put — the data is in a frozen layer
 		// and will be persisted by the next successful Flush.
-		sim.oracle.RecordWrite(node.id, timelineID, pageAddr, data)
+		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
 		wrote = true
 
 		if err != nil {
@@ -299,8 +301,8 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	maxPage := uint64(sim.config.DevicePages)
-	pageAddr := sim.rng.Uint64N(maxPage)
+	maxPage := PageIdx(sim.config.DevicePages)
+	pageIdx := PageIdx(sim.rng.Uint64N(uint64(maxPage)))
 
 	// Pick a random sub-page offset and length (1-2048 bytes).
 	writeLen := sim.rng.IntN(2048) + 1
@@ -315,7 +317,7 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	// engine's read-modify-write result even if prior untracked writes
 	// (from faulted operations) modified the page.
 	basePage := make([]byte, PageSize)
-	if _, err := v.Read(ctx, basePage, pageAddr*PageSize); err != nil {
+	if _, err := v.Read(ctx, basePage, pageIdx.ByteOffset()); err != nil {
 		// Can't read the base page (S3 fault) — skip this operation.
 		// We haven't written anything, so no divergence.
 		return
@@ -324,14 +326,14 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	copy(expected, basePage)
 	copy(expected[writeOff:writeOff+writeLen], data)
 
-	offset := pageAddr*PageSize + uint64(writeOff)
+	offset := pageIdx.ByteOffset() + uint64(writeOff)
 	err := v.Write(ctx, data, offset)
 
 	// Always record: writePage puts the full-page result into the memLayer
 	// before auto-flush runs. The data persists even if Write returns an
 	// error from auto-flush. We use the actual base page (read above), not
 	// the oracle's expected value, so the expected result is correct.
-	sim.oracle.RecordWrite(node.id, timelineID, pageAddr, expected)
+	sim.oracle.RecordWrite(node.id, timelineID, pageIdx, expected)
 
 	if err != nil {
 		return
@@ -345,7 +347,7 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 // reportMismatch dumps both oracle history and timeline layer state for a
 // mismatched page, then fatals. This is the single diagnostic entry point
 // for all mismatch types (inline reads and full scan).
-func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, volName, nodeID, timelineID string, pageAddr uint64, got, expected []byte) {
+func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, volName, nodeID, timelineID string, pageIdx PageIdx, got, expected []byte) {
 	isZero := func(b []byte) bool {
 		for _, v := range b {
 			if v != 0 {
@@ -356,7 +358,7 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, 
 	}
 
 	sim.t.Logf("=== MISMATCH: vol=%s tl=%s page=%d gotZero=%v expZero=%v ===",
-		volName, timelineID, pageAddr, isZero(got), isZero(expected))
+		volName, timelineID, pageIdx, isZero(got), isZero(expected))
 	sim.t.Logf("got:      %x...", got[:32])
 	sim.t.Logf("expected: %x...", expected[:32])
 
@@ -378,7 +380,7 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, 
 	}
 
 	// Oracle history: full lifecycle of this page.
-	sim.t.Log(sim.oracle.PageHistory(timelineID, pageAddr))
+	sim.t.Log(sim.oracle.PageHistory(timelineID, pageIdx))
 
 	// Count ALL oracle events for this timeline (not just this page).
 	var writeCount, flushCount, branchCount int
@@ -407,7 +409,7 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol loophole.Volume, 
 
 	// Timeline layer inspector: what each layer sees.
 	if v, ok := vol.(*volume); ok {
-		sim.t.Log(v.timeline.DebugPage(ctx, pageAddr, math.MaxUint64))
+		sim.t.Log(v.layer.DebugPage(ctx, pageIdx))
 	}
 
 	sim.t.FailNow()
@@ -424,20 +426,20 @@ func (sim *Simulation) opRead(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	maxPage := uint64(sim.config.DevicePages)
-	pageAddr := sim.rng.Uint64N(maxPage)
+	maxPage := PageIdx(sim.config.DevicePages)
+	pageIdx := PageIdx(sim.rng.Uint64N(uint64(maxPage)))
 
 	buf := make([]byte, PageSize)
-	_, err := v.Read(ctx, buf, pageAddr*PageSize)
+	_, err := v.Read(ctx, buf, pageIdx.ByteOffset())
 	if err != nil {
 		// S3 faults can cause read failures. Expected.
 		return
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	if !sim.oracle.VerifyRead(node.id, timelineID, pageAddr, buf) {
-		expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
-		sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageAddr, buf, expected)
+	if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
+		expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
+		sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 	}
 }
 
@@ -483,7 +485,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 	// Capture branchSeq before snapshot (nextSeq at the time of branching).
 	var branchSeq uint64
 	if pv, ok := v.(*volume); ok {
-		branchSeq = pv.timeline.nextSeq.Load()
+		branchSeq = pv.layer.nextSeq.Load()
 	}
 
 	snapName := fmt.Sprintf("%s-snap-%d", volName, sim.nextVolID)
@@ -537,7 +539,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	// Log parent's nextSeq before clone for diagnostics.
 	var parentNextSeq uint64
 	if pv, ok := v.(*volume); ok {
-		parentNextSeq = pv.timeline.nextSeq.Load()
+		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
 	clone, err := v.Clone(ctx, cloneName)
@@ -554,7 +556,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	// Log the clone's ancestorSeq for diagnostics.
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
 	}
 
 	sim.volumeTimelines[cloneName] = ref.TimelineID
@@ -591,7 +593,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 	// Capture branchSeq before clone.
 	var parentNextSeq uint64
 	if pv, ok := v.(*volume); ok {
-		parentNextSeq = pv.timeline.nextSeq.Load()
+		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
 	// No pre-flush! Clone's internal freezeMemLayer + flushFrozenLayers
@@ -611,7 +613,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] CLONE-NOFLUSH parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
 	}
 
 	sim.volumeTimelines[cloneName] = ref.TimelineID
@@ -641,17 +643,17 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	maxPage := uint64(sim.config.DevicePages)
+	maxPage := PageIdx(sim.config.DevicePages)
 
 	// Punch 1-5 contiguous pages.
-	startPage := sim.rng.Uint64N(maxPage)
-	numPages := uint64(sim.rng.IntN(5) + 1)
+	startPage := PageIdx(sim.rng.Uint64N(uint64(maxPage)))
+	numPages := PageIdx(sim.rng.IntN(5) + 1)
 	if startPage+numPages > maxPage {
 		numPages = maxPage - startPage
 	}
 
-	offset := startPage * PageSize
-	length := numPages * PageSize
+	offset := startPage.ByteOffset()
+	length := uint64(numPages) * PageSize
 	if err := v.PunchHole(ctx, offset, length); err != nil {
 		return
 	}
@@ -689,22 +691,22 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 	timelineID := sim.volumeTimelines[volName]
 	sim.oracle.RecordFlush(node.id, timelineID)
 
-	vol.timeline.Compact(ctx)
+	_ = vol.layer.CompactL0(ctx)
 
 	// Post-compaction verification: read all pages and check against oracle.
 	// Compaction rewrites layers; this catches data loss or corruption.
-	maxPage := uint64(sim.config.DevicePages)
-	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+	maxPage := PageIdx(sim.config.DevicePages)
+	for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
 		buf := make([]byte, PageSize)
-		_, err := v.Read(ctx, buf, pageAddr*PageSize)
+		_, err := v.Read(ctx, buf, pageIdx.ByteOffset())
 		if err != nil {
 			// S3 faults can cause read failures during verification.
 			return
 		}
-		if !sim.oracle.VerifyRead(node.id, timelineID, pageAddr, buf) {
-			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
+		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
+			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
 			sim.t.Logf("POST-COMPACT MISMATCH vol=%s", volName)
-			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageAddr, buf, expected)
+			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 		}
 	}
 }
@@ -775,18 +777,18 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	maxPage := uint64(sim.config.DevicePages)
-	numPages := uint64(sim.rng.IntN(10) + 1)
+	maxPage := PageIdx(sim.config.DevicePages)
+	numPages := PageIdx(sim.rng.IntN(10) + 1)
 	if numPages > maxPage {
 		numPages = maxPage
 	}
 
-	srcStart := sim.rng.Uint64N(maxPage - numPages + 1)
-	dstStart := sim.rng.Uint64N(maxPage - numPages + 1)
+	srcStart := PageIdx(sim.rng.Uint64N(uint64(maxPage - numPages + 1)))
+	dstStart := PageIdx(sim.rng.Uint64N(uint64(maxPage - numPages + 1)))
 
-	srcOff := srcStart * PageSize
-	dstOff := dstStart * PageSize
-	length := numPages * PageSize
+	srcOff := srcStart.ByteOffset()
+	dstOff := dstStart.ByteOffset()
+	length := uint64(numPages) * PageSize
 
 	srcTL := sim.volumeTimelines[srcName]
 	dstTL := sim.volumeTimelines[dstName]
@@ -796,8 +798,8 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	// Record in oracle: pages that were actually copied. Write enters the
 	// memLayer before auto-flush, so always record based on copied (which
 	// now includes the page whose Write triggered a flush error).
-	pagesCopied := copied / PageSize
-	for pg := uint64(0); pg < pagesCopied; pg++ {
+	pagesCopied := PageIdx(copied / PageSize)
+	for pg := PageIdx(0); pg < pagesCopied; pg++ {
 		expected := sim.oracle.ExpectedRead(node.id, srcTL, srcStart+pg)
 		sim.oracle.RecordWrite(node.id, dstTL, dstStart+pg, expected)
 	}
@@ -830,13 +832,13 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	maxPage := uint64(sim.config.DevicePages)
+	maxPage := PageIdx(sim.config.DevicePages)
 
 	// Pre-generate all write data from the sim RNG before spawning goroutines.
 	// The RNG is not safe for concurrent use.
 	type writeOp struct {
-		pageAddr uint64
-		data     []byte
+		pageIdx PageIdx
+		data    []byte
 	}
 	const numWriters = 3
 	writerOps := make([][]writeOp, numWriters)
@@ -845,8 +847,8 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		writerOps[w] = make([]writeOp, numPages)
 		for i := range numPages {
 			writerOps[w][i] = writeOp{
-				pageAddr: sim.rng.Uint64N(maxPage),
-				data:     make([]byte, PageSize),
+				pageIdx: PageIdx(sim.rng.Uint64N(uint64(maxPage))),
+				data:    make([]byte, PageSize),
 			}
 			sim.fillRandomBytes(writerOps[w][i].data)
 		}
@@ -859,7 +861,7 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		go func() {
 			defer wg.Done()
 			for _, op := range writerOps[w] {
-				v.Write(ctx, op.data, op.pageAddr*PageSize)
+				v.Write(ctx, op.data, op.pageIdx.ByteOffset())
 			}
 		}()
 	}
@@ -868,18 +870,18 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 	// Record writes in oracle. The order of concurrent writes to the same
 	// page is non-deterministic, so we read back each written page to get
 	// the actual value and record that.
-	writtenPages := make(map[uint64]bool)
+	writtenPages := make(map[PageIdx]struct{})
 	for _, ops := range writerOps {
 		for _, op := range ops {
-			writtenPages[op.pageAddr] = true
+			writtenPages[op.pageIdx] = struct{}{}
 		}
 	}
-	for pageAddr := range writtenPages {
+	for pageIdx := range writtenPages {
 		buf := make([]byte, PageSize)
-		if _, err := v.Read(ctx, buf, pageAddr*PageSize); err != nil {
+		if _, err := v.Read(ctx, buf, pageIdx.ByteOffset()); err != nil {
 			continue
 		}
-		sim.oracle.RecordWrite(node.id, timelineID, pageAddr, buf)
+		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, buf)
 	}
 
 	if err := v.Flush(ctx); err != nil {
@@ -900,14 +902,14 @@ func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	maxPage := uint64(sim.config.DevicePages)
+	maxPage := PageIdx(sim.config.DevicePages)
 
-	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+	for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
 		data := make([]byte, PageSize)
 		sim.fillRandomBytes(data)
 
-		err := v.Write(ctx, data, pageAddr*PageSize)
-		sim.oracle.RecordWrite(node.id, timelineID, pageAddr, data)
+		err := v.Write(ctx, data, pageIdx.ByteOffset())
+		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
 
 		if err != nil {
 			// Auto-flush error — data is in frozen layer, try to flush.
@@ -1008,7 +1010,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 
 	var parentNextSeq uint64
 	if pv, ok := v.(*volume); ok {
-		parentNextSeq = pv.timeline.nextSeq.Load()
+		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
 	clone, err := v.Clone(ctx, cloneName)
@@ -1023,7 +1025,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 
 	if cv, ok := clone.(*volume); ok {
 		sim.t.Logf("[%s] DEEP-CLONE parent=%s (nextSeq=%d) -> child=%s (ancestorSeq=%d)",
-			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.timeline.ancestorSeq)
+			node.id, parentTL[:8], parentNextSeq, ref.TimelineID[:8], cv.layer.nextSeq.Load())
 	}
 
 	sim.volumeTimelines[cloneName] = ref.TimelineID
@@ -1080,7 +1082,7 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 	parentTL := sim.volumeTimelines[snapName]
 	var parentNextSeq uint64
 	if pv, ok := snapVol.(*volume); ok {
-		parentNextSeq = pv.timeline.nextSeq.Load()
+		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
 	clone, err := snapVol.Clone(ctx, cloneName)
@@ -1131,17 +1133,17 @@ func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
-	maxPage := uint64(sim.config.DevicePages)
-	for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+	maxPage := PageIdx(sim.config.DevicePages)
+	for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
 		buf := make([]byte, PageSize)
-		_, err := v.Read(ctx, buf, pageAddr*PageSize)
+		_, err := v.Read(ctx, buf, pageIdx.ByteOffset())
 		if err != nil {
 			return
 		}
-		if !sim.oracle.VerifyRead(node.id, timelineID, pageAddr, buf) {
-			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageAddr)
+		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
+			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
 			sim.t.Logf("MID-SIM VERIFY MISMATCH vol=%s", volName)
-			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageAddr, buf, expected)
+			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 		}
 	}
 }
@@ -1188,7 +1190,7 @@ func (sim *Simulation) recoverNode(ctx context.Context, node *SimNode) {
 	node.alive = true
 	node.volumes = nil
 
-	node.manager = sim.newManager(sim.t.TempDir(), node.fs, PageSize)
+	node.manager = sim.newManager(sim.t.TempDir(), node.fs)
 	sim.allManagers = append(sim.allManagers, node.manager)
 
 	// Re-acquire up to 3 unleased volumes. Production nodes typically serve
@@ -1228,12 +1230,12 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 	if !ok {
 		return
 	}
-	actualTL := vol.timeline.id
+	actualTL := vol.layer.id
 	oracleTL := sim.volumeTimelines[name]
 	if actualTL != oracleTL {
 		sim.t.Fatalf("TIMELINE MISMATCH on open: vol=%s oracle=%s actual=%s", name, oracleTL[:8], actualTL[:8])
 	}
-	vol.timeline.debugLog = func(msg string) {
+	vol.layer.debugLog = func(msg string) {
 		sim.t.Logf("[%s/%s] %s", node.id, name, msg)
 	}
 }
@@ -1281,7 +1283,7 @@ func (sim *Simulation) FullScan() {
 	ctx := sim.t.Context()
 	sim.store.ClearFaults()
 
-	m := sim.newManager(sim.t.TempDir(), NewSimLocalFS(), 16*PageSize)
+	m := sim.newManager(sim.t.TempDir(), NewSimLocalFS())
 	sim.allManagers = append(sim.allManagers, m)
 
 	// Verify ListAllVolumes contains every tracked volume.
@@ -1333,19 +1335,19 @@ func (sim *Simulation) FullScan() {
 			continue
 		}
 
-		maxPage := uint64(sim.config.DevicePages)
-		for pageAddr := uint64(0); pageAddr < maxPage; pageAddr++ {
+		maxPage := PageIdx(sim.config.DevicePages)
+		for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
 			buf := make([]byte, PageSize)
-			_, err := v.Read(ctx, buf, pageAddr*PageSize)
+			_, err := v.Read(ctx, buf, pageIdx.ByteOffset())
 			if err != nil {
-				sim.t.Fatalf("full scan read error: vol=%s page=%d: %v", volName, pageAddr, err)
+				sim.t.Fatalf("full scan read error: vol=%s page=%d: %v", volName, pageIdx, err)
 			}
 
 			// Fresh manager — no node context. Maybe-flushed data from crashed
 			// nodes may or may not have survived, so use the crash-tolerant check.
-			if !sim.oracle.VerifyReadAfterCrash(timelineID, pageAddr, buf) {
-				expected := sim.oracle.ExpectedRead("", timelineID, pageAddr)
-				sim.reportMismatch(ctx, v, volName, "", timelineID, pageAddr, buf, expected)
+			if !sim.oracle.VerifyReadAfterCrash(timelineID, pageIdx, buf) {
+				expected := sim.oracle.ExpectedRead("", timelineID, pageIdx)
+				sim.reportMismatch(ctx, v, volName, "", timelineID, pageIdx, buf, expected)
 			}
 		}
 		scanned++

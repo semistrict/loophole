@@ -13,6 +13,7 @@ import (
 
 // ErrNotFound is returned by ObjectStore.Get when the object does not exist.
 var ErrNotFound = errors.New("not found")
+var ErrExists = errors.New("already exists")
 
 // ObjectStore abstracts access to an S3-compatible object store.
 // It is rooted at a specific bucket and prefix — all keys are relative
@@ -32,8 +33,8 @@ type ObjectStore interface {
 	// PutBytesCAS writes data with If-Match on the given ETag. Returns the new ETag.
 	PutBytesCAS(ctx context.Context, key string, data []byte, etag string) (newEtag string, err error)
 	PutReader(ctx context.Context, key string, r io.Reader) error
-	// PutIfNotExists writes only if the key doesn't exist. Returns true if created.
-	PutIfNotExists(ctx context.Context, key string, data []byte) (bool, error)
+	// PutIfNotExists writes only if the key doesn't exist. Returns ErrExists if the key already exists.
+	PutIfNotExists(ctx context.Context, key string, data []byte) error
 
 	DeleteObject(ctx context.Context, key string) error
 	ListKeys(ctx context.Context, prefix string) ([]ObjectInfo, error)

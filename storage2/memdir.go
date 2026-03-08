@@ -1,6 +1,6 @@
 //go:build !js
 
-package lsm
+package storage2
 
 import "os"
 

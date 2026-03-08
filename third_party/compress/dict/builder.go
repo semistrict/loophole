@@ -135,6 +135,9 @@ func buildDict(input [][]byte, o Options) ([]byte, error) {
 		}
 		printf("\r input %d indexed...", i)
 	}
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("no matches found in input")
+	}
 	threshold := uint32(total / uint64(len(matches)))
 	println("\nTotal", total, "match", len(matches), "avg", threshold)
 	sorted := make([]match, 0, len(matches)/2)
@@ -163,6 +166,9 @@ func buildDict(input [][]byte, o Options) ([]byte, error) {
 		return sorted[i].n > sorted[j].n
 	})
 	println("Sorted len:", len(sorted))
+	if len(sorted) == 0 {
+		return nil, fmt.Errorf("no frequent matches found in input")
+	}
 	if len(sorted) > wantLen {
 		sorted = sorted[:wantLen]
 	}

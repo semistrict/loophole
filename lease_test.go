@@ -229,7 +229,7 @@ func TestCheckAvailableAutoBreakCleansUpLeaseFile(t *testing.T) {
 		// Simulate a dead holder: create lease file manually, no poll loop.
 		deadToken := "dead-holder-token"
 		data, _ := json.Marshal(leaseFile{})
-		_, err := leases.PutIfNotExists(t.Context(), deadToken+".json", data)
+		err := leases.PutIfNotExists(t.Context(), deadToken+".json", data)
 		require.NoError(t, err)
 
 		challenger := NewLeaseManager(leases)

@@ -1,4 +1,4 @@
-package lsm
+package storage2
 
 import (
 	"bytes"

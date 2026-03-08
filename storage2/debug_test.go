@@ -1,0 +1,142 @@
+//go:build !js
+
+package storage2
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// DebugPage traces through all layers for a given page address, showing what
+// each layer holds. Used in test mismatch reports to diagnose read issues.
+func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
+	isZero := func(b []byte) bool {
+		for _, v := range b {
+			if v != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	hash := func(b []byte) string {
+		if len(b) >= 4 {
+			return fmt.Sprintf("%02x%02x%02x%02x", b[0], b[1], b[2], b[3])
+		}
+		return "?"
+	}
+
+	var lines []string
+	add := func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+
+	add("=== DebugPage layer=%s page=%d ===", ly.id[:8], pageIdx)
+
+	ly.mu.RLock()
+	l0entries := ly.index.L0
+	l1map := ly.l1Map
+	l2map := ly.l2Map
+	mt := ly.memtable
+	ly.mu.RUnlock()
+
+	ly.frozenMu.RLock()
+	frozen := make([]*memtable, len(ly.frozenTables))
+	copy(frozen, ly.frozenTables)
+	ly.frozenMu.RUnlock()
+
+	add("  index: %d L0 entries, nextSeq=%d", len(l0entries), ly.nextSeq.Load())
+
+	// 1. Active memtable.
+	if mt != nil {
+		if entry, ok := mt.get(pageIdx); ok {
+			if entry.tombstone {
+				add("  [1] memtable: TOMBSTONE seq=%d", entry.seq)
+			} else {
+				data, err := mt.readData(entry)
+				if err != nil {
+					add("  [1] memtable: seq=%d err=%v", entry.seq, err)
+				} else {
+					add("  [1] memtable: seq=%d zero=%v hash=%s", entry.seq, isZero(data), hash(data))
+				}
+			}
+		} else {
+			add("  [1] memtable: not present")
+		}
+	}
+
+	// 2. Frozen memtables (newest first).
+	for i := len(frozen) - 1; i >= 0; i-- {
+		if entry, ok := frozen[i].get(pageIdx); ok {
+			if entry.tombstone {
+				add("  [2] frozen[%d]: TOMBSTONE seq=%d", i, entry.seq)
+			} else {
+				data, err := frozen[i].readData(entry)
+				if err != nil {
+					add("  [2] frozen[%d]: seq=%d err=%v", i, entry.seq, err)
+				} else {
+					add("  [2] frozen[%d]: seq=%d zero=%v hash=%s", i, entry.seq, isZero(data), hash(data))
+				}
+			}
+		}
+	}
+
+	// 3. Page cache.
+	if ly.diskCache != nil {
+		if cached := ly.diskCache.GetPage(ly.pageCacheKey(pageIdx)); cached != nil {
+			add("  [3] pageCache: zero=%v hash=%s", isZero(cached), hash(cached))
+		} else {
+			add("  [3] pageCache: miss")
+		}
+	} else {
+		add("  [3] pageCache: none")
+	}
+
+	// 4. L0 files (newest first).
+	for i := len(l0entries) - 1; i >= 0; i-- {
+		l0e := &l0entries[i]
+		if l0HasTombstone(l0e, pageIdx) {
+			add("  [4] L0[%d] %s: TOMBSTONE", i, l0e.Key)
+		} else if l0HasPage(l0e, pageIdx) {
+			data, err := ly.readFromL0(ctx, l0e, pageIdx)
+			if err != nil {
+				add("  [4] L0[%d] %s: FOUND err=%v", i, l0e.Key, err)
+			} else {
+				add("  [4] L0[%d] %s: FOUND zero=%v hash=%s", i, l0e.Key, isZero(data), hash(data))
+			}
+		} else {
+			add("  [4] L0[%d] %s: page not present (%d pages)", i, l0e.Key, len(l0e.Pages))
+		}
+	}
+
+	// 5. L1 (sparse blocks).
+	block := pageIdx.Block()
+	if layer := l1map.Find(block); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l1", layer, pageIdx)
+		if err != nil {
+			add("  [5] L1 block=%d layer=%s: err=%v", block, layer[:8], err)
+		} else if found {
+			add("  [5] L1 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+		} else {
+			add("  [5] L1 block=%d layer=%s: page not in block", block, layer[:8])
+		}
+	} else {
+		add("  [5] L1: no block for addr %d", block)
+	}
+
+	// 6. L2 (dense blocks).
+	if layer := l2map.Find(block); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l2", layer, pageIdx)
+		if err != nil {
+			add("  [6] L2 block=%d layer=%s: err=%v", block, layer[:8], err)
+		} else if found {
+			add("  [6] L2 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+		} else {
+			add("  [6] L2 block=%d layer=%s: page not in block", block, layer[:8])
+		}
+	} else {
+		add("  [6] L2: no block for addr %d", block)
+	}
+
+	return strings.Join(lines, "\n")
+}

@@ -18,7 +18,7 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fuseblockdev"
-	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/storage2"
 )
 
 func skipIfNotLinuxRoot(t *testing.T) {
@@ -61,7 +61,7 @@ func newFUSEBackend(t *testing.T) Service {
 	store, err := loophole.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
-	vm := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{}, nil, nil)
+	vm := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{}, nil, nil)
 
 	dir := loophole.Dir(t.TempDir())
 	b, err := NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})

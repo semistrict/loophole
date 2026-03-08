@@ -111,18 +111,18 @@ func (f *FileStore) PutReader(_ context.Context, key string, r io.Reader) error 
 	return os.WriteFile(p, data, 0644)
 }
 
-func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) (bool, error) {
+func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) error {
 	p := f.path(key)
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-		return false, err
+		return err
 	}
 	// O_EXCL ensures atomic create-if-not-exists.
 	file, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
 	if err != nil {
 		if os.IsExist(err) {
-			return false, nil
+			return ErrExists
 		}
-		return false, err
+		return err
 	}
 	_, err = file.Write(data)
 	if cerr := file.Close(); cerr != nil {
@@ -135,9 +135,9 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte) (
 		if rerr := os.Remove(p); rerr != nil {
 			slog.Warn("remove failed", "path", p, "error", rerr)
 		}
-		return false, err
+		return err
 	}
-	return true, nil
+	return nil
 }
 
 func (f *FileStore) DeleteObject(_ context.Context, key string) error {

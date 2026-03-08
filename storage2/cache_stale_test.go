@@ -1,4 +1,4 @@
-package lsm
+package storage2
 
 import (
 	"bytes"
@@ -7,14 +7,14 @@ import (
 	"github.com/semistrict/loophole"
 )
 
-// TestStalePageCacheAfterFlush verifies that flushing a memLayer to S3
+// TestStalePageCacheAfterFlush verifies that flushing a memtable to S3
 // invalidates page cache entries for affected pages.
 //
 // Without flush-time invalidation, the sequence:
 //  1. Write A to page 0, flush → A in S3 delta
 //  2. Read page 0 → readPage fetches A from S3, caches A
 //  3. Write B to page 0, flush → B in S3 delta (newer)
-//  4. Read page 0 → readPage checks: memLayer (empty), frozen (empty),
+//  4. Read page 0 → readPage checks: memtable (empty), frozen (empty),
 //     page cache (stale A!) → returns A instead of B
 //
 // The page cache must be invalidated at flush time (step 3) so that
@@ -22,7 +22,6 @@ import (
 func TestStalePageCacheAfterFlush(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize // high so flushes are manual only
-	cfg.PageCacheBytes = 64 * PageSize
 
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()

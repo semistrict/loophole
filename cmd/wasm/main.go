@@ -11,7 +11,7 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/jsutil"
-	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/storage2"
 )
 
 var backend fsbackend.Service
@@ -22,7 +22,7 @@ func main() {
 	s3 := jsutil.MustGetS3()
 	store := jsutil.NewJSObjectStore(s3, "")
 
-	vm := lsm.NewVolumeManager(store, "", lsm.Config{}, nil, nil)
+	vm := storage2.NewVolumeManager(store, "", storage2.Config{}, nil, nil)
 	drivers := map[string]fsbackend.AnyDriver{
 		loophole.VolumeTypeExt4: fsbackend.NewLwext4Driver(),
 	}

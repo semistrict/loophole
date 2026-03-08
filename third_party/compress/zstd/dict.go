@@ -427,7 +427,10 @@ func BuildDict(o BuildDictOptions) ([]byte, error) {
 	avgSize := min(litTotal, huff0.BlockSizeMax/2)
 	huffBuff := make([]byte, 0, avgSize)
 	// Target size
-	div := max(litTotal/avgSize, 1)
+	div := 1
+	if avgSize > 0 {
+		div = max(litTotal/avgSize, 1)
+	}
 	if debug {
 		println("Huffman weights:")
 	}
