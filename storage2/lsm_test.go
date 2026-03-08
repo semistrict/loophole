@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/semistrict/loophole"
@@ -2647,3 +2648,78 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 
 // TestWriteTriggersEarlyFlushWhenStale verifies that a write triggers a
 // flush after a 2s delay when the last flush was more than FlushInterval ago.
+func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := loophole.NewMemStore()
+		cfg := Config{
+			FlushThreshold:  64 * PageSize, // large — memtable never fills
+			MaxFrozenTables: 10,
+			FlushInterval:   1 * time.Hour, // regular timer never fires
+		}
+		m := newTestManager(t, store, cfg)
+		ctx := t.Context()
+
+		v, err := m.NewVolume(ctx, "vol", 1024*1024, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		vol := v.(*volume)
+
+		// Write data — not stale yet, so no early flush.
+		page := make([]byte, PageSize)
+		page[0] = 0xAA
+		if err := v.Write(ctx, page, 0); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(1 * time.Second)
+
+		vol.layer.mu.RLock()
+		l0Count := len(vol.layer.index.L0)
+		vol.layer.mu.RUnlock()
+		if l0Count != 0 {
+			t.Fatalf("expected 0 L0 entries before stale write, got %d", l0Count)
+		}
+
+		// Simulate stale state: set lastFlushAt to 2 hours ago.
+		vol.layer.lastFlushAt.Store(time.Now().Add(-2 * time.Hour).UnixMilli())
+
+		// Write again — triggers early flush path.
+		page[0] = 0xBB
+		if err := v.Write(ctx, page, PageSize); err != nil {
+			t.Fatal(err)
+		}
+
+		// After 1s the flush hasn't happened yet (2s delay).
+		time.Sleep(1 * time.Second)
+		vol.layer.mu.RLock()
+		l0Count = len(vol.layer.index.L0)
+		vol.layer.mu.RUnlock()
+		if l0Count != 0 {
+			t.Fatalf("expected 0 L0 entries after 1s (flush delay is 2s), got %d", l0Count)
+		}
+
+		// After another 2s the flush should complete.
+		time.Sleep(2 * time.Second)
+		vol.layer.mu.RLock()
+		l0Count = len(vol.layer.index.L0)
+		vol.layer.mu.RUnlock()
+		if l0Count == 0 {
+			t.Fatal("expected L0 entries after early flush, got 0")
+		}
+
+		// Verify data integrity.
+		buf := make([]byte, PageSize)
+		if _, err := v.Read(ctx, buf, 0); err != nil {
+			t.Fatal(err)
+		}
+		if buf[0] != 0xAA {
+			t.Fatalf("page 0: expected 0xAA, got 0x%02X", buf[0])
+		}
+		if _, err := v.Read(ctx, buf, PageSize); err != nil {
+			t.Fatal(err)
+		}
+		if buf[0] != 0xBB {
+			t.Fatalf("page 1: expected 0xBB, got 0x%02X", buf[0])
+		}
+	})
+}

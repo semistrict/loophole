@@ -62,8 +62,9 @@ type layer struct {
 	flushStop   chan struct{}
 	flushDone   chan struct{}
 	flushNotify chan struct{}
-	writeNotify chan struct{}
+	writeNotify chan struct{} // poked on every write; triggers early flush if stale
 	flushCancel context.CancelFunc
+	lastFlushAt atomic.Int64 // UnixMilli of last successful flush
 	closeOnce   sync.Once
 
 	debugLog func(string)
@@ -729,6 +730,10 @@ func (ly *layer) Close() {
 	})
 }
 
+// flushWriteDelay is how long to wait after a write-triggered flush
+// before actually flushing, to batch nearby writes.
+const flushWriteDelay = 2 * time.Second
+
 // startPeriodicFlush starts the background flush goroutine.
 func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
 	if ly.config.FlushInterval < 0 {
@@ -741,34 +746,87 @@ func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
 	ly.flushDone = make(chan struct{})
 	ly.flushNotify = make(chan struct{}, 1)
 	ly.writeNotify = make(chan struct{}, 1)
+	ly.lastFlushAt.Store(time.Now().UnixMilli())
 
-	go func() {
-		defer close(ly.flushDone)
-		ticker := time.NewTicker(ly.config.FlushInterval)
-		defer ticker.Stop()
+	go ly.periodicFlushLoop(ctx)
+}
 
-		for {
+func (ly *layer) periodicFlushLoop(ctx context.Context) {
+	defer close(ly.flushDone)
+	timer := time.NewTimer(ly.config.FlushInterval)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ly.flushStop:
+			return
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		case <-ly.flushNotify:
+		case <-ly.writeNotify:
+			// A write arrived. If the last flush was longer than FlushInterval
+			// ago, schedule a flush after a short delay to batch nearby writes.
+			sinceFlush := time.Since(time.UnixMilli(ly.lastFlushAt.Load()))
+			if sinceFlush < ly.config.FlushInterval {
+				continue // not stale, let the regular timer handle it
+			}
+			// Drain any extra write notifications.
+			select {
+			case <-ly.writeNotify:
+			default:
+			}
+			// Wait a short delay to batch writes, but still listen for stop.
+			delay := time.NewTimer(flushWriteDelay)
 			select {
 			case <-ly.flushStop:
+				delay.Stop()
 				return
-			case <-ctx.Done():
-				return
-			case <-ly.flushNotify:
-			case <-ticker.C:
+			case <-delay.C:
 			}
+		}
 
-			ly.frozenMu.RLock()
-			hasFrozen := len(ly.frozenTables) > 0
-			ly.frozenMu.RUnlock()
+		// Drain any pending notifications so we don't loop unnecessarily.
+		select {
+		case <-ly.flushNotify:
+		default:
+		}
+		select {
+		case <-ly.writeNotify:
+		default:
+		}
 
-			if hasFrozen {
-				// TryLock avoids blocking if another goroutine (e.g.
-				// an explicit Flush call) already holds flushMu. Under
-				// synctest, a blocked goroutine prevents time from
-				// advancing, which deadlocks retry timers.
-				if !ly.flushMu.TryLock() {
-					continue
-				}
+		ly.doPeriodicFlush(ctx)
+		if ctx.Err() != nil {
+			return
+		}
+		timer.Reset(ly.config.FlushInterval)
+	}
+}
+
+func (ly *layer) doPeriodicFlush(ctx context.Context) {
+	// Flush frozen tables. TryLock avoids blocking if another goroutine
+	// (e.g. an explicit Flush call) already holds flushMu. Under synctest,
+	// a blocked goroutine prevents time from advancing, which deadlocks
+	// retry timers.
+	if ly.flushMu.TryLock() {
+		err := ly.flushFrozenTablesLocked(ctx, 5)
+		ly.flushMu.Unlock()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			slog.Error("periodic flush failed", "layer", ly.id, "error", err)
+		}
+	}
+
+	// Also freeze+flush active memtable if non-empty.
+	ly.mu.RLock()
+	mt := ly.memtable
+	ly.mu.RUnlock()
+	if !mt.isEmpty() {
+		if err := ly.freezememtable(); err == nil {
+			if ly.flushMu.TryLock() {
 				err := ly.flushFrozenTablesLocked(ctx, 5)
 				ly.flushMu.Unlock()
 				if err != nil {
@@ -779,7 +837,8 @@ func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
 				}
 			}
 		}
-	}()
+	}
+	ly.lastFlushAt.Store(time.Now().UnixMilli())
 }
 
 func (ly *layer) log(format string, args ...any) {
