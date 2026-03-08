@@ -4,17 +4,16 @@ import (
 	"testing"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/lsm"
+	"github.com/semistrict/loophole/storage2"
 	"github.com/stretchr/testify/require"
 )
 
 func testManager(t *testing.T) loophole.VolumeManager {
 	t.Helper()
 	store := loophole.NewMemStore()
-	m := lsm.NewVolumeManager(store, t.TempDir(), lsm.Config{
-		FlushThreshold:  16 * lsm.PageSize,
-		MaxFrozenLayers: 2,
-		PageCacheBytes:  16 * lsm.PageSize,
+	m := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{
+		FlushThreshold:  16 * storage2.PageSize,
+		MaxFrozenTables: 2,
 	}, nil, nil)
 	t.Cleanup(func() { m.Close(t.Context()) })
 	return m

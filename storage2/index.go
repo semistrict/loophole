@@ -86,16 +86,16 @@ func (m *blockRangeMap) Find(block BlockIdx) string {
 	return ""
 }
 
-// Set updates the map so that block maps to layerID. If block falls
-// within an existing range of the same layer, the range is extended.
-// Otherwise a new single-block range is inserted.
-func (m *blockRangeMap) Set(block BlockIdx, layerID string) {
-	m.ranges = setBlockRange(m.ranges, block, layerID)
+// Set returns a new blockRangeMap with block mapped to layerID.
+// The original map is not modified (copy-on-write for snapshot safety).
+func (m *blockRangeMap) Set(block BlockIdx, layerID string) *blockRangeMap {
+	return &blockRangeMap{ranges: setBlockRange(m.ranges, block, layerID)}
 }
 
-// Remove removes block from the map.
-func (m *blockRangeMap) Remove(block BlockIdx) {
-	m.ranges = removeBlockAddr(m.ranges, block)
+// Remove returns a new blockRangeMap with block removed.
+// The original map is not modified (copy-on-write for snapshot safety).
+func (m *blockRangeMap) Remove(block BlockIdx) *blockRangeMap {
+	return &blockRangeMap{ranges: removeBlockAddr(m.ranges, block)}
 }
 
 // Ranges returns the underlying sorted ranges (for serialization).

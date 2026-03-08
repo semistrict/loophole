@@ -13,3 +13,5 @@ vmlinuz
 node_modules/
 docker-config/
 cmd/wasm/web/public/loophole.wasm
+*.prof
+*.test

@@ -34,10 +34,9 @@ type layer struct {
 	diskCache *PageCache
 	cacheDir  string
 
-	mu        sync.RWMutex
-	index     layerIndex
-	indexEtag string
-	memtable  *memtable
+	mu       sync.RWMutex
+	index    layerIndex
+	memtable *memtable
 
 	nextSeq atomic.Uint64
 
@@ -118,14 +117,13 @@ func openLayer(ctx context.Context, store loophole.ObjectStore, id string, confi
 }
 
 func (ly *layer) loadIndex(ctx context.Context) error {
-	idx, etag, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		// No index.json yet — start fresh.
 		ly.index = layerIndex{NextSeq: 1}
 		ly.nextSeq.Store(1)
 		ly.l1Map = newBlockRangeMap(nil)
 		ly.l2Map = newBlockRangeMap(nil)
-		ly.indexEtag = ""
 		return nil
 	}
 
@@ -133,7 +131,6 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 	ly.nextSeq.Store(idx.NextSeq)
 	ly.l1Map = newBlockRangeMap(idx.L1)
 	ly.l2Map = newBlockRangeMap(idx.L2)
-	ly.indexEtag = etag
 	return nil
 }
 
@@ -143,7 +140,6 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 	idx.NextSeq = ly.nextSeq.Load()
 	idx.L1 = ly.l1Map.Ranges()
 	idx.L2 = ly.l2Map.Ranges()
-	etag := ly.indexEtag
 	ly.mu.RUnlock()
 
 	data, err := json.Marshal(idx)
@@ -151,15 +147,7 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 		return fmt.Errorf("marshal index: %w", err)
 	}
 
-	newEtag, err := ly.layerStore.PutBytesCAS(ctx, "index.json", data, etag)
-	if err != nil {
-		return err
-	}
-
-	ly.mu.Lock()
-	ly.indexEtag = newEtag
-	ly.mu.Unlock()
-	return nil
+	return ly.layerStore.PutReader(ctx, "index.json", bytes.NewReader(data))
 }
 
 // snapshotLayers captures current layer state under a read lock.
@@ -205,11 +193,17 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 // readPageWith reads a single page using a pre-captured layer snapshot.
 func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, error) {
 	// 1. Active memtable.
+	staleSnapshot := false
 	if entry, ok := snap.memtable.get(pageIdx); ok {
 		if entry.tombstone {
 			return zeroPage[:], nil
 		}
-		return snap.memtable.readData(entry)
+		data, err := snap.memtable.readData(entry)
+		if err == nil {
+			return data, nil
+		}
+		// Memtable was cleaned up — its data was flushed to L0.
+		staleSnapshot = true
 	}
 
 	// 2. Frozen memtables (newest first).
@@ -222,6 +216,9 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 			if err == nil {
 				return data, nil
 			}
+			// Frozen memtable was cleaned up — its data was flushed to L0
+			// but our snapshot's L0 list is stale. Refresh it.
+			staleSnapshot = true
 			break
 		}
 	}
@@ -233,9 +230,18 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		}
 	}
 
+	// If a frozen memtable was cleaned up, refresh the L0 list from the layer
+	// since the flush guarantees the L0 entry exists before cleanup.
+	l0 := snap.l0
+	if staleSnapshot {
+		ly.mu.RLock()
+		l0 = ly.index.L0
+		ly.mu.RUnlock()
+	}
+
 	// 4. L0 files (newest first — last in slice is newest).
-	for i := len(snap.l0) - 1; i >= 0; i-- {
-		l0e := &snap.l0[i]
+	for i := len(l0) - 1; i >= 0; i-- {
+		l0e := &l0[i]
 		if l0HasTombstone(l0e, pageIdx) {
 			return zeroPage[:], nil
 		}
@@ -909,7 +915,7 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 
 		// Update L1 range map.
 		ly.mu.Lock()
-		ly.l1Map.Set(blockAddr, ly.id)
+		ly.l1Map = ly.l1Map.Set(blockAddr, ly.id)
 		ly.mu.Unlock()
 
 		// Check if this L1 block should be promoted to L2.
@@ -977,8 +983,8 @@ func (ly *layer) promoteL1toL2(ctx context.Context, blockAddr BlockIdx, l1Pages 
 
 	// Update maps: add L2 entry, remove L1 entry.
 	ly.mu.Lock()
-	ly.l2Map.Set(blockAddr, ly.id)
-	ly.l1Map.Remove(blockAddr)
+	ly.l2Map = ly.l2Map.Set(blockAddr, ly.id)
+	ly.l1Map = ly.l1Map.Remove(blockAddr)
 	ly.mu.Unlock()
 
 	// Cache new block.

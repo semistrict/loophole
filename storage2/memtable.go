@@ -102,6 +102,10 @@ func (mt *memtable) put(pageIdx PageIdx, seq uint64, data []byte) error {
 
 	var slot int
 	if existing, ok := mt.index[pageIdx]; ok && !existing.tombstone {
+		// Reject stale writes — a higher seq already owns this page.
+		if seq < existing.seq {
+			return nil
+		}
 		slot = existing.slot
 	} else {
 		if mt.nextSlot >= mt.maxPages {

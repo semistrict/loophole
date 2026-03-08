@@ -5,6 +5,7 @@ package storage2
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 
@@ -207,6 +208,12 @@ func (v *volume) ReleaseRef(ctx context.Context) error {
 func (v *volume) destroy(ctx context.Context) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if !v.readOnly.Load() {
+		if err := v.layer.Flush(ctx); err != nil {
+			slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
+		}
+		v.manager.releaseVolumeLease(ctx, v.name)
+	}
 	v.manager.closeVolume(v.name)
 	v.layer.Close()
 	return nil
