@@ -25,9 +25,10 @@ type l0Entry struct {
 // the layer that owns the blobs. The blob key for block index N in
 // layer L is "layers/{L}/l1/{N}" or "layers/{L}/l2/{N}".
 type blockRange struct {
-	Start BlockIdx `json:"start"` // inclusive
-	End   BlockIdx `json:"end"`   // exclusive
-	Layer string   `json:"layer"` // layer ID that owns the blobs
+	Start         BlockIdx `json:"start"`                     // inclusive
+	End           BlockIdx `json:"end"`                       // exclusive
+	Layer         string   `json:"layer"`                     // layer ID that owns the blobs
+	WriteLeaseSeq uint64   `json:"write_lease_seq,omitempty"` // lease seq embedded in blob keys
 }
 
 // l0HasPage checks if an L0 entry contains the given page.
@@ -72,24 +73,25 @@ func newBlockRangeMap(ranges []blockRange) *blockRangeMap {
 	return &blockRangeMap{ranges: sorted}
 }
 
-// Find returns the layer ID for the given block index, or "" if not found.
-func (m *blockRangeMap) Find(block BlockIdx) string {
+// Find returns the layer ID and write lease seq for the given block index,
+// or ("", 0) if not found.
+func (m *blockRangeMap) Find(block BlockIdx) (string, uint64) {
 	if m == nil || len(m.ranges) == 0 {
-		return ""
+		return "", 0
 	}
 	i := sort.Search(len(m.ranges), func(i int) bool {
 		return m.ranges[i].End > block
 	})
 	if i < len(m.ranges) && m.ranges[i].Start <= block {
-		return m.ranges[i].Layer
+		return m.ranges[i].Layer, m.ranges[i].WriteLeaseSeq
 	}
-	return ""
+	return "", 0
 }
 
-// Set returns a new blockRangeMap with block mapped to layerID.
+// Set returns a new blockRangeMap with block mapped to layerID and writeLeaseSeq.
 // The original map is not modified (copy-on-write for snapshot safety).
-func (m *blockRangeMap) Set(block BlockIdx, layerID string) *blockRangeMap {
-	return &blockRangeMap{ranges: setBlockRange(m.ranges, block, layerID)}
+func (m *blockRangeMap) Set(block BlockIdx, layerID string, writeLeaseSeq uint64) *blockRangeMap {
+	return &blockRangeMap{ranges: setBlockRange(m.ranges, block, layerID, writeLeaseSeq)}
 }
 
 // Remove returns a new blockRangeMap with block removed.
@@ -107,7 +109,7 @@ func (m *blockRangeMap) Ranges() []blockRange {
 }
 
 // setBlockRange inserts or updates a single block address in sorted ranges.
-func setBlockRange(ranges []blockRange, blockAddr BlockIdx, layerID string) []blockRange {
+func setBlockRange(ranges []blockRange, blockAddr BlockIdx, layerID string, writeLeaseSeq uint64) []blockRange {
 	// Remove old mapping first (if any).
 	ranges = removeBlockAddr(ranges, blockAddr)
 
@@ -116,9 +118,9 @@ func setBlockRange(ranges []blockRange, blockAddr BlockIdx, layerID string) []bl
 		return ranges[i].Start > blockAddr
 	})
 
-	// Try to merge with adjacent ranges.
-	canMergePrev := i > 0 && ranges[i-1].End == blockAddr && ranges[i-1].Layer == layerID
-	canMergeNext := i < len(ranges) && ranges[i].Start == blockAddr+1 && ranges[i].Layer == layerID
+	// Try to merge with adjacent ranges (must match both layer and writeLeaseSeq).
+	canMergePrev := i > 0 && ranges[i-1].End == blockAddr && ranges[i-1].Layer == layerID && ranges[i-1].WriteLeaseSeq == writeLeaseSeq
+	canMergeNext := i < len(ranges) && ranges[i].Start == blockAddr+1 && ranges[i].Layer == layerID && ranges[i].WriteLeaseSeq == writeLeaseSeq
 
 	switch {
 	case canMergePrev && canMergeNext:
@@ -131,7 +133,7 @@ func setBlockRange(ranges []blockRange, blockAddr BlockIdx, layerID string) []bl
 		ranges[i].Start = blockAddr
 	default:
 		// Insert new single-block range.
-		newRange := blockRange{Start: blockAddr, End: blockAddr + 1, Layer: layerID}
+		newRange := blockRange{Start: blockAddr, End: blockAddr + 1, Layer: layerID, WriteLeaseSeq: writeLeaseSeq}
 		ranges = append(ranges, blockRange{})
 		copy(ranges[i+1:], ranges[i:])
 		ranges[i] = newRange

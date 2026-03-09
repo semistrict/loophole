@@ -1,183 +1,188 @@
-import { useEffect, useRef } from 'react'
-import { Terminal as XTerm } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebLinksAddon } from '@xterm/addon-web-links'
-import '@xterm/xterm/css/xterm.css'
-import { shellWebSocketUrl } from '@/lib/api'
+import { useState, useCallback, useEffect } from 'react'
+import { Plus, X, AlertTriangle } from 'lucide-react'
+import { cn } from '@/lib/utils'
+import { useTerminalSessions } from '@/hooks/useTerminalSessions'
+import TerminalRenderer from './TerminalRenderer'
 
 interface TerminalProps {
   containerId: string
   volume: string | null
-  onTitleChange?: (title: string) => void
-  onBell?: () => void
 }
 
-export default function Terminal({ containerId, volume, onTitleChange, onBell }: TerminalProps) {
-  const containerRef = useRef<HTMLDivElement>(null)
-  const termRef = useRef<XTerm | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const fitRef = useRef<FitAddon | null>(null)
-  const connectedVolumeRef = useRef<string | null>(null)
+export default function Terminal({ containerId, volume }: TerminalProps) {
+  const {
+    sessions, screens, leaseError,
+    createSession, breakLease, dismissLeaseError,
+    writeToSession, resizeSession, killSession,
+  } = useTerminalSessions(containerId)
 
-  // Create xterm instance once on mount, never destroy until unmount.
+  const [activeTab, setActiveTab] = useState<string | null>(null)
+  const [breaking, setBreaking] = useState(false)
+
+  // Auto-select the first open session, or create one when a volume is selected.
   useEffect(() => {
-    if (!containerRef.current) return
-
-    const term = new XTerm({
-      cursorBlink: true,
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-      fontSize: 13,
-      lineHeight: 1.2,
-      theme: {
-        background: '#0a0a0a',
-        foreground: '#e0e0e0',
-        cursor: '#e0e0e0',
-        selectionBackground: '#ffffff30',
-        black: '#1a1a1a',
-        red: '#ff6b6b',
-        green: '#69db7c',
-        yellow: '#ffd43b',
-        blue: '#74c0fc',
-        magenta: '#da77f2',
-        cyan: '#66d9e8',
-        white: '#e0e0e0',
-        brightBlack: '#555555',
-        brightRed: '#ff8787',
-        brightGreen: '#8ce99a',
-        brightYellow: '#ffe066',
-        brightBlue: '#91d5ff',
-        brightMagenta: '#e599f7',
-        brightCyan: '#99e9f2',
-        brightWhite: '#ffffff',
-      },
-    })
-
-    const fit = new FitAddon()
-    term.loadAddon(fit)
-    term.loadAddon(new WebLinksAddon())
-
-    termRef.current = term
-    fitRef.current = fit
-
-    term.open(containerRef.current)
-    fit.fit()
-
-    // Window resize → fit
-    const onResize = () => fit.fit()
-    window.addEventListener('resize', onResize)
-
-    // ResizeObserver for container size changes
-    const observer = new ResizeObserver(() => fit.fit())
-    observer.observe(containerRef.current)
-
-    return () => {
-      window.removeEventListener('resize', onResize)
-      observer.disconnect()
-      term.dispose()
-      termRef.current = null
-      fitRef.current = null
-    }
-  }, [])
-
-  // Connect/reconnect WebSocket when volume changes.
-  // The xterm instance stays alive — we just swap the WS connection.
-  useEffect(() => {
-    const term = termRef.current
-    if (!term) return
-
-    // Close existing connection
-    if (wsRef.current) {
-      wsRef.current.close()
-      wsRef.current = null
-    }
-
-    if (!volume) {
-      if (connectedVolumeRef.current) {
-        term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n')
-        connectedVolumeRef.current = null
+    if (!volume) return
+    const existing = sessions.find((s) => s.volume === volume && !s.closed)
+    if (existing) {
+      if (!activeTab || !sessions.find((s) => s.id === activeTab && !s.closed)) {
+        setActiveTab(existing.id)
       }
       return
     }
+    if (leaseError?.volume === volume) return
+    createSession(volume).then((id) => setActiveTab(id)).catch(() => {})
+  }, [volume, sessions.length])
 
-    // Clear terminal for new session
-    if (connectedVolumeRef.current !== volume) {
-      term.reset()
-      term.write(`\x1b[90mConnecting to ${volume}...\x1b[0m\r\n`)
-    }
-    connectedVolumeRef.current = volume
-
-    const ws = new WebSocket(shellWebSocketUrl(containerId, volume))
-    ws.binaryType = 'arraybuffer'
-    wsRef.current = ws
-
-    ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: 'resize',
-          cols: term.cols,
-          rows: term.rows,
-        }),
-      )
-    }
-
-    ws.onmessage = (event) => {
-      if (event.data instanceof ArrayBuffer) {
-        term.write(new Uint8Array(event.data))
-      }
-    }
-
-    ws.onclose = () => {
-      term.write('\r\n\x1b[90m[session ended]\x1b[0m\r\n')
-    }
-
-    // Terminal input → WebSocket
-    const dataDisposable = term.onData((data) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(new TextEncoder().encode(data))
-      }
-    })
-
-    // Resize events
-    const resizeDisposable = term.onResize(({ cols, rows }) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'resize', cols, rows }))
-      }
-    })
-
-    return () => {
-      dataDisposable.dispose()
-      resizeDisposable.dispose()
-      ws.close()
-      wsRef.current = null
-    }
-  }, [containerId, volume])
-
-  // Register title/bell callbacks (separate effect so volume changes don't re-register xterm listeners)
+  // If active tab gets closed/removed, switch to another.
   useEffect(() => {
-    const term = termRef.current
-    if (!term) return
+    if (activeTab && sessions.find((s) => s.id === activeTab)) return
+    const open = sessions.find((s) => !s.closed)
+    setActiveTab(open?.id ?? null)
+  }, [sessions, activeTab])
 
-    const titleDisposable = term.onTitleChange((title) => onTitleChange?.(title))
-    const bellDisposable = term.onBell(() => onBell?.())
+  const handleNewTab = useCallback(() => {
+    if (!volume) return
+    createSession(volume).then((id) => setActiveTab(id)).catch(() => {})
+  }, [volume, createSession])
 
-    return () => {
-      titleDisposable.dispose()
-      bellDisposable.dispose()
+  const handleCloseTab = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      e.stopPropagation()
+      killSession(id)
+    },
+    [killSession],
+  )
+
+  const handleBreakLease = useCallback(async () => {
+    if (!leaseError) return
+    setBreaking(true)
+    try {
+      await breakLease(leaseError.volume)
+      // Retry creating the session after breaking the lease.
+      const id = await createSession(leaseError.volume)
+      setActiveTab(id)
+    } catch {
+      // breakLease or createSession failed — leaseError state will update
+    } finally {
+      setBreaking(false)
     }
-  }, [onTitleChange, onBell])
+  }, [leaseError, breakLease, createSession])
+
+  const activeScreen = activeTab ? screens[activeTab] : null
+  const openSessions = sessions.filter((s) => !s.closed || s.id === activeTab)
+
+  if (!volume) {
+    return (
+      <div className="flex-1 flex items-center justify-center" style={{ background: '#0a0a0a' }}>
+        <span className="font-mono text-sm" style={{ color: '#555' }}>
+          Select a volume to open a shell
+        </span>
+      </div>
+    )
+  }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 relative">
+    <div className="flex-1 flex flex-col min-h-0">
+      {/* Tab bar */}
       <div
-        ref={containerRef}
-        className="flex-1 min-h-0"
-        style={{ backgroundColor: '#0a0a0a' }}
-      />
-      {!volume && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#0a0a0a]/80 text-muted-foreground font-mono text-sm">
-          Select a volume to open a shell
+        className="flex items-center h-8 shrink-0 select-none overflow-x-auto"
+        style={{ background: '#111', borderBottom: '1px solid #222' }}
+      >
+        {openSessions.map((s) => {
+          const label = s.title || s.volume
+          return (
+            <button
+              key={s.id}
+              onClick={() => setActiveTab(s.id)}
+              className={cn(
+                'group flex items-center gap-1.5 px-3 h-full text-xs font-mono transition-colors shrink-0',
+                s.id === activeTab
+                  ? 'bg-[#0a0a0a] text-[#e4e4e7]'
+                  : 'text-[#777] hover:text-[#aaa] hover:bg-[#1a1a1a]',
+                s.closed && 'opacity-50',
+              )}
+            >
+              <span className="truncate max-w-40">
+                {label}
+                {s.closed ? ' (closed)' : ''}
+              </span>
+              <span
+                onClick={(e) => handleCloseTab(s.id, e)}
+                className="p-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-[#333] transition-opacity"
+              >
+                <X size={10} />
+              </span>
+            </button>
+          )
+        })}
+        <button
+          onClick={handleNewTab}
+          className="flex items-center justify-center w-7 h-full text-[#555] hover:text-[#aaa] hover:bg-[#1a1a1a] transition-colors shrink-0"
+          title="New terminal"
+        >
+          <Plus size={12} />
+        </button>
+      </div>
+
+      {/* Lease error dialog */}
+      {leaseError && (
+        <div className="flex-1 flex items-center justify-center" style={{ background: '#0a0a0a' }}>
+          <div
+            className="max-w-md rounded-lg p-6 space-y-4"
+            style={{ background: '#1a1a1a', border: '1px solid #333' }}
+          >
+            <div className="flex items-start gap-3">
+              <AlertTriangle size={20} className="shrink-0 mt-0.5" style={{ color: '#e5a00d' }} />
+              <div className="space-y-2">
+                <h3 className="font-mono text-sm font-medium" style={{ color: '#e4e4e7' }}>
+                  Volume in use by another instance
+                </h3>
+                <p className="font-mono text-xs leading-relaxed" style={{ color: '#888' }}>
+                  {leaseError.message}
+                </p>
+                <p className="font-mono text-xs leading-relaxed" style={{ color: '#888' }}>
+                  Would you like to request the other instance to release this volume?
+                  The remote daemon will flush pending writes and unmount cleanly.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={dismissLeaseError}
+                className="px-3 py-1.5 rounded text-xs font-mono transition-colors"
+                style={{ color: '#888', background: '#222', border: '1px solid #333' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleBreakLease}
+                disabled={breaking}
+                className="px-3 py-1.5 rounded text-xs font-mono transition-colors disabled:opacity-50"
+                style={{ color: '#fff', background: '#b45309', border: '1px solid #d97706' }}
+              >
+                {breaking ? 'Requesting...' : 'Transfer ownership'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
+
+      {/* Terminal area */}
+      {!leaseError && (activeScreen ? (
+        <TerminalRenderer
+          screen={activeScreen}
+          onInput={(data) => activeTab && writeToSession(activeTab, data)}
+          onResize={(cols, rows) => activeTab && resizeSession(activeTab, cols, rows)}
+        />
+      ) : (
+        <div className="flex-1 flex items-center justify-center" style={{ background: '#0a0a0a' }}>
+          <span className="font-mono text-xs" style={{ color: '#555' }}>
+            {sessions.some((s) => !s.closed)
+              ? 'Connecting...'
+              : 'Starting terminal...'}
+          </span>
+        </div>
+      ))}
     </div>
   )
 }

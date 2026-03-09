@@ -44,7 +44,7 @@ const l0IndexEntrySize = 8 + 8 + 4 + 4 // 24 bytes
 
 // buildL0 serializes a frozen memtable's entries into the L0 file format.
 // Returns the serialized bytes and the l0Entry metadata (including page index).
-func buildL0(mt *memtable, layerID string, entries []sortedEntry) ([]byte, l0Entry, error) {
+func buildL0(mt *memtable, layerID string, entries []sortedEntry, writeLeaseSeq uint64) ([]byte, l0Entry, error) {
 	if len(entries) == 0 {
 		return nil, l0Entry{}, fmt.Errorf("no entries")
 	}
@@ -112,7 +112,7 @@ func buildL0(mt *memtable, layerID string, entries []sortedEntry) ([]byte, l0Ent
 	}
 	copy(result[:l0HeaderSize], hdrBuf.Bytes())
 
-	key := fmt.Sprintf("layers/%s/l0/%016x-%016x", layerID, mt.startSeq, mt.endSeq)
+	key := fmt.Sprintf("layers/%s/l0/%016x-%016x-%016x", layerID, writeLeaseSeq, mt.startSeq, mt.endSeq)
 
 	return result, l0Entry{
 		Key:        key,

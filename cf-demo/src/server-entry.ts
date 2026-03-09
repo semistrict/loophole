@@ -3,24 +3,23 @@ import { resolveContainer } from './lib/container'
 
 export { SandboxContainer } from './container'
 
-// WebSocket upgrades can't go through TanStack Start — intercept them here.
-// Path: /c/:id/sandbox/shell?volume=...
-const WS_PREFIX = /^\/c\/([^/]+)\/sandbox\//
+// All /c/:id/sandbox/* requests are proxied directly to the container.
+// TanStack Start splat routes don't reliably match these, so we intercept here.
+const SANDBOX_PREFIX = /^\/c\/([^/]+)\/sandbox\//
 
 export default {
   fetch(request: Request, ...args: unknown[]) {
-    if (request.headers.get('Upgrade') === 'websocket') {
-      const url = new URL(request.url)
-      const match = url.pathname.match(WS_PREFIX)
-      if (!match) {
-        return new Response('WebSocket path must be /c/:id/sandbox/...', { status: 400 })
-      }
+    const url = new URL(request.url)
+    const match = url.pathname.match(SANDBOX_PREFIX)
+    if (match) {
       const containerId = decodeURIComponent(match[1])
-      const rest = url.pathname.slice(match[0].length) // e.g. "shell"
+      const rest = url.pathname.slice(match[0].length)
       const container = resolveContainer(containerId)
       return container.fetch(
         new Request(`http://container/sandbox/${rest}${url.search}`, {
+          method: request.method,
           headers: request.headers,
+          body: request.method !== 'GET' ? request.body : undefined,
         }),
       )
     }

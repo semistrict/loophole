@@ -112,17 +112,43 @@ func (c *Client) ChrootClone(ctx context.Context, clone string) (string, error) 
 	return result.Mountpoint, nil
 }
 
-// ChrootStatus returns the volume name (chroot socket: GET /status).
-func (c *Client) ChrootStatus(ctx context.Context) (string, error) {
+// ChrootStatusResponse holds the response from the chroot status endpoint.
+type ChrootStatusResponse struct {
+	Name     string              `json:"name"`
+	Size     uint64              `json:"size"`
+	Type     string              `json:"type"`
+	ReadOnly bool                `json:"read_only"`
+	Refs     int32               `json:"refs"`
+	Layer    ChrootLayerResponse `json:"layer"`
+	// Fallback for old-style responses.
+	Volume string `json:"volume,omitempty"`
+}
+
+// ChrootLayerResponse holds layer details from the chroot status endpoint.
+type ChrootLayerResponse struct {
+	LayerID        string `json:"layer_id"`
+	L0Count        int    `json:"l0_count"`
+	L0TotalPages   int    `json:"l0_total_pages"`
+	L1Ranges       int    `json:"l1_ranges"`
+	L2Ranges       int    `json:"l2_ranges"`
+	MemtablePages  int    `json:"memtable_pages"`
+	MemtableMax    int    `json:"memtable_max"`
+	FrozenCount    int    `json:"frozen_memtables"`
+	L0CacheEntries int    `json:"l0_cache_entries"`
+	BlockCacheEnts int    `json:"block_cache_entries"`
+}
+
+// ChrootStatus returns volume status info (chroot socket: GET /status).
+func (c *Client) ChrootStatus(ctx context.Context) (*ChrootStatusResponse, error) {
 	resp, err := c.rpc(ctx, "GET", "/status", nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	var result struct{ Volume string }
+	var result ChrootStatusResponse
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", err
+		return nil, err
 	}
-	return result.Volume, nil
+	return &result, nil
 }
 
 // --- RPC methods ---

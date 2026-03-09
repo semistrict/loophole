@@ -119,10 +119,11 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 	}
 
 	ref := volumeRef{
-		LayerID:    childID,
-		Size:       v.size,
-		Type:       v.volType,
-		LeaseToken: m.lease.Token(),
+		LayerID:       childID,
+		Size:          v.size,
+		Type:          v.volType,
+		LeaseToken:    m.lease.Token(),
+		WriteLeaseSeq: 1,
 	}
 	refData, err := json.Marshal(ref)
 	if err != nil {
@@ -155,6 +156,7 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 	if err != nil {
 		return nil, fmt.Errorf("init clone layer: %w", err)
 	}
+	ly.writeLeaseSeq = 1
 
 	if m.config.FlushInterval > 0 {
 		ly.startPeriodicFlush(ctx)

@@ -60,4 +60,33 @@ var (
 		Name:      "early_flushes_total",
 		Help:      "Flush cycles triggered by dirty count crossing soft threshold.",
 	}))
+
+	FlushUploadDuration = reg(prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "upload_duration_seconds",
+		Help:      "Time to upload a single L0 blob to S3 (excludes index save).",
+		Buckets:   prometheus.ExponentialBuckets(0.01, 2, 12),
+	}))
+
+	FrozenTableCount = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "frozen_tables",
+		Help:      "Current number of frozen memtables awaiting flush.",
+	}))
+
+	MemtableBytes = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "memtable_bytes",
+		Help:      "Current active memtable size in bytes.",
+	}))
+
+	FlushPages = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "pages_total",
+		Help:      "Total pages flushed (data + tombstones).",
+	}))
 )

@@ -3,8 +3,8 @@
 package e2e
 
 import (
-	"bytes"
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -19,13 +19,11 @@ import (
 	"github.com/semistrict/loophole/client"
 )
 
-// TestE2E_ShellWebSocket tests the /sandbox/shell WebSocket endpoint.
-// It creates a volume with a minimal rootfs (busybox), connects via WebSocket,
-// runs a command, and verifies the shell is chrooted to the volume root.
+// TestE2E_ShellWebSocket tests the /sandbox/shell WebSocket endpoint
+// which now speaks the midterm JSON protocol (screen/update/closed messages).
 func TestE2E_ShellWebSocket(t *testing.T) {
 	skipE2E(t)
 
-	// We need a statically-linked shell. busybox-static is ideal.
 	busybox := findBusybox(t)
 
 	b := newBackend(t)
@@ -36,30 +34,26 @@ func TestE2E_ShellWebSocket(t *testing.T) {
 	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: vol}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
-	// Build a minimal rootfs: /bin/sh -> busybox, with common applet symlinks.
 	tfs := newTestFS(t, b, mp)
 	tfs.MkdirAll(t, "bin")
 	tfs.MkdirAll(t, "tmp")
 
-	// Copy busybox into the volume.
 	busyboxData, err := os.ReadFile(busybox)
 	require.NoError(t, err)
 	tfs.WriteFile(t, "bin/busybox", busyboxData)
 
-	// Make busybox executable and create applet symlinks.
 	require.NoError(t, os.Chmod(mp+"/bin/busybox", 0o755))
 	for _, applet := range []string{"sh", "cat", "ls", "echo"} {
 		require.NoError(t, os.Symlink("busybox", mp+"/bin/"+applet))
 	}
 
-	// Create a marker file to verify chroot works.
 	tfs.WriteFile(t, "chroot-marker.txt", []byte("inside-volume\n"))
 
 	if needsKernelExt4() {
 		syncFS(t, mp)
 	}
 
-	// Connect to the daemon's shell WebSocket.
+	// Connect to the daemon's shell WebSocket (compat endpoint).
 	sock := testClient.Socket()
 	dialer := websocket.Dialer{
 		NetDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -72,40 +66,85 @@ func TestE2E_ShellWebSocket(t *testing.T) {
 	defer conn.Close()
 	require.Equal(t, 101, resp.StatusCode)
 
-	// Send a command to read the marker file.
-	// The shell prompt may appear first; we send our command and look for output.
-	err = conn.WriteMessage(websocket.BinaryMessage, []byte("cat /chroot-marker.txt\n"))
-	require.NoError(t, err)
-
-	// Also test that / is the volume root by listing it.
-	err = conn.WriteMessage(websocket.BinaryMessage, []byte("ls /chroot-marker.txt && echo CHROOT_OK\n"))
-	require.NoError(t, err)
-
-	// Tell the shell to exit.
-	err = conn.WriteMessage(websocket.BinaryMessage, []byte("exit\n"))
-	require.NoError(t, err)
-
-	// Read all output until the connection closes.
-	var output bytes.Buffer
+	// Read the initial screen message.
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	_, screenData, err := conn.ReadMessage()
+	require.NoError(t, err)
+
+	var screen struct {
+		Type string `json:"type"`
+	}
+	require.NoError(t, json.Unmarshal(screenData, &screen))
+	require.Equal(t, "screen", screen.Type)
+
+	// Send input via the JSON protocol.
+	sendInput := func(data string) {
+		msg, _ := json.Marshal(map[string]string{"type": "input", "data": data})
+		require.NoError(t, conn.WriteMessage(websocket.TextMessage, msg))
+	}
+
+	sendInput("cat /chroot-marker.txt\n")
+	sendInput("ls /chroot-marker.txt && echo CHROOT_OK\n")
+	sendInput("exit\n")
+
+	// Collect all row HTML from update messages until the connection closes.
+	var allHTML []string
 	for {
-		_, msg, err := conn.ReadMessage()
+		_, data, err := conn.ReadMessage()
 		if err != nil {
 			break
 		}
-		output.Write(msg)
+		var msg struct {
+			Type string          `json:"type"`
+			Rows json.RawMessage `json:"rows"`
+		}
+		if json.Unmarshal(data, &msg) != nil {
+			continue
+		}
+		switch msg.Type {
+		case "update":
+			var rows map[string]string
+			if json.Unmarshal(msg.Rows, &rows) == nil {
+				for _, html := range rows {
+					allHTML = append(allHTML, html)
+				}
+			}
+		case "screen":
+			var rows []string
+			if json.Unmarshal(msg.Rows, &rows) == nil {
+				allHTML = append(allHTML, rows...)
+			}
+		}
 	}
 
-	out := output.String()
+	// Strip HTML tags to get plain text for assertions.
+	out := stripHTML(strings.Join(allHTML, "\n"))
 	t.Logf("shell output:\n%s", out)
 
-	// Verify the marker file content appeared in the output.
-	require.True(t, strings.Contains(out, "inside-volume"),
-		"expected shell output to contain 'inside-volume' (marker file content), got:\n%s", out)
+	require.Contains(t, out, "inside-volume",
+		"expected shell output to contain 'inside-volume' (marker file content)")
+	require.Contains(t, out, "CHROOT_OK",
+		"expected 'CHROOT_OK' in output (chroot verification)")
+}
 
-	// Verify chroot worked — ls found the file at / and printed CHROOT_OK.
-	require.True(t, strings.Contains(out, "CHROOT_OK"),
-		"expected 'CHROOT_OK' in output (chroot verification), got:\n%s", out)
+// stripHTML removes HTML tags from a string, returning plain text.
+func stripHTML(s string) string {
+	var b strings.Builder
+	inTag := false
+	for _, r := range s {
+		if r == '<' {
+			inTag = true
+			continue
+		}
+		if r == '>' {
+			inTag = false
+			continue
+		}
+		if !inTag {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // findBusybox returns the path to a statically-linked busybox binary.
@@ -117,13 +156,11 @@ func findBusybox(t *testing.T) string {
 		"/usr/bin/busybox",
 	} {
 		if _, err := os.Stat(path); err == nil {
-			// Verify it's statically linked (or at least executable).
 			if err := exec.Command(path, "--help").Run(); err == nil {
 				return path
 			}
 		}
 	}
-	// Try PATH.
 	if p, err := exec.LookPath("busybox"); err == nil {
 		return p
 	}

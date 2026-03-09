@@ -108,6 +108,7 @@ func (lm *LeaseManager) EnsureStarted(ctx context.Context) error {
 	if err := lm.createLease(ctx); err != nil {
 		return fmt.Errorf("create lease file: %w", err)
 	}
+	slog.Info("lease: started", "token", lm.token)
 	pollCtx, cancel := context.WithCancel(context.Background())
 	lm.stop = cancel
 	lm.started = true
@@ -129,7 +130,7 @@ func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string
 	}
 
 	// Lease file exists — check if the holder is still alive.
-	slog.Info("lease: checking if holder is alive", "token", existingToken)
+	slog.Info("lease: checking if holder is alive", "holder", existingToken, "token", lm.token)
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	_, rpcErr := lm.Call(checkCtx, existingToken, "check_alive", nil)
@@ -147,7 +148,7 @@ func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string
 	}
 
 	// Timed out waiting for response — holder is dead.
-	slog.Warn("lease: holder not responding, auto-breaking stale lease", "token", existingToken)
+	slog.Warn("lease: holder not responding, auto-breaking stale lease", "holder", existingToken, "token", lm.token)
 	if err := lm.forceBreakLease(ctx, existingToken); err != nil {
 		return fmt.Errorf("auto-break lease %q: %w", existingToken, err)
 	}

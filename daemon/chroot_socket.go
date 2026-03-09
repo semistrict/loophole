@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/storage2"
 )
 
 // startChrootSocket creates a restricted Unix socket that is bind-mounted into
@@ -111,7 +112,21 @@ func startChrootSocket(mountpoint string, backend fsbackend.Service) (cleanup fu
 	})
 
 	mux.HandleFunc("GET /status", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, map[string]string{"status": "ok", "volume": backend.VolumeAt(mountpoint)})
+		volName := backend.VolumeAt(mountpoint)
+		vol := backend.VM().GetVolume(volName)
+		if vol == nil {
+			writeJSON(w, map[string]string{"status": "ok", "volume": volName})
+			return
+		}
+		type debugInfoProvider interface {
+			DebugInfo() storage2.VolumeDebugInfo
+		}
+		if dp, ok := vol.(debugInfoProvider); ok {
+			info := dp.DebugInfo()
+			writeJSON(w, info)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok", "volume": volName})
 	})
 
 	srv := &http.Server{Handler: mux}

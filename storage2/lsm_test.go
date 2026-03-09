@@ -53,7 +53,7 @@ func TestMemLayerPutGet(t *testing.T) {
 	for i := range page {
 		page[i] = 0xAB
 	}
-	if err := ml.put(42, 0, page[:]); err != nil {
+	if err := ml.put(42, page[:]); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,10 +88,10 @@ func TestMemLayerTombstone(t *testing.T) {
 	// Write then tombstone.
 	page := make([]byte, PageSize)
 	page[0] = 0xFF
-	if err := ml.put(10, 0, page); err != nil {
+	if err := ml.put(10, page); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.putTombstone(10, 1); err != nil {
+	if err := ml.putTombstone(10); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,13 +113,13 @@ func TestMemLayerFreeze(t *testing.T) {
 	defer ml.cleanup()
 
 	page := make([]byte, PageSize)
-	if err := ml.put(1, 0, page); err != nil {
+	if err := ml.put(1, page); err != nil {
 		t.Fatal(err)
 	}
 	ml.freeze(1)
 
 	// Writes should fail after freeze.
-	if err := ml.put(2, 1, page); err == nil {
+	if err := ml.put(2, page); err == nil {
 		t.Fatal("expected error writing to frozen memlayer")
 	}
 }
@@ -2075,19 +2075,19 @@ func TestMemLayerTombstoneThenPut(t *testing.T) {
 		page2[i] = 0xCC
 	}
 
-	if err := ml.put(100, 1, page0); err != nil {
+	if err := ml.put(100, page0); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.put(200, 2, page1); err != nil {
+	if err := ml.put(200, page1); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.put(300, 3, page2); err != nil {
+	if err := ml.put(300, page2); err != nil {
 		t.Fatal(err)
 	}
 
 	// Tombstone page 300 (which was in slot 2). The tombstone entry has slot=0
 	// as a zero value, which is NOT the correct slot.
-	if err := ml.putTombstone(300, 4); err != nil {
+	if err := ml.putTombstone(300); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2098,7 +2098,7 @@ func TestMemLayerTombstoneThenPut(t *testing.T) {
 	for i := range page3 {
 		page3[i] = 0xDD
 	}
-	if err := ml.put(300, 5, page3); err != nil {
+	if err := ml.put(300, page3); err != nil {
 		t.Fatal(err)
 	}
 

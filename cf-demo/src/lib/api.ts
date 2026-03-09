@@ -98,7 +98,3 @@ export const readDir = createServerFn({ method: 'GET' })
     return containerJson<DirEntry[]>(res)
   })
 
-export function shellWebSocketUrl(containerId: string, volume: string): string {
-  const wsBase = window.location.origin.replace(/^http/, 'ws')
-  return `${wsBase}/c/${encodeURIComponent(containerId)}/sandbox/shell?volume=${encodeURIComponent(volume)}`
-}

@@ -21,7 +21,6 @@ var errMemtableFull = fmt.Errorf("memtable full")
 
 // memEntry is one entry in the memtable's index.
 type memEntry struct {
-	seq       uint64
 	slot      int
 	tombstone bool
 }
@@ -88,7 +87,7 @@ func newMemtable(dir string, startSeq uint64, maxPages int) (*memtable, error) {
 	}, nil
 }
 
-func (mt *memtable) put(pageIdx PageIdx, seq uint64, data []byte) error {
+func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	if len(data) != PageSize {
 		return fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(data))
 	}
@@ -102,10 +101,6 @@ func (mt *memtable) put(pageIdx PageIdx, seq uint64, data []byte) error {
 
 	var slot int
 	if existing, ok := mt.index[pageIdx]; ok && !existing.tombstone {
-		// Reject stale writes — a higher seq already owns this page.
-		if seq < existing.seq {
-			return nil
-		}
 		slot = existing.slot
 	} else {
 		if mt.nextSlot >= mt.maxPages {
@@ -119,11 +114,11 @@ func (mt *memtable) put(pageIdx PageIdx, seq uint64, data []byte) error {
 	off := slot * PageSize
 	copy(mt.mmap[off:off+PageSize], data)
 
-	mt.index[pageIdx] = memEntry{seq: seq, slot: slot}
+	mt.index[pageIdx] = memEntry{slot: slot}
 	return nil
 }
 
-func (mt *memtable) putTombstone(pageIdx PageIdx, seq uint64) error {
+func (mt *memtable) putTombstone(pageIdx PageIdx) error {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()
 
@@ -131,7 +126,7 @@ func (mt *memtable) putTombstone(pageIdx PageIdx, seq uint64) error {
 		return fmt.Errorf("memtable is frozen")
 	}
 
-	mt.index[pageIdx] = memEntry{seq: seq, tombstone: true}
+	mt.index[pageIdx] = memEntry{tombstone: true}
 	return nil
 }
 
@@ -200,10 +195,7 @@ func (mt *memtable) entries() []sortedEntry {
 		out = append(out, sortedEntry{pageIdx: addr, memEntry: e})
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].pageIdx != out[j].pageIdx {
-			return out[i].pageIdx < out[j].pageIdx
-		}
-		return out[i].seq < out[j].seq
+		return out[i].pageIdx < out[j].pageIdx
 	})
 	return out
 }

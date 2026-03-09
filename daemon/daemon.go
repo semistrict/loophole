@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -48,8 +47,7 @@ type Daemon struct {
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
 
-	shellMu    sync.Mutex
-	shellProcs map[*os.Process]struct{} // active shell processes; killed on shutdown
+	ptyMgr *ptyManager // manages midterm-backed PTY sessions
 }
 
 // Backend returns the underlying fsbackend.Service.
@@ -222,7 +220,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		startupErr: startupErr,
 		shutdownCh: make(chan struct{}),
 		doneCh:     make(chan struct{}),
-		shellProcs: make(map[*os.Process]struct{}),
+		ptyMgr:     newPtyManager(),
 	}
 
 	// Always start an NBD server for db commands (requires a working backend).
@@ -286,12 +284,8 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		close(d.shutdownCh)
 
 		d.log.Info("shutdown: start")
-		d.log.Info("shutdown: killing shell sessions")
-		d.shellMu.Lock()
-		for p := range d.shellProcs {
-			_ = p.Kill()
-		}
-		d.shellMu.Unlock()
+		d.log.Info("shutdown: killing PTY sessions")
+		d.ptyMgr.killAll()
 
 		if d.backend != nil {
 			d.log.Info("shutdown: closing backend (flush volumes, release leases)")
@@ -390,7 +384,13 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 		writeJSON(w, map[string]string{"status": "done"})
 	})
 
-	mux.HandleFunc("GET /sandbox/shell", d.handleShell)
+	mux.HandleFunc("GET /sandbox/shell", d.handleShellCompat)
+	mux.HandleFunc("POST /sandbox/pty", d.handlePTYCreate)
+	mux.HandleFunc("GET /sandbox/pty", d.handlePTYList)
+	mux.HandleFunc("GET /sandbox/pty/{id}/ws", d.handlePTYWebSocket)
+	mux.HandleFunc("GET /sandbox/pty/{id}/screen", d.handlePTYScreen)
+	mux.HandleFunc("POST /sandbox/pty/{id}/resize", d.handlePTYResize)
+	mux.HandleFunc("DELETE /sandbox/pty/{id}", d.handlePTYKill)
 	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
 	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)
 	mux.HandleFunc("GET /sandbox/stat", d.handleStat)
@@ -461,8 +461,17 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 
 const zygoteVolume = "zygote-ubuntu-2404"
 
+// requireBackend returns true (and writes 503) if storage is not available.
+func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
+	if d.backend == nil {
+		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
+		return true
+	}
+	return false
+}
+
 func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	var req loophole.CreateParams
@@ -515,7 +524,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	var req struct {
@@ -536,6 +545,9 @@ func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 		Force  bool   `json:"force"`
@@ -556,7 +568,7 @@ func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	var req struct {
@@ -586,6 +598,9 @@ func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Mountpoint string `json:"mountpoint"`
 	}
@@ -607,7 +622,7 @@ func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	var req struct {
@@ -627,6 +642,9 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Mountpoint string `json:"mountpoint"`
 		Name       string `json:"name"`
@@ -646,6 +664,9 @@ func (d *Daemon) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Mountpoint      string `json:"mountpoint"`
 		Clone           string `json:"clone"`
@@ -669,6 +690,9 @@ func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
 // --- Device handlers ---
 
 func (d *Daemon) handleDeviceAttach(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -688,6 +712,9 @@ func (d *Daemon) handleDeviceAttach(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDeviceDetach(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -706,6 +733,9 @@ func (d *Daemon) handleDeviceDetach(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDeviceSnapshot(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume   string `json:"volume"`
 		Snapshot string `json:"snapshot"`
@@ -725,6 +755,9 @@ func (d *Daemon) handleDeviceSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 		Clone  string `json:"clone"`
