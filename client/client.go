@@ -83,6 +83,48 @@ func (c *Client) EnsureDaemon() error {
 	return c.startDaemon()
 }
 
+// --- Chroot socket methods ---
+// These talk to the restricted /.loophole socket inside a chroot.
+
+// Flush flushes the volume to S3 (chroot socket: POST /flush).
+func (c *Client) Flush(ctx context.Context) error {
+	_, err := c.rpc(ctx, "POST", "/flush", nil)
+	return err
+}
+
+// ChrootSnapshot creates a snapshot (chroot socket: POST /snapshot).
+func (c *Client) ChrootSnapshot(ctx context.Context, name string) error {
+	_, err := c.rpc(ctx, "POST", "/snapshot", map[string]string{"name": name})
+	return err
+}
+
+// ChrootClone clones the volume (chroot socket: POST /clone).
+// Returns the mountpoint where the clone was mounted.
+func (c *Client) ChrootClone(ctx context.Context, clone string) (string, error) {
+	resp, err := c.rpc(ctx, "POST", "/clone", map[string]string{"clone": clone})
+	if err != nil {
+		return "", err
+	}
+	var result struct{ Mountpoint string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Mountpoint, nil
+}
+
+// ChrootStatus returns the volume name (chroot socket: GET /status).
+func (c *Client) ChrootStatus(ctx context.Context) (string, error) {
+	resp, err := c.rpc(ctx, "GET", "/status", nil)
+	if err != nil {
+		return "", err
+	}
+	var result struct{ Volume string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Volume, nil
+}
+
 // --- RPC methods ---
 
 // CreateParams is an alias for loophole.CreateParams.

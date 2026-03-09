@@ -232,6 +232,8 @@ func (v *NBDVolume) Flush() error {
 	return err
 }
 
+func (v *NBDVolume) FlushLocal() error { return v.Flush() }
+
 func (v *NBDVolume) PunchHole(_, _ uint64) error {
 	return nil
 }
@@ -267,3 +269,5 @@ func (v *NBDVolume) Freeze() error {
 func (v *NBDVolume) Refresh(_ context.Context) error {
 	return nil
 }
+func (v *NBDVolume) OnBeforeFreeze(_ func() error) {}
+func (v *NBDVolume) OnBeforeClose(_ func())        {}

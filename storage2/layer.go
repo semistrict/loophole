@@ -333,10 +333,12 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	if snap.memtable != nil {
 		if entry, ok := snap.memtable.get(pageIdx); ok {
 			if entry.tombstone {
+				metrics.PageReadSource.WithLabelValues("memtable").Inc()
 				return zeroPage[:], nil
 			}
 			data, err := snap.memtable.readData(entry)
 			if err == nil {
+				metrics.PageReadSource.WithLabelValues("memtable").Inc()
 				return data, nil
 			}
 			// Memtable was cleaned up — its data was flushed to L0.
@@ -348,10 +350,12 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	for i := len(snap.frozen) - 1; i >= 0; i-- {
 		if entry, ok := snap.frozen[i].get(pageIdx); ok {
 			if entry.tombstone {
+				metrics.PageReadSource.WithLabelValues("frozen").Inc()
 				return zeroPage[:], nil
 			}
 			data, err := snap.frozen[i].readData(entry)
 			if err == nil {
+				metrics.PageReadSource.WithLabelValues("frozen").Inc()
 				return data, nil
 			}
 			// Frozen memtable was cleaned up — its data was flushed to L0
@@ -364,8 +368,11 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	// 3. Page cache (frozen layer data is immutable).
 	if ly.diskCache != nil {
 		if cached := ly.diskCache.GetPage(ly.pageCacheKey(pageIdx)); cached != nil {
+			metrics.CacheHits.Inc()
+			metrics.PageReadSource.WithLabelValues("cache").Inc()
 			return cached, nil
 		}
+		metrics.CacheMisses.Inc()
 	}
 
 	// If a frozen memtable was cleaned up, refresh the L0 list from the layer
@@ -381,6 +388,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	for i := len(l0) - 1; i >= 0; i-- {
 		l0e := &l0[i]
 		if l0HasTombstone(l0e, pageIdx) {
+			metrics.PageReadSource.WithLabelValues("l0").Inc()
 			return zeroPage[:], nil
 		}
 		if !l0HasPage(l0e, pageIdx) {
@@ -391,6 +399,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 			return nil, err
 		}
 		ly.cachePage(pageIdx, data)
+		metrics.PageReadSource.WithLabelValues("l0").Inc()
 		return data, nil
 	}
 
@@ -402,6 +411,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		}
 		if found {
 			ly.cachePage(pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l1").Inc()
 			return data, nil
 		}
 		// Page not in this sparse block — fall through to L2.
@@ -415,11 +425,13 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		}
 		if found {
 			ly.cachePage(pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l2").Inc()
 			return data, nil
 		}
 	}
 
 	// 7. Page never written — return zeros.
+	metrics.PageReadSource.WithLabelValues("zero").Inc()
 	return zeroPage[:], nil
 }
 
@@ -575,6 +587,7 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	// Backpressure: if the memtable is full, freeze and flush.
 	for errors.Is(err, errMemtableFull) {
+		bpStart := time.Now()
 		if err := ly.maybeFreezeAndFlush(); err != nil {
 			return err
 		}
@@ -582,6 +595,8 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 		mt = ly.memtable
 		err = mt.put(pageIdx, seq, page[:])
 		ly.mu.RUnlock()
+		metrics.BackpressureWaits.Inc()
+		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
 	}
 	if err != nil {
 		return err
@@ -600,9 +615,12 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 	nfrozen := len(ly.frozenTables)
 	ly.frozenMu.RUnlock()
 	if nfrozen >= ly.config.MaxFrozenTables {
+		bpStart := time.Now()
 		if err := ly.flushFrozenTables(); err != nil {
 			return err
 		}
+		metrics.BackpressureWaits.Inc()
+		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
 	}
 
 	// Check if memtable needs freezing.
@@ -756,20 +774,21 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		return fmt.Errorf("build L0: %w", err)
 	}
 
-	slog.Info("flushing L0", "key", l0entry.Key, "entries", len(entries), "bytes", len(data))
+	flushStart := time.Now()
+	slog.Info("flush: uploading L0", "layer", ly.id, "key", l0entry.Key, "pages", len(entries), "bytes", len(data))
 
 	// Upload with retry (no backoff — retries are immediate to avoid
 	// blocking the synctest bubble with timer waits while holding flushMu).
 	for attempt := range maxRetries {
 		err = ly.store.PutReader(ctx, l0entry.Key, bytes.NewReader(data))
 		if err == nil {
-			slog.Info("flushed L0", "key", l0entry.Key, "bytes", len(data))
+			slog.Info("flush: uploaded L0", "layer", ly.id, "key", l0entry.Key, "bytes", len(data), "dur", time.Since(flushStart))
 			break
 		}
 		if attempt == maxRetries-1 {
 			return fmt.Errorf("upload L0 (after %d attempts): %w", maxRetries, err)
 		}
-		slog.Warn("retrying L0 upload", "key", l0entry.Key, "attempt", attempt+1, "error", err)
+		slog.Warn("flush: retrying L0 upload", "layer", ly.id, "key", l0entry.Key, "attempt", attempt+1, "error", err)
 	}
 
 	metrics.FlushBytes.Add(float64(len(data)))
@@ -799,12 +818,14 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		ly.id[:min(8, len(ly.id))], l0entry.Key, len(l0entry.Pages), len(l0entry.Tombstones))
 
 	// Checkpoint index.json.
+	idxStart := time.Now()
 	if err := ly.saveIndex(ctx); err != nil {
 		ly.mu.Lock()
 		ly.index.L0 = ly.index.L0[:len(ly.index.L0)-1]
 		ly.mu.Unlock()
 		return fmt.Errorf("save index: %w", err)
 	}
+	slog.Info("flush: saved index", "layer", ly.id, "dur", time.Since(idxStart), "total_dur", time.Since(flushStart))
 
 	return nil
 }
@@ -865,6 +886,65 @@ func (ly *layer) Close() {
 		ly.frozenTables = nil
 		ly.frozenMu.Unlock()
 	})
+}
+
+// LayerDebugInfo holds layer structure details for the debug endpoint.
+type LayerDebugInfo struct {
+	LayerID        string `json:"layer_id"`
+	L0Count        int    `json:"l0_count"`
+	L0TotalPages   int    `json:"l0_total_pages"`
+	L1Ranges       int    `json:"l1_ranges"`
+	L2Ranges       int    `json:"l2_ranges"`
+	MemtablePages  int    `json:"memtable_pages"`
+	MemtableMax    int    `json:"memtable_max"`
+	FrozenCount    int    `json:"frozen_memtables"`
+	L0CacheEntries int    `json:"l0_cache_entries"`
+	BlockCacheEnts int    `json:"block_cache_entries"`
+}
+
+func (ly *layer) debugInfo() LayerDebugInfo {
+	ly.mu.RLock()
+	idx := ly.index
+	l1Ranges := len(ly.l1Map.Ranges())
+	l2Ranges := len(ly.l2Map.Ranges())
+	mtPages, mtMax := 0, 0
+	if ly.memtable != nil {
+		ly.memtable.mu.RLock()
+		mtPages = len(ly.memtable.index)
+		mtMax = ly.memtable.maxPages
+		ly.memtable.mu.RUnlock()
+	}
+	ly.mu.RUnlock()
+
+	ly.frozenMu.RLock()
+	frozenCount := len(ly.frozenTables)
+	ly.frozenMu.RUnlock()
+
+	l0Pages := 0
+	for i := range idx.L0 {
+		l0Pages += len(idx.L0[i].Pages)
+	}
+
+	ly.l0Cache.mu.RLock()
+	l0Cached := len(ly.l0Cache.entries)
+	ly.l0Cache.mu.RUnlock()
+
+	ly.blockCache.mu.RLock()
+	blockCached := len(ly.blockCache.entries)
+	ly.blockCache.mu.RUnlock()
+
+	return LayerDebugInfo{
+		LayerID:        ly.id,
+		L0Count:        len(idx.L0),
+		L0TotalPages:   l0Pages,
+		L1Ranges:       l1Ranges,
+		L2Ranges:       l2Ranges,
+		MemtablePages:  mtPages,
+		MemtableMax:    mtMax,
+		FrozenCount:    frozenCount,
+		L0CacheEntries: l0Cached,
+		BlockCacheEnts: blockCached,
+	}
 }
 
 // flushWriteDelay is how long to wait after a write-triggered flush

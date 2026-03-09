@@ -38,7 +38,12 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-func newFUSEBackend(t *testing.T) Service {
+type fuseBackend struct {
+	Service
+	fuseDir string
+}
+
+func newFUSEBackend(t *testing.T) *fuseBackend {
 	t.Helper()
 	skipIfNotLinuxRoot(t)
 
@@ -64,53 +69,58 @@ func newFUSEBackend(t *testing.T) Service {
 	vm := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{}, nil, nil)
 
 	dir := loophole.Dir(t.TempDir())
-	b, err := NewFUSE(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{})
+	fuseDir := dir.Fuse(inst.ProfileName)
+	b, err := NewFUSE(fuseDir, vm, &fuseblockdev.Options{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		_ = b.Close(cleanupCtx)
 	})
-	return b
+	return &fuseBackend{Service: b, fuseDir: fuseDir}
 }
 
-// loopDeviceCount returns the number of currently attached loop devices.
-func loopDeviceCount(t *testing.T) int {
+// loopDevicesFor returns the number of loop devices whose backing file
+// is under fuseDir. This isolates each test from loop device state
+// changes caused by other tests or the host (e.g. udev in OrbStack).
+func loopDevicesFor(t *testing.T, fuseDir string) int {
 	t.Helper()
-	out, err := exec.Command("losetup", "-l", "-n").Output()
+	out, err := exec.Command("losetup", "-l", "-n", "-O", "NAME,BACK-FILE").Output()
 	require.NoError(t, err)
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) == 1 && lines[0] == "" {
-		return 0
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, fuseDir) {
+			count++
+		}
 	}
-	return len(lines)
+	return count
 }
 
 func TestFUSE_CreateMountUnmount_CleansUpLoopDevice(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	before := loopDeviceCount(t)
+	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir))
 
 	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "looptest"}))
 
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "looptest", mp))
 
-	during := loopDeviceCount(t)
-	require.Equal(t, before+1, during, "mount should attach exactly one loop device")
+	require.Equal(t, 1, loopDevicesFor(t, b.fuseDir), "mount should attach exactly one loop device")
 
 	require.NoError(t, b.Unmount(ctx, mp))
 
-	after := loopDeviceCount(t)
-	require.Equal(t, before, after, "unmount should detach the loop device")
+	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "unmount should detach the loop device")
 }
 
 func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	before := loopDeviceCount(t)
 	n := 3
 
 	mps := make([]string, n)
@@ -121,44 +131,36 @@ func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
 		require.NoError(t, b.Mount(ctx, name, mps[i]))
 	}
 
-	during := loopDeviceCount(t)
-	require.Equal(t, before+n, during, "should have %d loop devices attached", n)
+	require.Equal(t, n, loopDevicesFor(t, b.fuseDir), "should have %d loop devices attached", n)
 
 	for _, mp := range mps {
 		require.NoError(t, b.Unmount(ctx, mp))
 	}
 
-	after := loopDeviceCount(t)
-	require.Equal(t, before, after, "all loop devices should be detached after unmount")
+	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "all loop devices should be detached after unmount")
 }
 
 func TestFUSE_Close_CleansUpLoopDevices(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	before := loopDeviceCount(t)
-
 	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "closetest"}))
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "closetest", mp))
 
-	require.Equal(t, before+1, loopDeviceCount(t))
+	require.Equal(t, 1, loopDevicesFor(t, b.fuseDir))
 
 	// Close should unmount everything and detach loop devices.
 	require.NoError(t, b.Close(ctx))
 
-	after := loopDeviceCount(t)
-	require.Equal(t, before, after, "Close should detach all loop devices")
+	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "Close should detach all loop devices")
 }
 
 func TestFUSE_CreateDoesNotLeakLoopDevice(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	before := loopDeviceCount(t)
-
 	require.NoError(t, b.Create(ctx, client.CreateParams{Type: loophole.VolumeTypeExt4, Volume: "noleak"}))
 
-	after := loopDeviceCount(t)
-	require.Equal(t, before, after, "Create/Format should not leak a loop device")
+	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "Create/Format should not leak a loop device")
 }

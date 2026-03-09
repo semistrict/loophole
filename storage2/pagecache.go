@@ -1,7 +1,9 @@
 package storage2
 
 import (
+	"log/slog"
 	"math"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -204,8 +206,25 @@ func (c *PageCache) runBudgetLoop() {
 				c.mu.Unlock()
 				return
 			}
+			oldBudget := c.budget
+			oldEntries := len(c.entries)
+			oldUsed := c.usedBytes
 			c.budget = c.computeBudgetLocked()
 			c.evictUntilWithinBudgetLocked()
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			slog.Info("pagecache: budget adjusted",
+				"budget_mb", c.budget>>20,
+				"old_budget_mb", oldBudget>>20,
+				"used_mb", c.usedBytes>>20,
+				"entries", len(c.entries),
+				"evicted", oldEntries-len(c.entries),
+				"freed_mb", (oldUsed-c.usedBytes)>>20,
+				"free_space_mb", c.store.FreeSpace()>>20,
+				"heap_mb", m.HeapAlloc>>20,
+				"sys_mb", m.Sys>>20,
+				"goroutines", runtime.NumGoroutine(),
+			)
 			c.mu.Unlock()
 		case <-c.stopCh:
 			return

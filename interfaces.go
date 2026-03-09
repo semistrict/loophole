@@ -50,6 +50,10 @@ type Volume interface {
 	PunchHole(offset, length uint64) error
 	ZeroRange(offset, length uint64) error
 	Flush() error
+	// FlushLocal freezes the memtable and notifies the background flush loop
+	// without waiting for the S3 upload. Falls back to synchronous Flush if
+	// no background loop is running.
+	FlushLocal() error
 	Snapshot(snapshotName string) error
 	Clone(cloneName string) (Volume, error)
 	CopyFrom(src Volume, srcOff, dstOff, length uint64) (uint64, error)
@@ -57,4 +61,12 @@ type Volume interface {
 	Refresh(ctx context.Context) error
 	AcquireRef() error
 	ReleaseRef() error
+
+	// OnBeforeFreeze registers a hook called before the volume is frozen.
+	// Hooks fire in LIFO order. If any hook returns an error, freeze aborts.
+	OnBeforeFreeze(fn func() error)
+
+	// OnBeforeClose registers a hook called when the last ref is released.
+	// Hooks fire in LIFO order. Errors are logged but don't prevent close.
+	OnBeforeClose(fn func())
 }

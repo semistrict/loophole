@@ -67,6 +67,7 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 - `make cf-demo-bin` — cross-compile linux/amd64 binary (nosqlite nolwext4) to `cf-demo/bin/loophole`
 - `cd cf-demo && pnpm exec wrangler deploy` — deploy the worker + container
 - Deployed URL: `https://cf-demo.ramon3525.workers.dev`
+- **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. A `destroy()` + `start()` cycle does NOT guarantee the new image — the rollout may still be in progress. Give it a minute or two after deploy before destroying/restarting. Verify the new binary is running by checking `md5sum /usr/local/bin/loophole` via the host exec endpoint (no volume param): `POST /debug/sandbox/exec?cmd=md5sum+/usr/local/bin/loophole`
 
 ### CF debug endpoints
 
@@ -86,6 +87,32 @@ The `/c/<container-id>/debug/` routes proxy to the container's loophole daemon. 
 - `POST /debug/sandbox/exec?volume=<vol>&cmd=<cmd>` — run a command in the sandbox
 - `GET /debug/status` — daemon status JSON
 - `GET /debug/volumes` — list loaded volumes
+
+### CF container logs (Axiom)
+
+The CF container daemon sends structured logs to Axiom. Dataset: `deepagent`. Use the `axiom` CLI to query.
+
+**Common fields:** `_time`, `level` (INFO/WARN/ERROR), `msg`, `volume`, `mountpoint`, `clone`, `zygote`, `err`, `error`, `method`, `path`, `status`, `dur` (nanoseconds).
+
+**Examples:**
+```bash
+# Recent logs (last 30 min), sorted chronologically
+axiom query "['deepagent'] | where _time > now(-30m) | sort by _time asc | project _time, level, msg, volume, mountpoint, err, error, clone" -f json
+
+# Errors and warnings only
+axiom query "['deepagent'] | where _time > now(-1h) | where level == 'ERROR' or level == 'WARN' | sort by _time asc | project _time, level, msg, err, error" -f json
+
+# HTTP requests with latency
+axiom query "['deepagent'] | where _time > now(-30m) | where msg == 'http' | sort by _time asc | project _time, method, path, status, dur" -f json
+
+# Filter by volume
+axiom query "['deepagent'] | where _time > now(-1h) | where volume == 'sandbox-1' | sort by _time asc" -f json
+```
+
+**Notes:**
+- Time filters use `now(-30m)`, `now(-1h)`, etc. Do NOT use string timestamps (causes type error).
+- Use `-f json` for machine-readable output.
+- The `dur` field is in nanoseconds (e.g. 1924547003 = ~1.9s).
 
 **Example: clone zygote and run a command:**
 ```

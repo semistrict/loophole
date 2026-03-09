@@ -15,7 +15,8 @@ RUN apt-get update \
 FROM golang:1.25-bookworm
 
 RUN apt-get update && apt-get install -y \
-    fuse \
+    fuse3 \
+    libfuse3-dev \
     e2fsprogs \
     util-linux \
     conmon \
@@ -30,7 +31,8 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     curl \
     busybox-static \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/fusermount3 /usr/bin/fusermount
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
 

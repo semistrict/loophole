@@ -391,9 +391,9 @@ func LoopDetachPath(devPath string) error {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
 	}
 
-	// Wait for the kernel's async rundown to finish. On modern kernels
-	// LOOP_CLR_FD is asynchronous; we poll the sysfs backing_file which
-	// is cleared once rundown completes. Typically resolves in <1ms.
+	// Poll sysfs until backing_file clears (up to 100ms).
+	// LOOP_CLR_FD may clear synchronously or set AUTOCLEAR if another
+	// process (e.g. host udev) has the device open.
 	base := devPath[len("/dev/"):]
 	sysPath := fmt.Sprintf("/sys/block/%s/loop/backing_file", base)
 	for range 100 {

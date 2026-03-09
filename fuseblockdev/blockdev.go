@@ -338,7 +338,9 @@ func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) sysc
 		done(syscall.EBADF)
 		return syscall.EBADF
 	}
-	if err := d.vol.Flush(); err != nil {
+	// Use FlushLocal to freeze the memtable without waiting for S3 upload.
+	// The background flush loop will handle the upload asynchronously.
+	if err := d.vol.FlushLocal(); err != nil {
 		slog.Warn("blockdev: fsync error", "error", err)
 		done(syscall.EIO)
 		return syscall.EIO
