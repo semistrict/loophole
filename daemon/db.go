@@ -18,6 +18,9 @@ func (d *Daemon) registerDBRoutes(mux *http.ServeMux) {
 }
 
 func (d *Daemon) handleDBCreate(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 		Size   uint64 `json:"size,omitempty"`
@@ -47,6 +50,9 @@ func (d *Daemon) handleDBCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDBSnapshot(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume   string `json:"volume"`
 		Snapshot string `json:"snapshot"`
@@ -73,6 +79,9 @@ func (d *Daemon) handleDBSnapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDBBranch(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 		Branch string `json:"branch"`
@@ -104,6 +113,9 @@ func (d *Daemon) handleDBBranch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDBFlush(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	var req struct {
 		Volume string `json:"volume"`
 	}
@@ -129,6 +141,9 @@ func (d *Daemon) handleDBFlush(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDBList(w http.ResponseWriter, r *http.Request) {
+	if d.requireBackend(w) {
+		return
+	}
 	volumes, err := d.backend.VM().ListVolumesByType(r.Context(), loophole.VolumeTypeSQLite)
 	if err != nil {
 		writeError(w, 500, err)

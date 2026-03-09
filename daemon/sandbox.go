@@ -181,7 +181,7 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleReadDir(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	volume := r.URL.Query().Get("volume")
@@ -223,7 +223,7 @@ func (d *Daemon) handleReadDir(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleStat(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	volume := r.URL.Query().Get("volume")

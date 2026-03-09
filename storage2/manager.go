@@ -21,11 +21,12 @@ var _ loophole.VolumeManager = (*Manager)(nil)
 
 // volumeRef is the S3-persisted mapping from volume name to layer ID.
 type volumeRef struct {
-	LayerID    string `json:"layer_id"`
-	Size       uint64 `json:"size,omitempty"`
-	ReadOnly   bool   `json:"read_only,omitempty"`
-	Type       string `json:"type,omitempty"`
-	LeaseToken string `json:"lease_token,omitempty"`
+	LayerID       string `json:"layer_id"`
+	Size          uint64 `json:"size,omitempty"`
+	ReadOnly      bool   `json:"read_only,omitempty"`
+	Type          string `json:"type,omitempty"`
+	LeaseToken    string `json:"lease_token,omitempty"`
+	WriteLeaseSeq uint64 `json:"write_lease_seq,omitempty"`
 }
 
 // managedVolume is the internal interface for volumes tracked by the Manager.
@@ -213,7 +214,7 @@ func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 	m.mu.Unlock()
 
 	// Acquire lease to ensure no other daemon is using this volume.
-	if err := m.acquireVolumeLease(ctx, name); err != nil {
+	if _, err := m.acquireVolumeLease(ctx, name); err != nil {
 		return err
 	}
 	defer m.releaseVolumeLease(ctx, name)
@@ -316,22 +317,29 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (m
 		return m.openFrozenVolume(ctx, name, ref)
 	}
 
+	// Acquire write lease before opening the layer so we have the
+	// writeLeaseSeq for file naming.
+	var writeLeaseSeq uint64
+	if !ref.ReadOnly && ref.LeaseToken != m.lease.Token() {
+		seq, err := m.acquireVolumeLease(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("acquire lease for %q: %w", name, err)
+		}
+		writeLeaseSeq = seq
+	}
+
 	cacheDir := m.cacheDir + "/layers/" + ref.LayerID
 	ly, err := openLayer(ctx, m.store, ref.LayerID, m.config, m.diskCache, cacheDir)
 	if err != nil {
+		if writeLeaseSeq > 0 {
+			m.releaseVolumeLease(ctx, name)
+		}
 		return nil, fmt.Errorf("open layer %q: %w", ref.LayerID, err)
 	}
+	ly.writeLeaseSeq = writeLeaseSeq
 
 	if m.config.FlushInterval > 0 {
 		ly.startPeriodicFlush(ctx)
-	}
-
-	// Acquire write lease (skip for read-only volumes or if we already hold it).
-	if !ref.ReadOnly && ref.LeaseToken != m.lease.Token() {
-		if err := m.acquireVolumeLease(ctx, name); err != nil {
-			ly.Close()
-			return nil, fmt.Errorf("acquire lease for %q: %w", name, err)
-		}
 	}
 
 	v := newVolume(name, ref.Size, ref.Type, ly, m)
@@ -409,17 +417,22 @@ func (m *Manager) closeVolume(name string) {
 }
 
 // acquireVolumeLease checks the volume ref's lease token and writes ours.
-func (m *Manager) acquireVolumeLease(ctx context.Context, name string) error {
+// Atomically increments WriteLeaseSeq in the same CAS and returns the new value.
+func (m *Manager) acquireVolumeLease(ctx context.Context, name string) (uint64, error) {
 	if err := m.lease.EnsureStarted(ctx); err != nil {
-		return fmt.Errorf("start lease: %w", err)
+		return 0, fmt.Errorf("start lease: %w", err)
 	}
-	return loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
+	var seq uint64
+	err := loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
 		if err := m.lease.CheckAvailable(ctx, ref.LeaseToken); err != nil {
 			return fmt.Errorf("volume %s: %w", name, err)
 		}
 		ref.LeaseToken = m.lease.Token()
+		ref.WriteLeaseSeq++
+		seq = ref.WriteLeaseSeq
 		return nil
 	})
+	return seq, err
 }
 
 // releaseVolumeLease clears the lease token from the volume ref if it matches ours.

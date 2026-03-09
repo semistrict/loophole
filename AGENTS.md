@@ -65,7 +65,7 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 ## Deploying to Cloudflare
 
 - `make cf-demo-bin` — cross-compile linux/amd64 binary (nosqlite nolwext4) to `cf-demo/bin/loophole`
-- `cd cf-demo && pnpm exec wrangler deploy` — deploy the worker + container
+- **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
 - Deployed URL: `https://cf-demo.ramon3525.workers.dev`
 - **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. A `destroy()` + `start()` cycle does NOT guarantee the new image — the rollout may still be in progress. Give it a minute or two after deploy before destroying/restarting. Verify the new binary is running by checking `md5sum /usr/local/bin/loophole` via the host exec endpoint (no volume param): `POST /debug/sandbox/exec?cmd=md5sum+/usr/local/bin/loophole`
 

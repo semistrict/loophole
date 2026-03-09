@@ -51,13 +51,13 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	if mt != nil {
 		if entry, ok := mt.get(pageIdx); ok {
 			if entry.tombstone {
-				add("  [1] memtable: TOMBSTONE seq=%d", entry.seq)
+				add("  [1] memtable: TOMBSTONE")
 			} else {
 				data, err := mt.readData(entry)
 				if err != nil {
-					add("  [1] memtable: seq=%d err=%v", entry.seq, err)
+					add("  [1] memtable: err=%v", err)
 				} else {
-					add("  [1] memtable: seq=%d zero=%v hash=%s", entry.seq, isZero(data), hash(data))
+					add("  [1] memtable: zero=%v hash=%s", isZero(data), hash(data))
 				}
 			}
 		} else {
@@ -69,13 +69,13 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	for i := len(frozen) - 1; i >= 0; i-- {
 		if entry, ok := frozen[i].get(pageIdx); ok {
 			if entry.tombstone {
-				add("  [2] frozen[%d]: TOMBSTONE seq=%d", i, entry.seq)
+				add("  [2] frozen[%d]: TOMBSTONE", i)
 			} else {
 				data, err := frozen[i].readData(entry)
 				if err != nil {
-					add("  [2] frozen[%d]: seq=%d err=%v", i, entry.seq, err)
+					add("  [2] frozen[%d]: err=%v", i, err)
 				} else {
-					add("  [2] frozen[%d]: seq=%d zero=%v hash=%s", i, entry.seq, isZero(data), hash(data))
+					add("  [2] frozen[%d]: zero=%v hash=%s", i, isZero(data), hash(data))
 				}
 			}
 		}
@@ -111,8 +111,8 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 
 	// 5. L1 (sparse blocks).
 	block := pageIdx.Block()
-	if layer := l1map.Find(block); layer != "" {
-		data, found, err := ly.readFromBlock(ctx, "l1", layer, pageIdx)
+	if layer, seq := l1map.Find(block); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
 		if err != nil {
 			add("  [5] L1 block=%d layer=%s: err=%v", block, layer[:8], err)
 		} else if found {
@@ -125,8 +125,8 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	}
 
 	// 6. L2 (dense blocks).
-	if layer := l2map.Find(block); layer != "" {
-		data, found, err := ly.readFromBlock(ctx, "l2", layer, pageIdx)
+	if layer, seq := l2map.Find(block); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
 		if err != nil {
 			add("  [6] L2 block=%d layer=%s: err=%v", block, layer[:8], err)
 		} else if found {

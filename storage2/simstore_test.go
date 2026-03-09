@@ -12,8 +12,10 @@ import (
 // FaultConfig controls probabilistic fault injection in SimObjectStore.
 type FaultConfig struct {
 	// Per-operation failure probability (0.0 - 1.0).
-	PutFailRate float64
-	GetFailRate float64
+	PutFailRate    float64
+	GetFailRate    float64
+	ListFailRate   float64
+	DeleteFailRate float64
 
 	// Per-operation latency (advanced via synctest's fake clock).
 	PutLatency time.Duration
@@ -97,6 +99,18 @@ func (s *SimObjectStore) InjectFaults() {
 		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
+		})
+	}
+
+	if s.faults.ListFailRate > 0 && s.rng.Float64() < s.faults.ListFailRate {
+		s.inner.SetFault(loophole.OpListKeys, "", loophole.Fault{
+			Err: fmt.Errorf("simulated S3 LIST failure"),
+		})
+	}
+
+	if s.faults.DeleteFailRate > 0 && s.rng.Float64() < s.faults.DeleteFailRate {
+		s.inner.SetFault(loophole.OpDeleteObject, "", loophole.Fault{
+			Err: fmt.Errorf("simulated S3 DELETE failure"),
 		})
 	}
 

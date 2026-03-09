@@ -1,15 +1,18 @@
 package storage2
 
 import (
+	"bytes"
 	"context"
 	crand "crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -162,9 +165,9 @@ func (sim *Simulation) Run() {
 		}
 
 		// Advance the fake clock to let periodic flush goroutines fire.
-		// This creates a race between periodic auto-flush and explicit
-		// operations — a real production scenario.
-		time.Sleep(1 * time.Millisecond)
+		// Randomize the sleep duration (0-5ms) so different ticks exercise
+		// different race windows between auto-flush and explicit operations.
+		time.Sleep(time.Duration(sim.rng.IntN(6)) * time.Millisecond)
 
 		if tick%50 == 0 {
 			sim.t.Logf("tick %d: %d volumes, %d timelines", tick, len(sim.volumeTimelines), len(sim.timelineIDs))
@@ -216,6 +219,7 @@ func (sim *Simulation) opTable() []opEntry {
 		{2, sim.opDeepClone},
 		{2, sim.opCloneFromSnapshot},
 		{3, sim.opVerify},
+		{2, sim.opSnapshotIsolation},
 		{2, sim.opOpen},
 		{2, sim.opDeleteVolume},
 		{2, sim.opCloseVolume},
@@ -437,6 +441,7 @@ func (sim *Simulation) opRead(ctx context.Context, node *SimNode) {
 	}
 
 	timelineID := sim.volumeTimelines[volName]
+	sim.oracle.RecordRead(node.id, timelineID, pageIdx, buf)
 	if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
 		expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
 		sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
@@ -1148,6 +1153,104 @@ func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
 	}
 }
 
+// opSnapshotIsolation verifies that writes to a parent volume after cloning
+// don't bleed into the child. This is a targeted isolation check:
+//  1. Clone an owned volume.
+//  2. Write new data to the parent.
+//  3. Read the same pages from the child and assert they still have
+//     the pre-clone values.
+func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil || v.ReadOnly() {
+		return
+	}
+
+	// Flush parent so state is consistent.
+	if err := v.Flush(); err != nil {
+		return
+	}
+	parentTL := sim.volumeTimelines[volName]
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	// Snapshot the parent's current page state (from oracle) for later comparison.
+	maxPage := PageIdx(sim.config.DevicePages)
+	preClone := make(map[PageIdx][]byte)
+	for pg := PageIdx(0); pg < maxPage; pg++ {
+		preClone[pg] = sim.oracle.ExpectedRead(node.id, parentTL, pg)
+	}
+
+	var parentNextSeq uint64
+	if pv, ok := v.(*volume); ok {
+		parentNextSeq = pv.layer.nextSeq.Load()
+	}
+
+	cloneName := fmt.Sprintf("%s-iso-%d", volName, sim.nextVolID)
+	sim.nextVolID++
+	clone, err := v.Clone(cloneName)
+	if err != nil {
+		return
+	}
+
+	// Clone internally flushes parent data.
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	ref, err := sim.getVolRef(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	childTL := ref.LayerID
+	sim.volumeTimelines[cloneName] = childTL
+	sim.timelineIDs = append(sim.timelineIDs, childTL)
+	sim.leases[cloneName] = node.id
+	node.volumes = append(node.volumes, cloneName)
+	sim.oracle.RecordBranch(childTL, parentTL, parentNextSeq)
+
+	if sim.timelineChildren[parentTL] == nil {
+		sim.timelineChildren[parentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[parentTL][childTL] = true
+
+	// Write new data to 1-5 random pages on the parent.
+	numWrites := sim.rng.IntN(5) + 1
+	writtenPages := make(map[PageIdx]struct{})
+	for range numWrites {
+		pg := PageIdx(sim.rng.Uint64N(uint64(maxPage)))
+		data := make([]byte, PageSize)
+		sim.fillRandomBytes(data)
+		if err := v.Write(data, pg.ByteOffset()); err == nil {
+			sim.oracle.RecordWrite(node.id, parentTL, pg, data)
+			writtenPages[pg] = struct{}{}
+		}
+	}
+	if err := v.Flush(); err != nil {
+		return
+	}
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	// Verify child still sees pre-clone data for the pages we wrote on the parent.
+	for pg := range writtenPages {
+		buf := make([]byte, PageSize)
+		_, err := clone.Read(ctx, buf, pg.ByteOffset())
+		if err != nil {
+			continue
+		}
+		if !bytes.Equal(buf, preClone[pg]) {
+			sim.t.Logf("SNAPSHOT ISOLATION VIOLATION: parent write to page %d leaked into child", pg)
+			sim.t.Logf("  child got:      %x...", buf[:32])
+			sim.t.Logf("  expected (pre): %x...", preClone[pg][:32])
+			sim.t.FailNow()
+		}
+	}
+
+	_ = clone
+}
+
 func (sim *Simulation) opOpen(ctx context.Context, node *SimNode) {
 	// Find an unleased volume and open it on this node.
 	volNames := make([]string, 0, len(sim.volumeTimelines))
@@ -1361,7 +1464,54 @@ func (sim *Simulation) FullScan() {
 
 	m.Close(ctx)
 
+	// Structural invariant checks: verify layer reference integrity.
+	sim.verifyLayerIntegrity(ctx, volNames)
+
 	sim.t.Logf("full scan: verified %d volumes, %d pages each", scanned, sim.config.DevicePages)
+}
+
+// verifyLayerIntegrity checks structural invariants of the S3 state:
+//   - Every volume ref points to a layer that has an index.json.
+//   - Every L0 blob referenced in index.json exists in S3.
+//   - No volume ref points to a nonexistent layer.
+func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []string) {
+	store := sim.store.Store()
+
+	for _, volName := range volNames {
+		ref, err := sim.getVolRef(ctx, volName)
+		if err != nil {
+			continue
+		}
+
+		// Check index.json exists for this layer.
+		layerStore := store.At("layers/" + ref.LayerID)
+		idxRC, _, err := layerStore.Get(ctx, "index.json")
+		if err != nil {
+			sim.t.Fatalf("layer integrity: vol=%s layer=%s missing index.json: %v",
+				volName, ref.LayerID[:8], err)
+		}
+
+		// Parse the index and verify L0 blob references.
+		var idx layerIndex
+		if err := json.NewDecoder(idxRC).Decode(&idx); err != nil {
+			idxRC.Close()
+			sim.t.Fatalf("layer integrity: vol=%s layer=%s corrupt index.json: %v",
+				volName, ref.LayerID[:8], err)
+		}
+		idxRC.Close()
+
+		for i, l0 := range idx.L0 {
+			_, _, err := store.Get(ctx, l0.Key)
+			if err != nil {
+				if strings.Contains(err.Error(), "not found") {
+					sim.t.Fatalf("layer integrity: vol=%s layer=%s L0[%d] missing blob %q",
+						volName, ref.LayerID[:8], i, l0.Key)
+				}
+				// Other errors (e.g. transient) — skip.
+				continue
+			}
+		}
+	}
 }
 
 func (sim *Simulation) getVolRef(ctx context.Context, name string) (volumeRef, error) {
@@ -1450,6 +1600,8 @@ func TestSimulation(t *testing.T) {
 			S3Faults: FaultConfig{
 				PutFailRate:              faultRate,
 				GetFailRate:              faultRate,
+				ListFailRate:             faultRate / 2,
+				DeleteFailRate:           faultRate / 2,
 				PhantomPutRate:           0.02,
 				LayersJsonPhantomPutRate: 0.03,
 			},
@@ -1492,6 +1644,8 @@ func TestSimulationDeterminism(t *testing.T) {
 		S3Faults: FaultConfig{
 			PutFailRate:    0.02,
 			GetFailRate:    0.02,
+			ListFailRate:   0.01,
+			DeleteFailRate: 0.01,
 			PhantomPutRate: 0.02,
 		},
 	}

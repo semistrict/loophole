@@ -49,9 +49,11 @@ func TestE2E_ChrootSocketStatus(t *testing.T) {
 	skipE2E(t)
 	_, _, c := setupChrootSocketVolume(t, "csock-status")
 
-	vol, err := c.ChrootStatus(t.Context())
+	status, err := c.ChrootStatus(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, "csock-status", vol)
+	require.Equal(t, "csock-status", status.Name)
+	require.Greater(t, status.Size, uint64(0))
+	require.NotEmpty(t, status.Layer.LayerID)
 }
 
 func TestE2E_ChrootSocketFlush(t *testing.T) {

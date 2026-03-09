@@ -22,7 +22,7 @@ var wsUpgrader = websocket.Upgrader{
 }
 
 func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
+	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
 	conn, err := wsUpgrader.Upgrade(w, r, nil)

@@ -163,17 +163,23 @@ func printCache(fams map[string]*dto.MetricFamily) {
 
 func printFlush(fams map[string]*dto.MetricFamily) {
 	blocks := counterVal(fams, "loophole_flush_blocks_total")
-	if blocks == 0 {
+	frozenTables := gaugeVal(fams, "loophole_flush_frozen_tables")
+	mtBytes := gaugeVal(fams, "loophole_flush_memtable_bytes")
+	if blocks == 0 && frozenTables == 0 && mtBytes == 0 {
 		return
 	}
 	_, _ = header.Println("Flush")
-	printCounter(fams, "loophole_flush_blocks_total", "blocks")
+	printGaugeBytes(fams, "loophole_flush_memtable_bytes", "memtable")
+	printGauge(fams, "loophole_flush_frozen_tables", "queue depth")
+	printCounter(fams, "loophole_flush_pages_total", "pages")
 	printCounterBytes(fams, "loophole_flush_bytes_total", "bytes")
 	printCounter(fams, "loophole_flush_errors_total", "errors")
 	printCounter(fams, "loophole_flush_tombstones_total", "tombstones")
-	printCounter(fams, "loophole_flush_backpressure_waits_total", "backpressure")
-	printCounter(fams, "loophole_flush_early_flushes_total", "early flushes")
 	printHistSummary(fams, "loophole_flush_duration_seconds", "duration")
+	printHistSummary(fams, "loophole_flush_upload_duration_seconds", "upload")
+	printCounter(fams, "loophole_flush_early_flushes_total", "early flush")
+	printCounter(fams, "loophole_flush_backpressure_waits_total", "bp waits")
+	printHistSummary(fams, "loophole_flush_backpressure_wait_seconds", "bp time")
 	fmt.Println()
 }
 
@@ -270,6 +276,18 @@ func printCounterBytes(fams map[string]*dto.MetricFamily, name, lbl string) {
 	fmt.Println(humanBytes(v))
 }
 
+func gaugeVal(fams map[string]*dto.MetricFamily, name string) float64 {
+	fam := fams[name]
+	if fam == nil {
+		return 0
+	}
+	var total float64
+	for _, m := range fam.GetMetric() {
+		total += m.GetGauge().GetValue()
+	}
+	return total
+}
+
 func printGauge(fams map[string]*dto.MetricFamily, name, lbl string) {
 	fam := fams[name]
 	if fam == nil {
@@ -279,6 +297,21 @@ func printGauge(fams map[string]*dto.MetricFamily, name, lbl string) {
 		v := m.GetGauge().GetValue()
 		_, _ = label.Printf("  %-10s ", lbl)
 		fmt.Println(humanCount(v))
+	}
+}
+
+func printGaugeBytes(fams map[string]*dto.MetricFamily, name, lbl string) {
+	fam := fams[name]
+	if fam == nil {
+		return
+	}
+	for _, m := range fam.GetMetric() {
+		v := m.GetGauge().GetValue()
+		if v == 0 {
+			return
+		}
+		_, _ = label.Printf("  %-10s ", lbl)
+		fmt.Println(humanBytes(v))
 	}
 }
 

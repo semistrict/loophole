@@ -30,6 +30,11 @@ type layer struct {
 	diskCache *PageCache
 	cacheDir  string
 
+	// writeLeaseSeq is the monotonically increasing sequence number
+	// assigned when the write lease was acquired. All files written
+	// during this lease session embed this value in their key names.
+	writeLeaseSeq uint64
+
 	mu       sync.RWMutex
 	index    layerIndex
 	memtable *memtable
@@ -404,8 +409,8 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	}
 
 	// 5. L1 (sparse blocks).
-	if layer := snap.l1.Find(pageIdx.Block()); layer != "" {
-		data, found, err := ly.readFromBlock(ctx, "l1", layer, pageIdx)
+	if layer, seq := snap.l1.Find(pageIdx.Block()); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
 		if err != nil {
 			return nil, err
 		}
@@ -418,8 +423,8 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	}
 
 	// 6. L2 (dense blocks).
-	if layer := snap.l2.Find(pageIdx.Block()); layer != "" {
-		data, found, err := ly.readFromBlock(ctx, "l2", layer, pageIdx)
+	if layer, seq := snap.l2.Find(pageIdx.Block()); layer != "" {
+		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
 		if err != nil {
 			return nil, err
 		}
@@ -501,9 +506,9 @@ func (ly *layer) getParsedL0(ctx context.Context, l0e *l0Entry) (*parsedL0, erro
 }
 
 // readFromBlock reads a page from an L1 or L2 block.
-func (ly *layer) readFromBlock(ctx context.Context, level, layerID string, pageIdx PageIdx) ([]byte, bool, error) {
+func (ly *layer) readFromBlock(ctx context.Context, level, layerID string, writeLeaseSeq uint64, pageIdx PageIdx) ([]byte, bool, error) {
 	blockAddr := pageIdx.Block()
-	key := fmt.Sprintf("layers/%s/%s/%016x", layerID, level, blockAddr)
+	key := blockKey(layerID, level, writeLeaseSeq, blockAddr)
 
 	pb, err := ly.getParsedBlock(ctx, key)
 	if err != nil {
@@ -577,13 +582,14 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	copy(page[pageOff:], chunk)
 
-	seq := ly.nextSeq.Add(1) - 1
 	ly.mu.RLock()
 	mt := ly.memtable
-	err := mt.put(pageIdx, seq, page[:])
+	err := mt.put(pageIdx, page[:])
 	ly.mu.RUnlock()
 
 	pageLock.Unlock()
+
+	metrics.MemtableBytes.Set(float64(mt.size.Load()))
 
 	// Backpressure: if the memtable is full, freeze and flush.
 	for errors.Is(err, errMemtableFull) {
@@ -593,7 +599,7 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 		}
 		ly.mu.RLock()
 		mt = ly.memtable
-		err = mt.put(pageIdx, seq, page[:])
+		err = mt.put(pageIdx, page[:])
 		ly.mu.RUnlock()
 		metrics.BackpressureWaits.Inc()
 		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
@@ -668,15 +674,9 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 
 	// Tombstone fully-covered interior pages.
 	for pageIdx := firstFullPage; pageIdx < lastFullPage; pageIdx++ {
-		pageLock := ly.pageLock(pageIdx)
-		pageLock.Lock()
-
-		seq := ly.nextSeq.Add(1) - 1
 		ly.mu.RLock()
-		err := ly.memtable.putTombstone(pageIdx, seq)
+		err := ly.memtable.putTombstone(pageIdx)
 		ly.mu.RUnlock()
-
-		pageLock.Unlock()
 		if err != nil {
 			return err
 		}
@@ -704,19 +704,23 @@ func (ly *layer) freezememtable() error {
 	if err := ensureDir(memDir); err != nil {
 		return fmt.Errorf("ensure mem dir: %w", err)
 	}
-	mt, err := newMemtable(memDir, ly.nextSeq.Load(), ly.config.maxMemtablePages())
+	// Advance nextSeq to guarantee a unique L0 key for each frozen memtable.
+	freezeSeq := ly.nextSeq.Add(1)
+	mt, err := newMemtable(memDir, freezeSeq, ly.config.maxMemtablePages())
 	if err != nil {
 		return fmt.Errorf("create new memtable: %w", err)
 	}
 
 	old := ly.memtable
-	old.freeze(ly.nextSeq.Load())
+	old.freeze(freezeSeq)
 
 	ly.frozenMu.Lock()
 	ly.frozenTables = append(ly.frozenTables, old)
+	metrics.FrozenTableCount.Set(float64(len(ly.frozenTables)))
 	ly.frozenMu.Unlock()
 
 	ly.memtable = mt
+	metrics.MemtableBytes.Set(0)
 	return nil
 }
 
@@ -756,6 +760,7 @@ func (ly *layer) flushFrozenTablesLocked(maxRetries int) error {
 
 		ly.frozenMu.Lock()
 		ly.frozenTables = ly.frozenTables[1:]
+		metrics.FrozenTableCount.Set(float64(len(ly.frozenTables)))
 		ly.frozenMu.Unlock()
 
 		mt.cleanup()
@@ -769,7 +774,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		return nil
 	}
 
-	data, l0entry, err := buildL0(mt, ly.id, entries)
+	data, l0entry, err := buildL0(mt, ly.id, entries, ly.writeLeaseSeq)
 	if err != nil {
 		return fmt.Errorf("build L0: %w", err)
 	}
@@ -779,19 +784,32 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 
 	// Upload with retry (no backoff — retries are immediate to avoid
 	// blocking the synctest bubble with timer waits while holding flushMu).
+	uploadStart := time.Now()
 	for attempt := range maxRetries {
 		err = ly.store.PutReader(ctx, l0entry.Key, bytes.NewReader(data))
 		if err == nil {
+			metrics.FlushUploadDuration.Observe(time.Since(uploadStart).Seconds())
 			slog.Info("flush: uploaded L0", "layer", ly.id, "key", l0entry.Key, "bytes", len(data), "dur", time.Since(flushStart))
 			break
 		}
 		if attempt == maxRetries-1 {
+			metrics.FlushErrors.Inc()
 			return fmt.Errorf("upload L0 (after %d attempts): %w", maxRetries, err)
 		}
 		slog.Warn("flush: retrying L0 upload", "layer", ly.id, "key", l0entry.Key, "attempt", attempt+1, "error", err)
 	}
 
+	// Count pages and tombstones.
+	tombstones := 0
+	for _, e := range entries {
+		if e.tombstone {
+			tombstones++
+		}
+	}
+	metrics.FlushPages.Add(float64(len(entries)))
+	metrics.FlushBlocks.Add(float64(len(entries)))
 	metrics.FlushBytes.Add(float64(len(data)))
+	metrics.FlushTombstones.Add(float64(tombstones))
 
 	// Pre-cache the parsed L0.
 	p, _ := parseL0(data)
@@ -827,6 +845,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 	}
 	slog.Info("flush: saved index", "layer", ly.id, "dur", time.Since(idxStart), "total_dur", time.Since(flushStart))
 
+	metrics.FlushDuration.Observe(time.Since(flushStart).Seconds())
 	return nil
 }
 
@@ -994,6 +1013,7 @@ func (ly *layer) periodicFlushLoop(ctx context.Context) {
 			default:
 			}
 			// Wait a short delay to batch writes, but still listen for stop.
+			metrics.EarlyFlushes.Inc()
 			delay := time.NewTimer(flushWriteDelay)
 			select {
 			case <-ly.flushStop:
@@ -1047,6 +1067,11 @@ func (ly *layer) doPeriodicFlush() {
 		}
 	}
 	ly.lastFlushAt.Store(time.Now().UnixMilli())
+}
+
+// blockKey returns the S3 key for a block blob, incorporating the write lease seq.
+func blockKey(layerID, level string, writeLeaseSeq uint64, blockAddr BlockIdx) string {
+	return fmt.Sprintf("layers/%s/%s/%016x-%016x", layerID, level, writeLeaseSeq, blockAddr)
 }
 
 func (ly *layer) log(format string, args ...any) {
@@ -1114,8 +1139,8 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 		pageMap := make(map[uint16][]byte) // page offset → data
 
 		// Load existing L1 block.
-		if layer := ly.l1Map.Find(blockAddr); layer != "" {
-			key := fmt.Sprintf("layers/%s/l1/%016x", layer, blockAddr)
+		if layer, seq := ly.l1Map.Find(blockAddr); layer != "" {
+			key := blockKey(layer, "l1", seq, blockAddr)
 			pb, err := ly.getParsedBlock(ctx, key)
 			if err != nil {
 				return fmt.Errorf("read existing L1 block %d: %w", blockAddr, err)
@@ -1175,14 +1200,14 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 			return fmt.Errorf("build L1 block %d: %w", blockAddr, err)
 		}
 
-		key := fmt.Sprintf("layers/%s/l1/%016x", ly.id, blockAddr)
+		key := blockKey(ly.id, "l1", ly.writeLeaseSeq, blockAddr)
 		if err := ly.store.PutReader(ctx, key, bytes.NewReader(blockData)); err != nil {
 			return fmt.Errorf("upload L1 block %d: %w", blockAddr, err)
 		}
 
 		// Update L1 range map.
 		ly.mu.Lock()
-		ly.l1Map = ly.l1Map.Set(blockAddr, ly.id)
+		ly.l1Map = ly.l1Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
 		ly.mu.Unlock()
 
 		// Check if this L1 block should be promoted to L2.
@@ -1212,8 +1237,8 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 func (ly *layer) promoteL1toL2(ctx context.Context, blockAddr BlockIdx, l1Pages []blockPage) error {
 	// Read existing L2 block if any.
 	pageMap := make(map[uint16][]byte)
-	if layer := ly.l2Map.Find(blockAddr); layer != "" {
-		key := fmt.Sprintf("layers/%s/l2/%016x", layer, blockAddr)
+	if layer, seq := ly.l2Map.Find(blockAddr); layer != "" {
+		key := blockKey(layer, "l2", seq, blockAddr)
 		pb, err := ly.getParsedBlock(ctx, key)
 		if err != nil {
 			return fmt.Errorf("read existing L2 block: %w", err)
@@ -1243,14 +1268,14 @@ func (ly *layer) promoteL1toL2(ctx context.Context, blockAddr BlockIdx, l1Pages 
 		return err
 	}
 
-	key := fmt.Sprintf("layers/%s/l2/%016x", ly.id, blockAddr)
+	key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
 	if err := ly.store.PutReader(ctx, key, bytes.NewReader(blockData)); err != nil {
 		return err
 	}
 
 	// Update maps: add L2 entry, remove L1 entry.
 	ly.mu.Lock()
-	ly.l2Map = ly.l2Map.Set(blockAddr, ly.id)
+	ly.l2Map = ly.l2Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
 	ly.l1Map = ly.l1Map.Remove(blockAddr)
 	ly.mu.Unlock()
 

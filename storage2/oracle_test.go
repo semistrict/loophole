@@ -23,6 +23,7 @@ const (
 	EventFlush
 	EventCrash
 	EventBranch
+	EventRead // verified read — logged for determinism checks
 )
 
 func (k OracleEventKind) String() string {
@@ -37,6 +38,8 @@ func (k OracleEventKind) String() string {
 		return "CRASH"
 	case EventBranch:
 		return "BRANCH"
+	case EventRead:
+		return "READ"
 	default:
 		return "?"
 	}
@@ -66,6 +69,8 @@ func (e OracleEvent) String() string {
 		return fmt.Sprintf("[%04d] CRASH    node=%-8s", e.Seq, e.NodeID)
 	case EventBranch:
 		return fmt.Sprintf("[%04d] BRANCH   parent=%s -> child=%s", e.Seq, e.ParentID[:8], e.LayerID[:8])
+	case EventRead:
+		return fmt.Sprintf("[%04d] READ     node=%-8s tl=%s page=%d hash=%08x", e.Seq, e.NodeID, e.LayerID[:8], e.PageIdx, e.DataHash)
 	default:
 		return fmt.Sprintf("[%04d] ?", e.Seq)
 	}
@@ -265,6 +270,19 @@ func (o *Oracle) ExpectedRead(nodeID, timelineID string, pageIdx PageIdx) []byte
 	}
 
 	return o.flushedOrZero(timelineID, pageIdx)
+}
+
+// RecordRead logs a verified read into the event stream. This makes the
+// determinism check stronger: if two runs with the same seed produce
+// different read results, the event logs diverge.
+func (o *Oracle) RecordRead(nodeID, timelineID string, pageIdx PageIdx, data []byte) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	var hash uint32
+	if len(data) >= 4 {
+		hash = uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+	}
+	o.logEvent(OracleEvent{Kind: EventRead, NodeID: nodeID, LayerID: timelineID, PageIdx: pageIdx, DataHash: hash})
 }
 
 // VerifyRead checks that actual data matches expected for a live-node read.
