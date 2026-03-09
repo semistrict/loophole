@@ -3,4 +3,4 @@
 	url = https://github.com/mattn/go-sqlite3.git
 [submodule "third_party/go-fuse"]
 	path = third_party/go-fuse
-	url = https://github.com/hanwen/go-fuse.git
+	url = https://github.com/semistrict/go-fuse.git
