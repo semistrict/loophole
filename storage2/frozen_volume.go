@@ -19,6 +19,8 @@ var _ managedVolume = (*frozenVolume)(nil)
 // frozenVolume is a lightweight, read-only volume backed by a frozen layer.
 // No memtable, no lease, no flush, no write path.
 type frozenVolume struct {
+	volumeHooks
+
 	name    string
 	size    uint64
 	volType string
@@ -88,7 +90,8 @@ func (v *frozenVolume) ZeroRange(offset, length uint64) error {
 	return v.PunchHole(offset, length)
 }
 
-func (v *frozenVolume) Flush() error { return nil }
+func (v *frozenVolume) Flush() error      { return nil }
+func (v *frozenVolume) FlushLocal() error { return nil }
 
 func (v *frozenVolume) Snapshot(snapshotName string) error {
 	return fmt.Errorf("cannot snapshot frozen volume %q", v.name)
@@ -196,6 +199,7 @@ func (v *frozenVolume) AcquireRef() error {
 
 func (v *frozenVolume) ReleaseRef() error {
 	if v.refs.Add(-1) == 0 {
+		v.fireBeforeClose()
 		v.manager.closeVolume(v.name)
 		v.layer.Close()
 	}
@@ -205,3 +209,14 @@ func (v *frozenVolume) ReleaseRef() error {
 func (v *frozenVolume) isReadOnly() bool { return true }
 func (v *frozenVolume) flush() error     { return nil }
 func (v *frozenVolume) close()           { v.layer.Close() }
+
+func (v *frozenVolume) DebugInfo() VolumeDebugInfo {
+	return VolumeDebugInfo{
+		Name:     v.name,
+		Size:     v.size,
+		Type:     v.volType,
+		ReadOnly: true,
+		Refs:     v.refs.Load(),
+		Layer:    v.layer.debugInfo(),
+	}
+}

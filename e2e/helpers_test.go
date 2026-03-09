@@ -168,7 +168,7 @@ func (b *testBackend) Snapshot(ctx context.Context, mountpoint, name string) err
 	return b.c.Snapshot(ctx, mountpoint, name)
 }
 
-func (b *testBackend) Freeze(ctx context.Context, volume string) error {
+func (b *testBackend) FreezeVolume(ctx context.Context, volume string) error {
 	return b.c.Freeze(ctx, volume)
 }
 

@@ -18,7 +18,13 @@ var globalProfile string
 
 func main() {
 	selfBin, _ = os.Executable()
-	if err := rootCmd().Execute(); err != nil {
+	var root *cobra.Command
+	if inChroot() {
+		root = chrootRootCmd()
+	} else {
+		root = rootCmd()
+	}
+	if err := root.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}

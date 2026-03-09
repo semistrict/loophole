@@ -89,7 +89,7 @@ type Service interface {
 	Unmount(ctx context.Context, mountpoint string) error
 	Snapshot(ctx context.Context, mountpoint, name string) error
 	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
-	Freeze(ctx context.Context, mountpoint string) error
+	FreezeVolume(ctx context.Context, volume string) error
 	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
 	// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
@@ -99,6 +99,10 @@ type Service interface {
 	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
 	DeviceClone(ctx context.Context, volume, clone string) (string, error)
 	DevicePath(volume string) (string, error)
+	// OnBeforeUnmount registers a callback that fires (LIFO) before the
+	// filesystem at mountpoint is unmounted. Use this for cleanup that must
+	// precede FS unmount (e.g. chroot bind-mount teardown).
+	OnBeforeUnmount(mountpoint string, fn func())
 	IsMounted(mountpoint string) bool
 	IsVolumeMounted(volume string) bool
 	VolumeAt(mountpoint string) string
@@ -166,9 +170,10 @@ type VolumeRegistrar interface {
 // mountEntry stores the volume, driver-specific handle, and the driver
 // that created the mount.
 type mountEntry struct {
-	vol    loophole.Volume
-	handle any
-	driver AnyDriver
+	vol           loophole.Volume
+	handle        any
+	driver        AnyDriver
+	beforeUnmount []func() // fired LIFO before driver.Unmount
 }
 
 // Backend owns a VolumeManager and a set of AnyDrivers keyed by volume
@@ -274,18 +279,7 @@ func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
 		return fmt.Errorf("mountpoint %q not tracked", mountpoint)
 	}
 
-	if err := entry.driver.Unmount(ctx, entry.handle); err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	delete(b.mounts, mountpoint)
-	b.mu.Unlock()
-
-	if vr, ok := entry.driver.Unwrap().(VolumeRegistrar); ok {
-		vr.UnregisterVolume(entry.vol.Name())
-	}
-
+	b.doUnmount(ctx, mountpoint, entry)
 	return entry.vol.ReleaseRef()
 }
 
@@ -339,13 +333,76 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 	return b.mountVolume(ctx, cloneVol, cloneMountpoint)
 }
 
-// Freeze flushes dirty data and quiesces the filesystem.
-func (b *Backend) Freeze(ctx context.Context, mountpoint string) error {
-	entry, err := b.entry(mountpoint)
+// FreezeVolume permanently freezes a volume, making it immutable.
+// vol.Freeze() fires before_freeze hooks (which flush the FS cache),
+// then persists the volume. If mounted, the mount is explicitly torn
+// down afterward (chroot teardown, FS unmount, volume ref release).
+func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
+	vol, err := b.vm.OpenVolume(ctx, volume)
 	if err != nil {
+		return fmt.Errorf("open volume: %w", err)
+	}
+	if vol.ReadOnly() {
+		return fmt.Errorf("volume %q is already frozen", volume)
+	}
+
+	slog.Info("freeze: persisting volume", "volume", volume)
+	if err := vol.Freeze(); err != nil {
 		return err
 	}
-	return entry.driver.Freeze(ctx, entry.handle)
+
+	// Explicitly tear down mount if mounted.
+	if mp := b.mountpointForVolume(volume); mp != "" {
+		b.mu.Lock()
+		entry, ok := b.mounts[mp]
+		b.mu.Unlock()
+		if ok {
+			b.doUnmount(ctx, mp, entry)
+			return entry.vol.ReleaseRef()
+		}
+	}
+	return nil
+}
+
+// mountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
+func (b *Backend) mountpointForVolume(volume string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for mp, entry := range b.mounts {
+		if entry.vol.Name() == volume {
+			return mp
+		}
+	}
+	return ""
+}
+
+// OnBeforeUnmount registers a callback that fires (LIFO) before the
+// filesystem at mountpoint is unmounted.
+func (b *Backend) OnBeforeUnmount(mountpoint string, fn func()) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if entry, ok := b.mounts[mountpoint]; ok {
+		entry.beforeUnmount = append(entry.beforeUnmount, fn)
+		b.mounts[mountpoint] = entry
+	}
+}
+
+// doUnmount tears down a single mount: fires beforeUnmount callbacks (LIFO),
+// unmounts the FS via the driver, removes the mount from tracking, and
+// unregisters the volume from the driver.
+func (b *Backend) doUnmount(ctx context.Context, mountpoint string, entry mountEntry) {
+	for i := len(entry.beforeUnmount) - 1; i >= 0; i-- {
+		entry.beforeUnmount[i]()
+	}
+	if err := entry.driver.Unmount(ctx, entry.handle); err != nil {
+		slog.Warn("unmount failed", "mountpoint", mountpoint, "error", err)
+	}
+	b.mu.Lock()
+	delete(b.mounts, mountpoint)
+	b.mu.Unlock()
+	if vr, ok := entry.driver.Unwrap().(VolumeRegistrar); ok {
+		vr.UnregisterVolume(entry.vol.Name())
+	}
 }
 
 // Thaw resumes the filesystem after Freeze.
@@ -550,15 +607,19 @@ func (b *Backend) Mounts() map[string]string {
 func (b *Backend) Close(ctx context.Context) error {
 	mounts := b.Mounts() // snapshot: mountpoint → volume name
 
+	slog.Info("backend close: unmounting volumes", "count", len(mounts))
 	var wg sync.WaitGroup
 	for mp, vol := range mounts {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			slog.Info("backend close: closing mount", "mountpoint", mp, "volume", vol)
 			b.closeMount(ctx, mp, vol)
+			slog.Info("backend close: mount closed", "mountpoint", mp, "volume", vol)
 		}()
 	}
 	wg.Wait()
+	slog.Info("backend close: all mounts closed")
 
 	// Close each unique driver once.
 	closed := make(map[AnyDriver]bool)
@@ -567,14 +628,17 @@ func (b *Backend) Close(ctx context.Context) error {
 			continue
 		}
 		closed[d] = true
+		slog.Info("backend close: closing driver")
 		if err := d.Close(ctx); err != nil {
-			slog.Warn("driver close failed", "error", err)
+			slog.Warn("backend close: driver close failed", "error", err)
 		}
 	}
+	slog.Info("backend close: closing volume manager")
 	if err := b.vm.Close(ctx); err != nil {
-		slog.Warn("volume manager close failed", "error", err)
+		slog.Warn("backend close: volume manager close failed", "error", err)
 		return err
 	}
+	slog.Info("backend close: done")
 	return nil
 }
 
@@ -587,34 +651,20 @@ func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
 		return
 	}
 
-	// 1. Freeze — quiesce the filesystem so ext4 flushes its dirty pages
-	//    through FUSE before we flush the volume to S3.
+	// 1. Quiesce FS (manual — shutdown doesn't use before_freeze hooks).
 	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
 		slog.Warn("freeze failed during close", "mountpoint", mountpoint, "error", err)
 	}
 
-	// 2. Flush — persist all dirty data to S3.
+	// 2. Flush to S3.
 	if err := entry.vol.Flush(); err != nil {
 		slog.Warn("flush failed during close", "volume", volume, "error", err)
 	}
 
-	// 3. Unmount — detach the filesystem and loop device.
-	if err := entry.driver.Unmount(ctx, entry.handle); err != nil {
-		slog.Warn("unmount failed during close", "mountpoint", mountpoint, "error", err)
-	}
-	b.mu.Lock()
-	delete(b.mounts, mountpoint)
-	b.mu.Unlock()
-	if vr, ok := entry.driver.Unwrap().(VolumeRegistrar); ok {
-		vr.UnregisterVolume(volume)
-	}
+	// 3. Tear down mount (chroot teardown, FS unmount, map cleanup).
+	b.doUnmount(ctx, mountpoint, entry)
 
-	// 4. Flush again — catch any writes that squeezed in between freeze and unmount.
-	if err := entry.vol.Flush(); err != nil {
-		slog.Warn("post-unmount flush failed during close", "volume", volume, "error", err)
-	}
-
-	// Release the volume ref (may trigger destroy).
+	// 4. Release ref (may trigger volume destruction which flushes again).
 	if err := entry.vol.ReleaseRef(); err != nil {
 		slog.Warn("release ref failed during close", "volume", volume, "error", err)
 	}
@@ -668,6 +718,12 @@ func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoi
 	b.mu.Lock()
 	b.mounts[mountpoint] = mountEntry{vol: vol, handle: handle, driver: driver}
 	b.mu.Unlock()
+
+	// Register before-freeze hook — flushes FS cache before volume freeze.
+	vol.OnBeforeFreeze(func() error {
+		return driver.Freeze(ctx, handle)
+	})
+
 	return nil
 }
 

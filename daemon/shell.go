@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os/exec"
+	"os"
 	"sync"
 
 	"github.com/creack/pty/v2"
@@ -19,6 +19,13 @@ type shellResize struct {
 }
 
 func (d *Daemon) handleShell(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-d.shutdownCh:
+		writeError(w, 503, fmt.Errorf("daemon is shutting down"))
+		return
+	default:
+	}
+
 	volume := r.URL.Query().Get("volume")
 	if volume == "" {
 		writeError(w, 400, fmt.Errorf("missing volume parameter"))
@@ -54,20 +61,27 @@ func (d *Daemon) handleShell(w http.ResponseWriter, r *http.Request) {
 	defer func() { _ = conn.Close() }()
 
 	// Spawn a shell chrooted into the volume's mountpoint.
-	cmd := exec.Command("/usr/sbin/chroot", mountpoint, "/bin/sh", "-l")
-	cmd.Dir = "/"
-	cmd.Env = []string{
-		"TERM=xterm-256color",
-		"HOME=/root",
-		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	// Try /bin/bash first, fall back to /bin/sh if not found.
+	shell := "/bin/bash"
+	if _, err := os.Stat(mountpoint + shell); err != nil {
+		shell = "/bin/sh"
 	}
+	cmd := chrootCmd(mountpoint, d.backend, shell, "-l")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		d.log.Error("pty start failed", "err", err)
 		return
 	}
+
+	d.shellMu.Lock()
+	d.shellProcs[cmd.Process] = struct{}{}
+	d.shellMu.Unlock()
+
 	defer func() {
+		d.shellMu.Lock()
+		delete(d.shellProcs, cmd.Process)
+		d.shellMu.Unlock()
 		_ = ptmx.Close()
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()

@@ -14,8 +14,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,6 +47,9 @@ type Daemon struct {
 
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
+
+	shellMu    sync.Mutex
+	shellProcs map[*os.Process]struct{} // active shell processes; killed on shutdown
 }
 
 // Backend returns the underlying fsbackend.Service.
@@ -110,6 +115,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		axiomClose = func() { ah.Close() }
 	}
 	logger := slog.New(handlers)
+	slog.SetDefault(logger)
 	logger.Info("starting daemon", "s3", inst.URL(), "log", logPath)
 
 	tuneProcess(logger)
@@ -216,6 +222,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		startupErr: startupErr,
 		shutdownCh: make(chan struct{}),
 		doneCh:     make(chan struct{}),
+		shellProcs: make(map[*os.Process]struct{}),
 	}
 
 	// Always start an NBD server for db commands (requires a working backend).
@@ -234,10 +241,43 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 
 // Serve blocks, handling HTTP requests until the context is cancelled.
 func (d *Daemon) Serve(ctx context.Context) error {
+	defer func() {
+		if r := recover(); r != nil {
+			buf := make([]byte, 64<<10)
+			n := runtime.Stack(buf, true)
+			d.log.Error("PANIC", "panic", fmt.Sprintf("%v", r), "stack", string(buf[:n]))
+			if d.axiomClose != nil {
+				d.axiomClose()
+			}
+			panic(r) // re-panic after logging
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	srv := &http.Server{Handler: d.instrument(d.mux(stop))}
+
+	// Heartbeat: log runtime stats every 5s at debug level.
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				var m runtime.MemStats
+				runtime.ReadMemStats(&m)
+				d.log.Debug("heartbeat",
+					"heap_mb", m.HeapAlloc>>20,
+					"sys_mb", m.Sys>>20,
+					"goroutines", runtime.NumGoroutine(),
+					"gc_cycles", m.NumGC,
+				)
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	// When context cancels, begin graceful shutdown in background.
 	// The HTTP server stays running so clients can poll /status and /shutdown/wait.
@@ -245,37 +285,51 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		close(d.shutdownCh)
 
-		d.log.Info("shutting down: flushing and releasing leases")
+		d.log.Info("shutdown: start")
+		d.log.Info("shutdown: killing shell sessions")
+		d.shellMu.Lock()
+		for p := range d.shellProcs {
+			_ = p.Kill()
+		}
+		d.shellMu.Unlock()
+
 		if d.backend != nil {
+			d.log.Info("shutdown: closing backend (flush volumes, release leases)")
 			if err := d.backend.Close(context.Background()); err != nil {
-				d.log.Warn("backend close error", "error", err)
+				d.log.Warn("shutdown: backend close error", "error", err)
 			}
+			d.log.Info("shutdown: backend closed")
 		}
 		if d.diskCache != nil {
+			d.log.Info("shutdown: closing disk cache")
 			if err := d.diskCache.Close(); err != nil {
-				d.log.Warn("disk cache close error", "error", err)
+				d.log.Warn("shutdown: disk cache close error", "error", err)
 			}
-		}
-		if d.axiomClose != nil {
-			d.axiomClose()
+			d.log.Info("shutdown: disk cache closed")
 		}
 		close(d.doneCh)
 
 		// Now stop accepting requests and remove sockets.
 		if d.nbdLn != nil {
+			d.log.Info("shutdown: closing NBD listener")
 			if err := d.nbdLn.Close(); err != nil {
-				d.log.Warn("NBD listener close error", "error", err)
+				d.log.Warn("shutdown: NBD listener close error", "error", err)
 			}
 			if err := os.Remove(d.nbdSock); err != nil {
-				d.log.Warn("remove NBD socket", "path", d.nbdSock, "error", err)
+				d.log.Warn("shutdown: remove NBD socket", "path", d.nbdSock, "error", err)
 			}
 		}
+		d.log.Info("shutdown: closing HTTP server")
 		if err := srv.Close(); err != nil {
-			d.log.Warn("http server close error", "error", err)
+			d.log.Warn("shutdown: http server close error", "error", err)
 		}
 		sockPath := d.dir.Socket(d.inst.ProfileName)
 		if err := os.Remove(sockPath); err != nil {
-			d.log.Warn("remove socket", "path", sockPath, "error", err)
+			d.log.Warn("shutdown: remove socket", "path", sockPath, "error", err)
+		}
+		d.log.Info("shutdown: complete")
+		if d.axiomClose != nil {
+			d.axiomClose()
 		}
 	}()
 
@@ -343,6 +397,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)
+	mux.HandleFunc("GET /debug/volume", d.handleDebugVolume)
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
 	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
@@ -562,18 +617,9 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
-	vol, err := d.backend.VM().OpenVolume(r.Context(), req.Volume)
-	if err != nil {
-		writeError(w, 500, fmt.Errorf("open volume: %w", err))
-		return
-	}
-	if vol.ReadOnly() {
-		writeError(w, 400, fmt.Errorf("volume %q is already read-only", req.Volume))
-		return
-	}
 	d.log.Info("freeze", "volume", req.Volume)
-	if err := vol.Freeze(); err != nil {
-		d.log.Error("freeze failed", "err", err)
+	if err := d.backend.FreezeVolume(r.Context(), req.Volume); err != nil {
+		d.log.Error("freeze failed", "volume", req.Volume, "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -770,6 +816,34 @@ func (d *Daemon) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"volumes": names})
+}
+
+// debugInfoProvider is implemented by storage2.volume and storage2.frozenVolume.
+type debugInfoProvider interface {
+	DebugInfo() storage2.VolumeDebugInfo
+}
+
+func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
+	if d.backend == nil {
+		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
+		return
+	}
+	name := r.URL.Query().Get("volume")
+	if name == "" {
+		writeError(w, 400, fmt.Errorf("missing volume parameter"))
+		return
+	}
+	vol := d.backend.VM().GetVolume(name)
+	if vol == nil {
+		writeError(w, 404, fmt.Errorf("volume %q not open", name))
+		return
+	}
+	dp, ok := vol.(debugInfoProvider)
+	if !ok {
+		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", name))
+		return
+	}
+	writeJSON(w, dp.DebugInfo())
 }
 
 // --- helpers ---

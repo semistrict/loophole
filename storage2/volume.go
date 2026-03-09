@@ -17,6 +17,8 @@ import (
 var _ loophole.Volume = (*volume)(nil)
 
 type volume struct {
+	volumeHooks
+
 	name     string
 	size     uint64
 	volType  string
@@ -113,6 +115,22 @@ func (v *volume) Flush() error {
 	return v.layer.Flush()
 }
 
+// FlushLocal notifies the background flush loop to upload pending data
+// without blocking. If no background loop is running, this is a no-op.
+// Suitable for FUSE fsync where we don't want to block on S3.
+func (v *volume) FlushLocal() error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	ly := v.layer
+	if ly.flushNotify != nil {
+		select {
+		case ly.flushNotify <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
 func (v *volume) branch() (string, error) {
 	// Flush everything to S3.
 	if !v.readOnly.Load() {
@@ -194,6 +212,12 @@ func (v *volume) Freeze() error {
 	if v.readOnly.Load() {
 		return nil
 	}
+	// Fire hooks before acquiring the write lock — hooks may need to
+	// write to the volume (e.g. FS cache flush) which requires RLock.
+	slog.Info("freeze: firing before-freeze hooks", "volume", v.name)
+	if err := v.fireBeforeFreeze(); err != nil {
+		return fmt.Errorf("before-freeze hook: %w", err)
+	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	slog.Info("freeze: flushing layer", "volume", v.name)
@@ -252,6 +276,7 @@ func (v *volume) ReleaseRef() error {
 }
 
 func (v *volume) destroy() error {
+	v.fireBeforeClose()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.readOnly.Load() {
@@ -268,3 +293,24 @@ func (v *volume) destroy() error {
 func (v *volume) isReadOnly() bool { return v.readOnly.Load() }
 func (v *volume) flush() error     { return v.layer.Flush() }
 func (v *volume) close()           { v.layer.Close() }
+
+// VolumeDebugInfo holds volume + layer structure details for the debug endpoint.
+type VolumeDebugInfo struct {
+	Name     string         `json:"name"`
+	Size     uint64         `json:"size"`
+	Type     string         `json:"type"`
+	ReadOnly bool           `json:"read_only"`
+	Refs     int32          `json:"refs"`
+	Layer    LayerDebugInfo `json:"layer"`
+}
+
+func (v *volume) DebugInfo() VolumeDebugInfo {
+	return VolumeDebugInfo{
+		Name:     v.name,
+		Size:     v.size,
+		Type:     v.volType,
+		ReadOnly: v.readOnly.Load(),
+		Refs:     v.refs.Load(),
+		Layer:    v.layer.debugInfo(),
+	}
+}

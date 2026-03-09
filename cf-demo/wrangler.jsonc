@@ -1,0 +1,34 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "cf-demo",
+	"compatibility_date": "2025-09-02",
+	"compatibility_flags": [
+		"nodejs_compat"
+	],
+	"main": "src/server-entry.ts",
+	"observability": {
+		"enabled": true
+	},
+	"containers": [
+		{
+			"class_name": "SandboxContainer",
+			"image": "./Dockerfile",
+			"instance_type": "standard-4",
+			"max_instances": 5
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "SANDBOX",
+				"class_name": "SandboxContainer"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["SandboxContainer"]
+		}
+	]
+}
