@@ -36,11 +36,12 @@ type Daemon struct {
 	backend   fsbackend.Service
 	diskCache *storage2.PageCache
 	ln        net.Listener
-	log       *slog.Logger
 
-	nbdSock    string       // set once NBD server is started
-	nbdLn      net.Listener // NBD listener, closed on shutdown
-	startupErr string       // non-fatal startup error (e.g. bad S3 creds)
+	nbdSock    string                      // set once NBD server is started
+	nbdLn      net.Listener                // NBD listener, closed on shutdown
+	grpcLn     net.Listener                //nolint:unused // used on linux (snapshotter_linux.go)
+	grpcSrv    interface{ GracefulStop() } //nolint:unused // used on linux (snapshotter_linux.go)
+	startupErr string                      // non-fatal startup error (e.g. bad S3 creds)
 
 	axiomClose func() // flushes and closes the axiom handler; nil if axiom is not configured
 
@@ -114,9 +115,9 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	}
 	logger := slog.New(handlers)
 	slog.SetDefault(logger)
-	logger.Info("starting daemon", "s3", inst.URL(), "log", logPath)
+	slog.Info("starting daemon", "s3", inst.URL(), "log", logPath)
 
-	tuneProcess(logger)
+	tuneProcess()
 
 	// Create object store
 	var startupErr string
@@ -127,13 +128,13 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if err != nil {
 			return nil, fmt.Errorf("create file store: %w", err)
 		}
-		logger.Warn("using local file store — data is NOT replicated to S3")
+		slog.Warn("using local file store — data is NOT replicated to S3")
 	} else {
 		var err error
 		store, err = loophole.NewS3Store(ctx, inst)
 		if err != nil {
 			storeErr := fmt.Sprintf("create S3 store: %v", err)
-			logger.Error("S3 store init failed, daemon will start degraded", "error", err)
+			slog.Error("S3 store init failed, daemon will start degraded", "error", err)
 			// Fall back to a nil store — volume operations will fail but daemon stays up.
 			store = nil
 			startupErr = storeErr
@@ -163,17 +164,17 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 			// Unmount if mounted.
 			for mp, vol := range backend.Mounts() {
 				if vol == volumeName {
-					logger.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
+					slog.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
 					if err := backend.Unmount(ctx, mp); err != nil {
-						logger.Warn("release: unmount failed", "volume", volumeName, "error", err)
+						slog.Warn("release: unmount failed", "volume", volumeName, "error", err)
 					}
 				}
 			}
 			// Detach device if attached (and not already closed by Unmount).
 			if v := vm.GetVolume(volumeName); v != nil {
-				logger.Info("release: detaching device", "volume", volumeName)
+				slog.Info("release: detaching device", "volume", volumeName)
 				if err := backend.DeviceDetach(ctx, volumeName); err != nil {
-					logger.Warn("release: device detach failed", "volume", volumeName, "error", err)
+					slog.Warn("release: device detach failed", "volume", volumeName, "error", err)
 				}
 			}
 		})
@@ -186,14 +187,14 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if err != nil {
 			return nil, fmt.Errorf("listen tcp %s: %w", addr, err)
 		}
-		logger.Info("listening on TCP", "addr", addr)
+		slog.Info("listening on TCP", "addr", addr)
 	} else {
 		sockPath := dir.Socket(inst.ProfileName)
 		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 			return nil, err
 		}
 		if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-			logger.Warn("remove stale socket failed", "path", sockPath, "error", err)
+			slog.Warn("remove stale socket failed", "path", sockPath, "error", err)
 		}
 		ln, err = net.Listen("unix", sockPath)
 		if err != nil {
@@ -202,7 +203,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if socketMode != 0 {
 			if err := os.Chmod(sockPath, socketMode); err != nil {
 				if closeErr := ln.Close(); closeErr != nil {
-					logger.Warn("listener close error", "error", closeErr)
+					slog.Warn("listener close error", "error", closeErr)
 				}
 				return nil, fmt.Errorf("chmod socket: %w", err)
 			}
@@ -215,7 +216,6 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		backend:    backend,
 		diskCache:  diskCache,
 		ln:         ln,
-		log:        logger,
 		axiomClose: axiomClose,
 		startupErr: startupErr,
 		shutdownCh: make(chan struct{}),
@@ -232,6 +232,15 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if err := d.startNBD(nbdSock); err != nil {
 			return nil, fmt.Errorf("start NBD server: %w", err)
 		}
+
+		// Start snapshotter gRPC server if configured.
+		grpcSock := inst.SnapshotterSocket
+		if grpcSock == "" {
+			grpcSock = dir.GRPC(inst.ProfileName)
+		}
+		if err := d.startSnapshotter(grpcSock); err != nil {
+			slog.Warn("snapshotter gRPC server failed to start", "error", err)
+		}
 	}
 
 	return d, nil
@@ -243,7 +252,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		if r := recover(); r != nil {
 			buf := make([]byte, 64<<10)
 			n := runtime.Stack(buf, true)
-			d.log.Error("PANIC", "panic", fmt.Sprintf("%v", r), "stack", string(buf[:n]))
+			slog.Error("PANIC", "panic", fmt.Sprintf("%v", r), "stack", string(buf[:n]))
 			if d.axiomClose != nil {
 				d.axiomClose()
 			}
@@ -265,7 +274,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 			case <-ticker.C:
 				var m runtime.MemStats
 				runtime.ReadMemStats(&m)
-				d.log.Debug("heartbeat",
+				slog.Debug("heartbeat",
 					"heap_mb", m.HeapAlloc>>20,
 					"sys_mb", m.Sys>>20,
 					"goroutines", runtime.NumGoroutine(),
@@ -283,57 +292,60 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		<-ctx.Done()
 		close(d.shutdownCh)
 
-		d.log.Info("shutdown: start")
-		d.log.Info("shutdown: killing PTY sessions")
+		slog.Info("shutdown: start")
+		slog.Info("shutdown: killing PTY sessions")
 		d.ptyMgr.killAll()
 
 		if d.backend != nil {
-			d.log.Info("shutdown: closing backend (flush volumes, release leases)")
+			slog.Info("shutdown: closing backend (flush volumes, release leases)")
 			if err := d.backend.Close(context.Background()); err != nil {
-				d.log.Warn("shutdown: backend close error", "error", err)
+				slog.Warn("shutdown: backend close error", "error", err)
 			}
-			d.log.Info("shutdown: backend closed")
+			slog.Info("shutdown: backend closed")
 		}
 		if d.diskCache != nil {
-			d.log.Info("shutdown: closing disk cache")
+			slog.Info("shutdown: closing disk cache")
 			if err := d.diskCache.Close(); err != nil {
-				d.log.Warn("shutdown: disk cache close error", "error", err)
+				slog.Warn("shutdown: disk cache close error", "error", err)
 			}
-			d.log.Info("shutdown: disk cache closed")
+			slog.Info("shutdown: disk cache closed")
 		}
 		close(d.doneCh)
 
+		// Stop snapshotter gRPC server.
+		d.stopSnapshotter()
+
 		// Now stop accepting requests and remove sockets.
 		if d.nbdLn != nil {
-			d.log.Info("shutdown: closing NBD listener")
+			slog.Info("shutdown: closing NBD listener")
 			if err := d.nbdLn.Close(); err != nil {
-				d.log.Warn("shutdown: NBD listener close error", "error", err)
+				slog.Warn("shutdown: NBD listener close error", "error", err)
 			}
 			if err := os.Remove(d.nbdSock); err != nil {
-				d.log.Warn("shutdown: remove NBD socket", "path", d.nbdSock, "error", err)
+				slog.Warn("shutdown: remove NBD socket", "path", d.nbdSock, "error", err)
 			}
 		}
-		d.log.Info("shutdown: closing HTTP server")
+		slog.Info("shutdown: closing HTTP server")
 		if err := srv.Close(); err != nil {
-			d.log.Warn("shutdown: http server close error", "error", err)
+			slog.Warn("shutdown: http server close error", "error", err)
 		}
 		sockPath := d.dir.Socket(d.inst.ProfileName)
 		if err := os.Remove(sockPath); err != nil {
-			d.log.Warn("shutdown: remove socket", "path", sockPath, "error", err)
+			slog.Warn("shutdown: remove socket", "path", sockPath, "error", err)
 		}
-		d.log.Info("shutdown: complete")
+		slog.Info("shutdown: complete")
 		if d.axiomClose != nil {
 			d.axiomClose()
 		}
 	}()
 
-	d.log.Info("daemon ready", "mode", d.inst.Mode, "socket", d.dir.Socket(d.inst.ProfileName))
+	slog.Info("daemon ready", "mode", d.inst.Mode, "socket", d.dir.Socket(d.inst.ProfileName))
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil
 	}
 
-	d.log.Info("daemon stopped")
+	slog.Info("daemon stopped")
 	return err
 }
 
@@ -375,7 +387,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /clone", d.handleClone)
 	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
-		d.log.Info("shutdown requested")
+		slog.Info("shutdown requested")
 		writeJSON(w, map[string]string{"status": "shutting_down"})
 		stop()
 	})
@@ -437,7 +449,7 @@ func (d *Daemon) instrument(next http.Handler) http.Handler {
 			level = slog.LevelWarn
 		}
 
-		d.log.Log(r.Context(), level, "http", "method", r.Method, "path", r.URL.Path, "status", rw.code, "dur", dur)
+		slog.Log(r.Context(), level, "http", "method", r.Method, "path", r.URL.Path, "status", rw.code, "dur", dur)
 	})
 }
 
@@ -488,12 +500,12 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	// If size is specified, create a fresh volume (used for zygote creation).
 	if req.Size > 0 {
-		d.log.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
+		slog.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
 		if req.Type == "" {
 			req.Type = string(loophole.DefaultFSType())
 		}
 		if err := d.backend.Create(ctx, req); err != nil {
-			d.log.Error("create volume failed", "err", err)
+			slog.Error("create volume failed", "err", err)
 			writeError(w, 500, fmt.Errorf("create: %w", err))
 			return
 		}
@@ -502,12 +514,12 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Otherwise clone from zygote.
-	d.log.Info("create (clone from zygote)", "volume", req.Volume, "zygote", zygoteVolume)
+	slog.Info("create (clone from zygote)", "volume", req.Volume, "zygote", zygoteVolume)
 
 	// Open the zygote volume (frozen layers need no lease).
 	zygote, err := d.backend.VM().OpenVolume(ctx, zygoteVolume)
 	if err != nil {
-		d.log.Error("open zygote failed", "err", err)
+		slog.Error("open zygote failed", "err", err)
 		writeError(w, 500, fmt.Errorf("open zygote: %w", err))
 		return
 	}
@@ -515,7 +527,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Clone from zygote to the requested name.
 	_, err = zygote.Clone(req.Volume)
 	if err != nil {
-		d.log.Error("clone from zygote failed", "err", err)
+		slog.Error("clone from zygote failed", "err", err)
 		writeError(w, 500, fmt.Errorf("clone: %w", err))
 		return
 	}
@@ -535,9 +547,9 @@ func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("delete", "volume", req.Volume)
+	slog.Info("delete", "volume", req.Volume)
 	if err := d.backend.VM().DeleteVolume(r.Context(), req.Volume); err != nil {
-		d.log.Error("delete failed", "err", err)
+		slog.Error("delete failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -557,10 +569,10 @@ func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("break-lease", "volume", req.Volume, "force", req.Force)
+	slog.Info("break-lease", "volume", req.Volume, "force", req.Force)
 	graceful, err := d.backend.VM().BreakLease(r.Context(), req.Volume, req.Force)
 	if err != nil {
-		d.log.Error("break-lease failed", "err", err)
+		slog.Error("break-lease failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -584,9 +596,9 @@ func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
 	if mountpoint == "" {
 		mountpoint = req.Volume
 	}
-	d.log.Info("mount", "volume", req.Volume, "mountpoint", mountpoint)
+	slog.Info("mount", "volume", req.Volume, "mountpoint", mountpoint)
 	if err := d.backend.Mount(r.Context(), req.Volume, mountpoint); err != nil {
-		d.log.Error("mount failed", "err", err)
+		slog.Error("mount failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -609,14 +621,14 @@ func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("unmount", "mountpoint", req.Mountpoint)
+	slog.Info("unmount", "mountpoint", req.Mountpoint)
 	if err := d.backend.Unmount(r.Context(), req.Mountpoint); err != nil {
-		d.log.Error("unmount failed", "err", err)
+		slog.Error("unmount failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
 	if err := os.Remove(d.dir.MountSymlink(req.Mountpoint)); err != nil && !os.IsNotExist(err) {
-		d.log.Warn("remove mount symlink failed", "error", err)
+		slog.Warn("remove mount symlink failed", "error", err)
 	}
 	writeJSON(w, map[string]string{"status": "ok"})
 }
@@ -632,9 +644,9 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
-	d.log.Info("freeze", "volume", req.Volume)
+	slog.Info("freeze", "volume", req.Volume)
 	if err := d.backend.FreezeVolume(r.Context(), req.Volume); err != nil {
-		d.log.Error("freeze failed", "volume", req.Volume, "err", err)
+		slog.Error("freeze failed", "volume", req.Volume, "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -654,9 +666,9 @@ func (d *Daemon) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("snapshot", "mountpoint", req.Mountpoint, "name", req.Name)
+	slog.Info("snapshot", "mountpoint", req.Mountpoint, "name", req.Name)
 	if err := d.backend.Snapshot(r.Context(), req.Mountpoint, req.Name); err != nil {
-		d.log.Error("snapshot failed", "err", err)
+		slog.Error("snapshot failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -677,9 +689,9 @@ func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("clone", "mountpoint", req.Mountpoint, "clone", req.Clone)
+	slog.Info("clone", "mountpoint", req.Mountpoint, "clone", req.Clone)
 	if err := d.backend.Clone(r.Context(), req.Mountpoint, req.Clone, req.CloneMountpoint); err != nil {
-		d.log.Error("clone failed", "err", err)
+		slog.Error("clone failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -701,10 +713,10 @@ func (d *Daemon) handleDeviceAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/attach", "volume", req.Volume)
+	slog.Info("device/attach", "volume", req.Volume)
 	device, err := d.backend.DeviceAttach(r.Context(), req.Volume)
 	if err != nil {
-		d.log.Error("device/attach failed", "err", err)
+		slog.Error("device/attach failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -723,9 +735,9 @@ func (d *Daemon) handleDeviceDetach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/detach", "volume", req.Volume)
+	slog.Info("device/detach", "volume", req.Volume)
 	if err := d.backend.DeviceDetach(r.Context(), req.Volume); err != nil {
-		d.log.Error("device/detach failed", "err", err)
+		slog.Error("device/detach failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -745,9 +757,9 @@ func (d *Daemon) handleDeviceSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
+	slog.Info("device/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
 	if err := d.backend.DeviceSnapshot(r.Context(), req.Volume, req.Snapshot); err != nil {
-		d.log.Error("device/snapshot failed", "err", err)
+		slog.Error("device/snapshot failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -767,10 +779,10 @@ func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("device/clone", "volume", req.Volume, "clone", req.Clone)
+	slog.Info("device/clone", "volume", req.Volume, "clone", req.Clone)
 	device, err := d.backend.DeviceClone(r.Context(), req.Volume, req.Clone)
 	if err != nil {
-		d.log.Error("device/clone failed", "err", err)
+		slog.Error("device/clone failed", "err", err)
 		writeError(w, 500, err)
 		return
 	}
@@ -786,7 +798,7 @@ func (d *Daemon) startNBD(sockPath string) error {
 
 	// Remove any leftover socket from a previous daemon.
 	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		d.log.Warn("remove stale NBD socket", "path", sockPath, "error", err)
+		slog.Warn("remove stale NBD socket", "path", sockPath, "error", err)
 	}
 
 	srv := nbdserve.NewServer(d.backend.VM())
@@ -797,11 +809,11 @@ func (d *Daemon) startNBD(sockPath string) error {
 
 	d.nbdSock = sockPath
 	d.nbdLn = ln
-	d.log.Info("NBD server started", "socket", sockPath)
+	slog.Info("NBD server started", "socket", sockPath)
 
 	go func() {
 		if err := srv.ServeListener(ln); err != nil {
-			d.log.Error("NBD server error", "error", err)
+			slog.Error("NBD server error", "error", err)
 		}
 	}()
 
@@ -907,13 +919,13 @@ func writeError(w http.ResponseWriter, code int, err error) {
 func (d *Daemon) writeSymlink(mountpoint string) {
 	symPath := d.dir.MountSymlink(mountpoint)
 	if err := os.MkdirAll(filepath.Dir(symPath), 0o755); err != nil {
-		d.log.Warn("create symlink dir failed", "path", symPath, "error", err)
+		slog.Warn("create symlink dir failed", "path", symPath, "error", err)
 		return
 	}
 	if err := os.Remove(symPath); err != nil && !os.IsNotExist(err) {
-		d.log.Warn("remove old symlink failed", "path", symPath, "error", err)
+		slog.Warn("remove old symlink failed", "path", symPath, "error", err)
 	}
 	if err := os.Symlink(d.dir.Socket(d.inst.ProfileName), symPath); err != nil {
-		d.log.Warn("create mount symlink failed", "path", symPath, "error", err)
+		slog.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}
 }

@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
@@ -336,7 +338,9 @@ func TestE2E_NBDDeviceExclOpen(t *testing.T) {
 
 func logCmd(t *testing.T, name string, args ...string) {
 	t.Helper()
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("$ %s %s\nerror: %v\n%s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))

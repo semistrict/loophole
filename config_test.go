@@ -83,5 +83,5 @@ func TestResolveMissingBucket(t *testing.T) {
 	}
 	_, err := cfg.Resolve("bad")
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "bucket or local_dir is required")
+	require.Contains(t, err.Error(), "bucket, local_dir, or daemon_url is required")
 }

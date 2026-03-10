@@ -19,7 +19,7 @@ func TestConcurrentPartialPageWrites(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
 
-	vol, err := m.NewVolume(ctx, "race", 0, "")
+	vol, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "race"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
 
-	vol, err := m.NewVolume(ctx, "punch-race", 0, "")
+	vol, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "punch-race"})
 	if err != nil {
 		t.Fatal(err)
 	}

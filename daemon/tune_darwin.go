@@ -2,6 +2,4 @@
 
 package daemon
 
-import "log/slog"
-
-func tuneProcess(_ *slog.Logger) {}
+func tuneProcess() {}

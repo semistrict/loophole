@@ -34,7 +34,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	vm := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{}, nil, nil)
 	t.Cleanup(func() { vm.Close(t.Context()) })
 
-	vol, err := vm.NewVolume(t.Context(), "testvol", 4096, "")
+	vol, err := vm.NewVolume(t.Context(), loophole.CreateParams{Volume: "testvol", Size: 4096})
 	require.NoError(t, err)
 
 	mountDir := t.TempDir()
@@ -206,7 +206,7 @@ func TestFuseReadOnlyOpenRejected(t *testing.T) {
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	newvol, err := env.vm.NewVolume(t.Context(), "newvol", 4096, "")
+	newvol, err := env.vm.NewVolume(t.Context(), loophole.CreateParams{Volume: "newvol", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("newvol", newvol)
 
@@ -230,7 +230,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
 
-	cloneVol, err := env.vm.NewVolume(t.Context(), "clone", 4096, "")
+	cloneVol, err := env.vm.NewVolume(t.Context(), loophole.CreateParams{Volume: "clone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("clone", cloneVol)
 
@@ -257,7 +257,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush())
 
-	dstVol, err := env.vm.NewVolume(t.Context(), "refclone", 4096, "")
+	dstVol, err := env.vm.NewVolume(t.Context(), loophole.CreateParams{Volume: "refclone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("refclone", dstVol)
 

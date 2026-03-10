@@ -89,6 +89,7 @@ type Service interface {
 	Unmount(ctx context.Context, mountpoint string) error
 	Snapshot(ctx context.Context, mountpoint, name string) error
 	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
+	MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error
 	FreezeVolume(ctx context.Context, volume string) error
 	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
@@ -232,7 +233,8 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 	if err != nil {
 		return err
 	}
-	vol, err := b.vm.NewVolume(ctx, p.Volume, p.Size, volType)
+	p.Type = volType
+	vol, err := b.vm.NewVolume(ctx, p)
 	if err != nil {
 		return err
 	}
@@ -683,7 +685,12 @@ func (b *Backend) mountpointFor(volume string) string {
 	return ""
 }
 
-// mountVolume mounts an already-open *Volume. Used by Mount and Clone.
+// MountOpen mounts an already-open Volume at the given mountpoint.
+func (b *Backend) MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error {
+	return b.mountVolume(ctx, vol, mountpoint)
+}
+
+// mountVolume mounts an already-open *Volume. Used by Mount, Clone, and MountOpen.
 func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoint string) error {
 	slog.Debug("backend: mountVolume start", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()

@@ -21,12 +21,14 @@ var _ loophole.VolumeManager = (*Manager)(nil)
 
 // volumeRef is the S3-persisted mapping from volume name to layer ID.
 type volumeRef struct {
-	LayerID       string `json:"layer_id"`
-	Size          uint64 `json:"size,omitempty"`
-	ReadOnly      bool   `json:"read_only,omitempty"`
-	Type          string `json:"type,omitempty"`
-	LeaseToken    string `json:"lease_token,omitempty"`
-	WriteLeaseSeq uint64 `json:"write_lease_seq,omitempty"`
+	LayerID       string            `json:"layer_id"`
+	Size          uint64            `json:"size,omitempty"`
+	ReadOnly      bool              `json:"read_only,omitempty"`
+	Type          string            `json:"type,omitempty"`
+	LeaseToken    string            `json:"lease_token,omitempty"`
+	WriteLeaseSeq uint64            `json:"write_lease_seq,omitempty"`
+	Parent        string            `json:"parent,omitempty"`
+	Labels        map[string]string `json:"labels,omitempty"`
 }
 
 // managedVolume is the internal interface for volumes tracked by the Manager.
@@ -50,6 +52,7 @@ type Manager struct {
 	volRefs loophole.ObjectStore // store.At("volumes")
 
 	mu         sync.Mutex
+	cond       *sync.Cond // broadcast on volume close
 	volumes    map[string]managedVolume
 	openFlight singleflight[managedVolume]
 	onRelease  func(ctx context.Context, volumeName string)
@@ -86,6 +89,7 @@ func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config
 		volRefs:   store.At("volumes"),
 		volumes:   make(map[string]managedVolume),
 	}
+	m.cond = sync.NewCond(&m.mu)
 	lease.Handle("release", m.handleRelease)
 	return m
 }
@@ -96,7 +100,10 @@ func (m *Manager) SetOnRelease(fn func(ctx context.Context, volumeName string)) 
 	m.onRelease = fn
 }
 
-func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volType string) (loophole.Volume, error) {
+func (m *Manager) NewVolume(ctx context.Context, p loophole.CreateParams) (loophole.Volume, error) {
+	name := p.Volume
+	size := p.Size
+	volType := p.Type
 	slog.Info("storage2: NewVolume", "name", name, "size", size, "type", volType)
 	if size == 0 {
 		size = DefaultVolumeSize
@@ -118,7 +125,7 @@ func (m *Manager) NewVolume(ctx context.Context, name string, size uint64, volTy
 	}
 
 	// Write volume ref (with lease token).
-	ref := volumeRef{LayerID: layerID, Size: size, Type: volType}
+	ref := volumeRef{LayerID: layerID, Size: size, Type: volType, Parent: p.Parent, Labels: p.Labels}
 	if err := m.putVolumeRefNew(ctx, name, ref); err != nil {
 		return nil, err
 	}
@@ -203,6 +210,60 @@ func (m *Manager) ListVolumesByType(ctx context.Context, volType string) ([]stri
 		}
 	}
 	return names, nil
+}
+
+func (m *Manager) VolumeInfo(ctx context.Context, name string) (loophole.VolumeInfo, error) {
+	ref, err := m.getVolumeRef(ctx, name)
+	if err != nil {
+		return loophole.VolumeInfo{}, err
+	}
+	return loophole.VolumeInfo{
+		Name:     name,
+		Size:     ref.Size,
+		ReadOnly: ref.ReadOnly,
+		Type:     ref.Type,
+		Parent:   ref.Parent,
+		Labels:   ref.Labels,
+	}, nil
+}
+
+func (m *Manager) UpdateLabels(ctx context.Context, name string, labels map[string]string) error {
+	return loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
+		ref.Labels = labels
+		return nil
+	})
+}
+
+// WaitClosed blocks until the named volume is no longer open in this manager,
+// or until ctx is cancelled.
+func (m *Manager) WaitClosed(ctx context.Context, name string) error {
+	done := ctx.Done()
+	m.mu.Lock()
+	for {
+		if _, ok := m.volumes[name]; !ok {
+			m.mu.Unlock()
+			return nil
+		}
+		// Check context before waiting.
+		select {
+		case <-done:
+			m.mu.Unlock()
+			return ctx.Err()
+		default:
+		}
+		// Wait for a signal from closeVolume. Use a goroutine to
+		// unblock if the context is cancelled while waiting.
+		ch := make(chan struct{})
+		go func() {
+			select {
+			case <-done:
+				m.cond.Broadcast() // wake us up so we can check ctx
+			case <-ch:
+			}
+		}()
+		m.cond.Wait()
+		close(ch)
+	}
 }
 
 func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
@@ -413,6 +474,7 @@ func (m *Manager) putVolumeRef(ctx context.Context, name string, ref volumeRef) 
 func (m *Manager) closeVolume(name string) {
 	m.mu.Lock()
 	delete(m.volumes, name)
+	m.cond.Broadcast()
 	m.mu.Unlock()
 }
 
@@ -428,6 +490,20 @@ func (m *Manager) acquireVolumeLease(ctx context.Context, name string) (uint64, 
 			return fmt.Errorf("volume %s: %w", name, err)
 		}
 		ref.LeaseToken = m.lease.Token()
+		ref.WriteLeaseSeq++
+		seq = ref.WriteLeaseSeq
+		return nil
+	})
+	return seq, err
+}
+
+// relayerVolume atomically updates a volume ref to point to a new layer ID
+// and increments WriteLeaseSeq. Used after Snapshot to switch the parent
+// volume to a new layer so the old layer is never written to again.
+func (m *Manager) relayerVolume(ctx context.Context, name string, newLayerID string) (uint64, error) {
+	var seq uint64
+	err := loophole.ModifyJSON[volumeRef](ctx, m.volRefs, name, func(ref *volumeRef) error {
+		ref.LayerID = newLayerID
 		ref.WriteLeaseSeq++
 		seq = ref.WriteLeaseSeq
 		return nil

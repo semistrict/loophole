@@ -31,7 +31,6 @@ import { Label } from '@/components/ui/label'
 import FileTree from './FileTree'
 
 interface SidebarProps {
-  containerId: string
   selectedVolume: string | null
   onSelectVolume: (volume: string) => void
   bellFlash: boolean
@@ -45,7 +44,6 @@ type ModalState =
   | null
 
 export default function Sidebar({
-  containerId,
   selectedVolume,
   onSelectVolume,
   bellFlash,
@@ -62,36 +60,36 @@ export default function Sidebar({
   const deleteVolume = useServerFn(deleteVolumeFn)
 
   const volumesQuery = useQuery({
-    queryKey: ['volumes', containerId],
-    queryFn: () => listVolumes({ data: { containerId } }),
+    queryKey: ['volumes'],
+    queryFn: () => listVolumes(),
   })
 
-  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['volumes', containerId] })
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ['volumes'] })
 
   const createMutation = useMutation({
     mutationFn: (input: { volume: string }) =>
-      createVolume({ data: { containerId, ...input } }),
+      createVolume({ data: input }),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const snapshotMutation = useMutation({
     mutationFn: (input: { mountpoint: string; name: string }) =>
-      snapshotVolume({ data: { containerId, ...input } }),
+      snapshotVolume({ data: input }),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const cloneMutation = useMutation({
     mutationFn: (input: { mountpoint: string; clone: string; cloneMountpoint: string }) =>
-      cloneVolume({ data: { containerId, ...input } }),
+      cloneVolume({ data: input }),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const deleteMutation = useMutation({
     mutationFn: (input: { volume: string }) =>
-      deleteVolume({ data: { containerId, ...input } }),
+      deleteVolume({ data: input }),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
@@ -135,7 +133,6 @@ export default function Sidebar({
   }
 
   const rawData = volumesQuery.data
-  console.log('[Sidebar] volumesQuery.data =', JSON.stringify(rawData), 'type =', typeof rawData, 'isArray =', Array.isArray(rawData))
   const volumes: string[] = Array.isArray(rawData) ? rawData : []
 
   return (
@@ -221,7 +218,7 @@ export default function Sidebar({
             </span>
           </div>
           <div className="flex-1 overflow-y-auto">
-            <FileTree key={selectedVolume} containerId={containerId} volume={selectedVolume} />
+            <FileTree key={selectedVolume} volume={selectedVolume} />
           </div>
         </div>
       )}

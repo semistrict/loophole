@@ -21,7 +21,7 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 
 	// Create root volume and write data.
-	v, err := m.NewVolume(ctx, "root", 1024*1024, "")
+	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "root", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}

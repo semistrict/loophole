@@ -5,7 +5,6 @@ import type { DirEntry } from '@/lib/types'
 import { cn } from '@/lib/utils'
 
 interface FileTreeProps {
-  containerId: string
   volume: string
 }
 
@@ -68,14 +67,14 @@ function FileTreeNode({
   )
 }
 
-export default function FileTree({ containerId, volume }: FileTreeProps) {
+export default function FileTree({ volume }: FileTreeProps) {
   const [roots, setRoots] = useState<TreeNode[]>([])
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const loadDir = useCallback(
     async (dirPath: string): Promise<TreeNode[]> => {
-      const raw = await readDir({ data: { containerId, volume, path: dirPath } })
+      const raw = await readDir({ data: { volume, path: dirPath } })
       // Server functions may wrap the response; extract the array.
       const entries: DirEntry[] = Array.isArray(raw) ? raw : (raw as any).result ?? (raw as any).data ?? []
       entries.sort((a: DirEntry, b: DirEntry) => {
@@ -89,7 +88,7 @@ export default function FileTree({ containerId, volume }: FileTreeProps) {
         expanded: false,
       }))
     },
-    [containerId, volume],
+    [volume],
   )
 
   const loadRoot = useCallback(async () => {

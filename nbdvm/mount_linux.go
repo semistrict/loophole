@@ -23,7 +23,6 @@ const defaultNumConns = 4 // parallel socket pairs per device
 type Server struct {
 	vm       loophole.VolumeManager
 	numConns int
-	log      *slog.Logger
 
 	mu      sync.Mutex
 	exports map[string]*volumeExport // volume name → export state
@@ -39,7 +38,6 @@ type volumeExport struct {
 // Options configures the NBD server.
 type Options struct {
 	NumConnections int // parallel socket pairs per device (default 4)
-	Logger         *slog.Logger
 }
 
 // NewServer creates a new NBD volume server.
@@ -51,14 +49,9 @@ func NewServer(vm loophole.VolumeManager, opts *Options) (*Server, error) {
 	if numConns == 0 {
 		numConns = defaultNumConns
 	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &Server{
 		vm:       vm,
 		numConns: numConns,
-		log:      logger,
 		exports:  make(map[string]*volumeExport),
 	}, nil
 }
@@ -112,7 +105,7 @@ func (s *Server) Connect(ctx context.Context, vol loophole.Volume) (string, erro
 	s.mu.Unlock()
 
 	devPath := nbd.DevicePath(idx)
-	s.log.Info("nbd: connected", "volume", name, "device", devPath)
+	slog.Info("nbd: connected", "volume", name, "device", devPath)
 	return devPath, nil
 }
 
@@ -139,7 +132,7 @@ func (s *Server) Disconnect(ctx context.Context, volumeName string) error {
 		return nil
 	}
 
-	s.log.Info("nbd: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
+	slog.Info("nbd: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
 
 	// Tell the kernel to disconnect this NBD device via netlink.
 	if err := nbdnl.Disconnect(exp.devIdx); err != nil {

@@ -89,4 +89,11 @@ var (
 		Name:      "pages_total",
 		Help:      "Total pages flushed (data + tombstones).",
 	}))
+
+	L0Compactions = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "l0_compactions_total",
+		Help:      "L0→L1 compaction cycles completed.",
+	}))
 )
