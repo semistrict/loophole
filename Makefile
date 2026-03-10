@@ -110,6 +110,10 @@ podman:
 cf-demo-bin:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "nosqlite nolwext4" -o cf-demo/bin/loophole ./cmd/loophole
 
+# Build linux/amd64 binary for Fly test machine
+fly-bin:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "nosqlite nolwext4" -o bin/loophole-linux-amd64 ./cmd/loophole
+
 # Download third-party dependencies
 deps:
 	./download-deps.sh

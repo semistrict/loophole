@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +20,14 @@ import (
 	"github.com/semistrict/loophole/metrics"
 )
 
+// safeFileName encodes a volume name for safe use as a filename.
+// Encodes % → %25 and / → %2F.
+func safeFileName(name string) string {
+	name = strings.ReplaceAll(name, "%", "%25")
+	name = strings.ReplaceAll(name, "/", "%2F")
+	return name
+}
+
 // Server manages the internal FUSE mount that exposes volume device files.
 // Volumes must be explicitly registered via Add before they are visible.
 type Server struct {
@@ -26,8 +35,9 @@ type Server struct {
 	MountDir string
 	root     *rootNode
 
-	mu      sync.Mutex
-	volumes map[string]loophole.Volume
+	mu        sync.Mutex
+	volumes   map[string]loophole.Volume // safeFileName(name) → volume
+	origNames map[string]string          // safeFileName(name) → original name
 }
 
 // Options configures the FUSE mount.
@@ -48,7 +58,8 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 	}
 
 	srv := &Server{
-		volumes: make(map[string]loophole.Volume),
+		volumes:   make(map[string]loophole.Volume),
+		origNames: make(map[string]string),
 	}
 	root := &rootNode{srv: srv}
 
@@ -95,32 +106,44 @@ func (s *Server) Unmount() error {
 // a previous process (e.g. after a crash). It is safe to call if dir is not
 // mounted or does not exist.
 func UnmountStale(dir string) {
+	// Try fusermount first, then fusermount3 (Ubuntu 24.04+).
 	if err := exec.Command("fusermount", "-u", dir).Run(); err != nil {
-		slog.Debug("fusermount stale cleanup", "dir", dir, "error", err)
+		if err2 := exec.Command("fusermount3", "-u", dir).Run(); err2 != nil {
+			// Last resort: lazy unmount via umount.
+			if err3 := exec.Command("umount", "-l", dir).Run(); err3 != nil {
+				slog.Debug("fusermount stale cleanup", "dir", dir, "error", err3)
+			}
+		}
 	}
 }
 
 // Add registers a volume so it becomes visible as a device file.
 func (s *Server) Add(name string, vol loophole.Volume) {
+	safe := safeFileName(name)
 	s.mu.Lock()
-	s.volumes[name] = vol
+	s.volumes[safe] = vol
+	s.origNames[safe] = name
 	s.mu.Unlock()
 }
 
 // Remove unregisters a volume. Existing FUSE inodes continue to work
 // (they hold their own refs) but new Lookups will return ENOENT.
 func (s *Server) Remove(name string) {
+	safe := safeFileName(name)
 	s.mu.Lock()
-	delete(s.volumes, name)
+	delete(s.volumes, safe)
+	delete(s.origNames, safe)
 	s.mu.Unlock()
 }
 
-func (s *Server) getVolume(name string) loophole.Volume {
+// getVolume looks up a volume by its safe (filesystem-encoded) name.
+func (s *Server) getVolume(safeName string) loophole.Volume {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.volumes[name]
+	return s.volumes[safeName]
 }
 
+// volumeNames returns the safe (filesystem-encoded) names of all registered volumes.
 func (s *Server) volumeNames() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -133,7 +156,7 @@ func (s *Server) volumeNames() []string {
 
 // DevicePath returns the path to the device file for a volume.
 func (s *Server) DevicePath(volumeName string) string {
-	return s.MountDir + "/" + volumeName
+	return s.MountDir + "/" + safeFileName(volumeName)
 }
 
 // --- root node: flat directory of volume files ---
@@ -158,14 +181,14 @@ func (r *rootNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) 
 	if vol == nil {
 		return nil, syscall.ENOENT
 	}
-	if err := vol.AcquireRef(); err != nil {
-		slog.Warn("fuse lookup: acquire ref", "volume", name, "error", err)
-		return nil, syscall.EIO
-	}
-	devNode := &deviceNode{vol: vol}
+	// Note: we do NOT acquire a ref here. The Open/Release pair handles the
+	// critical ref that prevents the volume from being destroyed while in use.
+	// Acquiring a ref in Lookup would delay volume cleanup until the kernel
+	// evicts the inode (OnForget), which can be arbitrarily delayed.
+	devNode := &deviceNode{srv: r.srv, safeName: name}
 	stable := fs.StableAttr{Mode: syscall.S_IFREG}
 	child := r.NewInode(ctx, devNode, stable)
-	devNode.fillAttr(&out.Attr)
+	devNode.fillAttr(&out.Attr, vol)
 	return child, fs.OK
 }
 
@@ -185,7 +208,16 @@ func (r *rootNode) Readdir(_ context.Context) (fs.DirStream, syscall.Errno) {
 
 type deviceNode struct {
 	fs.Inode
-	vol loophole.Volume
+	srv      *Server
+	safeName string
+}
+
+// volume returns the current volume for this device node.
+// It looks up the volume dynamically from the server so that
+// a re-registered volume (after unmount+remount) is picked up
+// even if the kernel reuses a cached inode.
+func (d *deviceNode) volume() loophole.Volume {
+	return d.srv.getVolume(d.safeName)
 }
 
 type deviceHandle struct {
@@ -201,7 +233,6 @@ func (h *deviceHandle) release(ctx context.Context) error {
 	return err
 }
 
-var _ = (fs.NodeOnForgetter)((*deviceNode)(nil))
 var _ = (fs.NodeGetattrer)((*deviceNode)(nil))
 var _ = (fs.NodeSetattrer)((*deviceNode)(nil))
 var _ = (fs.NodeOpener)((*deviceNode)(nil))
@@ -213,34 +244,35 @@ var _ = (fs.NodeReleaser)((*deviceNode)(nil))
 var _ = (fs.NodeAllocater)((*deviceNode)(nil))
 var _ = (fs.NodeCopyFileRanger)((*deviceNode)(nil))
 
-// OnForget releases the ref acquired in Lookup when the kernel evicts this inode.
-func (d *deviceNode) OnForget() {
-	if err := d.vol.ReleaseRef(); err != nil {
-		slog.Warn("fuse forget: release ref", "error", err)
-	}
-}
-
-func (d *deviceNode) fillAttr(out *fuse.Attr) {
-	if d.vol.ReadOnly() {
+func (d *deviceNode) fillAttr(out *fuse.Attr, vol loophole.Volume) {
+	if vol.ReadOnly() {
 		out.Mode = syscall.S_IFREG | 0o400
 	} else {
 		out.Mode = syscall.S_IFREG | 0o600
 	}
-	out.Size = d.vol.Size()
-	out.Blocks = d.vol.Size() / 512
+	out.Size = vol.Size()
+	out.Blocks = vol.Size() / 512
 	out.Nlink = 1
 }
 
 func (d *deviceNode) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	d.fillAttr(&out.Attr)
+	vol := d.volume()
+	if vol == nil {
+		return syscall.ENOENT
+	}
+	d.fillAttr(&out.Attr, vol)
 	return fs.OK
 }
 
 func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	vol := d.volume()
+	if vol == nil {
+		return syscall.ENOENT
+	}
 	if mode, ok := in.GetMode(); ok {
 		writable := mode&0o200 != 0
-		if !writable && !d.vol.ReadOnly() {
-			if err := d.vol.Freeze(); err != nil {
+		if !writable && !vol.ReadOnly() {
+			if err := vol.Freeze(); err != nil {
 				return syscall.EIO
 			}
 		}
@@ -250,17 +282,22 @@ func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetA
 
 func (d *deviceNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	done := metrics.FuseOp("open")
-	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 && d.vol.ReadOnly() {
+	vol := d.volume()
+	if vol == nil {
+		done(syscall.ENOENT)
+		return nil, 0, syscall.ENOENT
+	}
+	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 && vol.ReadOnly() {
 		done(syscall.EROFS)
 		return nil, 0, syscall.EROFS
 	}
-	if err := d.vol.AcquireRef(); err != nil {
+	if err := vol.AcquireRef(); err != nil {
 		slog.Warn("fuse open: acquire ref", "error", err)
 		done(syscall.EIO)
 		return nil, 0, syscall.EIO
 	}
 	done(fs.OK)
-	return &deviceHandle{vol: d.vol}, fuse.FOPEN_KEEP_CACHE, fs.OK
+	return &deviceHandle{vol: vol}, fuse.FOPEN_KEEP_CACHE, fs.OK
 }
 
 func (d *deviceNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errno {
@@ -278,20 +315,26 @@ func (d *deviceNode) Release(ctx context.Context, fh fs.FileHandle) syscall.Errn
 	return fs.OK
 }
 
-func (d *deviceNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+func (d *deviceNode) Read(ctx context.Context, fh fs.FileHandle, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	done := metrics.FuseOp("read")
-	slog.Debug("blockdev: read", "off", off, "len", len(dest), "volSize", d.vol.Size())
-	if off < 0 || uint64(off) >= d.vol.Size() {
+	h, ok := fh.(*deviceHandle)
+	if !ok {
+		done(syscall.EBADF)
+		return nil, syscall.EBADF
+	}
+	vol := h.vol
+	slog.Debug("blockdev: read", "off", off, "len", len(dest), "volSize", vol.Size())
+	if off < 0 || uint64(off) >= vol.Size() {
 		done(fs.OK)
 		return fuse.ReadResultData(nil), fs.OK
 	}
 
 	end := uint64(off) + uint64(len(dest))
-	if end > d.vol.Size() {
-		dest = dest[:d.vol.Size()-uint64(off)]
+	if end > vol.Size() {
+		dest = dest[:vol.Size()-uint64(off)]
 	}
 
-	n, err := d.vol.Read(ctx, dest, uint64(off))
+	n, err := vol.Read(ctx, dest, uint64(off))
 	if err != nil {
 		slog.Warn("blockdev: read error", "off", off, "len", len(dest), "error", err)
 		done(syscall.EIO)
@@ -303,24 +346,30 @@ func (d *deviceNode) Read(ctx context.Context, _ fs.FileHandle, dest []byte, off
 	return fuse.ReadResultData(dest[:n]), fs.OK
 }
 
-func (d *deviceNode) Write(ctx context.Context, _ fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
+func (d *deviceNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, off int64) (uint32, syscall.Errno) {
 	done := metrics.FuseOp("write")
-	if d.vol.ReadOnly() {
+	h, ok := fh.(*deviceHandle)
+	if !ok {
+		done(syscall.EBADF)
+		return 0, syscall.EBADF
+	}
+	vol := h.vol
+	if vol.ReadOnly() {
 		done(syscall.EROFS)
 		return 0, syscall.EROFS
 	}
-	slog.Debug("blockdev: write", "off", off, "len", len(data), "volSize", d.vol.Size())
-	if off < 0 || uint64(off) >= d.vol.Size() {
+	slog.Debug("blockdev: write", "off", off, "len", len(data), "volSize", vol.Size())
+	if off < 0 || uint64(off) >= vol.Size() {
 		done(syscall.EFBIG)
 		return 0, syscall.EFBIG
 	}
 
 	end := uint64(off) + uint64(len(data))
-	if end > d.vol.Size() {
-		data = data[:d.vol.Size()-uint64(off)]
+	if end > vol.Size() {
+		data = data[:vol.Size()-uint64(off)]
 	}
 
-	if err := d.vol.Write(data, uint64(off)); err != nil {
+	if err := vol.Write(data, uint64(off)); err != nil {
 		slog.Warn("blockdev: write error", "off", off, "len", len(data), "error", err)
 		done(syscall.EIO)
 		return 0, syscall.EIO
@@ -334,13 +383,14 @@ func (d *deviceNode) Write(ctx context.Context, _ fs.FileHandle, data []byte, of
 func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) syscall.Errno {
 	slog.Debug("blockdev: fsync start")
 	done := metrics.FuseOp("fsync")
-	if _, ok := fh.(*deviceHandle); !ok {
+	h, ok := fh.(*deviceHandle)
+	if !ok {
 		done(syscall.EBADF)
 		return syscall.EBADF
 	}
 	// Use FlushLocal to freeze the memtable without waiting for S3 upload.
 	// The background flush loop will handle the upload asynchronously.
-	if err := d.vol.FlushLocal(); err != nil {
+	if err := h.vol.FlushLocal(); err != nil {
 		slog.Warn("blockdev: fsync error", "error", err)
 		done(syscall.EIO)
 		return syscall.EIO
@@ -353,11 +403,12 @@ func (d *deviceNode) Fsync(ctx context.Context, fh fs.FileHandle, _ uint32) sysc
 func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno {
 	slog.Debug("blockdev: flush start")
 	done := metrics.FuseOp("flush")
-	if _, ok := fh.(*deviceHandle); !ok {
+	h, ok := fh.(*deviceHandle)
+	if !ok {
 		done(syscall.EBADF)
 		return syscall.EBADF
 	}
-	if err := d.vol.Flush(); err != nil {
+	if err := h.vol.Flush(); err != nil {
 		slog.Warn("blockdev: flush error", "error", err)
 		done(syscall.EIO)
 		return syscall.EIO
@@ -367,13 +418,18 @@ func (d *deviceNode) Flush(ctx context.Context, fh fs.FileHandle) syscall.Errno 
 	return fs.OK
 }
 
-func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, size uint64, mode uint32) syscall.Errno {
+func (d *deviceNode) Allocate(ctx context.Context, fh fs.FileHandle, off uint64, size uint64, mode uint32) syscall.Errno {
 	const (
 		fallocKeepSize  = 0x01
 		fallocPunchHole = 0x02
 		fallocZeroRange = 0x10
 	)
-	if d.vol.ReadOnly() {
+	h, ok := fh.(*deviceHandle)
+	if !ok {
+		return syscall.EBADF
+	}
+	vol := h.vol
+	if vol.ReadOnly() {
 		metrics.FuseOps.WithLabelValues("fallocate_readonly", "error").Inc()
 		return syscall.EROFS
 	}
@@ -391,17 +447,17 @@ func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, 
 	}
 	done := metrics.FuseOp(opName)
 
-	if off >= d.vol.Size() || size == 0 {
+	if off >= vol.Size() || size == 0 {
 		done(fs.OK)
 		return fs.OK
 	}
 	end := off + size
-	if end > d.vol.Size() {
-		end = d.vol.Size()
+	if end > vol.Size() {
+		end = vol.Size()
 	}
 
 	slog.Debug("blockdev: fallocate", "op", opName, "off", off, "end", end, "len", end-off)
-	if err := d.vol.PunchHole(off, end-off); err != nil {
+	if err := vol.PunchHole(off, end-off); err != nil {
 		done(syscall.EIO)
 		return syscall.EIO
 	}
@@ -409,34 +465,41 @@ func (d *deviceNode) Allocate(ctx context.Context, _ fs.FileHandle, off uint64, 
 	return fs.OK
 }
 
-func (d *deviceNode) CopyFileRange(ctx context.Context, _ fs.FileHandle, offIn uint64, outNode *fs.Inode, _ fs.FileHandle, offOut uint64, length uint64, _ uint64) (uint32, syscall.Errno) {
+func (d *deviceNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offIn uint64, outNode *fs.Inode, fhOut fs.FileHandle, offOut uint64, length uint64, _ uint64) (uint32, syscall.Errno) {
 	done := metrics.FuseOp("copy_file_range")
-	dstNode, ok := outNode.Operations().(*deviceNode)
+	hIn, ok := fhIn.(*deviceHandle)
 	if !ok {
-		done(syscall.ENOTSUP)
-		return 0, syscall.ENOTSUP
+		done(syscall.EBADF)
+		return 0, syscall.EBADF
 	}
-	if dstNode.vol.ReadOnly() {
+	hOut, ok := fhOut.(*deviceHandle)
+	if !ok {
+		done(syscall.EBADF)
+		return 0, syscall.EBADF
+	}
+	srcVol := hIn.vol
+	dstVol := hOut.vol
+	if dstVol.ReadOnly() {
 		done(syscall.EROFS)
 		return 0, syscall.EROFS
 	}
 
-	if offIn >= d.vol.Size() {
+	if offIn >= srcVol.Size() {
 		done(fs.OK)
 		return 0, fs.OK
 	}
-	if offIn+length > d.vol.Size() {
-		length = d.vol.Size() - offIn
+	if offIn+length > srcVol.Size() {
+		length = srcVol.Size() - offIn
 	}
-	if offOut >= dstNode.vol.Size() {
+	if offOut >= dstVol.Size() {
 		done(syscall.EFBIG)
 		return 0, syscall.EFBIG
 	}
-	if offOut+length > dstNode.vol.Size() {
-		length = dstNode.vol.Size() - offOut
+	if offOut+length > dstVol.Size() {
+		length = dstVol.Size() - offOut
 	}
 
-	n, err := dstNode.vol.CopyFrom(d.vol, offIn, offOut, length)
+	n, err := dstVol.CopyFrom(srcVol, offIn, offOut, length)
 	if err != nil {
 		done(syscall.EIO)
 		return 0, syscall.EIO

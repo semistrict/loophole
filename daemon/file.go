@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,7 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		d.log.Error("websocket upgrade failed", "err", err)
+		slog.Error("websocket upgrade failed", "err", err)
 		return
 	}
 	defer func() { _ = conn.Close() }()
@@ -35,17 +36,17 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 	// First text message: argv as JSON string array.
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		d.log.Error("read argv", "err", err)
+		slog.Error("read argv", "err", err)
 		return
 	}
 
 	var argv []string
 	if err := json.Unmarshal(msg, &argv); err != nil {
-		d.log.Error("decode argv", "err", err)
+		slog.Error("decode argv", "err", err)
 		return
 	}
 	if len(argv) == 0 {
-		d.log.Error("empty argv")
+		slog.Error("empty argv")
 		return
 	}
 
@@ -54,7 +55,7 @@ func (d *Daemon) handleFile(w http.ResponseWriter, r *http.Request) {
 
 	cmd := filecmd.Lookup(cmdName)
 	if cmd == nil {
-		d.log.Error("unknown file command", "cmd", cmdName)
+		slog.Error("unknown file command", "cmd", cmdName)
 		wsOut := &wsWriter{conn: conn}
 		mux := streammux.NewWriter(wsOut)
 		_, _ = fmt.Fprintf(mux.Stderr(), "unknown file command: %s", cmdName)

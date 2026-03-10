@@ -851,6 +851,16 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 
 // Snapshot freezes this layer and creates a child layer that inherits all
 // data via a copy of this layer's index.json.
+// Snapshot creates a child layer that inherits this layer's complete state.
+//
+// IMPORTANT INVARIANT: After calling Snapshot, the caller MUST ensure this
+// layer is never written to again. The child's L1/L2 block ranges reference
+// objects keyed by this layer's ID and writeLeaseSeq. If this layer continues
+// to compact (rewrite L1 blocks), the child's references become stale.
+//
+// The volume layer enforces this by calling relayer() after Snapshot, which
+// creates a new layer for the parent volume. The old layer is effectively
+// frozen — only frozen (immutable) layers may be shared between volumes.
 func (ly *layer) Snapshot(childID string) error {
 	// 1. Flush everything.
 	if err := ly.Flush(); err != nil {
@@ -1033,12 +1043,12 @@ func (ly *layer) periodicFlushLoop(ctx context.Context) {
 		default:
 		}
 
-		ly.doPeriodicFlush()
+		ly.doPeriodicFlush(ctx)
 		timer.Reset(ly.config.FlushInterval)
 	}
 }
 
-func (ly *layer) doPeriodicFlush() {
+func (ly *layer) doPeriodicFlush(ctx context.Context) {
 	// Flush frozen tables. TryLock avoids blocking if another goroutine
 	// (e.g. an explicit Flush call) already holds flushMu. Under synctest,
 	// a blocked goroutine prevents time from advancing, which deadlocks
@@ -1067,6 +1077,16 @@ func (ly *layer) doPeriodicFlush() {
 		}
 	}
 	ly.lastFlushAt.Store(time.Now().UnixMilli())
+
+	// Compact L0→L1 if threshold reached. Use tryCompactL0 to avoid
+	// blocking if an explicit CompactL0 is already running. Under
+	// synctest, a blocking Lock on compactMu combined with RetryStore's
+	// backoff sleeps creates a cascade: each retry sleep advances the
+	// fake clock, waking more periodicFlush goroutines that also try
+	// to compact and retry, causing a deadlock.
+	if err := ly.tryCompactL0(ctx); err != nil {
+		slog.Error("L0 compaction failed", "layer", ly.id, "error", err)
+	}
 }
 
 // blockKey returns the S3 key for a block blob, incorporating the write lease seq.
@@ -1099,17 +1119,30 @@ func ensureDir(path string) error {
 	return ensureMemDir(path)
 }
 
+// tryCompactL0 attempts compaction but skips if another compaction is
+// already in progress. Used by periodicFlush to avoid blocking.
+func (ly *layer) tryCompactL0(ctx context.Context) error {
+	if !ly.compactMu.TryLock() {
+		return nil
+	}
+	defer ly.compactMu.Unlock()
+	return ly.compactL0Locked(ctx)
+}
+
 // CompactL0 merges L0 entries into L1 blocks.
 func (ly *layer) CompactL0(ctx context.Context) error {
 	ly.compactMu.Lock()
 	defer ly.compactMu.Unlock()
+	return ly.compactL0Locked(ctx)
+}
 
+func (ly *layer) compactL0Locked(ctx context.Context) error {
 	ly.mu.RLock()
 	l0entries := make([]l0Entry, len(ly.index.L0))
 	copy(l0entries, ly.index.L0)
 	ly.mu.RUnlock()
 
-	if totalL0Pages(l0entries) < L0CompactTrigger {
+	if totalL0Pages(l0entries) < ly.config.L0PagesMax {
 		return nil
 	}
 
@@ -1128,6 +1161,21 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 		}
 	}
 
+	// Snapshot l1Map/l2Map so we can update them without affecting the live
+	// state until the entire compaction succeeds. On partial failure (e.g.
+	// S3 fault), the in-memory maps remain unchanged and L0 entries are
+	// still intact, so no data is lost.
+	ly.mu.RLock()
+	newL1Map := ly.l1Map
+	newL2Map := ly.l2Map
+	ly.mu.RUnlock()
+
+	type cachedBlock struct {
+		key string
+		pb  *parsedBlock
+	}
+	var newCacheEntries []cachedBlock
+
 	// For each block address, read existing L1 block (if any), overlay L0 pages.
 	for blockAddr, sources := range blockGroups {
 		if err := ctx.Err(); err != nil {
@@ -1139,7 +1187,7 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 		pageMap := make(map[uint16][]byte) // page offset → data
 
 		// Load existing L1 block.
-		if layer, seq := ly.l1Map.Find(blockAddr); layer != "" {
+		if layer, seq := newL1Map.Find(blockAddr); layer != "" {
 			key := blockKey(layer, "l1", seq, blockAddr)
 			pb, err := ly.getParsedBlock(ctx, key)
 			if err != nil {
@@ -1205,85 +1253,74 @@ func (ly *layer) CompactL0(ctx context.Context) error {
 			return fmt.Errorf("upload L1 block %d: %w", blockAddr, err)
 		}
 
-		// Update L1 range map.
-		ly.mu.Lock()
-		ly.l1Map = ly.l1Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
-		ly.mu.Unlock()
+		// Stage L1 range map update.
+		newL1Map = newL1Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
 
 		// Check if this L1 block should be promoted to L2.
 		if len(pages) >= L1PromoteThreshold {
-			if err := ly.promoteL1toL2(ctx, blockAddr, pages); err != nil {
-				return fmt.Errorf("promote L1→L2 block %d: %w", blockAddr, err)
+			// Read existing L2 block if any.
+			l2PageMap := make(map[uint16][]byte)
+			if layer, seq := newL2Map.Find(blockAddr); layer != "" {
+				l2Key := blockKey(layer, "l2", seq, blockAddr)
+				pb, err := ly.getParsedBlock(ctx, l2Key)
+				if err != nil {
+					return fmt.Errorf("read existing L2 block: %w", err)
+				}
+				l2Pages, err := pb.readAllPages(ctx, blockAddr)
+				if err != nil {
+					return fmt.Errorf("read L2 block pages: %w", err)
+				}
+				for off, data := range l2Pages {
+					l2PageMap[off] = data
+				}
+			}
+			for _, p := range pages {
+				l2PageMap[p.offset] = p.data
+			}
+			var l2Pages []blockPage
+			for off, data := range l2PageMap {
+				l2Pages = append(l2Pages, blockPage{offset: off, data: data})
+			}
+			l2Data, err := buildBlock(blockAddr, l2Pages)
+			if err != nil {
+				return fmt.Errorf("build L2 block %d: %w", blockAddr, err)
+			}
+			l2Key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
+			if err := ly.store.PutReader(ctx, l2Key, bytes.NewReader(l2Data)); err != nil {
+				return fmt.Errorf("upload L2 block %d: %w", blockAddr, err)
+			}
+			newL2Map = newL2Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
+			newL1Map = newL1Map.Remove(blockAddr)
+
+			if pb, err := parseBlock(l2Data); err == nil && pb != nil {
+				newCacheEntries = append(newCacheEntries, cachedBlock{key: l2Key, pb: pb})
 			}
 		}
 
-		// Cache the new block.
-		pb, _ := parseBlock(blockData)
-		if pb != nil {
-			ly.blockCache.put(key, pb)
+		// Stage block cache entry.
+		if pb, err := parseBlock(blockData); err == nil && pb != nil {
+			newCacheEntries = append(newCacheEntries, cachedBlock{key: key, pb: pb})
 		}
 	}
 
-	// Clear L0 entries from index.
+	// All blocks processed successfully. Atomically swap maps and remove
+	// only the L0 entries we processed. Entries added by concurrent flushes
+	// during compaction are preserved.
 	ly.mu.Lock()
-	ly.index.L0 = nil
+	ly.l1Map = newL1Map
+	ly.l2Map = newL2Map
+	nProcessed := len(l0entries)
+	remaining := ly.index.L0[nProcessed:]
+	ly.index.L0 = make([]l0Entry, len(remaining))
+	copy(ly.index.L0, remaining)
 	ly.mu.Unlock()
+
+	for _, e := range newCacheEntries {
+		ly.blockCache.put(e.key, e.pb)
+	}
+
+	metrics.L0Compactions.Inc()
 
 	// Save updated index.
 	return ly.saveIndex(ctx)
-}
-
-// promoteL1toL2 merges an L1 block into L2.
-func (ly *layer) promoteL1toL2(ctx context.Context, blockAddr BlockIdx, l1Pages []blockPage) error {
-	// Read existing L2 block if any.
-	pageMap := make(map[uint16][]byte)
-	if layer, seq := ly.l2Map.Find(blockAddr); layer != "" {
-		key := blockKey(layer, "l2", seq, blockAddr)
-		pb, err := ly.getParsedBlock(ctx, key)
-		if err != nil {
-			return fmt.Errorf("read existing L2 block: %w", err)
-		}
-		pages, err := pb.readAllPages(ctx, blockAddr)
-		if err != nil {
-			return fmt.Errorf("read L2 block pages: %w", err)
-		}
-		for off, data := range pages {
-			pageMap[off] = data
-		}
-	}
-
-	// Overlay L1 pages onto L2.
-	for _, p := range l1Pages {
-		pageMap[p.offset] = p.data
-	}
-
-	// Build new L2 block.
-	var pages []blockPage
-	for off, data := range pageMap {
-		pages = append(pages, blockPage{offset: off, data: data})
-	}
-
-	blockData, err := buildBlock(blockAddr, pages)
-	if err != nil {
-		return err
-	}
-
-	key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
-	if err := ly.store.PutReader(ctx, key, bytes.NewReader(blockData)); err != nil {
-		return err
-	}
-
-	// Update maps: add L2 entry, remove L1 entry.
-	ly.mu.Lock()
-	ly.l2Map = ly.l2Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
-	ly.l1Map = ly.l1Map.Remove(blockAddr)
-	ly.mu.Unlock()
-
-	// Cache new block.
-	pb, _ := parseBlock(blockData)
-	if pb != nil {
-		ly.blockCache.put(key, pb)
-	}
-
-	return nil
 }

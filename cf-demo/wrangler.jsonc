@@ -22,6 +22,14 @@
 			{
 				"name": "SANDBOX",
 				"class_name": "SandboxContainer"
+			},
+			{
+				"name": "VOLUMES",
+				"class_name": "VolumeActor"
+			},
+			{
+				"name": "SCHEDULER",
+				"class_name": "Scheduler"
 			}
 		]
 	},
@@ -29,6 +37,10 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["SandboxContainer"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": ["Scheduler", "VolumeActor"]
 		}
 	]
 }

@@ -4,7 +4,7 @@
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./src/server-entry");
-		durableNamespaces: "SandboxContainer";
+		durableNamespaces: "SandboxContainer" | "VolumeActor" | "Scheduler";
 	}
 	interface Env {
 		R2_ENDPOINT: string;
@@ -14,6 +14,8 @@ declare namespace Cloudflare {
 		AXIOM_TOKEN: string;
 		AXIOM_DATASET: string;
 		SANDBOX: DurableObjectNamespace<import("./src/server-entry").SandboxContainer>;
+		VOLUMES: DurableObjectNamespace<import("./src/server-entry").VolumeActor>;
+		SCHEDULER: DurableObjectNamespace<import("./src/server-entry").Scheduler>;
 	}
 }
 interface Env extends Cloudflare.Env {}

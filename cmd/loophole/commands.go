@@ -39,6 +39,7 @@ func addCommands(root *cobra.Command) {
 		fileCmd(),
 		breakLeaseCmd(),
 		migrateCmd(),
+		sshCmd(),
 	)
 	addDBCommands(root)
 }

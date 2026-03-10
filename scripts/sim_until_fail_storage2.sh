@@ -4,7 +4,6 @@ set -euo pipefail
 # Repeatedly run storage2 TestSimulation until a failure appears.
 
 RUN_TEST="${RUN_TEST:-TestSimulation}"
-SIM_OPS_FIXED="${SIM_OPS_FIXED:-300}"
 SIM_PAGES_FIXED="${SIM_PAGES_FIXED:-256}"
 
 LOG_DIR="${SIM_FUZZ_LOG_DIR:-/tmp/sim-fuzz-storage2}"
@@ -15,11 +14,13 @@ PARALLELISM="${SIM_FUZZ_PARALLELISM:-4}"
 NODES_STR="${SIM_FUZZ_NODES_VALUES:-3 5 7 9}"
 CRASH_STR="${SIM_FUZZ_CRASH_VALUES:-0.01 0.02 0.05 0.10 0.15}"
 FAULT_STR="${SIM_FUZZ_FAULT_VALUES:-0.01 0.02 0.05 0.10 0.15 0.20}"
+OPS_STR="${SIM_FUZZ_OPS_VALUES:-500 1000 2000 3000 5000}"
 TIMELINE_STR="${SIM_FUZZ_TIMELINE_VALUES:-20 40 80 120}"
 
 read -r -a NODES_VALUES <<< "$NODES_STR"
 read -r -a CRASH_VALUES <<< "$CRASH_STR"
 read -r -a FAULT_VALUES <<< "$FAULT_STR"
+read -r -a OPS_VALUES <<< "$OPS_STR"
 read -r -a TIMELINE_VALUES <<< "$TIMELINE_STR"
 
 pick() {
@@ -67,7 +68,7 @@ next_run() {
 
 worker_loop() {
   local worker="$1"
-  local run seed nodes crash fault timelines log
+  local run seed nodes crash fault timelines ops log
   while true; do
     if [[ -f "$FAIL_FLAG" ]]; then
       return 0
@@ -79,13 +80,14 @@ worker_loop() {
     crash="$(pick "${CRASH_VALUES[@]}")"
     fault="$(pick "${FAULT_VALUES[@]}")"
     timelines="$(pick "${TIMELINE_VALUES[@]}")"
+    ops="$(pick "${OPS_VALUES[@]}")"
     log="$LOG_DIR/run-${run}.w${worker}.log"
 
-    echo "RUN $run worker=$worker seed=$seed ops=$SIM_OPS_FIXED nodes=$nodes crash=$crash fault=$fault timelines=$timelines"
+    echo "RUN $run worker=$worker seed=$seed ops=$ops nodes=$nodes crash=$crash fault=$fault timelines=$timelines"
 
     sim_env=(
       SIM_SEED="$seed"
-      SIM_OPS="$SIM_OPS_FIXED"
+      SIM_OPS="$ops"
       SIM_PAGES="$SIM_PAGES_FIXED"
       SIM_NODES="$nodes"
       SIM_CRASH_RATE="$crash"
@@ -93,7 +95,7 @@ worker_loop() {
       SIM_TIMELINES="$timelines"
     )
 
-    if env "${sim_env[@]}" go test -tags "" -run "$RUN_TEST" -timeout 60s ./storage2/ >"$log" 2>&1; then
+    if env "${sim_env[@]}" go test -tags "" -run "$RUN_TEST" -timeout 600s ./storage2/ >"$log" 2>&1; then
       echo "PASS $run worker=$worker"
 
     else
@@ -103,7 +105,7 @@ worker_loop() {
           echo "Log: $log"
           echo
           echo "Repro:"
-          echo "SIM_SEED=$seed SIM_OPS=$SIM_OPS_FIXED SIM_PAGES=$SIM_PAGES_FIXED SIM_NODES=$nodes SIM_CRASH_RATE=$crash SIM_FAULT_RATE=$fault SIM_TIMELINES=$timelines go test -tags '' -run $RUN_TEST -timeout 60s ./storage2/"
+          echo "SIM_SEED=$seed SIM_OPS=$ops SIM_PAGES=$SIM_PAGES_FIXED SIM_NODES=$nodes SIM_CRASH_RATE=$crash SIM_FAULT_RATE=$fault SIM_TIMELINES=$timelines go test -tags '' -run $RUN_TEST -timeout 60s ./storage2/"
         } > "$FAIL_SUMMARY"
         touch "$FAIL_FLAG"
       fi

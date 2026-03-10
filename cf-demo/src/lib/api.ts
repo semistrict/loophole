@@ -1,10 +1,9 @@
 import { createServerFn } from '@tanstack/react-start'
-import { resolveContainer } from './container'
 import type { DirEntry } from './types'
 
 export type { DirEntry }
 
-async function containerJson<T>(res: Response): Promise<T> {
+async function schedulerJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(body.error ?? res.statusText)
@@ -12,89 +11,83 @@ async function containerJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
-export const getContainerState = createServerFn({ method: 'GET' })
-  .inputValidator((data: { containerId: string }) => data)
-  .handler(async ({ data }) => {
-    const c = resolveContainer(data.containerId)
-    const state = await c.getState()
-    return { status: state.status }
-  })
+function schedulerFetch(path: string, init?: RequestInit): Promise<Response> {
+  const { env } = require('cloudflare:workers') as { env: Env }
+  const scheduler = env.SCHEDULER.get(env.SCHEDULER.idFromName('scheduler'))
+  return scheduler.fetch(
+    new Request(`http://scheduler${path}`, init),
+  )
+}
+
+function volumeFetch(volume: string, path: string, init?: RequestInit): Promise<Response> {
+  const { env } = require('cloudflare:workers') as { env: Env }
+  const actor = env.VOLUMES.get(env.VOLUMES.idFromName(volume))
+  const headers = new Headers(init?.headers)
+  headers.set('X-Volume', volume)
+  return actor.fetch(
+    new Request(`http://volume/${path}`, { ...init, headers }),
+  )
+}
 
 export const listVolumes = createServerFn({ method: 'GET' })
-  .inputValidator((data: { containerId: string }) => data)
-  .handler(async ({ data }) => {
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request('http://container/volumes'),
-    )
-    const result = await containerJson<{ volumes?: string[] }>(res)
+  .handler(async () => {
+    const res = await schedulerFetch('/api/volumes')
+    const result = await schedulerJson<{ volumes?: string[] }>(res)
     return result.volumes ?? []
   })
 
 export const createVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { containerId: string; volume: string }) => data)
+  .inputValidator((data: { volume: string }) => data)
   .handler(async ({ data }) => {
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request('http://container/create', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: data.volume }),
-      }),
-    )
-    await containerJson(res)
+    const res = await schedulerFetch('/api/volumes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ volume: data.volume }),
+    })
+    await schedulerJson(res)
   })
 
 export const snapshotVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { containerId: string; mountpoint: string; name: string }) => data)
+  .inputValidator((data: { mountpoint: string; name: string }) => data)
   .handler(async ({ data }) => {
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request('http://container/snapshot', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mountpoint: data.mountpoint, name: data.name }),
-      }),
-    )
-    await containerJson(res)
+    const res = await schedulerFetch('/debug/snapshot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mountpoint: data.mountpoint, name: data.name }),
+    })
+    await schedulerJson(res)
   })
 
 export const cloneVolume = createServerFn({ method: 'POST' })
   .inputValidator(
-    (data: { containerId: string; mountpoint: string; clone: string; cloneMountpoint: string }) => data,
+    (data: { mountpoint: string; clone: string; cloneMountpoint: string }) => data,
   )
   .handler(async ({ data }) => {
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request('http://container/clone', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mountpoint: data.mountpoint,
-          clone: data.clone,
-          clone_mountpoint: data.cloneMountpoint,
-        }),
+    const res = await schedulerFetch('/debug/clone', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mountpoint: data.mountpoint,
+        clone: data.clone,
+        clone_mountpoint: data.cloneMountpoint,
       }),
-    )
-    await containerJson(res)
+    })
+    await schedulerJson(res)
   })
 
 export const deleteVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { containerId: string; volume: string }) => data)
+  .inputValidator((data: { volume: string }) => data)
   .handler(async ({ data }) => {
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request('http://container/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ volume: data.volume }),
-      }),
-    )
-    await containerJson(res)
+    const res = await schedulerFetch('/api/volumes/' + encodeURIComponent(data.volume), {
+      method: 'DELETE',
+    })
+    await schedulerJson(res)
   })
 
 export const readDir = createServerFn({ method: 'GET' })
-  .inputValidator((data: { containerId: string; volume: string; path: string }) => data)
+  .inputValidator((data: { volume: string; path: string }) => data)
   .handler(async ({ data }): Promise<DirEntry[]> => {
     const params = new URLSearchParams({ volume: data.volume, path: data.path })
-    const res = await resolveContainer(data.containerId).fetch(
-      new Request(`http://container/sandbox/readdir?${params}`),
-    )
-    return containerJson<DirEntry[]>(res)
+    const res = await volumeFetch(data.volume, `sandbox/readdir?${params}`)
+    return schedulerJson<DirEntry[]>(res)
   })
-

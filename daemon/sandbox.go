@@ -218,7 +218,7 @@ func (d *Daemon) handleReadDir(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(entries); err != nil {
-		d.log.Warn("readdir encode error", "error", err)
+		slog.Warn("readdir encode error", "error", err)
 	}
 }
 
@@ -247,6 +247,6 @@ func (d *Daemon) handleStat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(statToEntry(path.Base(p), fi)); err != nil {
-		d.log.Warn("stat encode error", "error", err)
+		slog.Warn("stat encode error", "error", err)
 	}
 }

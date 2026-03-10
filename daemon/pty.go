@@ -75,7 +75,8 @@ type ptySession struct {
 
 	mu          sync.Mutex
 	subs        map[*websocket.Conn]struct{}
-	lastChanges []uint64 // snapshot of vt.Changes after last broadcast
+	rawSubs     map[*websocket.Conn]struct{} // raw mode subscribers (binary PTY output)
+	lastChanges []uint64                     // snapshot of vt.Changes after last broadcast
 
 	done chan struct{}
 }
@@ -89,6 +90,18 @@ func (s *ptySession) subscribe(conn *websocket.Conn) {
 func (s *ptySession) unsubscribe(conn *websocket.Conn) {
 	s.mu.Lock()
 	delete(s.subs, conn)
+	s.mu.Unlock()
+}
+
+func (s *ptySession) rawSubscribe(conn *websocket.Conn) {
+	s.mu.Lock()
+	s.rawSubs[conn] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *ptySession) rawUnsubscribe(conn *websocket.Conn) {
+	s.mu.Lock()
+	delete(s.rawSubs, conn)
 	s.mu.Unlock()
 }
 
@@ -218,7 +231,8 @@ func (s *ptySession) screenText() string {
 }
 
 // readLoop reads PTY output, feeds the VT emulator, and broadcasts
-// changed rows as JSON to all subscribed WebSockets.
+// changed rows as JSON to all subscribed WebSockets. Raw subscribers
+// receive the unprocessed PTY bytes as binary frames.
 func (s *ptySession) readLoop() {
 	defer close(s.done)
 	buf := make([]byte, 32*1024)
@@ -226,6 +240,12 @@ func (s *ptySession) readLoop() {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
 			s.mu.Lock()
+			// Collect raw subscribers.
+			rawConns := make([]*websocket.Conn, 0, len(s.rawSubs))
+			for c := range s.rawSubs {
+				rawConns = append(rawConns, c)
+			}
+			// Feed VT emulator for HTML subscribers.
 			_, _ = s.vt.Write(buf[:n])
 			msg := s.changedRowsMsg()
 			conns := make([]*websocket.Conn, 0, len(s.subs))
@@ -234,6 +254,14 @@ func (s *ptySession) readLoop() {
 			}
 			s.mu.Unlock()
 
+			// Broadcast raw PTY bytes (binary frames).
+			for _, c := range rawConns {
+				if wErr := c.WriteMessage(websocket.BinaryMessage, buf[:n]); wErr != nil {
+					slog.Debug("pty.raw.broadcast.write-error", "id", s.id, "error", wErr)
+				}
+			}
+
+			// Broadcast HTML updates (text frames).
 			if len(msg.Rows) > 0 {
 				data, _ := json.Marshal(msg)
 				for _, c := range conns {
@@ -250,6 +278,10 @@ func (s *ptySession) readLoop() {
 			closedData, _ := json.Marshal(closedMsg{Type: "closed"})
 			s.mu.Lock()
 			for c := range s.subs {
+				_ = c.WriteMessage(websocket.TextMessage, closedData)
+				_ = c.Close()
+			}
+			for c := range s.rawSubs {
 				_ = c.WriteMessage(websocket.TextMessage, closedData)
 				_ = c.Close()
 			}
@@ -300,6 +332,7 @@ func (pm *ptyManager) start(id, volume, mountpoint string, cols, rows uint16, ba
 		cmd:         cmd,
 		vt:          vt,
 		subs:        make(map[*websocket.Conn]struct{}),
+		rawSubs:     make(map[*websocket.Conn]struct{}),
 		lastChanges: make([]uint64, rows),
 		done:        make(chan struct{}),
 	}
@@ -463,18 +496,50 @@ func (d *Daemon) handlePTYWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		d.log.Error("pty ws upgrade failed", "id", id, "err", err)
+		slog.Error("pty ws upgrade failed", "id", id, "err", err)
 		return
 	}
 	defer func() { _ = conn.Close() }()
 
-	// Send full screen state to the new client.
+	// Raw mode: binary frames = stdin, text frames = resize JSON or stdin.
+	// Server broadcasts raw PTY bytes as binary frames, "closed" as text.
+	if r.URL.Query().Get("mode") == "raw" {
+		s.rawSubscribe(conn)
+		defer s.rawUnsubscribe(conn)
+
+		for {
+			msgType, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			switch msgType {
+			case websocket.BinaryMessage:
+				if _, err := s.ptmx.Write(data); err != nil {
+					return
+				}
+			case websocket.TextMessage:
+				// Try resize JSON first; otherwise treat as PTY input
+				// (allows plain text clients like websocat to send input).
+				var resize struct {
+					Cols uint16 `json:"cols"`
+					Rows uint16 `json:"rows"`
+				}
+				if json.Unmarshal(data, &resize) == nil && resize.Cols > 0 && resize.Rows > 0 {
+					_ = d.ptyMgr.resize(id, resize.Cols, resize.Rows)
+				} else if _, err := s.ptmx.Write(data); err != nil {
+					return
+				}
+			}
+		}
+	}
+
+	// HTML mode: send full screen state, then subscribe for diffs.
 	s.mu.Lock()
 	screenData, _ := json.Marshal(s.fullScreenMsg())
 	s.mu.Unlock()
 
 	if err := conn.WriteMessage(websocket.TextMessage, screenData); err != nil {
-		d.log.Debug("pty ws screen write error", "id", id, "err", err)
+		slog.Debug("pty ws screen write error", "id", id, "err", err)
 		return
 	}
 
@@ -547,6 +612,7 @@ func (d *Daemon) handlePTYResize(w http.ResponseWriter, r *http.Request) {
 
 // handleShellCompat is the old GET /sandbox/shell endpoint that now creates
 // a PTY session and speaks the midterm protocol over the same WebSocket.
+// Supports ?mode=raw for CLI clients, and ?cols=N&rows=N for initial size.
 func (d *Daemon) handleShellCompat(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
@@ -575,9 +641,22 @@ func (d *Daemon) handleShellCompat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cols := uint16(120)
+	rows := uint16(30)
+	if v := r.URL.Query().Get("cols"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 16); err == nil && n > 0 {
+			cols = uint16(n)
+		}
+	}
+	if v := r.URL.Query().Get("rows"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 16); err == nil && n > 0 {
+			rows = uint16(n)
+		}
+	}
+
 	// Generate a unique session ID.
 	id := fmt.Sprintf("%s-%d", volume, nextPTYID.Add(1))
-	if err := d.ptyMgr.start(id, volume, mountpoint, 120, 30, d.backend); err != nil {
+	if err := d.ptyMgr.start(id, volume, mountpoint, cols, rows, d.backend); err != nil {
 		writeError(w, 500, err)
 		return
 	}
@@ -585,7 +664,7 @@ func (d *Daemon) handleShellCompat(w http.ResponseWriter, r *http.Request) {
 	// Upgrade to WebSocket and behave like the PTY WS handler.
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
-		d.log.Error("shell compat ws upgrade failed", "err", err)
+		slog.Error("shell compat ws upgrade failed", "err", err)
 		_ = d.ptyMgr.kill(id)
 		return
 	}
@@ -594,6 +673,39 @@ func (d *Daemon) handleShellCompat(w http.ResponseWriter, r *http.Request) {
 	s := d.ptyMgr.get(id)
 	if s == nil {
 		return
+	}
+
+	raw := r.URL.Query().Get("mode") == "raw"
+
+	if raw {
+		s.rawSubscribe(conn)
+		defer func() {
+			s.rawUnsubscribe(conn)
+			_ = d.ptyMgr.kill(id)
+		}()
+
+		for {
+			msgType, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			switch msgType {
+			case websocket.BinaryMessage:
+				if _, err := s.ptmx.Write(data); err != nil {
+					return
+				}
+			case websocket.TextMessage:
+				var resize struct {
+					Cols uint16 `json:"cols"`
+					Rows uint16 `json:"rows"`
+				}
+				if json.Unmarshal(data, &resize) == nil && resize.Cols > 0 && resize.Rows > 0 {
+					_ = d.ptyMgr.resize(id, resize.Cols, resize.Rows)
+				} else if _, err := s.ptmx.Write(data); err != nil {
+					return
+				}
+			}
+		}
 	}
 
 	s.mu.Lock()

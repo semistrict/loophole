@@ -2,6 +2,8 @@
  * Terminal session manager — manages WebSocket connections to
  * server-side PTY sessions backed by the midterm VT emulator.
  *
+ * Routes through VolumeActor DOs at /v/{volume}/sandbox/...
+ *
  * WS protocol (server → client):
  *   screen  – full state on connect {rows, cursor, width, height, title}
  *   update  – changed rows only {rows: {idx: html}, cursor, title?}
@@ -12,7 +14,7 @@
  *   resize  – terminal resize {type:"resize", cols, rows}
  */
 
-import { useRef, useState, useCallback, useEffect } from 'react'
+import { useRef, useState, useCallback } from 'react'
 
 export interface TerminalSession {
   id: string
@@ -39,23 +41,22 @@ interface SessionInternal {
 
 let sessionCounter = 0
 
-export function useTerminalSessions(containerId: string) {
+export function useTerminalSessions() {
   const [sessions, setSessions] = useState<TerminalSession[]>([])
   const [screens, setScreens] = useState<Record<string, TerminalScreen>>({})
   const [leaseError, setLeaseError] = useState<LeaseError | null>(null)
   const internalsRef = useRef(new Map<string, SessionInternal>())
-  const restoredRef = useRef(false)
 
-  function sandboxUrl(path: string) {
-    return `/c/${encodeURIComponent(containerId)}/sandbox/${path}`
+  function volumeUrl(volume: string, path: string) {
+    return `/v/${encodeURIComponent(volume)}/sandbox/${path}`
   }
 
-  function connectSession(sessionId: string) {
+  function connectSession(sessionId: string, volume: string) {
     // Don't reconnect if already connected.
     if (internalsRef.current.has(sessionId)) return
 
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${proto}//${window.location.host}/c/${encodeURIComponent(containerId)}/sandbox/pty/${encodeURIComponent(sessionId)}/ws`
+    const wsUrl = `${proto}//${window.location.host}/v/${encodeURIComponent(volume)}/sandbox/pty/${encodeURIComponent(sessionId)}/ws`
     const ws = new WebSocket(wsUrl)
 
     ws.onmessage = (ev) => {
@@ -124,35 +125,11 @@ export function useTerminalSessions(containerId: string) {
     return ws
   }
 
-  // Restore existing sessions from the daemon on mount.
-  useEffect(() => {
-    if (restoredRef.current) return
-    restoredRef.current = true
-
-    fetch(sandboxUrl('pty'))
-      .then((res) => res.json() as Promise<{ sessions?: Array<{ id: string; volume: string; title: string }> }>)
-      .then((data) => {
-        const existing = data.sessions ?? []
-        if (existing.length === 0) return
-        setSessions((prev) => {
-          const knownIds = new Set(prev.map((s) => s.id))
-          const toAdd = existing
-            .filter((s) => !knownIds.has(s.id))
-            .map((s) => ({ id: s.id, volume: s.volume, title: s.title || '', closed: false }))
-          return [...prev, ...toAdd]
-        })
-        for (const s of existing) {
-          connectSession(s.id)
-        }
-      })
-      .catch(() => {})
-  }, [containerId])
-
   const createSession = useCallback(
     async (volume: string, cols = 120, rows = 30): Promise<string> => {
       const id = `${volume}-${++sessionCounter}`
 
-      const res = await fetch(sandboxUrl('pty'), {
+      const res = await fetch(volumeUrl(volume, 'pty'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id, volume, cols, rows }),
@@ -169,15 +146,15 @@ export function useTerminalSessions(containerId: string) {
 
       setLeaseError(null)
       setSessions((prev) => [...prev, { id, volume, title: '', closed: false }])
-      connectSession(id)
+      connectSession(id, volume)
       return id
     },
-    [containerId],
+    [],
   )
 
   const breakLease = useCallback(
     async (volume: string): Promise<void> => {
-      const res = await fetch(sandboxUrl('break-lease'), {
+      const res = await fetch(volumeUrl(volume, 'break-lease'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ volume, force: false }),
@@ -188,7 +165,7 @@ export function useTerminalSessions(containerId: string) {
       }
       setLeaseError(null)
     },
-    [containerId],
+    [],
   )
 
   const dismissLeaseError = useCallback(() => setLeaseError(null), [])
@@ -207,6 +184,7 @@ export function useTerminalSessions(containerId: string) {
 
   function killSession(id: string) {
     const internal = internalsRef.current.get(id)
+    const session = sessions.find((s) => s.id === id)
     if (internal) {
       internal.ws.close()
       internalsRef.current.delete(id)
@@ -218,7 +196,11 @@ export function useTerminalSessions(containerId: string) {
       return next
     })
 
-    fetch(sandboxUrl(`pty/${encodeURIComponent(id)}`), { method: 'DELETE' }).catch(() => {})
+    if (session) {
+      fetch(volumeUrl(session.volume, `pty/${encodeURIComponent(id)}`), {
+        method: 'DELETE',
+      }).catch(() => {})
+    }
   }
 
   return {

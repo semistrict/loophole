@@ -38,8 +38,8 @@ const (
 	// L0PageLimit is the hard limit on total L0 page entries in index.json.
 	L0PageLimit = 100_000
 
-	// L0CompactTrigger is when L0→L1 compaction should be triggered.
-	L0CompactTrigger = 10_000
+	// DefaultL0PagesMax is the default L0 page count that triggers L0→L1 compaction.
+	DefaultL0PagesMax = 10_000
 
 	// L1PromoteThreshold is the fraction of pages in an L1 block that
 	// triggers promotion to L2. 25% = 256 out of 1024 pages.
@@ -141,6 +141,10 @@ type Config struct {
 	// MaxCacheEntries caps the number of in-memory parsed L0/block entries.
 	// 0 = default (256).
 	MaxCacheEntries int
+
+	// L0PagesMax is the total L0 page entry count that triggers L0→L1 compaction.
+	// 0 = default (10,000).
+	L0PagesMax int
 }
 
 func (c *Config) setDefaults() {
@@ -152,6 +156,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.FlushInterval == 0 {
 		c.FlushInterval = DefaultFlushInterval
+	}
+	if c.L0PagesMax == 0 {
+		c.L0PagesMax = DefaultL0PagesMax
 	}
 }
 

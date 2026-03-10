@@ -5,16 +5,15 @@ import { useTerminalSessions } from '@/hooks/useTerminalSessions'
 import TerminalRenderer from './TerminalRenderer'
 
 interface TerminalProps {
-  containerId: string
   volume: string | null
 }
 
-export default function Terminal({ containerId, volume }: TerminalProps) {
+export default function Terminal({ volume }: TerminalProps) {
   const {
     sessions, screens, leaseError,
     createSession, breakLease, dismissLeaseError,
     writeToSession, resizeSession, killSession,
-  } = useTerminalSessions(containerId)
+  } = useTerminalSessions()
 
   const [activeTab, setActiveTab] = useState<string | null>(null)
   const [breaking, setBreaking] = useState(false)

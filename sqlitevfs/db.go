@@ -68,7 +68,7 @@ func Create(ctx context.Context, mgr loophole.VolumeManager, name string, opts .
 		return nil, fmt.Errorf("volume size %d too small (minimum %d)", o.size, MinVolumeSize)
 	}
 
-	vol, err := mgr.NewVolume(ctx, name, o.size, loophole.VolumeTypeSQLite)
+	vol, err := mgr.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: o.size, Type: loophole.VolumeTypeSQLite})
 	if err != nil {
 		return nil, fmt.Errorf("create volume: %w", err)
 	}

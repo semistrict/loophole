@@ -100,6 +100,14 @@ func (m *blockRangeMap) Remove(block BlockIdx) *blockRangeMap {
 	return &blockRangeMap{ranges: removeBlockAddr(m.ranges, block)}
 }
 
+// Len returns the number of block ranges.
+func (m *blockRangeMap) Len() int {
+	if m == nil {
+		return 0
+	}
+	return len(m.ranges)
+}
+
 // Ranges returns the underlying sorted ranges (for serialization).
 func (m *blockRangeMap) Ranges() []blockRange {
 	if m == nil {

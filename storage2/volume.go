@@ -143,7 +143,65 @@ func (v *volume) branch() (string, error) {
 	if err := v.layer.Snapshot(childID); err != nil {
 		return "", fmt.Errorf("snapshot: %w", err)
 	}
+
+	// Re-layer the parent: create a new layer so the old one is never
+	// written to again. Both child and new parent inherit the same
+	// L0/L1/L2 objects, which are immutable since no one writes to the
+	// old layer anymore. This preserves the invariant that only frozen
+	// (immutable) layers are ever referenced by other layers.
+	if !v.readOnly.Load() {
+		if err := v.relayer(); err != nil {
+			return "", fmt.Errorf("re-layer parent: %w", err)
+		}
+	}
+
 	return childID, nil
+}
+
+// relayer creates a new layer for this volume, swapping out the old one.
+// After this call, the old layer is effectively frozen — no one writes to it.
+func (v *volume) relayer() error {
+	ctx := context.Background()
+	oldLayer := v.layer
+
+	// Create a new layer with a copy of the current index.
+	newID := v.manager.idGen()
+	if err := oldLayer.Snapshot(newID); err != nil {
+		return fmt.Errorf("create new parent layer: %w", err)
+	}
+
+	// Read the current index state for the new layer.
+	oldLayer.mu.RLock()
+	idx := oldLayer.index
+	idx.NextSeq = oldLayer.nextSeq.Load()
+	idx.L1 = oldLayer.l1Map.Ranges()
+	idx.L2 = oldLayer.l2Map.Ranges()
+	oldLayer.mu.RUnlock()
+
+	// Update the volume ref to point to the new layer and get a new writeLeaseSeq.
+	seq, err := v.manager.relayerVolume(ctx, v.name, newID)
+	if err != nil {
+		return fmt.Errorf("update volume ref: %w", err)
+	}
+
+	cacheDir := v.manager.cacheDir + "/layers/" + newID
+	newLayer, err := initLayerFromIndex(v.manager.store, newID, v.manager.config, v.manager.diskCache, cacheDir, idx)
+	if err != nil {
+		return fmt.Errorf("init new layer: %w", err)
+	}
+	newLayer.writeLeaseSeq = seq
+
+	if v.manager.config.FlushInterval > 0 {
+		newLayer.startPeriodicFlush(ctx)
+	}
+
+	// Swap.
+	v.layer = newLayer
+	oldLayer.Close()
+
+	slog.Info("relayer: parent switched to new layer",
+		"volume", v.name, "old_layer", oldLayer.id, "new_layer", newID)
+	return nil
 }
 
 func (v *volume) Snapshot(snapshotName string) error {

@@ -29,7 +29,6 @@ import (
 type TCPServer struct {
 	vm       loophole.VolumeManager
 	numConns int
-	log      *slog.Logger
 
 	mu         sync.Mutex
 	exports    map[string]*tcpExport
@@ -52,14 +51,9 @@ func NewTCPServer(vm loophole.VolumeManager, opts *Options) (*TCPServer, error) 
 	if numConns == 0 {
 		numConns = 1 // TCP proxy mode: use 1 connection for now
 	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.Default()
-	}
 	return &TCPServer{
 		vm:         vm,
 		numConns:   numConns,
-		log:        logger,
 		exports:    make(map[string]*tcpExport),
 		connecting: make(map[string]struct{}),
 	}, nil
@@ -113,13 +107,13 @@ func (s *TCPServer) Connect(ctx context.Context, vol loophole.Volume) (string, e
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				s.log.Debug("nbd-tcp: accept loop ended", "err", err)
+				slog.Debug("nbd-tcp: accept loop ended", "err", err)
 				return
 			}
-			s.log.Debug("nbd-tcp: accepted connection", "remote", c.RemoteAddr())
+			slog.Debug("nbd-tcp: accepted connection", "remote", c.RemoteAddr())
 			go func() {
 				err := nbd.ServeDynamic(srvCtx, c, provider)
-				s.log.Debug("nbd-tcp: ServeDynamic returned", "remote", c.RemoteAddr(), "err", err)
+				slog.Debug("nbd-tcp: ServeDynamic returned", "remote", c.RemoteAddr(), "err", err)
 				if cerr := c.Close(); cerr != nil {
 					slog.Warn("close failed", "error", cerr)
 				}
@@ -237,7 +231,7 @@ func (s *TCPServer) Connect(ctx context.Context, vol loophole.Volume) (string, e
 
 		// Both sides are now in transmission mode. Proxy between the
 		// kernel's socketpair end and the TCP connection.
-		go proxy(srvCtx, proxyConn, tcpConn, s.log, i)
+		go proxy(srvCtx, proxyConn, tcpConn, i)
 	}
 
 	// Pass the kernel-side fds to the kernel via netlink.
@@ -279,7 +273,7 @@ func (s *TCPServer) Connect(ctx context.Context, vol loophole.Volume) (string, e
 	s.mu.Unlock()
 
 	devPath := nbd.DevicePath(idx)
-	s.log.Info("nbd-tcp: connected", "volume", name, "device", devPath, "server", tcpAddr)
+	slog.Info("nbd-tcp: connected", "volume", name, "device", devPath, "server", tcpAddr)
 	return devPath, nil
 }
 
@@ -293,7 +287,7 @@ type onlyRW struct {
 
 // proxy bidirectionally copies data between a (kernel socketpair) and b (TCP)
 // until ctx is cancelled or either side closes.
-func proxy(ctx context.Context, a, b net.Conn, log *slog.Logger, connIdx int) {
+func proxy(ctx context.Context, a, b net.Conn, connIdx int) {
 	var once sync.Once
 	done := make(chan struct{})
 	closeDone := func() { once.Do(func() { close(done) }) }
@@ -301,14 +295,14 @@ func proxy(ctx context.Context, a, b net.Conn, log *slog.Logger, connIdx int) {
 	go func() {
 		_, err := io.Copy(onlyRW{b, b}, onlyRW{a, a})
 		if err != nil {
-			log.Debug("nbd-tcp: proxy kernel→tcp error", "conn", connIdx, "err", err)
+			slog.Debug("nbd-tcp: proxy kernel→tcp error", "conn", connIdx, "err", err)
 		}
 		closeDone()
 	}()
 	go func() {
 		_, err := io.Copy(onlyRW{a, a}, onlyRW{b, b})
 		if err != nil {
-			log.Debug("nbd-tcp: proxy tcp→kernel error", "conn", connIdx, "err", err)
+			slog.Debug("nbd-tcp: proxy tcp→kernel error", "conn", connIdx, "err", err)
 		}
 		closeDone()
 	}()
@@ -348,7 +342,7 @@ func (s *TCPServer) Disconnect(ctx context.Context, volumeName string) error {
 		return nil
 	}
 
-	s.log.Info("nbd-tcp: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
+	slog.Info("nbd-tcp: disconnecting", "volume", volumeName, "device", nbd.DevicePath(exp.devIdx))
 
 	if err := nbdnl.Disconnect(exp.devIdx); err != nil {
 		slog.Warn("nbd disconnect failed", "device", nbd.DevicePath(exp.devIdx), "error", err)

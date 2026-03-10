@@ -10,141 +10,33 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as CIdIndexRouteImport } from './routes/c/$id/index'
-import { Route as CIdDebugTestRouteImport } from './routes/c/$id/debug/test'
-import { Route as CIdDebugStateRouteImport } from './routes/c/$id/debug/state'
-import { Route as CIdDebugStartRouteImport } from './routes/c/$id/debug/start'
-import { Route as CIdDebugEnvRouteImport } from './routes/c/$id/debug/env'
-import { Route as CIdDebugDestroyRouteImport } from './routes/c/$id/debug/destroy'
-import { Route as CIdDebugBootRouteImport } from './routes/c/$id/debug/boot'
-import { Route as CIdDebugSplatRouteImport } from './routes/c/$id/debug/$'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const CIdIndexRoute = CIdIndexRouteImport.update({
-  id: '/c/$id/',
-  path: '/c/$id/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugTestRoute = CIdDebugTestRouteImport.update({
-  id: '/c/$id/debug/test',
-  path: '/c/$id/debug/test',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugStateRoute = CIdDebugStateRouteImport.update({
-  id: '/c/$id/debug/state',
-  path: '/c/$id/debug/state',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugStartRoute = CIdDebugStartRouteImport.update({
-  id: '/c/$id/debug/start',
-  path: '/c/$id/debug/start',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugEnvRoute = CIdDebugEnvRouteImport.update({
-  id: '/c/$id/debug/env',
-  path: '/c/$id/debug/env',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugDestroyRoute = CIdDebugDestroyRouteImport.update({
-  id: '/c/$id/debug/destroy',
-  path: '/c/$id/debug/destroy',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugBootRoute = CIdDebugBootRouteImport.update({
-  id: '/c/$id/debug/boot',
-  path: '/c/$id/debug/boot',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const CIdDebugSplatRoute = CIdDebugSplatRouteImport.update({
-  id: '/c/$id/debug/$',
-  path: '/c/$id/debug/$',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/c/$id/': typeof CIdIndexRoute
-  '/c/$id/debug/$': typeof CIdDebugSplatRoute
-  '/c/$id/debug/boot': typeof CIdDebugBootRoute
-  '/c/$id/debug/destroy': typeof CIdDebugDestroyRoute
-  '/c/$id/debug/env': typeof CIdDebugEnvRoute
-  '/c/$id/debug/start': typeof CIdDebugStartRoute
-  '/c/$id/debug/state': typeof CIdDebugStateRoute
-  '/c/$id/debug/test': typeof CIdDebugTestRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/c/$id': typeof CIdIndexRoute
-  '/c/$id/debug/$': typeof CIdDebugSplatRoute
-  '/c/$id/debug/boot': typeof CIdDebugBootRoute
-  '/c/$id/debug/destroy': typeof CIdDebugDestroyRoute
-  '/c/$id/debug/env': typeof CIdDebugEnvRoute
-  '/c/$id/debug/start': typeof CIdDebugStartRoute
-  '/c/$id/debug/state': typeof CIdDebugStateRoute
-  '/c/$id/debug/test': typeof CIdDebugTestRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/c/$id/': typeof CIdIndexRoute
-  '/c/$id/debug/$': typeof CIdDebugSplatRoute
-  '/c/$id/debug/boot': typeof CIdDebugBootRoute
-  '/c/$id/debug/destroy': typeof CIdDebugDestroyRoute
-  '/c/$id/debug/env': typeof CIdDebugEnvRoute
-  '/c/$id/debug/start': typeof CIdDebugStartRoute
-  '/c/$id/debug/state': typeof CIdDebugStateRoute
-  '/c/$id/debug/test': typeof CIdDebugTestRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths:
-    | '/'
-    | '/c/$id/'
-    | '/c/$id/debug/$'
-    | '/c/$id/debug/boot'
-    | '/c/$id/debug/destroy'
-    | '/c/$id/debug/env'
-    | '/c/$id/debug/start'
-    | '/c/$id/debug/state'
-    | '/c/$id/debug/test'
+  fullPaths: '/'
   fileRoutesByTo: FileRoutesByTo
-  to:
-    | '/'
-    | '/c/$id'
-    | '/c/$id/debug/$'
-    | '/c/$id/debug/boot'
-    | '/c/$id/debug/destroy'
-    | '/c/$id/debug/env'
-    | '/c/$id/debug/start'
-    | '/c/$id/debug/state'
-    | '/c/$id/debug/test'
-  id:
-    | '__root__'
-    | '/'
-    | '/c/$id/'
-    | '/c/$id/debug/$'
-    | '/c/$id/debug/boot'
-    | '/c/$id/debug/destroy'
-    | '/c/$id/debug/env'
-    | '/c/$id/debug/start'
-    | '/c/$id/debug/state'
-    | '/c/$id/debug/test'
+  to: '/'
+  id: '__root__' | '/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  CIdIndexRoute: typeof CIdIndexRoute
-  CIdDebugSplatRoute: typeof CIdDebugSplatRoute
-  CIdDebugBootRoute: typeof CIdDebugBootRoute
-  CIdDebugDestroyRoute: typeof CIdDebugDestroyRoute
-  CIdDebugEnvRoute: typeof CIdDebugEnvRoute
-  CIdDebugStartRoute: typeof CIdDebugStartRoute
-  CIdDebugStateRoute: typeof CIdDebugStateRoute
-  CIdDebugTestRoute: typeof CIdDebugTestRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -156,75 +48,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/c/$id/': {
-      id: '/c/$id/'
-      path: '/c/$id'
-      fullPath: '/c/$id/'
-      preLoaderRoute: typeof CIdIndexRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/test': {
-      id: '/c/$id/debug/test'
-      path: '/c/$id/debug/test'
-      fullPath: '/c/$id/debug/test'
-      preLoaderRoute: typeof CIdDebugTestRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/state': {
-      id: '/c/$id/debug/state'
-      path: '/c/$id/debug/state'
-      fullPath: '/c/$id/debug/state'
-      preLoaderRoute: typeof CIdDebugStateRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/start': {
-      id: '/c/$id/debug/start'
-      path: '/c/$id/debug/start'
-      fullPath: '/c/$id/debug/start'
-      preLoaderRoute: typeof CIdDebugStartRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/env': {
-      id: '/c/$id/debug/env'
-      path: '/c/$id/debug/env'
-      fullPath: '/c/$id/debug/env'
-      preLoaderRoute: typeof CIdDebugEnvRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/destroy': {
-      id: '/c/$id/debug/destroy'
-      path: '/c/$id/debug/destroy'
-      fullPath: '/c/$id/debug/destroy'
-      preLoaderRoute: typeof CIdDebugDestroyRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/boot': {
-      id: '/c/$id/debug/boot'
-      path: '/c/$id/debug/boot'
-      fullPath: '/c/$id/debug/boot'
-      preLoaderRoute: typeof CIdDebugBootRouteImport
-      parentRoute: typeof rootRouteImport
-    }
-    '/c/$id/debug/$': {
-      id: '/c/$id/debug/$'
-      path: '/c/$id/debug/$'
-      fullPath: '/c/$id/debug/$'
-      preLoaderRoute: typeof CIdDebugSplatRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  CIdIndexRoute: CIdIndexRoute,
-  CIdDebugSplatRoute: CIdDebugSplatRoute,
-  CIdDebugBootRoute: CIdDebugBootRoute,
-  CIdDebugDestroyRoute: CIdDebugDestroyRoute,
-  CIdDebugEnvRoute: CIdDebugEnvRoute,
-  CIdDebugStartRoute: CIdDebugStartRoute,
-  CIdDebugStateRoute: CIdDebugStateRoute,
-  CIdDebugTestRoute: CIdDebugTestRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

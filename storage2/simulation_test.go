@@ -10,6 +10,7 @@ import (
 	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,7 +31,8 @@ type SimConfig struct {
 	CrashRate      float64 // probability of crash per tick
 	S3Faults       FaultConfig
 	FlushThreshold int64
-	FlushInterval  time.Duration // periodic auto-flush interval; 0 = default (5ms under synctest)
+	FlushInterval  time.Duration // periodic auto-flush interval; 0 = default (500ms under synctest)
+	L0PagesMax     int           // 0 = default (DefaultL0PagesMax)
 }
 
 // Simulation runs a multi-node deterministic simulation.
@@ -113,7 +115,12 @@ func (sim *Simulation) nextLayerID() string {
 func (sim *Simulation) newManager(cacheDir string, fs LocalFS) *Manager {
 	flushInterval := sim.config.FlushInterval
 	if flushInterval == 0 {
-		flushInterval = 5 * time.Millisecond // small interval so periodic flush fires under synctest
+		// The main loop sleeps 0-5ms per tick. A 500ms timer fires every
+		// ~200 ticks rather than every tick, keeping synctest scheduling
+		// cost O(nodes) per tick instead of O(volumes). Still gives ~200+
+		// flush fires per volume over a 5000-op run — plenty of coverage
+		// for flush/write race conditions.
+		flushInterval = 500 * time.Millisecond
 	}
 	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
 	if err != nil {
@@ -127,6 +134,7 @@ func (sim *Simulation) newManager(cacheDir string, fs LocalFS) *Manager {
 			FlushThreshold:  sim.config.FlushThreshold,
 			MaxFrozenTables: 2,
 			FlushInterval:   flushInterval,
+			L0PagesMax:      sim.config.L0PagesMax,
 		},
 		fs,
 		dc,
@@ -170,7 +178,7 @@ func (sim *Simulation) Run() {
 		time.Sleep(time.Duration(sim.rng.IntN(6)) * time.Millisecond)
 
 		if tick%50 == 0 {
-			sim.t.Logf("tick %d: %d volumes, %d timelines", tick, len(sim.volumeTimelines), len(sim.timelineIDs))
+			sim.t.Logf("tick %d: %d volumes, %d timelines, goroutines=%d", tick, len(sim.volumeTimelines), len(sim.timelineIDs), runtime.NumGoroutine())
 		}
 	}
 
@@ -516,6 +524,9 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 		sim.timelineChildren[parentTL] = make(map[string]bool)
 	}
 	sim.timelineChildren[parentTL][ref.LayerID] = true
+
+	// Re-layering: parent now has a new layer ID.
+	sim.updateParentAfterRelayer(ctx, volName, parentTL, branchSeq)
 }
 
 func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
@@ -576,6 +587,10 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
+
+	// Re-layering: parent now has a new layer ID.
+	sim.updateParentAfterRelayer(ctx, volName, parentTL, parentNextSeq)
+
 	_ = clone
 }
 
@@ -633,6 +648,10 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
+
+	// Re-layering: parent now has a new layer ID.
+	sim.updateParentAfterRelayer(ctx, volName, parentTL, parentNextSeq)
+
 	_ = clone
 }
 
@@ -696,7 +715,7 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 	timelineID := sim.volumeTimelines[volName]
 	sim.oracle.RecordFlush(node.id, timelineID)
 
-	_ = vol.layer.CompactL0(ctx)
+	_ = vol.layer.tryCompactL0(ctx)
 
 	// Post-compaction verification: read all pages and check against oracle.
 	// Compaction rewrites layers; this catches data loss or corruption.
@@ -724,7 +743,7 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 	name := fmt.Sprintf("vol-%d", sim.nextVolID)
 	sim.nextVolID++
 
-	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize, "")
+	v, err := node.manager.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		return // S3 faults can cause creation failures
 	}
@@ -1045,6 +1064,10 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 	sim.timelineChildren[parentTL][ref.LayerID] = true
 
 	sim.lastClonedVolume = cloneName
+
+	// Re-layering: parent now has a new layer ID.
+	sim.updateParentAfterRelayer(ctx, srcName, parentTL, parentNextSeq)
+
 	_ = clone
 }
 
@@ -1216,6 +1239,10 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 	}
 	sim.timelineChildren[parentTL][childTL] = true
 
+	// Re-layering: parent now has a new layer ID. Must update before
+	// writing to the parent so oracle tracks writes against the new TL.
+	parentTL = sim.updateParentAfterRelayer(ctx, volName, parentTL, parentNextSeq)
+
 	// Write new data to 1-5 random pages on the parent.
 	numWrites := sim.rng.IntN(5) + 1
 	writtenPages := make(map[PageIdx]struct{})
@@ -1283,7 +1310,13 @@ func (sim *Simulation) opCrash(_ context.Context, node *SimNode) {
 	// Discard unflushed oracle state.
 	sim.oracle.RecordCrash(node.id)
 
-	// Abandon the manager — a real crash doesn't get a clean Close.
+	// Kill the manager's background goroutines most of the time to keep the
+	// synctest bubble lean. Leave them running ~5% of the time to exercise
+	// the case where a crashed process's goroutines linger (e.g. stuck I/O).
+	if sim.rng.Float64() > 0.05 {
+		node.manager.Close(context.Background())
+	}
+
 	node.manager = nil
 	node.volumes = nil
 }
@@ -1344,7 +1377,7 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 }
 
 func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name string) {
-	v, err := node.manager.NewVolume(ctx, name, uint64(sim.config.DevicePages)*PageSize, "")
+	v, err := node.manager.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		sim.t.Fatalf("create volume %s: %v", name, err)
 	}
@@ -1474,13 +1507,29 @@ func (sim *Simulation) FullScan() {
 //   - Every volume ref points to a layer that has an index.json.
 //   - Every L0 blob referenced in index.json exists in S3.
 //   - No volume ref points to a nonexistent layer.
+//   - FROZEN LAYER INVARIANT: No two active (non-read-only) volumes share
+//     the same layer ID. After re-layering, each writable volume has its
+//     own unique layer. Shared layers (from clone/snapshot) are only
+//     referenced by read-only volumes or as ancestors.
 func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []string) {
 	store := sim.store.Store()
+
+	// Collect active (writable) layer IDs to verify uniqueness.
+	activeLayerOwners := make(map[string]string) // layerID → volName
 
 	for _, volName := range volNames {
 		ref, err := sim.getVolRef(ctx, volName)
 		if err != nil {
 			continue
+		}
+
+		// FROZEN LAYER INVARIANT CHECK: No two writable volumes share a layer.
+		if !ref.ReadOnly {
+			if other, exists := activeLayerOwners[ref.LayerID]; exists {
+				sim.t.Fatalf("FROZEN LAYER INVARIANT VIOLATION: writable volumes %q and %q share layer %s",
+					other, volName, ref.LayerID[:8])
+			}
+			activeLayerOwners[ref.LayerID] = volName
 		}
 
 		// Check index.json exists for this layer.
@@ -1512,6 +1561,35 @@ func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []stri
 			}
 		}
 	}
+}
+
+// updateParentAfterRelayer updates the sim's oracle and tracking maps after a
+// clone/snapshot re-layers the parent volume. Returns the new parent timeline ID.
+//
+// INVARIANT: Only frozen (immutable) layers may be referenced by other layers.
+// After branch(), the parent calls relayer() to create a new layer, ensuring
+// the old layer (now shared with the child) is never written to again.
+func (sim *Simulation) updateParentAfterRelayer(ctx context.Context, volName string, oldParentTL string, branchSeq uint64) string {
+	ref, err := sim.getVolRef(ctx, volName)
+	if err != nil {
+		return oldParentTL
+	}
+	newParentTL := ref.LayerID
+	if newParentTL == oldParentTL {
+		return oldParentTL // no re-layering (e.g. read-only volume)
+	}
+
+	sim.volumeTimelines[volName] = newParentTL
+	sim.timelineIDs = append(sim.timelineIDs, newParentTL)
+	sim.oracle.RecordBranch(newParentTL, oldParentTL, branchSeq)
+
+	if sim.timelineChildren[oldParentTL] == nil {
+		sim.timelineChildren[oldParentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[oldParentTL][newParentTL] = true
+
+	sim.t.Logf("RELAYER parent vol=%s old=%s new=%s", volName, oldParentTL[:8], newParentTL[:8])
+	return newParentTL
 }
 
 func (sim *Simulation) getVolRef(ctx context.Context, name string) (volumeRef, error) {
@@ -1597,6 +1675,7 @@ func TestSimulation(t *testing.T) {
 			OpsPerNode:     ops,
 			CrashRate:      crashRate,
 			FlushThreshold: 8 * PageSize,
+			L0PagesMax:     100,
 			S3Faults: FaultConfig{
 				PutFailRate:              faultRate,
 				GetFailRate:              faultRate,
@@ -1641,6 +1720,7 @@ func TestSimulationDeterminism(t *testing.T) {
 		OpsPerNode:     100,
 		CrashRate:      0.02,
 		FlushThreshold: 8 * PageSize,
+		L0PagesMax:     100,
 		S3Faults: FaultConfig{
 			PutFailRate:    0.02,
 			GetFailRate:    0.02,

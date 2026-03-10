@@ -11,21 +11,36 @@ const (
 
 // CreateParams holds the parameters for creating a new volume.
 type CreateParams struct {
-	Volume   string `json:"volume"`
-	Size     uint64 `json:"size,omitempty,string"`
-	NoFormat bool   `json:"no_format,omitempty"`
-	Type     string `json:"type,omitempty"`
+	Volume   string            `json:"volume"`
+	Size     uint64            `json:"size,omitempty,string"`
+	NoFormat bool              `json:"no_format,omitempty"`
+	Type     string            `json:"type,omitempty"`
+	Parent   string            `json:"parent,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
+}
+
+// VolumeInfo describes a volume's metadata.
+type VolumeInfo struct {
+	Name     string
+	Size     uint64
+	ReadOnly bool
+	Type     string
+	Parent   string
+	Labels   map[string]string
 }
 
 // VolumeManager manages the lifecycle of volumes.
 type VolumeManager interface {
-	NewVolume(ctx context.Context, name string, size uint64, volType string) (Volume, error)
+	NewVolume(ctx context.Context, p CreateParams) (Volume, error)
 	OpenVolume(ctx context.Context, name string) (Volume, error)
 	GetVolume(name string) Volume
 	Volumes() []string
 	ListAllVolumes(ctx context.Context) ([]string, error)
 	ListVolumesByType(ctx context.Context, volType string) ([]string, error)
 	DeleteVolume(ctx context.Context, name string) error
+	WaitClosed(ctx context.Context, name string) error
+	VolumeInfo(ctx context.Context, name string) (VolumeInfo, error)
+	UpdateLabels(ctx context.Context, name string, labels map[string]string) error
 	// BreakLease attempts to release a volume's lease. If force is false,
 	// only the polite RPC is tried; if the holder doesn't respond, an error
 	// is returned. If force is true, the lease is cleared regardless.

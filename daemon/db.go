@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"log/slog"
 	"net/http"
 
 	loophole "github.com/semistrict/loophole"
@@ -30,7 +31,7 @@ func (d *Daemon) handleDBCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("db/create", "volume", req.Volume, "size", req.Size)
+	slog.Info("db/create", "volume", req.Volume, "size", req.Size)
 
 	var opts []sqlitevfs.Option
 	if req.Size > 0 {
@@ -62,7 +63,7 @@ func (d *Daemon) handleDBSnapshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("db/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
+	slog.Info("db/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
 
 	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
 	if err != nil {
@@ -91,7 +92,7 @@ func (d *Daemon) handleDBBranch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("db/branch", "volume", req.Volume, "branch", req.Branch)
+	slog.Info("db/branch", "volume", req.Volume, "branch", req.Branch)
 
 	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
 	if err != nil {
@@ -124,7 +125,7 @@ func (d *Daemon) handleDBFlush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	d.log.Info("db/flush", "volume", req.Volume)
+	slog.Info("db/flush", "volume", req.Volume)
 
 	db, err := sqlitevfs.Open(r.Context(), d.backend.VM(), req.Volume)
 	if err != nil {

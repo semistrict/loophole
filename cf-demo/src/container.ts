@@ -27,8 +27,21 @@ export class SandboxContainer extends Container<Env> {
     console.log('[container]', { event: 'start', id: this.id })
   }
 
-  override onStop(params: StopParams) {
+  override async onStop(params: StopParams) {
     console.log('[container]', { event: 'stop', id: this.id, ...params })
+    // Notify Scheduler so it can clear assignments and notify VolumeActors.
+    try {
+      const scheduler = this.env.SCHEDULER.get(this.env.SCHEDULER.idFromName('scheduler'))
+      await scheduler.fetch(
+        new Request('http://scheduler/_internal/container-died', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ container: this.id }),
+        }),
+      )
+    } catch (e) {
+      console.error('[container] failed to notify scheduler on stop', e)
+    }
   }
 
   override async onActivityExpired() {

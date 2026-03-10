@@ -44,6 +44,27 @@ curl --unix-socket ~/.loophole/<profile>.sock 'http://localhost/debug/pprof/goro
 ```
 Use this to diagnose stuck operations (e.g. freeze blocked on S3 upload).
 
+### Debugging on remote Linux (Fly)
+
+When debugging the daemon on a remote Linux machine (e.g. Fly), these techniques work well:
+
+**Grep structured logs from the log file.** The daemon writes JSON-structured logs to `~/.loophole/<profile>.log`. Use `grep "snapshotter:"` or similar to filter for specific subsystems. This is much more reliable than trying to read interleaved console output.
+
+**Use `fly ssh console -C` for clean output.** When the daemon runs in the foreground with debug logging, its output floods the terminal. Use a separate SSH connection to run commands with clean stdout:
+```
+fly ssh console -a loophole-test -C 'ctr run --snapshotter loophole --rm docker.io/library/alpine:latest test /bin/echo hello'
+```
+
+**Goroutine dumps for stuck operations.** When something hangs, grab a goroutine dump via pprof to see exactly where it's blocked:
+```
+fly ssh console -a loophole-test -C 'curl --unix-socket /root/.loophole/tigris.sock "http://localhost/debug/pprof/goroutine?debug=2"'
+```
+Grep for your subsystem (e.g. `WaitClosed`, `snapshotter`, `grpc`) to find the stuck goroutine. This is how the FUSE Lookup ref leak was diagnosed — the dump showed `WaitClosed` blocked in `sync.Cond.Wait` because `OnForget` (kernel inode eviction) was indefinitely delayed.
+
+**Watch goroutine count in heartbeat.** The daemon logs `goroutines=N` every 5 seconds. A steadily climbing count indicates a goroutine leak. A stable but unexpectedly high count may indicate a stuck operation.
+
+**Note:** Ubuntu 24.04+ has `fusermount3` not `fusermount`. Stale FUSE mounts from a crashed daemon need `umount -l <mountpoint>` followed by `rm -rf <mountpoint>` before restarting.
+
 ## Creating a zygote volume
 
 A zygote is a frozen volume with a rootfs that other volumes clone from.

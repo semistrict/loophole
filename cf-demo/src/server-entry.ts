@@ -1,28 +1,43 @@
 import tanstackHandler from '@tanstack/react-start/server-entry'
-import { resolveContainer } from './lib/container'
 
 export { SandboxContainer } from './container'
+export { Scheduler } from './scheduler'
+export { VolumeActor } from './volume-actor'
 
-// All /c/:id/sandbox/* requests are proxied directly to the container.
-// TanStack Start splat routes don't reliably match these, so we intercept here.
-const SANDBOX_PREFIX = /^\/c\/([^/]+)\/sandbox\//
+const VOLUME_PREFIX = /^\/v\/([^/]+)\/(.*)/  // /v/{volume}/{rest}
+const API_PREFIX = /^\/api\//                 // /api/*
+const DEBUG_PREFIX = /^\/debug\//             // /debug/*
 
 export default {
   fetch(request: Request, ...args: unknown[]) {
     const url = new URL(request.url)
-    const match = url.pathname.match(SANDBOX_PREFIX)
-    if (match) {
-      const containerId = decodeURIComponent(match[1])
-      const rest = url.pathname.slice(match[0].length)
-      const container = resolveContainer(containerId)
-      return container.fetch(
-        new Request(`http://container/sandbox/${rest}${url.search}`, {
+
+    // Per-volume routes → VolumeActor DO
+    const volMatch = url.pathname.match(VOLUME_PREFIX)
+    if (volMatch) {
+      const volume = decodeURIComponent(volMatch[1])
+      const rest = volMatch[2]
+      const env = args[0] as Env
+      const actor = env.VOLUMES.get(env.VOLUMES.idFromName(volume))
+      const headers = new Headers(request.headers)
+      headers.set('X-Volume', volume)
+      return actor.fetch(
+        new Request(`http://volume/${rest}${url.search}`, {
           method: request.method,
-          headers: request.headers,
+          headers,
           body: request.method !== 'GET' ? request.body : undefined,
         }),
       )
     }
+
+    // Global API + debug routes → Scheduler DO
+    if (API_PREFIX.test(url.pathname) || DEBUG_PREFIX.test(url.pathname)) {
+      const env = args[0] as Env
+      const scheduler = env.SCHEDULER.get(env.SCHEDULER.idFromName('scheduler'))
+      return scheduler.fetch(request)
+    }
+
+    // React app (TanStack Start)
     return (tanstackHandler as any).fetch(request, ...args)
   },
 }
