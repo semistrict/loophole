@@ -14,6 +14,8 @@ RUN apt-get update \
 
 FROM golang:1.25-bookworm
 
+ENV PATH="/usr/local/go/bin:${PATH}"
+
 RUN apt-get update && apt-get install -y \
     fuse3 \
     libfuse3-dev \
@@ -33,7 +35,11 @@ RUN apt-get update && apt-get install -y \
     busybox-static \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && ln -sf /usr/bin/fusermount3 /usr/bin/fusermount
+    && ln -sf /usr/bin/fusermount3 /usr/bin/fusermount \
+    && printf '%s\n' 'case ":$PATH:" in' \
+       '  *:/usr/local/go/bin:*) ;;' \
+       '  *) export PATH="/usr/local/go/bin:$PATH" ;;' \
+       'esac' > /etc/profile.d/go-path.sh
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
 

@@ -83,6 +83,18 @@ func (v *frozenVolume) Write([]byte, uint64) error {
 	return fmt.Errorf("volume %q is frozen", v.name)
 }
 
+func (v *frozenVolume) EnableDirectWriteback() error {
+	return fmt.Errorf("volume %q is frozen", v.name)
+}
+
+func (v *frozenVolume) DisableDirectWriteback() error {
+	return fmt.Errorf("volume %q is frozen", v.name)
+}
+
+func (v *frozenVolume) WritePagesDirect([]loophole.DirectPage) error {
+	return fmt.Errorf("volume %q is frozen", v.name)
+}
+
 func (v *frozenVolume) PunchHole(uint64, uint64) error {
 	return fmt.Errorf("volume %q is frozen", v.name)
 }

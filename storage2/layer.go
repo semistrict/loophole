@@ -87,6 +87,11 @@ type layerSnapshot struct {
 	l2       *blockRangeMap
 }
 
+type cachedL0Page struct {
+	pageIdx PageIdx
+	data    []byte
+}
+
 // openLayer loads a layer from S3 and initializes its local state.
 // store is the global root (not scoped to a layer prefix).
 func openLayer(ctx context.Context, store loophole.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string) (*layer, error) {
@@ -815,7 +820,6 @@ func (ly *layer) flushFrozenTablesLocked(maxRetries int) error {
 }
 
 func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
-	ctx := context.Background()
 	entries := mt.entries()
 	if len(entries) == 0 {
 		return nil
@@ -826,12 +830,84 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		return fmt.Errorf("build L0: %w", err)
 	}
 
-	flushStart := time.Now()
-	slog.Debug("flush: uploading L0", "layer", ly.id, "key", l0entry.Key, "pages", len(entries), "bytes", len(data))
+	cached := make([]cachedL0Page, 0, len(entries))
+	for _, e := range entries {
+		pageData, err := mt.readData(e.slot)
+		if err == nil {
+			cached = append(cached, cachedL0Page{pageIdx: e.pageIdx, data: pageData})
+		}
+	}
 
-	// Upload with retry (no backoff — retries are immediate to avoid
-	// blocking the synctest bubble with timer waits while holding flushMu).
+	return ly.commitL0Blob(data, l0entry, cached, maxRetries)
+}
+
+func (ly *layer) WritePagesDirectL0(pages []loophole.DirectPage) error {
+	if len(pages) == 0 {
+		return nil
+	}
+
+	sorted := make([]loophole.DirectPage, len(pages))
+	copy(sorted, pages)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].Offset < sorted[j].Offset
+	})
+	for i := range sorted {
+		if sorted[i].Offset%PageSize != 0 {
+			return fmt.Errorf("direct page offset %d is not page-aligned", sorted[i].Offset)
+		}
+		if len(sorted[i].Data) != PageSize {
+			return fmt.Errorf("direct page at offset %d has size %d, want %d", sorted[i].Offset, len(sorted[i].Data), PageSize)
+		}
+		if i > 0 && sorted[i-1].Offset == sorted[i].Offset {
+			return fmt.Errorf("duplicate direct page offset %d", sorted[i].Offset)
+		}
+	}
+
+	ly.flushMu.Lock()
+	defer ly.flushMu.Unlock()
+
+	if err := ly.freezememtable(); err != nil {
+		return err
+	}
+	if err := ly.flushFrozenTablesLocked(5); err != nil {
+		return err
+	}
+
+	seq := ly.nextSeq.Add(1)
+	data, l0entry, err := buildL0FromDirectPages(ly.id, sorted, ly.writeLeaseSeq, seq)
+	if err != nil {
+		return fmt.Errorf("build direct L0: %w", err)
+	}
+
+	cached := make([]cachedL0Page, 0, len(sorted))
+	for _, page := range sorted {
+		cached = append(cached, cachedL0Page{
+			pageIdx: PageIdx(page.Offset / PageSize),
+			data:    append([]byte(nil), page.Data...),
+		})
+	}
+	if err := ly.commitL0Blob(data, l0entry, cached, 5); err != nil {
+		return err
+	}
+
+	ly.mu.RLock()
+	total := totalL0Pages(ly.index.L0)
+	ly.mu.RUnlock()
+	if total >= ly.config.L0PagesMax {
+		if err := ly.tryCompactL0(context.Background()); err != nil {
+			slog.Error("direct L0 compaction failed", "layer", ly.id, "error", err)
+		}
+	}
+	return nil
+}
+
+func (ly *layer) commitL0Blob(data []byte, l0entry l0Entry, cached []cachedL0Page, maxRetries int) error {
+	ctx := context.Background()
+	flushStart := time.Now()
+	slog.Debug("flush: uploading L0", "layer", ly.id, "key", l0entry.Key, "pages", len(l0entry.Pages), "bytes", len(data))
+
 	uploadStart := time.Now()
+	var err error
 	for attempt := range maxRetries {
 		err = ly.store.PutReader(ctx, l0entry.Key, bytes.NewReader(data))
 		if err == nil {
@@ -846,11 +922,10 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		slog.Warn("flush: retrying L0 upload", "layer", ly.id, "key", l0entry.Key, "attempt", attempt+1, "error", err)
 	}
 
-	metrics.FlushPages.Add(float64(len(entries)))
-	metrics.FlushBlocks.Add(float64(len(entries)))
+	metrics.FlushPages.Add(float64(len(l0entry.Pages)))
+	metrics.FlushBlocks.Add(float64(len(l0entry.Pages)))
 	metrics.FlushBytes.Add(float64(len(data)))
 
-	// Pre-cache the parsed L0.
 	p, _ := parseL0(data)
 	if p != nil {
 		p.store = ly.store
@@ -858,11 +933,8 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		ly.l0Cache.put(l0entry.Key, p)
 	}
 
-	// Update page cache with flushed data so L0 reads hit the cache.
-	for _, e := range entries {
-		if data, err := mt.readData(e.slot); err == nil {
-			ly.cachePage(l0entry.Key, e.pageIdx, data)
-		}
+	for _, page := range cached {
+		ly.cachePage(l0entry.Key, page.pageIdx, page.data)
 	}
 
 	ly.mu.Lock()
@@ -872,7 +944,6 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 	ly.log("FLUSH layer=%s l0=%s pages=%d",
 		ly.id[:min(8, len(ly.id))], l0entry.Key, len(l0entry.Pages))
 
-	// Checkpoint index.json.
 	idxStart := time.Now()
 	if err := ly.saveIndex(ctx); err != nil {
 		ly.mu.Lock()
@@ -1022,6 +1093,9 @@ func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
 	if ly.config.FlushInterval < 0 {
 		return
 	}
+	if ly.flushStop != nil {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	ly.flushCancel = cancel
@@ -1032,6 +1106,22 @@ func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
 	ly.lastFlushAt.Store(time.Now().UnixMilli())
 
 	go ly.periodicFlushLoop(ctx)
+}
+
+func (ly *layer) stopPeriodicFlush() {
+	if ly.flushStop == nil {
+		return
+	}
+	if ly.flushCancel != nil {
+		ly.flushCancel()
+		ly.flushCancel = nil
+	}
+	close(ly.flushStop)
+	<-ly.flushDone
+	ly.flushStop = nil
+	ly.flushDone = nil
+	ly.flushNotify = nil
+	ly.writeNotify = nil
 }
 
 func (ly *layer) periodicFlushLoop(ctx context.Context) {

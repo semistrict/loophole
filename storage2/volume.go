@@ -28,6 +28,8 @@ type volume struct {
 	mu    sync.RWMutex
 	layer *layer
 
+	directRefs int
+
 	manager *Manager
 }
 
@@ -93,6 +95,9 @@ func (v *volume) Write(data []byte, offset uint64) error {
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.directRefs > 0 {
+		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
+	}
 	return v.layer.Write(data, offset)
 }
 
@@ -102,6 +107,9 @@ func (v *volume) PunchHole(offset, length uint64) error {
 	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.directRefs > 0 {
+		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
+	}
 	return v.layer.PunchHole(offset, length)
 }
 
@@ -121,6 +129,9 @@ func (v *volume) Flush() error {
 func (v *volume) FlushLocal() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.directRefs > 0 {
+		return nil
+	}
 	ly := v.layer
 	if ly.flushNotify != nil {
 		select {
@@ -132,6 +143,9 @@ func (v *volume) FlushLocal() error {
 }
 
 func (v *volume) branch() (string, error) {
+	if v.directRefs > 0 {
+		return "", fmt.Errorf("volume %q has active direct writeback mappings", v.name)
+	}
 	// Flush everything to S3.
 	if !v.readOnly.Load() {
 		if err := v.layer.Flush(); err != nil {
@@ -300,6 +314,9 @@ func (v *volume) freeze(compact bool) error {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.directRefs > 0 {
+		return fmt.Errorf("volume %q has active direct writeback mappings", v.name)
+	}
 	slog.Info("freeze: flushing layer", "volume", v.name)
 	if err := v.layer.Flush(); err != nil {
 		return err
@@ -386,6 +403,49 @@ func (v *volume) destroy() error {
 func (v *volume) isReadOnly() bool { return v.readOnly.Load() }
 func (v *volume) flush() error     { return v.layer.Flush() }
 func (v *volume) close()           { v.layer.Close() }
+
+func (v *volume) EnableDirectWriteback() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.readOnly.Load() {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
+	if v.directRefs == 0 {
+		if err := v.layer.Flush(); err != nil {
+			return fmt.Errorf("flush before direct mode: %w", err)
+		}
+		v.layer.stopPeriodicFlush()
+	}
+	v.directRefs++
+	return nil
+}
+
+func (v *volume) DisableDirectWriteback() error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.directRefs == 0 {
+		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
+	}
+	v.directRefs--
+	if v.directRefs == 0 && v.manager.config.FlushInterval > 0 {
+		v.layer.startPeriodicFlush(context.Background())
+	}
+	return nil
+}
+
+func (v *volume) WritePagesDirect(pages []loophole.DirectPage) error {
+	if v.readOnly.Load() {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.directRefs == 0 {
+		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
+	}
+	return v.layer.WritePagesDirectL0(pages)
+}
 
 // VolumeDebugInfo holds volume + layer structure details for the debug endpoint.
 type VolumeDebugInfo struct {

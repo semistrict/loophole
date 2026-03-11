@@ -112,6 +112,73 @@ func buildL0(mt *memtable, layerID string, entries []sortedEntry, writeLeaseSeq 
 	}, nil
 }
 
+// buildL0FromDirectPages serializes full logical pages into the L0 file format.
+// pages must be sorted by pageIdx ascending and contain unique page indices.
+func buildL0FromDirectPages(layerID string, pages []loophole.DirectPage, writeLeaseSeq, seq uint64) ([]byte, l0Entry, error) {
+	if len(pages) == 0 {
+		return nil, l0Entry{}, fmt.Errorf("no entries")
+	}
+
+	encoder := getZstdEncoder()
+	defer putZstdEncoder(encoder)
+
+	var buf bytes.Buffer
+	buf.Write(make([]byte, l0HeaderSize))
+
+	indexEntries := make([]l0IndexEntry, 0, len(pages))
+	pageIdxs := make([]PageIdx, 0, len(pages))
+
+	for _, page := range pages {
+		if page.Offset%PageSize != 0 {
+			return nil, l0Entry{}, fmt.Errorf("direct page offset %d is not page-aligned", page.Offset)
+		}
+		if len(page.Data) != PageSize {
+			return nil, l0Entry{}, fmt.Errorf("direct page at offset %d has size %d, want %d", page.Offset, len(page.Data), PageSize)
+		}
+		pageIdx := PageIdx(page.Offset / PageSize)
+		compressed := encoder.EncodeAll(page.Data, nil)
+		ie := l0IndexEntry{
+			PageIdx:    pageIdx,
+			DataOffset: uint64(buf.Len()),
+			DataLen:    uint32(len(compressed)),
+			CRC32:      crc32.ChecksumIEEE(compressed),
+		}
+		buf.Write(compressed)
+		indexEntries = append(indexEntries, ie)
+		pageIdxs = append(pageIdxs, pageIdx)
+	}
+
+	indexOffset := uint64(buf.Len())
+	for _, ie := range indexEntries {
+		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
+			return nil, l0Entry{}, fmt.Errorf("write index entry: %w", err)
+		}
+	}
+
+	hdr := l0Header{
+		Magic:       l0Magic,
+		Version:     l0Version,
+		StartSeq:    seq,
+		EndSeq:      seq,
+		NumEntries:  uint32(len(pages)),
+		IndexOffset: indexOffset,
+	}
+
+	result := buf.Bytes()
+	var hdrBuf bytes.Buffer
+	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
+		return nil, l0Entry{}, fmt.Errorf("encode header: %w", err)
+	}
+	copy(result[:l0HeaderSize], hdrBuf.Bytes())
+
+	key := fmt.Sprintf("layers/%s/l0/%016x-%016x-%016x", layerID, writeLeaseSeq, seq, seq)
+	return result, l0Entry{
+		Key:   key,
+		Pages: pageIdxs,
+		Size:  int64(len(result)),
+	}, nil
+}
+
 // parsedL0 holds a parsed L0 file's index and optionally the full blob.
 type parsedL0 struct {
 	data  []byte // full blob; nil in index-only mode

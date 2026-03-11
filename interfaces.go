@@ -29,6 +29,13 @@ type VolumeInfo struct {
 	Labels   map[string]string `json:"labels,omitempty"`
 }
 
+// DirectPage is a single full logical page to persist through a direct
+// writeback path. Offset must be 4KB-aligned and Data must be exactly 4KB.
+type DirectPage struct {
+	Offset uint64
+	Data   []byte
+}
+
 // VolumeManager manages the lifecycle of volumes.
 type VolumeManager interface {
 	NewVolume(p CreateParams) (Volume, error)
@@ -63,6 +70,12 @@ type Volume interface {
 	// cache until release is called. Callers must not modify the slice.
 	ReadAt(ctx context.Context, offset uint64, n int) (buf []byte, release func(), err error)
 	Write(data []byte, offset uint64) error
+	// EnableDirectWriteback enters a mode where normal Write/PunchHole calls are
+	// rejected and full dirty pages can be flushed directly from an external page
+	// cache, such as mmap. Calls may be reference-counted by the implementation.
+	EnableDirectWriteback() error
+	DisableDirectWriteback() error
+	WritePagesDirect(pages []DirectPage) error
 	PunchHole(offset, length uint64) error
 	ZeroRange(offset, length uint64) error
 	Flush() error

@@ -227,6 +227,18 @@ func (v *NBDVolume) Write(data []byte, offset uint64) error {
 	return err
 }
 
+func (v *NBDVolume) EnableDirectWriteback() error {
+	return fmt.Errorf("direct writeback not supported on NBD volume")
+}
+
+func (v *NBDVolume) DisableDirectWriteback() error {
+	return fmt.Errorf("direct writeback not supported on NBD volume")
+}
+
+func (v *NBDVolume) WritePagesDirect([]loophole.DirectPage) error {
+	return fmt.Errorf("direct writeback not supported on NBD volume")
+}
+
 func (v *NBDVolume) Flush() error {
 	_, err := v.sendRequest(nbdCmdFlush, 0, nil, 0)
 	return err

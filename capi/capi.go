@@ -22,6 +22,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/daemon"
+	"github.com/semistrict/loophole/mmap"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -34,6 +35,7 @@ var (
 	globalCache   *storage2.PageCache
 	embedCleanup  func() // stops the embedded daemon server
 	initOnce      sync.Once
+	mmapRegions   sync.Map // uintptr → *mmap.MappedRegion
 )
 
 func storeHandle(vol loophole.Volume) int64 {
@@ -338,6 +340,45 @@ func loophole_strerror(code C.int32_t) *C.char {
 	default:
 		return C.CString(fmt.Sprintf("unknown error %d", int(code)))
 	}
+}
+
+// loophole_mmap creates a demand-paged memory mapping of the volume starting
+// at the given byte offset, for size bytes. Both offset and size must be
+// page-aligned (4096). Returns a pointer to the mapped region on success,
+// or NULL on error (including non-Linux platforms).
+//
+//export loophole_mmap
+func loophole_mmap(handle C.int64_t, offset C.uint64_t, size C.uint64_t) unsafe.Pointer {
+	vol := loadHandle(int64(handle))
+	if vol == nil {
+		return nil
+	}
+	mr, err := mmap.MapVolume(vol, uint64(offset), uint64(size))
+	if err != nil {
+		slog.Error("loophole_mmap failed", "error", err)
+		return nil
+	}
+	ptr := mr.Ptr()
+	mmapRegions.Store(uintptr(ptr), mr)
+	return ptr
+}
+
+// loophole_munmap unmaps a region previously returned by loophole_mmap.
+// Returns 0 on success, -1 on error.
+//
+//export loophole_munmap
+func loophole_munmap(ptr unsafe.Pointer, size C.uint64_t) C.int32_t {
+	key := uintptr(ptr)
+	v, ok := mmapRegions.LoadAndDelete(key)
+	if !ok {
+		return -1
+	}
+	mr := v.(*mmap.MappedRegion)
+	if err := mr.Close(); err != nil {
+		slog.Error("loophole_munmap failed", "error", err)
+		return -1
+	}
+	return 0
 }
 
 func main() {}
