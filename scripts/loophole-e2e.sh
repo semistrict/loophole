@@ -142,14 +142,15 @@ fi
 
 log "Creating tmux session '$SESSION_NAME'"
 tmux new-session -d -s "$SESSION_NAME" -n "$WINDOW_NAME" "bash"
-tmux split-window -h -t "${SESSION_NAME}:${WINDOW_NAME}" "bash"
-tmux select-layout -t "${SESSION_NAME}:${WINDOW_NAME}" even-horizontal
+WINDOW_TARGET="${SESSION_NAME}:0"
+tmux split-window -h -t "$WINDOW_TARGET" "bash"
+tmux select-layout -t "$WINDOW_TARGET" even-horizontal
 tmux set-option -g mouse on
 
-PANE_ORIG="${SESSION_NAME}:${WINDOW_NAME}.0"
-PANE_CLONE1="${SESSION_NAME}:${WINDOW_NAME}.1"
+PANE_ORIG="${WINDOW_TARGET}.0"
+PANE_CLONE1="${WINDOW_TARGET}.1"
 
-DEMO_CMD="cd ${LOOPHOLE_SRC} && bash scripts/loophole-demo.sh"
+DEMO_CMD="cd ${LOOPHOLE_SRC} && WORK_DIR=${WORK_DIR} FIRECRACKER_SRC=${FIRECRACKER_SRC} bash scripts/loophole-demo.sh"
 if [ "$SKIP_BUILD" = true ]; then
     DEMO_CMD="${DEMO_CMD} --skip-build"
 fi
@@ -165,7 +166,7 @@ wait_for_pattern "$PANE_ORIG" "ORIG-HEARTBEAT " 20 "original heartbeat output in
 
 log "Starting original -> clone-1 flow in pane 1"
 tmux send-keys -t "$PANE_CLONE1" \
-    "cd ${LOOPHOLE_SRC} && CLONE_ID=${CLONE1_ID} FC_SOCK=${FC_SOCK} CLONE_SOCK=${CLONE1_SOCK} SNAP_PATH=${SNAP1_PATH} MEM_PATH=${MEM1_PATH} SNAP_TYPE=Full bash scripts/loophole-clone.sh" \
+    "cd ${LOOPHOLE_SRC} && WORK_DIR=${WORK_DIR} CLONE_ID=${CLONE1_ID} FC_BIN=${FC_BIN} FC_SOCK=${FC_SOCK} CLONE_SOCK=${CLONE1_SOCK} SNAP_PATH=${SNAP1_PATH} MEM_PATH=${MEM1_PATH} SNAP_TYPE=Full bash scripts/loophole-clone.sh" \
     C-m
 
 wait_for_pattern "$PANE_CLONE1" "Clone VM restored and running" "$CLONE_TIMEOUT" "clone-1 restore completion"
@@ -179,13 +180,13 @@ wait_for_pattern "$PANE_CLONE1" "CLONE1-HEARTBEAT " 20 "clone-1 heartbeat output
 
 log "Creating pane 2 for clone-2"
 tmux split-window -v -t "$PANE_CLONE1" "bash"
-tmux select-layout -t "${SESSION_NAME}:${WINDOW_NAME}" tiled
-PANE_CLONE2="${SESSION_NAME}:${WINDOW_NAME}.2"
+tmux select-layout -t "$WINDOW_TARGET" tiled
+PANE_CLONE2="${WINDOW_TARGET}.2"
 
 MEM_VOL_CLONE1=$(cat "${SNAP1_PATH}.mem-clone")
 log "Starting clone-1 -> clone-2 diff flow in pane 2"
 tmux send-keys -t "$PANE_CLONE2" \
-    "cd ${LOOPHOLE_SRC} && CLONE_ID=${CLONE2_ID} FC_SOCK=${CLONE1_SOCK} CLONE_SOCK=${CLONE2_SOCK} SNAP_PATH=${SNAP2_PATH} MEM_PATH=${MEM2_PATH} MEM_VOL_NAME=${MEM_VOL_CLONE1} SNAP_TYPE=Diff bash scripts/loophole-clone.sh" \
+    "cd ${LOOPHOLE_SRC} && WORK_DIR=${WORK_DIR} CLONE_ID=${CLONE2_ID} FC_BIN=${FC_BIN} FC_SOCK=${CLONE1_SOCK} CLONE_SOCK=${CLONE2_SOCK} SNAP_PATH=${SNAP2_PATH} MEM_PATH=${MEM2_PATH} MEM_VOL_NAME=${MEM_VOL_CLONE1} SNAP_TYPE=Diff bash scripts/loophole-clone.sh" \
     C-m
 
 wait_for_pattern "$PANE_CLONE2" "Clone VM restored and running" "$CLONE_TIMEOUT" "clone-2 restore completion"
