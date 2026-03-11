@@ -11,8 +11,12 @@ import (
 // It derives all local filesystem paths for sockets, caches, logs, etc.
 type Dir string
 
-// DefaultDir returns the default loophole home directory (~/.loophole).
+// DefaultDir returns the loophole home directory. It checks LOOPHOLE_HOME
+// first, falling back to ~/.loophole.
 func DefaultDir() Dir {
+	if d := os.Getenv("LOOPHOLE_HOME"); d != "" {
+		return Dir(d)
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = "/tmp"

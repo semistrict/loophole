@@ -421,6 +421,8 @@ func deviceCmd() *cobra.Command {
 		deviceDetachCmd(),
 		deviceSnapshotCmd(),
 		deviceCloneCmd(),
+		deviceDDCmd(),
+		deviceFlushCmd(),
 	)
 
 	return cmd
@@ -509,6 +511,148 @@ func deviceCloneCmd() *cobra.Command {
 	}
 }
 
+func deviceFlushCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "flush <volume>",
+		Short: "Flush a volume's memtable to storage",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
+			if err := c.FlushVolume(cmd.Context(), args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("flushed volume %s\n", args[0])
+			return nil
+		},
+	}
+}
+
+func deviceDDCmd() *cobra.Command {
+	var ifFlag, ofFlag, bsFlag, typeFlag string
+
+	cmd := &cobra.Command{
+		Use:   "dd [if=<source>] [of=<dest>]",
+		Short: "Copy raw data between files and volumes",
+		Long: `Copy raw block data between local files and loophole volumes.
+Use the volume: syntax to refer to a volume as a raw block device.
+
+Import (file → volume): creates a new volume and writes the image into it.
+Export (volume → file): reads raw volume data and writes it to a file.
+
+Examples:
+  loophole device dd if=/path/to/rootfs.ext4 of=myvolume:
+  loophole device dd if=myvolume: of=/path/to/output.img
+  loophole device dd if=/path/to/rootfs.ext4 of=myvolume: type=ext4`,
+		Args:                  cobra.ArbitraryArgs,
+		DisableFlagsInUseLine: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Parse dd-style key=value args.
+			for _, arg := range args {
+				k, v, ok := strings.Cut(arg, "=")
+				if !ok {
+					return fmt.Errorf("unknown argument %q (expected key=value)", arg)
+				}
+				switch k {
+				case "if":
+					ifFlag = v
+				case "of":
+					ofFlag = v
+				case "bs":
+					bsFlag = v
+				case "type":
+					typeFlag = v
+				default:
+					return fmt.Errorf("unknown parameter %q", k)
+				}
+			}
+
+			if ifFlag == "" || ofFlag == "" {
+				return fmt.Errorf("if and of are required (e.g. loophole device dd if=image.ext4 of=myvolume:)")
+			}
+
+			_ = bsFlag // reserved for future use
+
+			srcVol, _, srcIsVol := filecmd.ParseVolPath(ifFlag)
+			dstVol, _, dstIsVol := filecmd.ParseVolPath(ofFlag)
+
+			if srcIsVol && dstIsVol {
+				return fmt.Errorf("both if and of are volumes; at least one must be a local file")
+			}
+			if !srcIsVol && !dstIsVol {
+				return fmt.Errorf("neither if nor of is a volume; use volume: syntax (e.g. of=myvolume:)")
+			}
+
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
+
+			if dstIsVol {
+				return deviceDDImport(cmd, c, ifFlag, dstVol, typeFlag)
+			}
+			return deviceDDExport(cmd, c, srcVol, ofFlag)
+		},
+	}
+
+	cmd.Flags().StringVar(&ifFlag, "if", "", "input: local file or volume:")
+	cmd.Flags().StringVar(&ofFlag, "of", "", "output: local file or volume:")
+	cmd.Flags().StringVar(&bsFlag, "bs", "", "block size (e.g. 1M, 4M); default 4M")
+	cmd.Flags().StringVar(&typeFlag, "type", "", "volume type for import (ext4, xfs); default ext4")
+
+	return cmd
+}
+
+// deviceDDImport writes a local file into a new volume.
+func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume, volType string) error {
+	if volType == "" {
+		volType = string(loophole.DefaultFSType())
+	}
+
+	f, err := os.Open(filePath)
+	if err != nil {
+		return fmt.Errorf("open image: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	fi, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat image: %w", err)
+	}
+	size := uint64(fi.Size())
+	fmt.Printf("Import: %s (%d bytes, %.1f GiB) → %s (type=%s)\n",
+		filePath, size, float64(size)/(1<<30), volume, volType)
+
+	return c.DeviceDD(cmd.Context(), client.CreateParams{
+		Volume: volume,
+		Size:   size,
+		Type:   volType,
+	}, f, os.Stdout)
+}
+
+// deviceDDExport reads a volume's raw data into a local file.
+func deviceDDExport(cmd *cobra.Command, c *client.Client, volume, filePath string) error {
+	ctx := cmd.Context()
+
+	info, err := c.VolumeInfo(ctx, volume)
+	if err != nil {
+		return fmt.Errorf("get volume info: %w", err)
+	}
+
+	f, err := os.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("create output file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	fmt.Printf("Export: %s (%d bytes, %.1f GiB) → %s\n",
+		volume, info.Size, float64(info.Size)/(1<<30), filePath)
+
+	return c.DeviceDDRead(ctx, volume, info.Size, f, os.Stdout)
+}
+
 // --- helpers ---
 
 // parseSize parses a human-readable size string like "100GB", "1TB", "512MB".
@@ -566,6 +710,15 @@ func extractProfileFlag(args []string) []string {
 			globalProfile = args[i][10:]
 			continue
 		}
+		if args[i] == "--pid" && i+1 < len(args) {
+			globalPID, _ = strconv.Atoi(args[i+1])
+			i++
+			continue
+		}
+		if strings.HasPrefix(args[i], "--pid=") {
+			globalPID, _ = strconv.Atoi(args[i][6:])
+			continue
+		}
 		out = append(out, args[i])
 	}
 	return out
@@ -574,6 +727,9 @@ func extractProfileFlag(args []string) []string {
 // resolveClientOnly returns a client for the current profile without
 // starting the daemon. Used by commands like stop that shouldn't auto-start.
 func resolveClientOnly() (*client.Client, error) {
+	if globalPID != 0 {
+		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
+	}
 	dir := loophole.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
@@ -585,6 +741,9 @@ func resolveClientOnly() (*client.Client, error) {
 // resolveClient returns a client for the current profile's daemon,
 // auto-starting it if necessary.
 func resolveClient() (*client.Client, error) {
+	if globalPID != 0 {
+		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
+	}
 	dir := loophole.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {

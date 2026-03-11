@@ -505,17 +505,16 @@ func (b *Backend) DeviceDetach(ctx context.Context, volume string) error {
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
 	}
-	driver, err := b.driverFor(vol.VolumeType())
-	if err != nil {
-		return err
-	}
-	if dc, ok := driver.Unwrap().(DeviceConnector); ok {
-		if err := dc.DisconnectDevice(ctx, volume); err != nil {
-			return err
+	driver, _ := b.driverFor(vol.VolumeType())
+	if driver != nil {
+		if dc, ok := driver.Unwrap().(DeviceConnector); ok {
+			if err := dc.DisconnectDevice(ctx, volume); err != nil {
+				return err
+			}
 		}
-	}
-	if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
-		vr.UnregisterVolume(volume)
+		if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
+			vr.UnregisterVolume(volume)
+		}
 	}
 	return vol.ReleaseRef()
 }

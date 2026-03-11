@@ -12,13 +12,16 @@ package main
 import "C"
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/daemon"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -28,7 +31,8 @@ var (
 	volHandles    sync.Map // int64 → loophole.Volume
 	nextVolHandle atomic.Int64
 	globalVM      loophole.VolumeManager
-	globalStore   loophole.ObjectStore
+	globalCache   *storage2.PageCache
+	embedCleanup  func() // stops the embedded daemon server
 	initOnce      sync.Once
 )
 
@@ -52,71 +56,97 @@ func deleteHandle(h int64) {
 
 // --- C API ---
 
-// InitConfig is the JSON-decoded configuration for loophole_init.
-type InitConfig struct {
-	// S3 store settings (used when LocalDir is empty).
-	Bucket    string `json:"bucket"`
-	Prefix    string `json:"prefix"`
-	Endpoint  string `json:"endpoint"`
-	Region    string `json:"region"`
-	AccessKey string `json:"access_key"`
-	SecretKey string `json:"secret_key"`
-
-	// Local file store (mutually exclusive with S3).
-	LocalDir string `json:"local_dir"`
-
-	// Local cache directory for layer data.
-	CacheDir string `json:"cache_dir"`
-}
-
-// loophole_init initializes the loophole runtime. Must be called once before
-// any other loophole_* function. config_json is a UTF-8 JSON string of length
-// config_len. Returns 0 on success, negative on error.
+// loophole_init initializes the loophole runtime from ~/.loophole/config.toml
+// (or the file at LOOPHOLE_CONFIG_FILE env var). Must be called once before
+// any other loophole_* function.
+//
+// config_path: path to config.toml directory, or NULL to use the default
+// (~/.loophole). If LOOPHOLE_CONFIG_DIR env var is set, it takes precedence
+// over the default but not over an explicit config_path argument.
+//
+// profile: profile name, or NULL to use the default profile.
+// If LOOPHOLE_PROFILE env var is set, it takes precedence over the default
+// but not over an explicit profile argument.
+//
+// Returns 0 on success, negative on error.
 //
 //export loophole_init
-func loophole_init(config_json *C.char, config_len C.uint32_t) C.int32_t {
+func loophole_init(config_path *C.char, profile *C.char) C.int32_t {
 	var retErr C.int32_t
 	initOnce.Do(func() {
-		buf := C.GoBytes(unsafe.Pointer(config_json), C.int(config_len))
-		var cfg InitConfig
-		if err := json.Unmarshal(buf, &cfg); err != nil {
+		// Determine config directory.
+		var dir loophole.Dir
+		if config_path != nil {
+			dir = loophole.Dir(C.GoString(config_path))
+		} else if envDir := os.Getenv("LOOPHOLE_CONFIG_DIR"); envDir != "" {
+			dir = loophole.Dir(envDir)
+		} else {
+			dir = loophole.DefaultDir()
+		}
+
+		// Determine profile name.
+		var profileName string
+		if profile != nil {
+			profileName = C.GoString(profile)
+		} else if envProfile := os.Getenv("LOOPHOLE_PROFILE"); envProfile != "" {
+			profileName = envProfile
+		}
+
+		// Load config and resolve profile.
+		cfg, err := loophole.LoadConfig(dir)
+		if err != nil {
+			slog.Error("loophole_init: load config", "error", err)
 			retErr = -1
 			return
 		}
+		inst, err := cfg.Resolve(profileName)
+		if err != nil {
+			slog.Error("loophole_init: resolve profile", "error", err)
+			retErr = -2
+			return
+		}
 
+		// Create object store.
 		ctx := context.Background()
 		var store loophole.ObjectStore
-		if cfg.LocalDir != "" {
-			var err error
-			store, err = loophole.NewFileStore(cfg.LocalDir)
+		if inst.LocalDir != "" {
+			store, err = loophole.NewFileStore(inst.LocalDir)
 			if err != nil {
-				retErr = -2
-				return
-			}
-		} else {
-			inst := loophole.Instance{
-				Bucket:    cfg.Bucket,
-				Prefix:    cfg.Prefix,
-				Endpoint:  cfg.Endpoint,
-				Region:    cfg.Region,
-				AccessKey: cfg.AccessKey,
-				SecretKey: cfg.SecretKey,
-			}
-			var err error
-			store, err = loophole.NewS3Store(ctx, inst)
-			if err != nil {
+				slog.Error("loophole_init: create file store", "error", err)
 				retErr = -3
 				return
 			}
+		} else {
+			store, err = loophole.NewS3Store(ctx, inst)
+			if err != nil {
+				slog.Error("loophole_init: create S3 store", "error", err)
+				retErr = -4
+				return
+			}
 		}
 
-		cacheDir := cfg.CacheDir
-		if cacheDir == "" {
-			cacheDir = "/tmp/loophole-cache"
+		// Set up cache directory and page cache (same as daemon).
+		cacheDir := dir.Cache(inst.ProfileName)
+		diskCache, err := storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
+		if err != nil {
+			slog.Error("loophole_init: create page cache", "error", err)
+			retErr = -5
+			return
 		}
 
-		globalStore = store
-		globalVM = storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, nil)
+		globalCache = diskCache
+		globalVM = storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, diskCache)
+
+		// Start the embedded daemon so the loophole CLI can connect via --pid.
+		cleanup, daemonErr := daemon.StartEmbedded(globalVM, diskCache, inst)
+		if daemonErr != nil {
+			slog.Error("loophole_init: embedded daemon failed (non-fatal)", "error", daemonErr)
+		} else {
+			embedCleanup = cleanup
+			slog.Info("loophole_init: embedded daemon started", "socket", daemon.EmbedSocketPath(os.Getpid()))
+		}
+
+		slog.Info("loophole_init: initialized", "store", inst.URL(), "profile", inst.ProfileName)
 	})
 	return retErr
 }
@@ -138,6 +168,9 @@ func loophole_create(name *C.char, name_len C.uint32_t, size C.uint64_t) C.int64
 	if err != nil {
 		return -2
 	}
+	if err := vol.AcquireRef(); err != nil {
+		return -3
+	}
 	return C.int64_t(storeHandle(vol))
 }
 
@@ -152,7 +185,14 @@ func loophole_open(name *C.char, name_len C.uint32_t) C.int64_t {
 	goName := C.GoStringN(name, C.int(name_len))
 	vol, err := globalVM.OpenVolume(goName)
 	if err != nil {
+		slog.Error("loophole_open failed", "volume", goName, "error", err)
 		return -2
+	}
+	// AcquireRef so each loophole_open/loophole_close pair is balanced.
+	// OpenVolume may return a cached volume whose initial ref belongs to the
+	// Manager, so we need our own ref to prevent premature destruction.
+	if err := vol.AcquireRef(); err != nil {
+		return -3
 	}
 	return C.int64_t(storeHandle(vol))
 }
@@ -204,6 +244,30 @@ func loophole_flush(handle C.int64_t) C.int32_t {
 	return 0
 }
 
+// loophole_clone clones a volume, creating a writable fork. The clone
+// includes an implicit flush. Returns a handle to the new clone volume
+// on success, or a negative error code.
+//
+//export loophole_clone
+func loophole_clone(handle C.int64_t, cloneName *C.char, cloneNameLen C.uint32_t) C.int64_t {
+	vol := loadHandle(int64(handle))
+	if vol == nil {
+		return -1
+	}
+	goCloneName := C.GoStringN(cloneName, C.int(cloneNameLen))
+	cloneVol, err := vol.Clone(goCloneName)
+	if err != nil {
+		slog.Error("loophole_clone failed", "error", err)
+		return -2
+	}
+	// Release our ref so the clone volume isn't held open by this process.
+	// The restoring process will open it fresh with its own lease.
+	if err := cloneVol.ReleaseRef(); err != nil {
+		slog.Error("loophole_clone: release clone ref failed", "error", err)
+	}
+	return 0
+}
+
 // loophole_size returns the volume size in bytes.
 //
 //export loophole_size
@@ -234,6 +298,10 @@ func loophole_close(handle C.int64_t) C.int32_t {
 //
 //export loophole_shutdown
 func loophole_shutdown() C.int32_t {
+	if embedCleanup != nil {
+		embedCleanup()
+		embedCleanup = nil
+	}
 	if globalVM == nil {
 		return 0
 	}
@@ -241,12 +309,16 @@ func loophole_shutdown() C.int32_t {
 		return -1
 	}
 	globalVM = nil
+	if globalCache != nil {
+		if err := globalCache.Close(); err != nil {
+			return -2
+		}
+		globalCache = nil
+	}
 	return 0
 }
 
-// loophole_strerror returns a human-readable error string for the last
-// operation on the given handle. Currently returns a generic message;
-// can be extended with per-handle error tracking if needed.
+// loophole_strerror returns a human-readable error string for the given code.
 //
 //export loophole_strerror
 func loophole_strerror(code C.int32_t) *C.char {
@@ -258,7 +330,11 @@ func loophole_strerror(code C.int32_t) *C.char {
 	case -2:
 		return C.CString("operation failed")
 	case -3:
+		return C.CString("file store initialization failed")
+	case -4:
 		return C.CString("S3 store initialization failed")
+	case -5:
+		return C.CString("page cache initialization failed")
 	default:
 		return C.CString(fmt.Sprintf("unknown error %d", int(code)))
 	}

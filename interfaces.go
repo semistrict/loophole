@@ -21,12 +21,12 @@ type CreateParams struct {
 
 // VolumeInfo describes a volume's metadata.
 type VolumeInfo struct {
-	Name     string
-	Size     uint64
-	ReadOnly bool
-	Type     string
-	Parent   string
-	Labels   map[string]string
+	Name     string            `json:"name"`
+	Size     uint64            `json:"size"`
+	ReadOnly bool              `json:"read_only,omitempty"`
+	Type     string            `json:"type,omitempty"`
+	Parent   string            `json:"parent,omitempty"`
+	Labels   map[string]string `json:"labels,omitempty"`
 }
 
 // VolumeManager manages the lifecycle of volumes.

@@ -145,6 +145,10 @@ type Config struct {
 	// L0PagesMax is the total L0 page entry count that triggers L0→L1 compaction.
 	// 0 = default (10,000).
 	L0PagesMax int
+
+	// MaxMemtableSlots caps the number of unique page slots in a memtable.
+	// 0 = default (65536). Only useful for tests.
+	MaxMemtableSlots int
 }
 
 func (c *Config) setDefaults() {
@@ -164,12 +168,16 @@ func (c *Config) setDefaults() {
 
 // maxMemtablePages returns the number of page slots for a new memtable.
 func (c *Config) maxMemtablePages() int {
+	cap := maxMemtableSlots
+	if c.MaxMemtableSlots > 0 {
+		cap = c.MaxMemtableSlots
+	}
 	n := int(c.FlushThreshold / PageSize)
 	if n < 1 {
 		n = 1
 	}
-	if n > maxMemtableSlots {
-		n = maxMemtableSlots
+	if n > cap {
+		n = cap
 	}
 	return n
 }

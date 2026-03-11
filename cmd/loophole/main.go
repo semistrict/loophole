@@ -15,6 +15,7 @@ import (
 
 var selfBin string
 var globalProfile string
+var globalPID int
 
 func main() {
 	selfBin, _ = os.Executable()
@@ -43,6 +44,7 @@ func rootCmd() *cobra.Command {
 	}
 
 	root.PersistentFlags().StringVarP(&globalProfile, "profile", "p", "", "Named profile (default: default_profile from config, or first defined)")
+	root.PersistentFlags().IntVar(&globalPID, "pid", 0, "Connect to an embedded loophole daemon in the process with this PID")
 
 	root.AddCommand(startCmd())
 	addCommands(root)

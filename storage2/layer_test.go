@@ -225,6 +225,149 @@ func TestLayerSnapshot(t *testing.T) {
 	assert.Equal(t, page, buf[:n])
 }
 
+func TestLayerDirectL2Write(t *testing.T) {
+	ctx := t.Context()
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  64 * 1024,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+
+	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	require.NoError(t, err)
+	defer ly.Close()
+
+	// Fresh layer should allow direct L2 writes.
+	require.True(t, ly.canDirectL2())
+
+	// Write exactly 3 full blocks (3 * 4MB = 12MB) at offset 0.
+	// This should take the direct L2 path for all 3 blocks.
+	numBlocks := 3
+	data := make([]byte, numBlocks*BlockSize)
+	for i := range data {
+		data[i] = byte((i * 7) % 256)
+	}
+	require.NoError(t, ly.Write(data, 0))
+
+	// The layer should still have no L0 or L1 entries — everything went
+	// straight to L2.
+	ly.mu.RLock()
+	l0Count := len(ly.index.L0)
+	l1Count := ly.l1Map.Len()
+	ly.mu.RUnlock()
+	assert.Equal(t, 0, l0Count, "expected no L0 entries")
+	assert.Equal(t, 0, l1Count, "expected no L1 entries")
+
+	// Verify each block index is present in the L2 map.
+	for blk := range numBlocks {
+		ly.mu.RLock()
+		layerID, _ := ly.l2Map.Find(BlockIdx(blk))
+		ly.mu.RUnlock()
+		assert.NotEmpty(t, layerID, "block %d missing from L2 map", blk)
+	}
+
+	// Read back every block and verify byte-for-byte.
+	buf := make([]byte, len(data))
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), n)
+	assert.Equal(t, data, buf)
+
+	// Verify individual page reads at block boundaries.
+	pageBuf := make([]byte, PageSize)
+	for blk := range numBlocks {
+		off := uint64(blk * BlockSize)
+		_, err := ly.Read(ctx, pageBuf, off)
+		require.NoError(t, err)
+		assert.Equal(t, data[off:off+PageSize], pageBuf, "block %d first page mismatch", blk)
+
+		// Last page of the block.
+		lastPageOff := off + uint64((BlockPages-1)*PageSize)
+		_, err = ly.Read(ctx, pageBuf, lastPageOff)
+		require.NoError(t, err)
+		assert.Equal(t, data[lastPageOff:lastPageOff+PageSize], pageBuf, "block %d last page mismatch", blk)
+	}
+}
+
+func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
+	ctx := t.Context()
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  64 * 1024,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+
+	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	require.NoError(t, err)
+	defer ly.Close()
+
+	// Write one full block via direct L2.
+	blockData := make([]byte, BlockSize)
+	for i := range blockData {
+		blockData[i] = byte(i % 251)
+	}
+	require.NoError(t, ly.Write(blockData, 0))
+
+	// Now write a small amount — this goes through the memtable path since
+	// the layer is no longer "fresh" (l2Map is non-empty, but canDirectL2
+	// checks memtable.size which is 0, and l0/l1 are empty, so it would
+	// still try direct L2 for aligned writes). Write a non-aligned small
+	// chunk to force the memtable path.
+	extra := bytes.Repeat([]byte{0xAA}, 100)
+	extraOff := uint64(BlockSize) // start of second block, but only 100 bytes
+	require.NoError(t, ly.Write(extra, extraOff))
+
+	// Read back the first block.
+	buf := make([]byte, BlockSize)
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, BlockSize, n)
+	assert.Equal(t, blockData, buf)
+
+	// Read back the partial write.
+	buf2 := make([]byte, 100)
+	_, err = ly.Read(ctx, buf2, extraOff)
+	require.NoError(t, err)
+	assert.Equal(t, extra, buf2)
+}
+
+func TestLayerDirectL2MixedWrite(t *testing.T) {
+	ctx := t.Context()
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  64 * 1024,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+
+	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	require.NoError(t, err)
+	defer ly.Close()
+
+	// Write data that spans: partial block + full block + partial block.
+	// The full block in the middle should NOT go through direct L2 because
+	// the leading partial write will populate the memtable first, making
+	// canDirectL2() return false.
+	leadingBytes := PageSize / 2 // half a page
+	data := make([]byte, leadingBytes+BlockSize+PageSize)
+	for i := range data {
+		data[i] = byte((i * 13) % 256)
+	}
+	require.NoError(t, ly.Write(data, 0))
+
+	// Read it all back.
+	buf := make([]byte, len(data))
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), n)
+	assert.Equal(t, data, buf)
+}
+
 func TestBlockRoundTrip(t *testing.T) {
 	ctx := t.Context()
 

@@ -358,6 +358,9 @@ func (v *volume) AcquireRef() error {
 
 func (v *volume) ReleaseRef() error {
 	newRefs := v.refs.Add(-1)
+	if newRefs < 0 {
+		panic(fmt.Sprintf("volume %q: ReleaseRef with refs already 0 (now %d)", v.name, newRefs))
+	}
 	slog.Debug("volume: ReleaseRef", "volume", v.name, "refsAfter", newRefs)
 	if newRefs == 0 {
 		return v.destroy()

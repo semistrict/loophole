@@ -37,11 +37,12 @@ type Daemon struct {
 	diskCache *storage2.PageCache
 	ln        net.Listener
 
-	nbdSock    string                      // set once NBD server is started
-	nbdLn      net.Listener                // NBD listener, closed on shutdown
-	grpcLn     net.Listener                //nolint:unused // used on linux (snapshotter_linux.go)
-	grpcSrv    interface{ GracefulStop() } //nolint:unused // used on linux (snapshotter_linux.go)
-	startupErr string                      // non-fatal startup error (e.g. bad S3 creds)
+	nbdSock       string                      // set once NBD server is started
+	nbdLn         net.Listener                // NBD listener, closed on shutdown
+	grpcLn        net.Listener                //nolint:unused // used on linux (snapshotter_linux.go)
+	grpcSrv       interface{ GracefulStop() } //nolint:unused // used on linux (snapshotter_linux.go)
+	startupErr    string                      // non-fatal startup error (e.g. bad S3 creds)
+	skipHashCheck bool                        // skip binary hash check (embedded mode)
 
 	axiomClose func() // flushes and closes the axiom handler; nil if axiom is not configured
 
@@ -374,6 +375,9 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
 	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
+	mux.HandleFunc("POST /device/dd/write", d.handleDeviceDDWrite)
+	mux.HandleFunc("GET /device/dd/read", d.handleDeviceDDRead)
+	mux.HandleFunc("POST /device/dd/finalize", d.handleDeviceDDFinalize)
 
 	d.registerDBRoutes(mux)
 
@@ -410,6 +414,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)
+	mux.HandleFunc("GET /volume-info", d.handleVolumeInfo)
 	mux.HandleFunc("GET /debug/volume", d.handleDebugVolume)
 	mux.Handle("GET /metrics", metrics.Handler())
 	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
@@ -431,9 +436,11 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 func (d *Daemon) instrument(next http.Handler) http.Handler {
 	serverHash := loophole.SelfHash()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if clientHash := r.Header.Get("X-Binary-Hash"); clientHash != "" && serverHash != "" && clientHash != serverHash {
-			writeError(w, http.StatusConflict, fmt.Errorf("binary mismatch: client %s != daemon %s (restart the daemon)", clientHash, serverHash))
-			return
+		if !d.skipHashCheck && r.URL.Path != "/shutdown" {
+			if clientHash := r.Header.Get("X-Binary-Hash"); clientHash != "" && serverHash != "" && clientHash != serverHash {
+				writeError(w, http.StatusConflict, fmt.Errorf("binary mismatch: client %s != daemon %s (restart the daemon)", clientHash, serverHash))
+				return
+			}
 		}
 
 		// Skip endpoints that hijack the connection or don't need metrics.
@@ -476,10 +483,6 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
 }
 
-// --- High-level handlers ---
-
-const zygoteVolume = "zygote-ubuntu-2404"
-
 // requireBackend returns true (and writes 503) if storage is not available.
 func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
 	if d.backend == nil {
@@ -487,322 +490,6 @@ func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
 		return true
 	}
 	return false
-}
-
-func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
-		return
-	}
-	var req loophole.CreateParams
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	if req.Volume == "" {
-		writeError(w, 400, fmt.Errorf("volume name is required"))
-		return
-	}
-
-	ctx := r.Context()
-
-	// If size is specified, create a fresh volume (used for zygote creation).
-	if req.Size > 0 {
-		slog.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
-		if req.Type == "" {
-			req.Type = string(loophole.DefaultFSType())
-		}
-		if err := d.backend.Create(ctx, req); err != nil {
-			slog.Error("create volume failed", "err", err)
-			writeError(w, 500, fmt.Errorf("create: %w", err))
-			return
-		}
-		writeJSON(w, map[string]string{"status": "ok"})
-		return
-	}
-
-	// Otherwise clone from zygote.
-	slog.Info("create (clone from zygote)", "volume", req.Volume, "zygote", zygoteVolume)
-
-	// Open the zygote volume (frozen layers need no lease).
-	zygote, err := d.backend.VM().OpenVolume(zygoteVolume)
-	if err != nil {
-		slog.Error("open zygote failed", "err", err)
-		writeError(w, 500, fmt.Errorf("open zygote: %w", err))
-		return
-	}
-
-	// Clone from zygote to the requested name.
-	_, err = zygote.Clone(req.Volume)
-	if err != nil {
-		slog.Error("clone from zygote failed", "err", err)
-		writeError(w, 500, fmt.Errorf("clone: %w", err))
-		return
-	}
-
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("delete", "volume", req.Volume)
-	if err := d.backend.VM().CloseVolume(req.Volume); err != nil {
-		slog.Warn("delete: close volume", "volume", req.Volume, "err", err)
-	}
-	if err := d.backend.VM().WaitClosed(r.Context(), req.Volume); err != nil {
-		slog.Error("delete: wait closed failed", "volume", req.Volume, "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	if err := d.backend.VM().DeleteVolume(r.Context(), req.Volume); err != nil {
-		slog.Error("delete failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleBreakLease(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume string `json:"volume"`
-		Force  bool   `json:"force"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("break-lease", "volume", req.Volume, "force", req.Force)
-	graceful, err := d.backend.VM().BreakLease(r.Context(), req.Volume, req.Force)
-	if err != nil {
-		slog.Error("break-lease failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]any{"status": "ok", "graceful": graceful})
-}
-
-func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume     string `json:"volume"`
-		Mountpoint string `json:"mountpoint"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	mountpoint := req.Mountpoint
-	if mountpoint == "" {
-		mountpoint = req.Volume
-	}
-	slog.Info("mount", "volume", req.Volume, "mountpoint", mountpoint)
-	if err := d.backend.Mount(r.Context(), req.Volume, mountpoint); err != nil {
-		slog.Error("mount failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-
-	if req.Mountpoint != "" {
-		d.writeSymlink(mountpoint)
-	}
-	writeJSON(w, map[string]string{"status": "ok", "mountpoint": mountpoint})
-}
-
-func (d *Daemon) handleUnmount(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Mountpoint string `json:"mountpoint"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("unmount", "mountpoint", req.Mountpoint)
-	if err := d.backend.Unmount(r.Context(), req.Mountpoint); err != nil {
-		slog.Error("unmount failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	if err := os.Remove(d.dir.MountSymlink(req.Mountpoint)); err != nil && !os.IsNotExist(err) {
-		slog.Warn("remove mount symlink failed", "error", err)
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume  string `json:"volume"`
-		Compact bool   `json:"compact"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	slog.Info("freeze", "volume", req.Volume, "compact", req.Compact)
-	if err := d.backend.FreezeVolume(r.Context(), req.Volume, req.Compact); err != nil {
-		slog.Error("freeze failed", "volume", req.Volume, "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleSnapshot(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Mountpoint string `json:"mountpoint"`
-		Name       string `json:"name"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("snapshot", "mountpoint", req.Mountpoint, "name", req.Name)
-	if err := d.backend.Snapshot(r.Context(), req.Mountpoint, req.Name); err != nil {
-		slog.Error("snapshot failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Mountpoint      string `json:"mountpoint"`
-		Clone           string `json:"clone"`
-		CloneMountpoint string `json:"clone_mountpoint"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("clone", "mountpoint", req.Mountpoint, "clone", req.Clone)
-	if err := d.backend.Clone(r.Context(), req.Mountpoint, req.Clone, req.CloneMountpoint); err != nil {
-		slog.Error("clone failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	d.writeSymlink(req.CloneMountpoint)
-	writeJSON(w, map[string]string{"status": "ok", "mountpoint": req.CloneMountpoint})
-}
-
-// --- Device handlers ---
-
-func (d *Daemon) handleDeviceAttach(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("device/attach", "volume", req.Volume)
-	device, err := d.backend.DeviceAttach(r.Context(), req.Volume)
-	if err != nil {
-		slog.Error("device/attach failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"device": device})
-}
-
-func (d *Daemon) handleDeviceDetach(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("device/detach", "volume", req.Volume)
-	if err := d.backend.DeviceDetach(r.Context(), req.Volume); err != nil {
-		slog.Error("device/detach failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDeviceSnapshot(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume   string `json:"volume"`
-		Snapshot string `json:"snapshot"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("device/snapshot", "volume", req.Volume, "snapshot", req.Snapshot)
-	if err := d.backend.DeviceSnapshot(r.Context(), req.Volume, req.Snapshot); err != nil {
-		slog.Error("device/snapshot failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"status": "ok"})
-}
-
-func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
-	if d.requireBackend(w) {
-		return
-	}
-	var req struct {
-		Volume string `json:"volume"`
-		Clone  string `json:"clone"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-
-	slog.Info("device/clone", "volume", req.Volume, "clone", req.Clone)
-	device, err := d.backend.DeviceClone(r.Context(), req.Volume, req.Clone)
-	if err != nil {
-		slog.Error("device/clone failed", "err", err)
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]string{"device": device})
 }
 
 // --- NBD ---
@@ -834,77 +521,6 @@ func (d *Daemon) startNBD(sockPath string) error {
 	}()
 
 	return nil
-}
-
-// --- Status ---
-
-func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
-	state := "running"
-	if d.shuttingDown() {
-		select {
-		case <-d.doneCh:
-			state = "stopped"
-		default:
-			state = "shutting_down"
-		}
-	}
-	status := map[string]any{
-		"state":    state,
-		"s3":       d.inst.URL(),
-		"mode":     string(d.inst.Mode),
-		"socket":   d.dir.Socket(d.inst.ProfileName),
-		"nbd_sock": d.nbdSock,
-		"log":      d.dir.Log(d.inst.ProfileName),
-	}
-	if d.backend != nil {
-		status["volumes"] = d.backend.VM().Volumes()
-		status["mounts"] = d.backend.Mounts()
-	}
-	if d.startupErr != "" {
-		status["error"] = d.startupErr
-	}
-	writeJSON(w, status)
-}
-
-func (d *Daemon) handleListVolumes(w http.ResponseWriter, r *http.Request) {
-	if d.backend == nil {
-		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
-		return
-	}
-	names, err := d.backend.VM().ListAllVolumes(r.Context())
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, map[string]any{"volumes": names})
-}
-
-// debugInfoProvider is implemented by storage2.volume and storage2.frozenVolume.
-type debugInfoProvider interface {
-	DebugInfo() storage2.VolumeDebugInfo
-}
-
-func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
-	if d.backend == nil {
-		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
-		return
-	}
-	name := r.URL.Query().Get("volume")
-	if name == "" {
-		writeError(w, 400, fmt.Errorf("missing volume parameter"))
-		return
-	}
-	vol := d.backend.VM().GetVolume(name)
-	if vol == nil {
-		writeError(w, 404, fmt.Errorf("volume %q not open", name))
-		return
-	}
-	dp, ok := vol.(debugInfoProvider)
-	if !ok {
-		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", name))
-		return
-	}
-	writeJSON(w, dp.DebugInfo())
 }
 
 // --- helpers ---

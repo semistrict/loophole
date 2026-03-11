@@ -2298,14 +2298,13 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	store := loophole.NewMemStore()
 	cacheDir := t.TempDir()
 
-	// Set FlushThreshold very high so the size-based flush check never triggers.
-	// The memlayer slot cap (maxMemtableSlots=16384) will be hit first.
-	// We use a smaller volume to keep the test fast — write maxMemtableSlots+100
-	// unique pages. Without backpressure, write 16385 would fail with
-	// "memlayer full".
+	// Use a small memtable slot cap so the test fills it quickly and
+	// exercises the backpressure path without writing 65K+ pages.
+	const testSlotCap = 512
 	config := Config{
-		FlushThreshold:  1 << 62, // effectively infinite
-		MaxFrozenTables: 2,
+		FlushThreshold:   1 << 62, // effectively infinite — force slot cap to trigger
+		MaxFrozenTables:  2,
+		MaxMemtableSlots: testSlotCap,
 	}
 	ctx := t.Context()
 
@@ -2317,8 +2316,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	t.Cleanup(func() { dc.Close() })
 	defer m.Close(ctx)
 
-	// maxMemtableSlots is 65536, so volume needs to be larger than that.
-	const numPages = maxMemtableSlots + 100
+	const numPages = testSlotCap + 100
 	v, err := m.NewVolume(loophole.CreateParams{Volume: "backpressure-test", Size: uint64(numPages+10) * PageSize})
 	if err != nil {
 		t.Fatal(err)
@@ -2337,8 +2335,8 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Check first page, last page, and a few around the memlayer boundary.
-	checkPages := []int{0, 1, maxMemtableSlots - 1, maxMemtableSlots, maxMemtableSlots + 1, numPages - 1}
+	// Check first page, last page, and a few around the slot cap boundary.
+	checkPages := []int{0, 1, testSlotCap - 1, testSlotCap, testSlotCap + 1, numPages - 1}
 	for _, i := range checkPages {
 		buf := make([]byte, PageSize)
 		if _, err := v.Read(ctx, buf, uint64(i)*PageSize); err != nil {

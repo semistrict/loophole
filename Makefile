@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-inprocess e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-inprocess e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4 libloophole.so libloophole.a
 
 .DEFAULT_GOAL := loophole
 
@@ -55,6 +55,16 @@ build: liblwext4
 # Build loophole binary
 loophole: liblwext4
 	go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-$(GOOS)-$(GOARCH) ./cmd/loophole
+
+# Build C shared library (libloophole.so / libloophole.dylib)
+CAPI_BUILDDIR := build/$(BUILD_PLATFORM)
+CAPI_TAGS := $(BUILDTAGS) nosqlite nolwext4
+libloophole.so: liblwext4
+	CGO_ENABLED=1 go build -tags "$(CAPI_TAGS)" -buildmode=c-shared -o $(CAPI_BUILDDIR)/libloophole.so ./capi
+
+# Build C static library (libloophole.a)
+libloophole.a: liblwext4
+	CGO_ENABLED=1 go build -tags "$(CAPI_TAGS)" -buildmode=c-archive -o $(CAPI_BUILDDIR)/libloophole.a ./capi
 
 # Build e2e test binary
 e2e.test: liblwext4
