@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y \
     iproute2 \
     curl \
     busybox-static \
+    libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/fusermount3 /usr/bin/fusermount
 

@@ -229,6 +229,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	data := bytes.Repeat([]byte("C"), 256)
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
+	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
 	cloneVol, err := env.vm.NewVolume(loophole.CreateParams{Volume: "clone", Size: 4096})
 	require.NoError(t, err)
@@ -254,6 +255,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 	data := bytes.Repeat([]byte("R"), 192)
 	_, err := env.f.WriteAt(data, 0)
 	require.NoError(t, err)
+	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
 	require.NoError(t, env.vol.Flush())
 
