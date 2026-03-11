@@ -8,6 +8,7 @@ import (
 	"io"
 	"sync"
 
+	_ "github.com/mattn/go-sqlite3" // link sqlite3 symbols for lhvfs.c
 	"github.com/psanford/sqlite3vfs"
 
 	"github.com/semistrict/loophole"

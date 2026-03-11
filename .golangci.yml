@@ -21,6 +21,7 @@ linters:
     paths:
       - third_party
       - old
+      - mmap
 
 formatters:
   enable:

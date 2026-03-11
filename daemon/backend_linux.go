@@ -41,7 +41,7 @@ func createBackend(vm loophole.VolumeManager, inst loophole.Instance, dir loopho
 		drivers[loophole.VolumeTypeExt4] = nbd
 		drivers[loophole.VolumeTypeXFS] = nbd
 	default: // ModeFUSE (blockdev)
-		fuse, err := fsbackend.NewFUSEDriver(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug"})
+		fuse, err := fsbackend.NewFUSEDriver(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug", EnableWriteback: true})
 		if err != nil {
 			slog.Warn("FUSE backend unavailable, filesystem operations will fail", "error", err)
 		} else {

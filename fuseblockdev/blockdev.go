@@ -44,6 +44,8 @@ type Server struct {
 type Options struct {
 	// Debug enables FUSE debug logging.
 	Debug bool
+	// EnableWriteback enables FUSE writeback caching for better write performance.
+	EnableWriteback bool
 }
 
 // Start mounts a FUSE filesystem at mountDir.
@@ -74,7 +76,7 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 			MaxBackground:   128,
 			DirectMount:     true,
 			Debug:           opts.Debug,
-			EnableWriteback: true,
+			EnableWriteback: opts.EnableWriteback,
 		},
 		EntryTimeout:    &cacheTTL,
 		AttrTimeout:     &cacheTTL,
