@@ -21,7 +21,7 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 
 	// Phase 1: Create a zygote volume, write some data, flush, freeze.
 	m1 := newTestManager(t, store, cfg)
-	v, err := m1.NewVolume(ctx, loophole.CreateParams{Volume: "zygote", Size: 16 * 1024 * 1024 * 1024})
+	v, err := m1.NewVolume(loophole.CreateParams{Volume: "zygote", Size: 16 * 1024 * 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 	m2 := newTestManager(t, store, cfg)
 
 	// Open the frozen zygote — should detect frozen meta, use frozenVolume.
-	zygote, err := m2.OpenVolume(ctx, "zygote")
+	zygote, err := m2.OpenVolume("zygote")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -49,16 +49,12 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 
 	// 1. Active memtable.
 	if mt != nil {
-		if entry, ok := mt.get(pageIdx); ok {
-			if entry.tombstone {
-				add("  [1] memtable: TOMBSTONE")
+		if slot, ok := mt.get(pageIdx); ok {
+			data, err := mt.readData(slot)
+			if err != nil {
+				add("  [1] memtable: err=%v", err)
 			} else {
-				data, err := mt.readData(entry)
-				if err != nil {
-					add("  [1] memtable: err=%v", err)
-				} else {
-					add("  [1] memtable: zero=%v hash=%s", isZero(data), hash(data))
-				}
+				add("  [1] memtable: zero=%v hash=%s", isZero(data), hash(data))
 			}
 		} else {
 			add("  [1] memtable: not present")
@@ -67,16 +63,12 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 
 	// 2. Frozen memtables (newest first).
 	for i := len(frozen) - 1; i >= 0; i-- {
-		if entry, ok := frozen[i].get(pageIdx); ok {
-			if entry.tombstone {
-				add("  [2] frozen[%d]: TOMBSTONE", i)
+		if slot, ok := frozen[i].get(pageIdx); ok {
+			data, err := frozen[i].readData(slot)
+			if err != nil {
+				add("  [2] frozen[%d]: err=%v", i, err)
 			} else {
-				data, err := frozen[i].readData(entry)
-				if err != nil {
-					add("  [2] frozen[%d]: err=%v", i, err)
-				} else {
-					add("  [2] frozen[%d]: zero=%v hash=%s", i, isZero(data), hash(data))
-				}
+				add("  [2] frozen[%d]: zero=%v hash=%s", i, isZero(data), hash(data))
 			}
 		}
 	}
@@ -95,9 +87,7 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	// 4. L0 files (newest first).
 	for i := len(l0entries) - 1; i >= 0; i-- {
 		l0e := &l0entries[i]
-		if l0HasTombstone(l0e, pageIdx) {
-			add("  [4] L0[%d] %s: TOMBSTONE", i, l0e.Key)
-		} else if l0HasPage(l0e, pageIdx) {
+		if l0HasPage(l0e, pageIdx) {
 			data, err := ly.readFromL0(ctx, l0e, pageIdx)
 			if err != nil {
 				add("  [4] L0[%d] %s: FOUND err=%v", i, l0e.Key, err)

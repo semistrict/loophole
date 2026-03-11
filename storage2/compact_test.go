@@ -1,6 +1,7 @@
 package storage2
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -134,7 +135,7 @@ func TestCompactL0PartialFailure(t *testing.T) {
 	})
 
 	// CompactL0 should fail partway through.
-	err = ly.CompactL0(ctx)
+	err = ly.CompactL0()
 	require.Error(t, err, "compaction should fail due to injected fault")
 
 	// Clear faults.
@@ -173,7 +174,7 @@ func TestCompactAfterClonePunchHole(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 
 	// Create parent, write data to several pages including page 5.
-	parent, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
+	parent, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
 	require.NoError(t, err)
 
 	for i := range 10 {
@@ -220,7 +221,7 @@ func TestCompactAfterClonePunchHole(t *testing.T) {
 
 	// Run compaction on clone's layer.
 	vol := clone.(*volume)
-	err = vol.layer.CompactL0(ctx)
+	err = vol.layer.CompactL0()
 	require.NoError(t, err)
 
 	// After compaction, L0 should be cleared.
@@ -262,7 +263,7 @@ func TestCompactTwiceAfterClonePunchHole(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 
 	// Create parent with data for page 5.
-	parent, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
+	parent, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
 	require.NoError(t, err)
 
 	for i := range 10 {
@@ -288,7 +289,7 @@ func TestCompactTwiceAfterClonePunchHole(t *testing.T) {
 	require.NoError(t, clone.Flush())
 
 	vol := clone.(*volume)
-	err = vol.layer.CompactL0(ctx)
+	err = vol.layer.CompactL0()
 	require.NoError(t, err)
 
 	// Verify page 5 has parent data in L1 after first compaction.
@@ -315,7 +316,7 @@ func TestCompactTwiceAfterClonePunchHole(t *testing.T) {
 	}
 	require.NoError(t, clone.Flush())
 
-	err = vol.layer.CompactL0(ctx)
+	err = vol.layer.CompactL0()
 	require.NoError(t, err)
 
 	// After second compaction, L0 should be cleared.
@@ -357,7 +358,7 @@ func TestCompactOverwritesClonedL1Block(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 
 	// Create parent, write data to several pages including page 5.
-	parent, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
+	parent, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 256 * PageSize})
 	require.NoError(t, err)
 
 	for i := range 10 {
@@ -379,7 +380,7 @@ func TestCompactOverwritesClonedL1Block(t *testing.T) {
 
 	// Compact parent → L1 block created containing page 5 (0xAA, 5).
 	parentVol := parent.(*volume)
-	err = parentVol.layer.CompactL0(ctx)
+	err = parentVol.layer.CompactL0()
 	require.NoError(t, err)
 
 	// Verify parent has page 5 data in L1.
@@ -409,7 +410,7 @@ func TestCompactOverwritesClonedL1Block(t *testing.T) {
 	require.NoError(t, parent.Flush())
 
 	// Second compaction on parent — overwrites L1 block with zeros for page 5.
-	err = parentVol.layer.CompactL0(ctx)
+	err = parentVol.layer.CompactL0()
 	require.NoError(t, err)
 
 	// Parent should see zeros for page 5 (punched).
@@ -493,7 +494,7 @@ func TestCompactL0DropsConcurrentTombstone(t *testing.T) {
 	// Start CompactL0 in background goroutine.
 	compactDone := make(chan error, 1)
 	go func() {
-		compactDone <- ly.CompactL0(ctx)
+		compactDone <- ly.CompactL0()
 	}()
 
 	// Wait for CompactL0 to reach its first L1 block upload (after snapshot).
@@ -524,6 +525,76 @@ func TestCompactL0DropsConcurrentTombstone(t *testing.T) {
 		"page 0 should be zeros after punch — compaction must not drop concurrent L0 entries")
 }
 
+// TestCompactL0CancelledByContext verifies that compaction respects context
+// cancellation: it bails out early, leaves L0 entries intact, and data remains
+// readable. This is the shutdown path — Close() cancels the periodic flush
+// goroutine's context, and compaction should stop promptly.
+func TestCompactL0CancelledByContext(t *testing.T) {
+	readCtx := t.Context()
+	store := loophole.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold:  PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+		L0PagesMax:      10,
+	}
+
+	ly, err := openLayer(readCtx, store, "test-layer", cfg, nil, t.TempDir())
+	require.NoError(t, err)
+	defer ly.Close()
+
+	// Write pages across two different blocks so compaction has multiple
+	// block groups to iterate over.
+	expected := make(map[uint64][]byte)
+	for i := range 5 {
+		page := make([]byte, PageSize)
+		page[0] = 0xAA
+		page[1] = byte(i)
+		offset := uint64(i) * PageSize
+		require.NoError(t, ly.Write(page, offset))
+		expected[offset] = page
+	}
+	for i := range 5 {
+		page := make([]byte, PageSize)
+		page[0] = 0xBB
+		page[1] = byte(i)
+		offset := uint64(BlockPages+i) * PageSize // block 1
+		require.NoError(t, ly.Write(page, offset))
+		expected[offset] = page
+	}
+	require.NoError(t, ly.Flush())
+
+	ly.mu.RLock()
+	l0Before := len(ly.index.L0)
+	ly.mu.RUnlock()
+	require.Greater(t, l0Before, 0)
+
+	// Cancel the context before starting compaction.
+	ctx, cancel := context.WithCancel(readCtx)
+	cancel()
+
+	ly.compactMu.Lock()
+	err = ly.compactL0Locked(ctx, false)
+	ly.compactMu.Unlock()
+	require.ErrorIs(t, err, context.Canceled)
+
+	// L0 entries must be unchanged — compaction bailed out before swapping.
+	ly.mu.RLock()
+	l0After := len(ly.index.L0)
+	ly.mu.RUnlock()
+	assert.Equal(t, l0Before, l0After, "L0 entries should be unchanged after cancelled compaction")
+
+	// All data must still be readable.
+	for offset, exp := range expected {
+		buf := make([]byte, PageSize)
+		n, readErr := ly.Read(readCtx, buf, offset)
+		require.NoError(t, readErr, "read at offset %d", offset)
+		assert.Equal(t, PageSize, n)
+		assert.Equal(t, exp, buf, "data mismatch at offset %d", offset)
+	}
+}
+
 // TestSnapshotS3OpCount measures the exact number of S3 operations triggered
 // by a single Snapshot call (which internally does branch + relayer). This
 // helps us understand why the simulation fuzzer is slow with large configs.
@@ -535,11 +606,10 @@ func TestSnapshotS3OpCount(t *testing.T) {
 		FlushInterval:   -1, // no background flush
 		L0PagesMax:      1000,
 	}
-	ctx := t.Context()
 	m := newTestManager(t, store, cfg)
 
 	// Create volume and write one page of data.
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "root", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "root", Size: 1024 * 1024})
 	require.NoError(t, err)
 
 	page := make([]byte, PageSize)

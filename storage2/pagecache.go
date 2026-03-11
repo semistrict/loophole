@@ -2,10 +2,8 @@ package storage2
 
 import (
 	"log/slog"
-	"math"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -20,29 +18,41 @@ type cacheKey struct {
 	PageIdx PageIdx
 }
 
-type entry struct {
-	key       cacheKey
-	arenaSlot int
-	credits   int32
-	ringIdx   int
-	pinCount  atomic.Int32
+// cacheStore is the storage backend for PageCache.
+type cacheStore interface {
+	// Arena
+	ReadSlot(slot int) ([]byte, error)
+	WriteSlot(slot int, data []byte) error
+	AllocArena(maxSlots int) error
+	ArenaSlots() int
+
+	// Index
+	LookupPage(key cacheKey) (slot int, ok bool, err error)
+	InsertPage(key cacheKey, slot int) error
+	DeletePage(key cacheKey) (slot int, err error)
+	BumpCredits(keys []cacheKey) error
+	AgeCredits() error
+	EvictLow(count int) (freedSlots []int, err error)
+	CountPages() (int, error)
+	UsedSlots() ([]int, error)
+
+	// Disk
+	FreeSpace() int64
+	MinReserve() int64
+	Close() error
 }
 
 // PageCache is a daemon-wide shared on-disk cache for fixed-size pages.
-// The in-memory index is process-local, so cache contents are discarded on startup.
+// The index is stored in SQLite (WAL mode) so multiple processes can share
+// the cache and pages persist across restarts.
 type PageCache struct {
-	mu        sync.Mutex
-	store     cacheStore
-	usedBytes int64
-	budget    int64
-
+	mu         sync.Mutex
+	store      cacheStore
+	usedBytes  int64
+	budget     int64
 	arenaSlots int
 	freeSlots  []int
-
-	entries    map[cacheKey]*entry
-	ring       []*entry
-	tombstones int
-	clockHand  int
+	accessBuf  []cacheKey
 	closed     bool
 	stopCh     chan struct{}
 	doneCh     chan struct{}
@@ -63,10 +73,9 @@ func NewPageCache(dir string) (*PageCache, error) {
 
 func newPageCacheWithStore(store cacheStore) (*PageCache, error) {
 	c := &PageCache{
-		store:   store,
-		entries: make(map[cacheKey]*entry),
-		stopCh:  make(chan struct{}),
-		doneCh:  make(chan struct{}),
+		store:  store,
+		stopCh: make(chan struct{}),
+		doneCh: make(chan struct{}),
 	}
 
 	c.budget = c.computeBudgetLocked()
@@ -74,52 +83,63 @@ func newPageCacheWithStore(store cacheStore) (*PageCache, error) {
 	if err := c.store.AllocArena(c.arenaSlots); err != nil {
 		return nil, err
 	}
-	c.freeSlots = make([]int, c.arenaSlots)
-	for i := range c.arenaSlots {
-		c.freeSlots[i] = c.arenaSlots - 1 - i
+	c.arenaSlots = c.store.ArenaSlots()
+
+	if err := c.rebuildFreeSlotsLocked(); err != nil {
+		return nil, err
 	}
 
 	go c.runBudgetLoop()
 	return c, nil
 }
 
+func (c *PageCache) rebuildFreeSlotsLocked() error {
+	usedSlots, err := c.store.UsedSlots()
+	if err != nil {
+		return err
+	}
+	used := make(map[int]struct{}, len(usedSlots))
+	for _, s := range usedSlots {
+		used[s] = struct{}{}
+	}
+	c.freeSlots = c.freeSlots[:0]
+	for i := c.arenaSlots - 1; i >= 0; i-- {
+		if _, ok := used[i]; !ok {
+			c.freeSlots = append(c.freeSlots, i)
+		}
+	}
+	c.usedBytes = int64(len(usedSlots)) * PageSize
+	return nil
+}
+
 func (c *PageCache) GetPage(key cacheKey) []byte {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
-	e := c.entries[key]
-	if e == nil {
+	if c.closed {
 		return nil
 	}
-	c.bumpCreditsLocked(e)
-	data, err := c.store.ReadSlot(e.arenaSlot)
+
+	slot, ok, err := c.store.LookupPage(key)
+	if !ok || err != nil {
+		return nil
+	}
+	c.accessBuf = append(c.accessBuf, key)
+	data, err := c.store.ReadSlot(slot)
 	if err != nil || len(data) != PageSize {
 		return nil
 	}
 	return data
 }
 
-// GetPagePinned returns a pinned zero-copy slice into the arena mmap.
-// The returned release function MUST be called when the caller is done with the data.
+// GetPagePinned returns a copy of the cached page data.
+// The returned release function is a no-op (kept for API compatibility).
 // Returns (nil, nil) on cache miss.
 func (c *PageCache) GetPagePinned(key cacheKey) ([]byte, func()) {
-	c.mu.Lock()
-	e := c.entries[key]
-	if e == nil {
-		c.mu.Unlock()
+	data := c.GetPage(key)
+	if data == nil {
 		return nil, nil
 	}
-	c.bumpCreditsLocked(e)
-	e.pinCount.Add(1)
-	slot := e.arenaSlot
-	c.mu.Unlock()
-
-	data, err := c.store.ReadSlotPinned(slot)
-	if err != nil {
-		e.pinCount.Add(-1)
-		return nil, nil
-	}
-	return data, func() { e.pinCount.Add(-1) }
+	return data, func() {}
 }
 
 func (c *PageCache) PutPage(key cacheKey, data []byte) {
@@ -133,18 +153,18 @@ func (c *PageCache) PutPage(key cacheKey, data []byte) {
 		return
 	}
 
-	if e := c.entries[key]; e != nil {
-		if err := c.store.WriteSlot(e.arenaSlot, data); err != nil {
+	if slot, ok, _ := c.store.LookupPage(key); ok {
+		if err := c.store.WriteSlot(slot, data); err != nil {
 			return
 		}
-		c.bumpCreditsLocked(e)
+		c.accessBuf = append(c.accessBuf, key)
 		return
 	}
 
 	if !c.ensureCapacityLocked(PageSize) {
 		return
 	}
-	slot, ok := c.ensurePageSlotLocked()
+	slot, ok := c.allocSlotLocked()
 	if !ok {
 		return
 	}
@@ -152,24 +172,24 @@ func (c *PageCache) PutPage(key cacheKey, data []byte) {
 		c.freeSlots = append(c.freeSlots, slot)
 		return
 	}
-
-	c.replaceEntryLocked(key, &entry{
-		key:       key,
-		arenaSlot: slot,
-		credits:   1,
-		ringIdx:   -1,
-	})
+	if err := c.store.InsertPage(key, slot); err != nil {
+		// UNIQUE violation (another process) or other error — give back the slot.
+		c.freeSlots = append(c.freeSlots, slot)
+		return
+	}
+	c.usedBytes += PageSize
 }
 
 func (c *PageCache) DeletePage(key cacheKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	e := c.entries[key]
-	if e == nil {
+	slot, err := c.store.DeletePage(key)
+	if err != nil {
 		return
 	}
-	c.removeEntryLocked(e)
+	c.usedBytes -= PageSize
+	c.freeSlots = append(c.freeSlots, slot)
 }
 
 func (c *PageCache) Close() error {
@@ -185,9 +205,8 @@ func (c *PageCache) Close() error {
 	<-c.doneCh
 
 	c.mu.Lock()
-	c.entries = nil
-	c.ring = nil
 	c.freeSlots = nil
+	c.accessBuf = nil
 	c.mu.Unlock()
 
 	return c.store.Close()
@@ -206,19 +225,24 @@ func (c *PageCache) runBudgetLoop() {
 				c.mu.Unlock()
 				return
 			}
+			c.flushCreditsLocked()
+			_ = c.store.AgeCredits()
+			_ = c.rebuildFreeSlotsLocked()
+
 			oldBudget := c.budget
-			oldEntries := len(c.entries)
 			oldUsed := c.usedBytes
+			oldCount, _ := c.store.CountPages()
 			c.budget = c.computeBudgetLocked()
 			c.evictUntilWithinBudgetLocked()
+			newCount, _ := c.store.CountPages()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
 			slog.Info("pagecache: budget adjusted",
 				"budget_mb", c.budget>>20,
 				"old_budget_mb", oldBudget>>20,
 				"used_mb", c.usedBytes>>20,
-				"entries", len(c.entries),
-				"evicted", oldEntries-len(c.entries),
+				"entries", newCount,
+				"evicted", oldCount-newCount,
 				"freed_mb", (oldUsed-c.usedBytes)>>20,
 				"free_space_mb", c.store.FreeSpace()>>20,
 				"heap_mb", m.HeapAlloc>>20,
@@ -278,140 +302,45 @@ func (c *PageCache) evictUntilWithinBudgetLocked() {
 	c.evictLocked(0)
 }
 
+func (c *PageCache) flushCreditsLocked() {
+	if len(c.accessBuf) > 0 {
+		_ = c.store.BumpCredits(c.accessBuf)
+		c.accessBuf = c.accessBuf[:0]
+	}
+}
+
 func (c *PageCache) evictLocked(delta int64) {
+	c.flushCreditsLocked()
 	for c.usedBytes+delta > c.budget {
-		if len(c.entries) == 0 || len(c.ring) == 0 {
+		count := int((c.usedBytes + delta - c.budget) / PageSize)
+		if count < 1 {
+			count = 1
+		}
+		freed, err := c.store.EvictLow(count)
+		if err != nil || len(freed) == 0 {
 			return
 		}
-		if !c.evictOneLocked() {
-			return
-		}
+		c.freeSlots = append(c.freeSlots, freed...)
+		c.usedBytes -= int64(len(freed)) * PageSize
 	}
 }
 
-func (c *PageCache) evictOneLocked() bool {
-	scanned := 0
-	for len(c.ring) > 0 && scanned < len(c.ring)*2 {
-		if c.clockHand >= len(c.ring) {
-			c.clockHand = 0
-		}
-		e := c.ring[c.clockHand]
-		c.clockHand++
-		scanned++
-		if e == nil {
-			continue
-		}
-
-		if e.pinCount.Load() > 0 {
-			continue
-		}
-
-		if e.credits <= 0 {
-			c.removeEntryLocked(e)
-			return true
-		}
-
-		e.credits--
-	}
-
-	for _, e := range c.ring {
-		if e == nil {
-			continue
-		}
-		if e.pinCount.Load() > 0 {
-			continue
-		}
-		c.removeEntryLocked(e)
-		return true
-	}
-	return false
-}
-
-func (c *PageCache) takeFreeSlotLocked() (int, bool) {
-	n := len(c.freeSlots)
-	if n == 0 {
-		return 0, false
-	}
-	slot := c.freeSlots[n-1]
-	c.freeSlots = c.freeSlots[:n-1]
-	return slot, true
-}
-
-func (c *PageCache) ensurePageSlotLocked() (int, bool) {
-	if slot, ok := c.takeFreeSlotLocked(); ok {
+func (c *PageCache) allocSlotLocked() (int, bool) {
+	if n := len(c.freeSlots); n > 0 {
+		slot := c.freeSlots[n-1]
+		c.freeSlots = c.freeSlots[:n-1]
 		return slot, true
 	}
-	for len(c.entries) > 0 {
-		if !c.evictOneLocked() {
-			break
-		}
-		if slot, ok := c.takeFreeSlotLocked(); ok {
-			return slot, true
-		}
+	// No free slots — flush credits and evict one page.
+	c.flushCreditsLocked()
+	freed, err := c.store.EvictLow(1)
+	if err != nil || len(freed) == 0 {
+		return 0, false
 	}
-	return 0, false
-}
-
-func (c *PageCache) replaceEntryLocked(key cacheKey, newEntry *entry) {
-	if old := c.entries[key]; old != nil {
-		c.removeEntryLocked(old)
+	c.usedBytes -= int64(len(freed)) * PageSize
+	slot := freed[0]
+	if len(freed) > 1 {
+		c.freeSlots = append(c.freeSlots, freed[1:]...)
 	}
-	newEntry.ringIdx = len(c.ring)
-	c.ring = append(c.ring, newEntry)
-	c.entries[key] = newEntry
-	c.usedBytes += PageSize
-}
-
-func (c *PageCache) removeEntryLocked(e *entry) {
-	if current := c.entries[e.key]; current != e {
-		return
-	}
-	delete(c.entries, e.key)
-	c.usedBytes -= PageSize
-	c.freeSlots = append(c.freeSlots, e.arenaSlot)
-	if e.ringIdx >= 0 && e.ringIdx < len(c.ring) && c.ring[e.ringIdx] == e {
-		c.ring[e.ringIdx] = nil
-		c.tombstones++
-	}
-	if len(c.ring) > 0 && c.tombstones*4 > len(c.ring) {
-		c.compactRingLocked()
-	}
-}
-
-func (c *PageCache) compactRingLocked() {
-	if len(c.ring) == 0 {
-		c.clockHand = 0
-		c.tombstones = 0
-		return
-	}
-	newRing := make([]*entry, 0, len(c.ring)-c.tombstones)
-	var current *entry
-	currentIdx := c.clockHand
-	if currentIdx >= len(c.ring) {
-		currentIdx = 0
-	}
-	if len(c.ring) > 0 {
-		current = c.ring[currentIdx]
-	}
-	for _, e := range c.ring {
-		if e == nil {
-			continue
-		}
-		e.ringIdx = len(newRing)
-		newRing = append(newRing, e)
-	}
-	c.ring = newRing
-	c.tombstones = 0
-	c.clockHand = 0
-	if current != nil {
-		if idx := current.ringIdx; idx >= 0 && idx < len(c.ring) {
-			c.clockHand = idx
-		}
-	}
-}
-
-func (c *PageCache) bumpCreditsLocked(e *entry) {
-	if e.credits < math.MaxInt32 {
-		e.credits++
-	}
+	return slot, true
 }

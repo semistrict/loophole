@@ -86,9 +86,23 @@ func (c *Client) EnsureDaemon() error {
 // --- Chroot socket methods ---
 // These talk to the restricted /.loophole socket inside a chroot.
 
-// Flush flushes the volume to S3 (chroot socket: POST /flush).
+// Flush flushes the volume to S3.
 func (c *Client) Flush(ctx context.Context) error {
 	_, err := c.rpc(ctx, "POST", "/flush", nil)
+	return err
+}
+
+// Compact triggers L0→L1 compaction on the volume. When called on the chroot
+// socket, the volume is implicit. When called on the daemon socket, pass the
+// volume name via CompactVolume.
+func (c *Client) Compact(ctx context.Context) error {
+	_, err := c.rpc(ctx, "POST", "/compact", nil)
+	return err
+}
+
+// CompactVolume triggers L0→L1 compaction on a named volume (daemon socket).
+func (c *Client) CompactVolume(ctx context.Context, volume string) error {
+	_, err := c.rpc(ctx, "POST", "/compact", map[string]string{"volume": volume})
 	return err
 }
 

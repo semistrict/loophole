@@ -31,8 +31,8 @@ type VolumeInfo struct {
 
 // VolumeManager manages the lifecycle of volumes.
 type VolumeManager interface {
-	NewVolume(ctx context.Context, p CreateParams) (Volume, error)
-	OpenVolume(ctx context.Context, name string) (Volume, error)
+	NewVolume(p CreateParams) (Volume, error)
+	OpenVolume(name string) (Volume, error)
 	GetVolume(name string) Volume
 	Volumes() []string
 	ListAllVolumes(ctx context.Context) ([]string, error)

@@ -84,7 +84,14 @@ func (f *FUSEDriver) Unmount(ctx context.Context, h fuseMount) error {
 }
 
 func (f *FUSEDriver) Close(ctx context.Context) error {
-	return f.fuse.Unmount()
+	if err := f.fuse.Unmount(); err != nil {
+		// fusermount3 can fail if a loop device or other consumer still
+		// holds a FUSE file descriptor open. Fall back to lazy unmount
+		// so the daemon can exit cleanly.
+		slog.Warn("fuse unmount failed, trying lazy unmount", "dir", f.fuse.MountDir, "error", err)
+		fuseblockdev.UnmountStale(f.fuse.MountDir)
+	}
+	return nil
 }
 
 func (f *FUSEDriver) Freeze(ctx context.Context, h fuseMount) error {

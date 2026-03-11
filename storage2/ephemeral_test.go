@@ -24,7 +24,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 128 * 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 128 * 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +98,7 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 128 * 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 128 * 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}

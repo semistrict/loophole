@@ -100,7 +100,8 @@ func (m *Manager) SetOnRelease(fn func(ctx context.Context, volumeName string)) 
 	m.onRelease = fn
 }
 
-func (m *Manager) NewVolume(ctx context.Context, p loophole.CreateParams) (loophole.Volume, error) {
+func (m *Manager) NewVolume(p loophole.CreateParams) (loophole.Volume, error) {
+	ctx := context.Background()
 	name := p.Volume
 	size := p.Size
 	volType := p.Type
@@ -130,10 +131,10 @@ func (m *Manager) NewVolume(ctx context.Context, p loophole.CreateParams) (looph
 		return nil, err
 	}
 
-	return m.openVolume(ctx, name, ref)
+	return m.openVolume(name, ref)
 }
 
-func (m *Manager) OpenVolume(ctx context.Context, name string) (loophole.Volume, error) {
+func (m *Manager) OpenVolume(name string) (loophole.Volume, error) {
 	m.mu.Lock()
 	if v, ok := m.volumes[name]; ok {
 		m.mu.Unlock()
@@ -150,11 +151,11 @@ func (m *Manager) OpenVolume(ctx context.Context, name string) (loophole.Volume,
 		}
 		m.mu.Unlock()
 
-		ref, err := m.getVolumeRef(ctx, name)
+		ref, err := m.getVolumeRef(context.Background(), name)
 		if err != nil {
 			return nil, fmt.Errorf("resolve volume %q: %w", name, err)
 		}
-		return m.openVolume(ctx, name, ref)
+		return m.openVolume(name, ref)
 	})
 	if err != nil {
 		return nil, err
@@ -299,15 +300,22 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.volumes = make(map[string]managedVolume)
 	m.mu.Unlock()
 
+	slog.Info("manager close: closing volumes", "count", len(vols))
 	for _, v := range vols {
+		slog.Info("manager close: volume", "volume", v.Name(), "readOnly", v.isReadOnly())
 		if !v.isReadOnly() {
+			slog.Info("manager close: flushing", "volume", v.Name())
 			if err := v.flush(); err != nil {
 				slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
 			}
+			slog.Info("manager close: releasing lease", "volume", v.Name())
 			m.releaseVolumeLease(ctx, v.Name())
 		}
+		slog.Info("manager close: closing volume", "volume", v.Name())
 		v.close()
+		slog.Info("manager close: volume closed", "volume", v.Name())
 	}
+	slog.Info("manager close: closing lease manager")
 	if err := m.lease.Close(ctx); err != nil {
 		return err
 	}
@@ -370,8 +378,9 @@ func (m *Manager) getVolumeRef(ctx context.Context, name string) (volumeRef, err
 	return ref, nil
 }
 
-func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (managedVolume, error) {
+func (m *Manager) openVolume(name string, ref volumeRef) (managedVolume, error) {
 	// Check object metadata on index.json (HEAD, no body) to see if frozen.
+	ctx := context.Background()
 	layerStore := m.store.At("layers/" + ref.LayerID)
 	meta, _ := layerStore.HeadMeta(ctx, "index.json")
 	if meta["frozen_at"] != "" {
@@ -400,7 +409,9 @@ func (m *Manager) openVolume(ctx context.Context, name string, ref volumeRef) (m
 	ly.writeLeaseSeq = writeLeaseSeq
 
 	if m.config.FlushInterval > 0 {
-		ly.startPeriodicFlush(ctx)
+		// Use a background context — ctx may be a short-lived HTTP request
+		// context that gets cancelled when the handler returns.
+		ly.startPeriodicFlush(context.Background())
 	}
 
 	v := newVolume(name, ref.Size, ref.Type, ly, m)

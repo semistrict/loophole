@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/util"
 )
 
 // Driver is the pluggable interface that backends implement.
@@ -90,7 +91,7 @@ type Service interface {
 	Snapshot(ctx context.Context, mountpoint, name string) error
 	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
 	MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error
-	FreezeVolume(ctx context.Context, volume string) error
+	FreezeVolume(ctx context.Context, volume string, compact bool) error
 	Thaw(ctx context.Context, mountpoint string) error
 	FS(mountpoint string) (FS, error)
 	// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
@@ -107,6 +108,7 @@ type Service interface {
 	IsMounted(mountpoint string) bool
 	IsVolumeMounted(volume string) bool
 	VolumeAt(mountpoint string) string
+	MountpointForVolume(volume string) string
 	Mounts() map[string]string
 	VM() loophole.VolumeManager
 	Close(ctx context.Context) error
@@ -234,7 +236,7 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 		return err
 	}
 	p.Type = volType
-	vol, err := b.vm.NewVolume(ctx, p)
+	vol, err := b.vm.NewVolume(p)
 	if err != nil {
 		return err
 	}
@@ -264,7 +266,7 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 // Returns an error if the volume is mounted at a different mountpoint.
 func (b *Backend) Mount(ctx context.Context, volume string, mountpoint string) error {
 	slog.Info("backend: opening volume for mount", "volume", volume, "mountpoint", mountpoint)
-	vol, err := b.vm.OpenVolume(ctx, volume)
+	vol, err := b.vm.OpenVolume(volume)
 	if err != nil {
 		return err
 	}
@@ -339,8 +341,8 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 // vol.Freeze() fires before_freeze hooks (which flush the FS cache),
 // then persists the volume. If mounted, the mount is explicitly torn
 // down afterward (chroot teardown, FS unmount, volume ref release).
-func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
-	vol, err := b.vm.OpenVolume(ctx, volume)
+func (b *Backend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
+	vol, err := b.vm.OpenVolume(volume)
 	if err != nil {
 		return fmt.Errorf("open volume: %w", err)
 	}
@@ -348,13 +350,26 @@ func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
 		return fmt.Errorf("volume %q is already frozen", volume)
 	}
 
-	slog.Info("freeze: persisting volume", "volume", volume)
-	if err := vol.Freeze(); err != nil {
-		return err
+	slog.Info("freeze: persisting volume", "volume", volume, "compact", compact)
+	if compact {
+		type freezeCompactor interface {
+			FreezeWithCompact() error
+		}
+		fc, ok := vol.(freezeCompactor)
+		if !ok {
+			return fmt.Errorf("volume %q does not support compact-freeze", volume)
+		}
+		if err := fc.FreezeWithCompact(); err != nil {
+			return err
+		}
+	} else {
+		if err := vol.Freeze(); err != nil {
+			return err
+		}
 	}
 
 	// Explicitly tear down mount if mounted.
-	if mp := b.mountpointForVolume(volume); mp != "" {
+	if mp := b.MountpointForVolume(volume); mp != "" {
 		b.mu.Lock()
 		entry, ok := b.mounts[mp]
 		b.mu.Unlock()
@@ -366,8 +381,8 @@ func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
 	return nil
 }
 
-// mountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
-func (b *Backend) mountpointForVolume(volume string) string {
+// MountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
+func (b *Backend) MountpointForVolume(volume string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for mp, entry := range b.mounts {
@@ -455,13 +470,18 @@ func (b *Backend) FSForVolume(ctx context.Context, volume string) (FS, error) {
 
 // DeviceAttach opens an existing volume and returns its block device path.
 // No filesystem is mounted — the caller manages the raw device.
+// Acquires a ref on the volume; DeviceDetach releases it.
 func (b *Backend) DeviceAttach(ctx context.Context, volume string) (string, error) {
-	vol, err := b.vm.OpenVolume(ctx, volume)
+	vol, err := b.vm.OpenVolume(volume)
 	if err != nil {
 		return "", err
 	}
+	if err := vol.AcquireRef(); err != nil {
+		return "", fmt.Errorf("acquire ref for device attach: %w", err)
+	}
 	driver, err := b.driverFor(vol.VolumeType())
 	if err != nil {
+		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
 		return "", err
 	}
 	if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
@@ -654,19 +674,23 @@ func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
 	}
 
 	// 1. Quiesce FS (manual — shutdown doesn't use before_freeze hooks).
+	slog.Info("closeMount: freezing", "mountpoint", mountpoint, "volume", volume)
 	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
 		slog.Warn("freeze failed during close", "mountpoint", mountpoint, "error", err)
 	}
 
 	// 2. Flush to S3.
+	slog.Info("closeMount: flushing", "mountpoint", mountpoint, "volume", volume)
 	if err := entry.vol.Flush(); err != nil {
 		slog.Warn("flush failed during close", "volume", volume, "error", err)
 	}
 
 	// 3. Tear down mount (chroot teardown, FS unmount, map cleanup).
+	slog.Info("closeMount: unmounting", "mountpoint", mountpoint, "volume", volume)
 	b.doUnmount(ctx, mountpoint, entry)
 
 	// 4. Release ref (may trigger volume destruction which flushes again).
+	slog.Info("closeMount: releasing ref", "mountpoint", mountpoint, "volume", volume)
 	if err := entry.vol.ReleaseRef(); err != nil {
 		slog.Warn("release ref failed during close", "volume", volume, "error", err)
 	}
@@ -691,6 +715,7 @@ func (b *Backend) MountOpen(ctx context.Context, vol loophole.Volume, mountpoint
 }
 
 // mountVolume mounts an already-open *Volume. Used by Mount, Clone, and MountOpen.
+// Acquires a ref on the volume; Unmount releases it.
 func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoint string) error {
 	slog.Debug("backend: mountVolume start", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
@@ -703,8 +728,13 @@ func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoi
 	}
 	b.mu.Unlock()
 
+	if err := vol.AcquireRef(); err != nil {
+		return fmt.Errorf("acquire ref for mount: %w", err)
+	}
+
 	driver, err := b.driverFor(vol.VolumeType())
 	if err != nil {
+		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
 		return err
 	}
 	if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
@@ -718,6 +748,7 @@ func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoi
 		if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
 			vr.UnregisterVolume(vol.Name())
 		}
+		util.SafeRun(vol.ReleaseRef, "release ref after mount failure")
 		return err
 	}
 

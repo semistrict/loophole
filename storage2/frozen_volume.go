@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -193,6 +194,7 @@ func (v *frozenVolume) AcquireRef() error {
 			return fmt.Errorf("volume %q is closed", v.name)
 		}
 		if v.refs.CompareAndSwap(n, n+1) {
+			slog.Debug("frozenVolume: AcquireRef", "volume", v.name, "refsAfter", n+1)
 			return nil
 		}
 	}
@@ -200,7 +202,9 @@ func (v *frozenVolume) AcquireRef() error {
 }
 
 func (v *frozenVolume) ReleaseRef() error {
-	if v.refs.Add(-1) == 0 {
+	newRefs := v.refs.Add(-1)
+	slog.Debug("frozenVolume: ReleaseRef", "volume", v.name, "refsAfter", newRefs)
+	if newRefs == 0 {
 		v.fireBeforeClose()
 		v.manager.closeVolume(v.name)
 		v.layer.Close()

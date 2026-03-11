@@ -241,7 +241,7 @@ func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
 		return nil, fmt.Errorf("create clone ref: %w", err)
 	}
 
-	return v.manager.OpenVolume(ctx, cloneName)
+	return v.manager.OpenVolume(cloneName)
 }
 
 func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (uint64, error) {
@@ -266,7 +266,29 @@ func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (u
 	return copied, nil
 }
 
+// CompactL0 flushes the memtable and compacts all L0 entries into L1/L2
+// blocks regardless of the L0 threshold.
+func (v *volume) CompactL0() error {
+	v.mu.RLock()
+	ly := v.layer
+	v.mu.RUnlock()
+	if err := ly.Flush(); err != nil {
+		return fmt.Errorf("flush before compact: %w", err)
+	}
+	return ly.ForceCompactL0()
+}
+
 func (v *volume) Freeze() error {
+	return v.freeze(false)
+}
+
+// FreezeWithCompact freezes the volume with L0→L1 compaction before marking
+// it frozen. Order: fire hooks → stop writes → flush → compact → mark frozen.
+func (v *volume) FreezeWithCompact() error {
+	return v.freeze(true)
+}
+
+func (v *volume) freeze(compact bool) error {
 	if v.readOnly.Load() {
 		return nil
 	}
@@ -281,6 +303,13 @@ func (v *volume) Freeze() error {
 	slog.Info("freeze: flushing layer", "volume", v.name)
 	if err := v.layer.Flush(); err != nil {
 		return err
+	}
+	if compact {
+		slog.Info("freeze: compacting L0→L1", "volume", v.name)
+		if err := v.layer.ForceCompactL0(); err != nil {
+			return fmt.Errorf("compact before freeze: %w", err)
+		}
+		slog.Info("freeze: compaction complete", "volume", v.name)
 	}
 	slog.Info("freeze: flush complete, checking metadata", "volume", v.name)
 	ctx := context.Background()
@@ -320,6 +349,7 @@ func (v *volume) AcquireRef() error {
 			return fmt.Errorf("volume %q is closed", v.name)
 		}
 		if v.refs.CompareAndSwap(n, n+1) {
+			slog.Debug("volume: AcquireRef", "volume", v.name, "refsAfter", n+1)
 			return nil
 		}
 	}
@@ -327,7 +357,9 @@ func (v *volume) AcquireRef() error {
 }
 
 func (v *volume) ReleaseRef() error {
-	if v.refs.Add(-1) == 0 {
+	newRefs := v.refs.Add(-1)
+	slog.Debug("volume: ReleaseRef", "volume", v.name, "refsAfter", newRefs)
+	if newRefs == 0 {
 		return v.destroy()
 	}
 	return nil

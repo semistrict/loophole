@@ -22,7 +22,7 @@ func testManager(t *testing.T) loophole.VolumeManager {
 func testVolume(t *testing.T, size uint64) loophole.Volume {
 	t.Helper()
 	m := testManager(t)
-	vol, err := m.NewVolume(t.Context(), loophole.CreateParams{Volume: t.Name(), Size: size})
+	vol, err := m.NewVolume(loophole.CreateParams{Volume: t.Name(), Size: size})
 	require.NoError(t, err)
 	t.Cleanup(func() { vol.ReleaseRef() })
 	return vol

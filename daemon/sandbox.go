@@ -1,3 +1,5 @@
+//go:build linux
+
 package daemon
 
 import (
@@ -13,6 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/semistrict/loophole/fsbackend"
 )
@@ -55,29 +59,24 @@ func prepareChrootEnv(mountpoint string, backend fsbackend.Service) {
 		return
 	}
 
-	// Bind mounts: /proc, /sys, /dev, /dev/pts
-	binds := []struct{ src, dst, fstype, opts string }{
+	// Bind mounts: /proc, /sys, /dev, /dev/pts, /dev/shm.
+	// /dev uses a plain bind (NOT rbind) to avoid propagating host sub-mounts
+	// (shm, hugepages, mqueue, host devpts) which would prevent clean unmount.
+	binds := []struct {
+		src, dst, fstype, data string
+		flags                  uintptr
+	}{
 		{src: "proc", dst: "proc", fstype: "proc"},
-		{src: "/sys", dst: "sys"},
-		{src: "/dev", dst: "dev", opts: "rbind"},
-		{src: "devpts", dst: "dev/pts", fstype: "devpts", opts: "newinstance,ptmxmode=0666"},
+		{src: "/sys", dst: "sys", flags: unix.MS_BIND},
+		{src: "/dev", dst: "dev", flags: unix.MS_BIND},
+		{src: "devpts", dst: "dev/pts", fstype: "devpts", data: "newinstance,ptmxmode=0666"},
+		{src: "tmpfs", dst: "dev/shm", fstype: "tmpfs", flags: unix.MS_NOSUID | unix.MS_NODEV},
 	}
 	for _, b := range binds {
 		dst := filepath.Join(mountpoint, b.dst)
 		_ = os.MkdirAll(dst, 0o755)
-		args := []string{"-n"}
-		if b.fstype != "" {
-			args = append(args, "-t", b.fstype)
-		} else {
-			args = append(args, "--bind")
-		}
-		if b.opts != "" {
-			args = append(args, "-o", b.opts)
-		}
-		args = append(args, b.src, dst)
-		if out, err := exec.Command("mount", args...).CombinedOutput(); err != nil {
-			slog.Warn("chroot mount failed", "dst", dst, "error", err, "output", string(out))
-			// Don't block on failure — best effort.
+		if err := unix.Mount(b.src, dst, b.fstype, b.flags, b.data); err != nil {
+			slog.Warn("chroot mount failed", "dst", dst, "error", err)
 		}
 	}
 
@@ -94,8 +93,8 @@ func prepareChrootEnv(mountpoint string, backend fsbackend.Service) {
 		if f, err := os.Create(dst); err == nil {
 			_ = f.Close()
 		}
-		if out, err := exec.Command("mount", "--bind", self, dst).CombinedOutput(); err != nil {
-			slog.Warn("chroot loophole binary bind mount failed", "error", err, "output", string(out))
+		if err := unix.Mount(self, dst, "", unix.MS_BIND, ""); err != nil {
+			slog.Warn("chroot loophole binary bind mount failed", "error", err)
 		}
 	}
 
@@ -111,10 +110,10 @@ func prepareChrootEnv(mountpoint string, backend fsbackend.Service) {
 		if sockCleanup != nil {
 			sockCleanup()
 		}
-		for _, sub := range []string{"usr/bin/loophole", "dev/pts", "dev", "sys", "proc"} {
+		for _, sub := range []string{"usr/bin/loophole", "dev/shm", "dev/pts", "dev", "sys", "proc"} {
 			dst := filepath.Join(mountpoint, sub)
-			if out, err := exec.Command("umount", "-n", "-l", dst).CombinedOutput(); err != nil {
-				slog.Warn("chroot umount failed", "dst", dst, "error", err, "output", string(out))
+			if err := unix.Unmount(dst, unix.MNT_DETACH); err != nil {
+				slog.Warn("chroot umount failed", "dst", dst, "error", err)
 			}
 		}
 	})

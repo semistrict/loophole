@@ -1,4 +1,4 @@
-// Package storage2 implements a tiered LSM storage layer for loophole volumes.
+// Package storage2 implements the tiered storage layer for loophole volumes.
 //
 // Data is organized into three levels:
 //   - L0: page-granularity flushes from the memtable (scattered 4KB pages)

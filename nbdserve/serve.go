@@ -33,7 +33,7 @@ func (s *Server) FindExport(ctx context.Context, name string) (nbd.Export, error
 	if name == "" {
 		return nbd.Export{}, fmt.Errorf("no default export; specify a volume name")
 	}
-	vol, err := s.vm.OpenVolume(ctx, name)
+	vol, err := s.vm.OpenVolume(name)
 	if err != nil {
 		return nbd.Export{}, fmt.Errorf("open volume %q: %w", name, err)
 	}

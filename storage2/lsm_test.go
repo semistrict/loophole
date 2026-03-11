@@ -77,7 +77,7 @@ func TestMemLayerPutGet(t *testing.T) {
 	}
 }
 
-func TestMemLayerTombstone(t *testing.T) {
+func TestMemLayerZeroOverwrite(t *testing.T) {
 	dir := t.TempDir()
 	ml, err := newMemtable(dir, 0, 1024)
 	if err != nil {
@@ -85,22 +85,26 @@ func TestMemLayerTombstone(t *testing.T) {
 	}
 	defer ml.cleanup()
 
-	// Write then tombstone.
+	// Write then overwrite with zeros.
 	page := make([]byte, PageSize)
 	page[0] = 0xFF
 	if err := ml.put(10, page); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.putTombstone(10); err != nil {
+	if err := ml.put(10, zeroPage[:]); err != nil {
 		t.Fatal(err)
 	}
 
-	entry, ok := ml.get(10)
+	slot, ok := ml.get(10)
 	if !ok {
 		t.Fatal("page 10 not found")
 	}
-	if !entry.tombstone {
-		t.Fatal("expected tombstone")
+	data, err := ml.readData(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data[0] != 0 {
+		t.Fatalf("expected zero page, got first byte %d", data[0])
 	}
 }
 
@@ -128,7 +132,7 @@ func TestWriteFlushRead(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +193,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
 	t.Cleanup(func() { m1.Close(t.Context()) })
 	t.Cleanup(func() { dc1.Close() })
-	v1, err := m1.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v1, err := m1.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +212,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 
 	// Reopen with a new manager (simulating process restart).
 	m2 := newTestManager(t, store, config)
-	v2, err := m2.OpenVolume(ctx, "test")
+	v2, err := m2.OpenVolume("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +238,7 @@ func TestPartialPageWrite(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +284,7 @@ func TestPunchHole(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +331,7 @@ func TestPunchHoleSubPage(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +371,7 @@ func TestPunchHoleFlushBetweenWriteAndPunch(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +415,7 @@ func TestPunchHoleAfterFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +454,7 @@ func TestSnapshotThenFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +495,7 @@ func TestMultipleFlushes(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +540,7 @@ func TestSnapshot(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +577,7 @@ func TestClone(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +634,7 @@ func TestOverwriteAfterFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -677,7 +681,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 
 	// Node A: create volume, write data, flush, snapshot.
 	mA := newTestManager(t, store, cfg)
-	v, err := mA.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := mA.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -697,7 +701,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 
 	// Node B: open the snapshot and read data via ancestor chain.
 	mB := newTestManager(t, store, cfg)
-	snapVol, err := mB.OpenVolume(ctx, "snap1")
+	snapVol, err := mB.OpenVolume("snap1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -724,7 +728,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 
 	// Create volume, write, flush.
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,7 +769,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 
 	// Open snap2 on a fresh manager (different node).
 	m2 := newTestManager(t, store, cfg)
-	snap2, err := m2.OpenVolume(ctx, "snap2")
+	snap2, err := m2.OpenVolume("snap2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +804,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 
 	m := newTestManager(t, store, cfg)
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -824,7 +828,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 
 	// Compact the parent.
 	vol := v.(*volume)
-	if err := vol.layer.CompactL0(ctx); err != nil {
+	if err := vol.layer.CompactL0(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -836,11 +840,11 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 	// Open both snapshots on a fresh manager.
 	m2 := newTestManager(t, store, cfg)
 
-	snapPre, err := m2.OpenVolume(ctx, "snap-pre")
+	snapPre, err := m2.OpenVolume("snap-pre")
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapPost, err := m2.OpenVolume(ctx, "snap-post")
+	snapPost, err := m2.OpenVolume("snap-post")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,7 +880,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 
 	// Node A: create, write, flush, snapshot.
 	mA := newTestManager(t, store, cfg)
-	v, err := mA.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
+	v, err := mA.NewVolume(loophole.CreateParams{Volume: "parent", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -895,7 +899,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 
 	// Node B: open snap1, clone it, read from clone.
 	mB := newTestManager(t, store, cfg)
-	snapVol, err := mB.OpenVolume(ctx, "snap1")
+	snapVol, err := mB.OpenVolume("snap1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -920,11 +924,11 @@ func TestVolumeReadOnlyGuards(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "src", Size: 1024 * 1024})
+	src, err := m.NewVolume(loophole.CreateParams{Volume: "src", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -988,12 +992,11 @@ func TestVolumeReadOnlyGuards(t *testing.T) {
 
 func TestNewVolumeDuplicateName(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	_, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	_, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("expected 'already exists' error, got: %v", err)
 	}
@@ -1001,9 +1004,8 @@ func TestNewVolumeDuplicateName(t *testing.T) {
 
 func TestNewVolumeDefaultSize(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol"})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1014,13 +1016,12 @@ func TestNewVolumeDefaultSize(t *testing.T) {
 
 func TestOpenVolumeCacheHit(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	v1, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v1, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
-	v2, err := m.OpenVolume(ctx, "vol")
+	v2, err := m.OpenVolume("vol")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1032,9 +1033,8 @@ func TestOpenVolumeCacheHit(t *testing.T) {
 
 func TestOpenVolumeNotFound(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	_, err := m.OpenVolume(ctx, "nonexistent")
+	_, err := m.OpenVolume("nonexistent")
 	if err == nil {
 		t.Fatal("expected error for nonexistent volume")
 	}
@@ -1044,7 +1044,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
 	err := m.DeleteVolume(ctx, "vol")
@@ -1062,7 +1062,7 @@ func TestDeleteVolumeThenList(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1088,12 +1088,11 @@ func TestDeleteVolumeThenList(t *testing.T) {
 
 func TestVolumesAndGetVolume(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "a", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "a", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "b", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "b", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1115,10 +1114,10 @@ func TestManagerClose(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "v1", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "v1", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "v2", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "v2", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1134,16 +1133,15 @@ func TestManagerClose(t *testing.T) {
 
 func TestCompactNoDeltas(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
 	vol := v.(*volume)
 
 	// No writes, just compact — should be a no-op.
-	if err := vol.layer.CompactL0(ctx); err != nil {
+	if err := vol.layer.CompactL0(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1159,7 +1157,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	ctx := t.Context()
 
 	m := newTestManager(t, store, cfg)
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1208,7 +1206,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 
 	// Create, write, flush, compact (to create an image layer).
 	m1 := newTestManager(t, store, cfg)
-	v, err := m1.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m1.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1221,7 +1219,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 		t.Fatal(err)
 	}
 	vol := v.(*volume)
-	if err := vol.layer.CompactL0(ctx); err != nil {
+	if err := vol.layer.CompactL0(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1247,7 +1245,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 
 	// Reopen on new manager — should fall back to S3 listing.
 	m2 := newTestManager(t, store, cfg)
-	v2, err := m2.OpenVolume(ctx, "vol")
+	v2, err := m2.OpenVolume("vol")
 	if err != nil {
 		t.Fatalf("open after layers.json delete: %v", err)
 	}
@@ -1275,10 +1273,10 @@ func TestListAllVolumes(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "alpha", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "alpha", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "beta", Size: 1024 * 1024}); err != nil {
+	if _, err := m.NewVolume(loophole.CreateParams{Volume: "beta", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1298,7 +1296,7 @@ func TestAcquireRefAndRelease(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1334,12 +1332,11 @@ func TestAcquireRefAndRelease(t *testing.T) {
 
 func TestNewVolumeMetaFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated meta.json failure"),
 	})
-	_, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	_, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err == nil || !strings.Contains(err.Error(), "simulated meta.json failure") {
 		t.Fatalf("expected meta.json failure, got: %v", err)
 	}
@@ -1349,7 +1346,6 @@ func TestNewVolumeMetaFail(t *testing.T) {
 // propagates an error from NewVolume (timeline meta.json succeeds, volume ref fails).
 func TestNewVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
 	// Key-specific fault: only the volume ref write (volumes/vol) fails,
 	// not the timeline meta.json write (timelines/<uuid>/meta.json).
@@ -1357,7 +1353,7 @@ func TestNewVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated volume ref failure"),
 	})
 
-	_, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	_, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err == nil || !strings.Contains(err.Error(), "simulated volume ref failure") {
 		t.Fatalf("expected volume ref failure, got: %v", err)
 	}
@@ -1369,7 +1365,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1411,10 +1407,9 @@ func TestListAllVolumesFail(t *testing.T) {
 // propagates from OpenVolume.
 func TestOpenVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
 	// Create a volume successfully.
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1427,7 +1422,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 	store.SetFault(loophole.OpGet, "", loophole.Fault{
 		Err: fmt.Errorf("simulated get failure"),
 	})
-	_, err = m.OpenVolume(ctx, "vol")
+	_, err = m.OpenVolume("vol")
 	if err == nil || !strings.Contains(err.Error(), "simulated get failure") {
 		t.Fatalf("expected get failure on OpenVolume, got: %v", err)
 	}
@@ -1439,7 +1434,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1459,7 +1454,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 
 	// Open on a fresh manager (empty local cache) so reads must go to S3.
 	m2 := newTestManager(t, store, m.config)
-	v2, err := m2.OpenVolume(ctx, "vol")
+	v2, err := m2.OpenVolume("vol")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1486,9 +1481,8 @@ func TestWritePartialPageReadFail(t *testing.T) {
 // propagates through readPage.
 func TestSnapshotCreateChildFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1522,9 +1516,8 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 // snapshot's volume ref propagates from Snapshot.
 func TestSnapshotPutVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1554,9 +1547,8 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 // updating the parent's meta.json during createChild propagates.
 func TestCloneCreateChildFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1583,9 +1575,8 @@ func TestCloneCreateChildFail(t *testing.T) {
 // TestClonePutVolumeRefFail tests that putVolumeRef failure propagates from Clone.
 func TestClonePutVolumeRefFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1613,9 +1604,8 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 // TestFreezeFlushFail tests that a flush failure inside Freeze propagates.
 func TestFreezeFlushFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1660,7 +1650,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1746,7 +1736,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	ctx := t.Context()
 
 	// Create source volume with 4 pages of known data.
-	src, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "src", Size: 64 * PageSize})
+	src, err := m.NewVolume(loophole.CreateParams{Volume: "src", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1762,7 +1752,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	}
 
 	// Create destination volume.
-	dst, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "dst", Size: 64 * PageSize})
+	dst, err := m.NewVolume(loophole.CreateParams{Volume: "dst", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1847,7 +1837,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	ctx := t.Context()
 
 	// Create a "parent" volume and write distinct data to pages 0-3.
-	parent, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "parent", Size: 64 * PageSize})
+	parent, err := m.NewVolume(loophole.CreateParams{Volume: "parent", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1869,7 +1859,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 
 	// Create a separate source volume with zeros on pages 0-3
 	// (never written, so they're zeros).
-	src, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "src", Size: 64 * PageSize})
+	src, err := m.NewVolume(loophole.CreateParams{Volume: "src", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1893,7 +1883,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	// Close and reopen dst on a fresh manager (simulates different node).
 	m.Close(ctx)
 	m2 := newTestManager(t, store, cfg)
-	dst2, err := m2.OpenVolume(ctx, "dst")
+	dst2, err := m2.OpenVolume("dst")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1962,7 +1952,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 64 * PageSize})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2004,7 +1994,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	// Close and reopen.
 	m.Close(ctx)
 	m2 := newTestManager(t, store, cfg)
-	v2, err := m2.OpenVolume(ctx, "test")
+	v2, err := m2.OpenVolume("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2050,10 +2040,9 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	t.Logf("oracle expects zeros for page 5 but actual has partial write data — confirms the sim bug")
 }
 
-// TestMemLayerTombstoneThenPut verifies that writing to a page after tombstoning
-// it doesn't corrupt slot 0's data. This was a bug where putTombstone set slot=0
-// (zero value), and a subsequent put reused slot 0 instead of allocating a new one.
-func TestMemLayerTombstoneThenPut(t *testing.T) {
+// TestMemLayerOverwriteReusesSlot verifies that overwriting a page reuses
+// the same slot and doesn't corrupt other pages' data.
+func TestMemLayerOverwriteReusesSlot(t *testing.T) {
 	dir := t.TempDir()
 	ml, err := newMemtable(dir, 1, 64)
 	if err != nil {
@@ -2085,15 +2074,7 @@ func TestMemLayerTombstoneThenPut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Tombstone page 300 (which was in slot 2). The tombstone entry has slot=0
-	// as a zero value, which is NOT the correct slot.
-	if err := ml.putTombstone(300); err != nil {
-		t.Fatal(err)
-	}
-
-	// Now write NEW data to page 300. Before the fix, put() would see the
-	// existing tombstone entry, reuse slot 0 (the zero-value slot), and
-	// overwrite page 100's data at slot 0.
+	// Overwrite page 300 with new data — should reuse slot 2.
 	page3 := make([]byte, PageSize)
 	for i := range page3 {
 		page3[i] = 0xDD
@@ -2102,12 +2083,12 @@ func TestMemLayerTombstoneThenPut(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read page 100 (slot 0) — should still be 0xAA, not 0xDD.
-	e0, ok := ml.get(100)
+	// Read page 100 (slot 0) — should still be 0xAA.
+	slot0, ok := ml.get(100)
 	if !ok {
 		t.Fatal("page 100 not found")
 	}
-	data0, err := ml.readData(e0)
+	data0, err := ml.readData(slot0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2116,11 +2097,11 @@ func TestMemLayerTombstoneThenPut(t *testing.T) {
 	}
 
 	// Read page 300 — should be 0xDD.
-	e3, ok := ml.get(300)
+	slot3, ok := ml.get(300)
 	if !ok {
 		t.Fatal("page 300 not found")
 	}
-	data3, err := ml.readData(e3)
+	data3, err := ml.readData(slot3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2147,7 +2128,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	}
 	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
 	t.Cleanup(func() { dc1.Close() })
-	v1, err := m1.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v1, err := m1.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2182,7 +2163,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 
 	// Reopen with a new manager (simulating process restart / remount).
 	m2 := newTestManager(t, store, config)
-	v2, err := m2.OpenVolume(ctx, "test")
+	v2, err := m2.OpenVolume("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2227,7 +2208,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	}
 	m1 := NewVolumeManager(store, cacheDir, config, nil, dc1)
 	t.Cleanup(func() { dc1.Close() })
-	v1, err := m1.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 64 * PageSize})
+	v1, err := m1.NewVolume(loophole.CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2289,7 +2270,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 
 	// Reopen and verify.
 	m2 := newTestManager(t, store, config)
-	v2, err := m2.OpenVolume(ctx, "test")
+	v2, err := m2.OpenVolume("test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2338,7 +2319,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 
 	// maxMemtableSlots is 65536, so volume needs to be larger than that.
 	const numPages = maxMemtableSlots + 100
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "backpressure-test", Size: uint64(numPages+10) * PageSize})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "backpressure-test", Size: uint64(numPages+10) * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2380,7 +2361,7 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 	m := newTestManager(t, store, config)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2462,7 +2443,7 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2520,9 +2501,8 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 		FlushInterval:   10 * time.Second, // very long timer
 	}
 	m := newTestManager(t, store, cfg)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2570,9 +2550,8 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 		FlushInterval:   10 * time.Second, // effectively disabled
 	}
 	m := newTestManager(t, store, cfg)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2620,7 +2599,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2668,7 +2647,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 		m := newTestManager(t, store, cfg)
 		ctx := t.Context()
 
-		v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+		v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2745,7 +2724,7 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2840,7 +2819,7 @@ func TestRefreshFollowMode(t *testing.T) {
 
 	// Writer creates a volume and writes data.
 	writer := newTestManager(t, store, cfg)
-	wv, err := writer.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	wv, err := writer.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2910,9 +2889,8 @@ func TestFlushReportsMetrics(t *testing.T) {
 		FlushInterval:   -1,
 	}
 	m := newTestManager(t, store, cfg)
-	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2947,7 +2925,7 @@ func TestReadAtZeroCopyMemtable(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2990,7 +2968,7 @@ func TestReadAtZeroCopyAfterFlush(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3028,7 +3006,7 @@ func TestReadAtSubPageFallback(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3072,7 +3050,7 @@ func TestReadAtPinPreventsCleanup(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}

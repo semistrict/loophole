@@ -25,7 +25,7 @@ func TestE2E_Lwext4Format100GB(t *testing.T) {
 
 	vm := newVolumeManager(t, store)
 
-	vol, err := vm.NewVolume(ctx, loophole.CreateParams{Volume: "big"})
+	vol, err := vm.NewVolume(loophole.CreateParams{Volume: "big"})
 	require.NoError(t, err)
 
 	fs, err := lwext4.Format(vol, daemonVolumeSize, nil)
@@ -74,7 +74,7 @@ func TestE2E_Lwext4CanMountCurrentFormat(t *testing.T) {
 	require.NoError(t, b.Unmount(ctx, mp))
 
 	// Re-open the raw volume and mount with lwext4 in-process.
-	vol, err := b.VM().OpenVolume(ctx, "compat")
+	vol, err := b.VM().OpenVolume("compat")
 	require.NoError(t, err)
 
 	fs, err := lwext4.Mount(vol, defaultVolumeSize)

@@ -17,9 +17,10 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/metrics"
+	"golang.org/x/sync/errgroup"
 )
 
-// layer is a writable storage layer backed by a tiered LSM.
+// layer is a writable storage layer backed by a tiered L0/L1/L2 structure.
 // Data flows: memtable → frozen memtables → L0 → L1 → L2 → zeros.
 type layer struct {
 	id         string
@@ -287,15 +288,15 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 	return total, nil
 }
 
-// readPagePinned returns a zero-copy slice for a single page-aligned read.
+// readPagePinned returns a pinned slice for a single page-aligned read.
 // The returned release function must be called when the caller is done.
-// Falls back to allocating for S3-sourced data.
+// Memtable hits are zero-copy; page cache and S3 paths allocate.
 func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, func(), error) {
 	// 1. Active memtable — zero-copy (nil for frozen layers).
 	staleSnapshot := false
 	if snap.memtable != nil {
-		if entry, ok := snap.memtable.get(pageIdx); ok {
-			data, release, err := snap.memtable.readDataPinned(entry)
+		if slot, ok := snap.memtable.get(pageIdx); ok {
+			data, release, err := snap.memtable.readDataPinned(slot)
 			if err == nil {
 				return data, release, nil
 			}
@@ -305,8 +306,8 @@ func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageId
 
 	// 2. Frozen memtables — zero-copy.
 	for i := len(snap.frozen) - 1; i >= 0; i-- {
-		if entry, ok := snap.frozen[i].get(pageIdx); ok {
-			data, release, err := snap.frozen[i].readDataPinned(entry)
+		if slot, ok := snap.frozen[i].get(pageIdx); ok {
+			data, release, err := snap.frozen[i].readDataPinned(slot)
 			if err == nil {
 				return data, release, nil
 			}
@@ -315,7 +316,7 @@ func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageId
 		}
 	}
 
-	// 3. Page cache — zero-copy.
+	// 3. Page cache — allocating copy.
 	if ly.diskCache != nil {
 		if data, release := ly.diskCache.GetPagePinned(ly.pageCacheKey(pageIdx)); data != nil {
 			return data, release, nil
@@ -336,12 +337,8 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	// 1. Active memtable (nil for frozen layers).
 	staleSnapshot := false
 	if snap.memtable != nil {
-		if entry, ok := snap.memtable.get(pageIdx); ok {
-			if entry.tombstone {
-				metrics.PageReadSource.WithLabelValues("memtable").Inc()
-				return zeroPage[:], nil
-			}
-			data, err := snap.memtable.readData(entry)
+		if slot, ok := snap.memtable.get(pageIdx); ok {
+			data, err := snap.memtable.readData(slot)
 			if err == nil {
 				metrics.PageReadSource.WithLabelValues("memtable").Inc()
 				return data, nil
@@ -353,12 +350,8 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 
 	// 2. Frozen memtables (newest first).
 	for i := len(snap.frozen) - 1; i >= 0; i-- {
-		if entry, ok := snap.frozen[i].get(pageIdx); ok {
-			if entry.tombstone {
-				metrics.PageReadSource.WithLabelValues("frozen").Inc()
-				return zeroPage[:], nil
-			}
-			data, err := snap.frozen[i].readData(entry)
+		if slot, ok := snap.frozen[i].get(pageIdx); ok {
+			data, err := snap.frozen[i].readData(slot)
 			if err == nil {
 				metrics.PageReadSource.WithLabelValues("frozen").Inc()
 				return data, nil
@@ -392,10 +385,6 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	// 4. L0 files (newest first — last in slice is newest).
 	for i := len(l0) - 1; i >= 0; i-- {
 		l0e := &l0[i]
-		if l0HasTombstone(l0e, pageIdx) {
-			metrics.PageReadSource.WithLabelValues("l0").Inc()
-			return zeroPage[:], nil
-		}
 		if !l0HasPage(l0e, pageIdx) {
 			continue
 		}
@@ -447,12 +436,6 @@ func (ly *layer) pageCacheKey(pageIdx PageIdx) cacheKey {
 func (ly *layer) cachePage(pageIdx PageIdx, data []byte) {
 	if ly.diskCache != nil {
 		ly.diskCache.PutPage(ly.pageCacheKey(pageIdx), data)
-	}
-}
-
-func (ly *layer) deleteCachedPage(pageIdx PageIdx) {
-	if ly.diskCache != nil {
-		ly.diskCache.DeletePage(ly.pageCacheKey(pageIdx))
 	}
 }
 
@@ -639,7 +622,7 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 	return nil
 }
 
-// PunchHole records tombstones for all pages fully covered by the range.
+// PunchHole zeroes all pages fully or partially covered by the range.
 func (ly *layer) PunchHole(offset, length uint64) error {
 	end := offset + length
 
@@ -672,12 +655,9 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 		}
 	}
 
-	// Tombstone fully-covered interior pages.
+	// Write zero pages for fully-covered interior pages.
 	for pageIdx := firstFullPage; pageIdx < lastFullPage; pageIdx++ {
-		ly.mu.RLock()
-		err := ly.memtable.putTombstone(pageIdx)
-		ly.mu.RUnlock()
-		if err != nil {
+		if err := ly.Write(zeroPage[:], pageIdx.ByteOffset()); err != nil {
 			return err
 		}
 	}
@@ -799,17 +779,9 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		slog.Warn("flush: retrying L0 upload", "layer", ly.id, "key", l0entry.Key, "attempt", attempt+1, "error", err)
 	}
 
-	// Count pages and tombstones.
-	tombstones := 0
-	for _, e := range entries {
-		if e.tombstone {
-			tombstones++
-		}
-	}
 	metrics.FlushPages.Add(float64(len(entries)))
 	metrics.FlushBlocks.Add(float64(len(entries)))
 	metrics.FlushBytes.Add(float64(len(data)))
-	metrics.FlushTombstones.Add(float64(tombstones))
 
 	// Pre-cache the parsed L0.
 	p, _ := parseL0(data)
@@ -821,9 +793,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 
 	// Update page cache with flushed data so L0 reads hit the cache.
 	for _, e := range entries {
-		if e.tombstone {
-			ly.deleteCachedPage(e.pageIdx)
-		} else if data, err := mt.readData(e.memEntry); err == nil {
+		if data, err := mt.readData(e.slot); err == nil {
 			ly.cachePage(e.pageIdx, data)
 		}
 	}
@@ -832,8 +802,8 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 	ly.index.L0 = append(ly.index.L0, l0entry)
 	ly.mu.Unlock()
 
-	ly.log("FLUSH layer=%s l0=%s pages=%d tombstones=%d",
-		ly.id[:min(8, len(ly.id))], l0entry.Key, len(l0entry.Pages), len(l0entry.Tombstones))
+	ly.log("FLUSH layer=%s l0=%s pages=%d",
+		ly.id[:min(8, len(ly.id))], l0entry.Key, len(l0entry.Pages))
 
 	// Checkpoint index.json.
 	idxStart := time.Now()
@@ -1084,6 +1054,7 @@ func (ly *layer) doPeriodicFlush(ctx context.Context) {
 	// backoff sleeps creates a cascade: each retry sleep advances the
 	// fake clock, waking more periodicFlush goroutines that also try
 	// to compact and retry, causing a deadlock.
+	slog.Debug("periodicFlush: attempting compaction", "layer", ly.id)
 	if err := ly.tryCompactL0(ctx); err != nil {
 		slog.Error("L0 compaction failed", "layer", ly.id, "error", err)
 	}
@@ -1123,28 +1094,56 @@ func ensureDir(path string) error {
 // already in progress. Used by periodicFlush to avoid blocking.
 func (ly *layer) tryCompactL0(ctx context.Context) error {
 	if !ly.compactMu.TryLock() {
+		slog.Debug("tryCompactL0: skipped, compaction already running", "layer", ly.id)
 		return nil
 	}
 	defer ly.compactMu.Unlock()
-	return ly.compactL0Locked(ctx)
+	return ly.compactL0Locked(ctx, false)
 }
 
-// CompactL0 merges L0 entries into L1 blocks.
-func (ly *layer) CompactL0(ctx context.Context) error {
+// CompactL0 merges L0 entries into L1 blocks if the L0 page count
+// exceeds the configured threshold.
+func (ly *layer) CompactL0() error {
 	ly.compactMu.Lock()
 	defer ly.compactMu.Unlock()
-	return ly.compactL0Locked(ctx)
+	return ly.compactL0Locked(context.Background(), false)
 }
 
-func (ly *layer) compactL0Locked(ctx context.Context) error {
+// ForceCompactL0 merges all L0 entries into L1 blocks regardless of threshold.
+func (ly *layer) ForceCompactL0() error {
+	ly.compactMu.Lock()
+	defer ly.compactMu.Unlock()
+	return ly.compactL0Locked(context.Background(), true)
+}
+
+func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	ly.mu.RLock()
 	l0entries := make([]l0Entry, len(ly.index.L0))
 	copy(l0entries, ly.index.L0)
 	ly.mu.RUnlock()
 
-	if totalL0Pages(l0entries) < ly.config.L0PagesMax {
+	total := totalL0Pages(l0entries)
+	if !force && total < ly.config.L0PagesMax {
+		slog.Debug("compactL0: below threshold", "layer", ly.id,
+			"l0Files", len(l0entries), "l0Pages", total, "threshold", ly.config.L0PagesMax)
 		return nil
 	}
+	if total == 0 {
+		return nil
+	}
+
+	slog.Info("compactL0: starting", "layer", ly.id,
+		"l0Files", len(l0entries), "l0Pages", total, "threshold", ly.config.L0PagesMax)
+
+	compactTimer := metrics.NewTimer(metrics.CompactDuration)
+	metrics.CompactRunning.Set(1)
+	metrics.CompactL0InputPages.Add(float64(total))
+	defer func() {
+		metrics.CompactRunning.Set(0)
+		metrics.CompactBlocksTotal.Set(0)
+		metrics.CompactBlocksProcessed.Set(0)
+		compactTimer.ObserveDuration()
+	}()
 
 	// Group all L0 page addresses by block address.
 	type pageSource struct {
@@ -1156,150 +1155,200 @@ func (ly *layer) compactL0Locked(ctx context.Context) error {
 		for _, pa := range l0e.Pages {
 			blockGroups[pa.Block()] = append(blockGroups[pa.Block()], pageSource{l0Idx: i, pageIdx: pa})
 		}
-		for _, pa := range l0e.Tombstones {
-			blockGroups[pa.Block()] = append(blockGroups[pa.Block()], pageSource{l0Idx: i, pageIdx: pa})
-		}
 	}
 
-	// Snapshot l1Map/l2Map so we can update them without affecting the live
-	// state until the entire compaction succeeds. On partial failure (e.g.
-	// S3 fault), the in-memory maps remain unchanged and L0 entries are
-	// still intact, so no data is lost.
+	// Snapshot l1Map/l2Map for reads. Each block has a unique address, so
+	// we can process all blocks in parallel and apply map updates after.
 	ly.mu.RLock()
-	newL1Map := ly.l1Map
-	newL2Map := ly.l2Map
+	snapL1Map := ly.l1Map
+	snapL2Map := ly.l2Map
 	ly.mu.RUnlock()
 
-	type cachedBlock struct {
-		key string
-		pb  *parsedBlock
+	// blockResult holds the output of processing one block.
+	type blockResult struct {
+		blockAddr BlockIdx
+		key       string
+		pb        *parsedBlock
+		promote   bool // true = L2 promotion, false = L1
 	}
-	var newCacheEntries []cachedBlock
 
-	// For each block address, read existing L1 block (if any), overlay L0 pages.
+	// Process blocks in parallel with bounded concurrency.
+	// Each in-flight block holds ~4MB of data, so 4 workers ≈ 16MB peak.
+	const maxCompactWorkers = 4
+
+	totalBlocks := len(blockGroups)
+	metrics.CompactBlocksTotal.Set(float64(totalBlocks))
+	var blocksProcessed atomic.Int64
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxCompactWorkers)
+
+	var resultsMu sync.Mutex
+	results := make([]blockResult, 0, totalBlocks)
+
 	for blockAddr, sources := range blockGroups {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		// Collect pages for this block. Newer L0 entries override older ones.
-		// L0 entries are ordered oldest-first, so later entries win.
-		pageMap := make(map[uint16][]byte) // page offset → data
-
-		// Load existing L1 block.
-		if layer, seq := newL1Map.Find(blockAddr); layer != "" {
-			key := blockKey(layer, "l1", seq, blockAddr)
-			pb, err := ly.getParsedBlock(ctx, key)
-			if err != nil {
-				return fmt.Errorf("read existing L1 block %d: %w", blockAddr, err)
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
 			}
-			pages, err := pb.readAllPages(ctx, blockAddr)
-			if err != nil {
-				return fmt.Errorf("read L1 block pages %d: %w", blockAddr, err)
+			blockStart := time.Now()
+			n := blocksProcessed.Add(1)
+			if n%50 == 0 || int(n) == totalBlocks {
+				slog.Debug("compactL0: progress", "layer", ly.id,
+					"blocks", fmt.Sprintf("%d/%d", n, totalBlocks))
 			}
-			for off, data := range pages {
-				pageMap[off] = data
-			}
-		}
+			metrics.CompactBlocksProcessed.Set(float64(n))
 
-		// Overlay L0 pages (in order, so newer wins).
-		sort.Slice(sources, func(i, j int) bool {
-			return sources[i].l0Idx < sources[j].l0Idx
-		})
-		for _, src := range sources {
-			pageOffset := uint16(src.pageIdx % BlockPages)
+			// Extract L0 compressed entries directly — no decompression.
+			// Process sources in order so newer L0 entries win.
+			sort.Slice(sources, func(i, j int) bool {
+				return sources[i].l0Idx < sources[j].l0Idx
+			})
 
-			// Check if this is a tombstone.
-			isTombstone := false
-			for _, t := range l0entries[src.l0Idx].Tombstones {
-				if t == src.pageIdx {
-					isTombstone = true
-					break
-				}
-			}
-
-			if isTombstone {
-				// Tombstone writes zeros into L1, masking any inherited L2 data.
-				pageMap[pageOffset] = zeroPage[:]
-			} else {
-				// Read the actual page data from the L0 file.
-				p, err := ly.getParsedL0(ctx, &l0entries[src.l0Idx])
+			l0Entries := make(map[uint16]compressedBlockPage, len(sources))
+			for _, src := range sources {
+				pageOffset := uint16(src.pageIdx % BlockPages)
+				p, err := ly.getParsedL0(gctx, &l0entries[src.l0Idx])
 				if err != nil {
 					return fmt.Errorf("read L0 for compact: %w", err)
 				}
-				data, found, err := p.findPage(ctx, src.pageIdx)
+				if ce, ok := p.compressedEntry(src.pageIdx); ok {
+					l0Entries[pageOffset] = ce
+				}
+			}
+
+			// Build the set of L0 offsets that override existing blocks.
+			l0Offsets := make(map[uint16]struct{}, len(l0Entries))
+			for off := range l0Entries {
+				l0Offsets[off] = struct{}{}
+			}
+
+			// Count merged pages to decide on L2 promotion.
+			var existingL1 *parsedBlock
+			mergedCount := len(l0Offsets)
+			if layer, seq := snapL1Map.Find(blockAddr); layer != "" {
+				key := blockKey(layer, "l1", seq, blockAddr)
+				pb, err := ly.getParsedBlock(gctx, key)
 				if err != nil {
-					return fmt.Errorf("find page in L0: %w", err)
+					return fmt.Errorf("read existing L1 block %d: %w", blockAddr, err)
 				}
-				if found {
-					pageMap[pageOffset] = data
-				}
-			}
-		}
-
-		// Build and upload new L1 block.
-		var pages []blockPage
-		for off, data := range pageMap {
-			pages = append(pages, blockPage{offset: off, data: data})
-		}
-
-		blockData, err := buildBlock(blockAddr, pages)
-		if err != nil {
-			return fmt.Errorf("build L1 block %d: %w", blockAddr, err)
-		}
-
-		key := blockKey(ly.id, "l1", ly.writeLeaseSeq, blockAddr)
-		if err := ly.store.PutReader(ctx, key, bytes.NewReader(blockData)); err != nil {
-			return fmt.Errorf("upload L1 block %d: %w", blockAddr, err)
-		}
-
-		// Stage L1 range map update.
-		newL1Map = newL1Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
-
-		// Check if this L1 block should be promoted to L2.
-		if len(pages) >= L1PromoteThreshold {
-			// Read existing L2 block if any.
-			l2PageMap := make(map[uint16][]byte)
-			if layer, seq := newL2Map.Find(blockAddr); layer != "" {
-				l2Key := blockKey(layer, "l2", seq, blockAddr)
-				pb, err := ly.getParsedBlock(ctx, l2Key)
-				if err != nil {
-					return fmt.Errorf("read existing L2 block: %w", err)
-				}
-				l2Pages, err := pb.readAllPages(ctx, blockAddr)
-				if err != nil {
-					return fmt.Errorf("read L2 block pages: %w", err)
-				}
-				for off, data := range l2Pages {
-					l2PageMap[off] = data
+				existingL1 = pb
+				for _, ie := range pb.index {
+					if _, overwritten := l0Offsets[ie.PageOffset]; !overwritten {
+						mergedCount++
+					}
 				}
 			}
-			for _, p := range pages {
-				l2PageMap[p.offset] = p.data
+
+			promote := mergedCount >= L1PromoteThreshold
+			var existingL2 *parsedBlock
+			if promote {
+				if layer, seq := snapL2Map.Find(blockAddr); layer != "" {
+					l2Key := blockKey(layer, "l2", seq, blockAddr)
+					pb, err := ly.getParsedBlock(gctx, l2Key)
+					if err != nil {
+						return fmt.Errorf("read existing L2 block %d: %w", blockAddr, err)
+					}
+					existingL2 = pb
+				}
 			}
-			var l2Pages []blockPage
-			for off, data := range l2PageMap {
-				l2Pages = append(l2Pages, blockPage{offset: off, data: data})
+
+			// Collect all pre-compressed entries: L0 + existing block entries.
+			var existing []compressedBlockPage
+			for _, ce := range l0Entries {
+				existing = append(existing, ce)
 			}
-			l2Data, err := buildBlock(blockAddr, l2Pages)
+
+			if promote {
+				// Promotion: merge L2 + L1 + L0.
+				l1Offsets := make(map[uint16]struct{})
+				if existingL1 != nil {
+					for _, ie := range existingL1.index {
+						l1Offsets[ie.PageOffset] = struct{}{}
+					}
+				}
+
+				// From L2: exclude pages overwritten by L1 or L0.
+				if existingL2 != nil {
+					l1AndL0 := make(map[uint16]struct{}, len(l1Offsets)+len(l0Offsets))
+					for off := range l1Offsets {
+						l1AndL0[off] = struct{}{}
+					}
+					for off := range l0Offsets {
+						l1AndL0[off] = struct{}{}
+					}
+					existing = append(existing, existingL2.compressedEntriesExcluding(l1AndL0)...)
+				}
+
+				// From L1: exclude pages overwritten by L0.
+				if existingL1 != nil {
+					existing = append(existing, existingL1.compressedEntriesExcluding(l0Offsets)...)
+				}
+			} else {
+				// L1 merge: copy untouched L1 entries, overlay L0 pages.
+				if existingL1 != nil {
+					existing = append(existing, existingL1.compressedEntriesExcluding(l0Offsets)...)
+				}
+			}
+
+			blockData, err := patchBlock(blockAddr, existing, nil)
 			if err != nil {
-				return fmt.Errorf("build L2 block %d: %w", blockAddr, err)
+				return fmt.Errorf("build block %d: %w", blockAddr, err)
 			}
-			l2Key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
-			if err := ly.store.PutReader(ctx, l2Key, bytes.NewReader(l2Data)); err != nil {
-				return fmt.Errorf("upload L2 block %d: %w", blockAddr, err)
-			}
-			newL2Map = newL2Map.Set(blockAddr, ly.id, ly.writeLeaseSeq)
-			newL1Map = newL1Map.Remove(blockAddr)
 
-			if pb, err := parseBlock(l2Data); err == nil && pb != nil {
-				newCacheEntries = append(newCacheEntries, cachedBlock{key: l2Key, pb: pb})
+			// Upload.
+			var key string
+			if promote {
+				key = blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
+			} else {
+				key = blockKey(ly.id, "l1", ly.writeLeaseSeq, blockAddr)
 			}
+			if err := ly.store.PutReader(gctx, key, bytes.NewReader(blockData)); err != nil {
+				return fmt.Errorf("upload block %d: %w", blockAddr, err)
+			}
+
+			metrics.CompactBlocksWritten.Inc()
+			metrics.CompactBytesWritten.Add(float64(len(blockData)))
+			if promote {
+				metrics.CompactL2Promotions.Inc()
+			}
+			metrics.CompactBlockDuration.Observe(time.Since(blockStart).Seconds())
+
+			// Parse for cache (best-effort).
+			var pb *parsedBlock
+			if parsed, parseErr := parseBlock(blockData); parseErr == nil {
+				pb = parsed
+			}
+
+			resultsMu.Lock()
+			results = append(results, blockResult{
+				blockAddr: blockAddr,
+				key:       key,
+				pb:        pb,
+				promote:   promote,
+			})
+			resultsMu.Unlock()
+
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Apply map updates sequentially from collected results.
+	newL1Map := snapL1Map
+	newL2Map := snapL2Map
+	for _, r := range results {
+		if r.promote {
+			newL2Map = newL2Map.Set(r.blockAddr, ly.id, ly.writeLeaseSeq)
+			newL1Map = newL1Map.Remove(r.blockAddr)
+		} else {
+			newL1Map = newL1Map.Set(r.blockAddr, ly.id, ly.writeLeaseSeq)
 		}
-
-		// Stage block cache entry.
-		if pb, err := parseBlock(blockData); err == nil && pb != nil {
-			newCacheEntries = append(newCacheEntries, cachedBlock{key: key, pb: pb})
+		if r.pb != nil {
+			ly.blockCache.put(r.key, r.pb)
 		}
 	}
 
@@ -1315,11 +1364,11 @@ func (ly *layer) compactL0Locked(ctx context.Context) error {
 	copy(ly.index.L0, remaining)
 	ly.mu.Unlock()
 
-	for _, e := range newCacheEntries {
-		ly.blockCache.put(e.key, e.pb)
-	}
-
 	metrics.L0Compactions.Inc()
+
+	slog.Info("compactL0: done", "layer", ly.id,
+		"processed", nProcessed, "remaining", len(remaining),
+		"l1Blocks", len(blockGroups))
 
 	// Save updated index.
 	return ly.saveIndex(ctx)
