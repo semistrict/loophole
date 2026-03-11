@@ -538,14 +538,77 @@ func (ly *layer) getParsedBlock(ctx context.Context, key string) (*parsedBlock, 
 func (ly *layer) Write(data []byte, offset uint64) error {
 	written := 0
 	for written < len(data) {
-		pageIdx, pageOff := PageIdxOf(offset + uint64(written))
-		chunk := min(uint64(len(data)-written), PageSize-pageOff)
+		remaining := len(data) - written
+
+		// Fast path: if this is a full block-aligned write on a fresh layer,
+		// write directly to L2 (skipping memtable → L0 → L1 → L2 pipeline).
+		if remaining >= BlockSize && offset%BlockSize == 0 && ly.canDirectL2() {
+			if err := ly.writeBlockDirectL2(data[written:written+BlockSize], offset); err != nil {
+				return err
+			}
+			written += BlockSize
+			offset += BlockSize
+			continue
+		}
+
+		pageIdx, pageOff := PageIdxOf(offset)
+		chunk := min(uint64(remaining), PageSize-pageOff)
 
 		if err := ly.writePage(pageIdx, pageOff, data[written:written+int(chunk)]); err != nil {
 			return err
 		}
 		written += int(chunk)
+		offset += chunk
 	}
+	return nil
+}
+
+// canDirectL2 returns true if the layer is fresh enough for direct L2 writes
+// (no L0 entries, no L1 ranges, empty memtable).
+func (ly *layer) canDirectL2() bool {
+	ly.mu.RLock()
+	defer ly.mu.RUnlock()
+	return len(ly.index.L0) == 0 && ly.l1Map.Len() == 0 && ly.memtable.size.Load() == 0
+}
+
+// writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,
+// bypassing the memtable/flush/compaction pipeline. The caller must ensure
+// offset is block-aligned and len(data) == BlockSize.
+func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
+	blockIdx := BlockIdx(offset / BlockSize)
+
+	// Split into pages.
+	pages := make([]blockPage, BlockPages)
+	for i := range BlockPages {
+		pages[i] = blockPage{
+			offset: uint16(i),
+			data:   data[i*PageSize : (i+1)*PageSize],
+		}
+	}
+
+	// Build the L2 block blob.
+	blob, err := buildBlock(blockIdx, pages)
+	if err != nil {
+		return fmt.Errorf("build direct L2 block %d: %w", blockIdx, err)
+	}
+
+	// Upload.
+	key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockIdx)
+	ctx := context.Background()
+	if err := ly.store.PutReader(ctx, key, bytes.NewReader(blob)); err != nil {
+		return fmt.Errorf("upload direct L2 block %d: %w", blockIdx, err)
+	}
+
+	// Update the L2 map and persist the index so the entries survive
+	// a volume close/reopen cycle.
+	ly.mu.Lock()
+	ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, ly.writeLeaseSeq)
+	ly.mu.Unlock()
+
+	if err := ly.saveIndex(ctx); err != nil {
+		return fmt.Errorf("save index after direct L2 block %d: %w", blockIdx, err)
+	}
+
 	return nil
 }
 

@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"hash/crc32"
 	"io"
+	"runtime"
 	"sort"
+	"sync"
 
 	"github.com/semistrict/loophole"
 )
@@ -55,8 +57,16 @@ type blockPage struct {
 	data   []byte // PageSize bytes
 }
 
+// compressedPage holds the result of compressing a single page.
+type compressedPage struct {
+	offset     uint16
+	compressed []byte
+	crc32      uint32
+}
+
 // buildBlock serializes pages into the block file format using plain zstd
 // compression (no dictionary). Pages must belong to the same block address.
+// Compression is parallelized across NumCPU goroutines.
 // Returns the serialized blob.
 func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 	if len(pages) == 0 {
@@ -68,33 +78,62 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 		return pages[i].offset < pages[j].offset
 	})
 
-	enc := getZstdEncoder()
-	defer putZstdEncoder(enc)
+	// Validate page sizes upfront.
+	for _, p := range pages {
+		if len(p.data) != PageSize {
+			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
+		}
+	}
 
+	// Compress all pages in parallel using NumCPU goroutines.
+	compressed := make([]compressedPage, len(pages))
+	var wg sync.WaitGroup
+	workers := runtime.NumCPU()
+	if workers > len(pages) {
+		workers = len(pages)
+	}
+	work := make(chan int, len(pages))
+	for i := range pages {
+		work <- i
+	}
+	close(work)
+
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			enc := getZstdEncoder()
+			defer putZstdEncoder(enc)
+			for i := range work {
+				c := enc.EncodeAll(pages[i].data, nil)
+				compressed[i] = compressedPage{
+					offset:     pages[i].offset,
+					compressed: c,
+					crc32:      crc32.ChecksumIEEE(c),
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Assemble the block from compressed results.
 	var buf bytes.Buffer
 
 	// Reserve space for header.
 	buf.Write(make([]byte, blockHeaderSize))
 
-	// No dictionary — DictOffset points right after header, DictSize=0.
 	dictOffset := uint64(buf.Len())
-
-	// Compress each page and record index entries.
 	dataOffset := uint64(buf.Len())
-	indexEntries := make([]blockIndexEntry, len(pages))
-	for i, p := range pages {
-		if len(p.data) != PageSize {
-			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
-		}
-		compressed := enc.EncodeAll(p.data, nil)
-		ie := blockIndexEntry{
-			PageOffset: p.offset,
+
+	indexEntries := make([]blockIndexEntry, len(compressed))
+	for i, cp := range compressed {
+		indexEntries[i] = blockIndexEntry{
+			PageOffset: cp.offset,
 			DataOffset: uint64(buf.Len()),
-			DataLen:    uint32(len(compressed)),
-			CRC32:      crc32.ChecksumIEEE(compressed),
+			DataLen:    uint32(len(cp.compressed)),
+			CRC32:      cp.crc32,
 		}
-		buf.Write(compressed)
-		indexEntries[i] = ie
+		buf.Write(cp.compressed)
 	}
 
 	// Write index.
@@ -110,7 +149,7 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 		Magic:      blockMagic,
 		Version:    blockVersion,
 		BlockIdx:   blockIdx,
-		NumEntries: uint32(len(pages)),
+		NumEntries: uint32(len(indexEntries)),
 		DictSize:   0,
 		DictOffset: dictOffset,
 		DataOffset: dataOffset,
@@ -278,8 +317,45 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		return nil, fmt.Errorf("no pages")
 	}
 
-	enc := getZstdEncoder()
-	defer putZstdEncoder(enc)
+	// Validate page sizes upfront.
+	for _, p := range newPages {
+		if len(p.data) != PageSize {
+			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
+		}
+	}
+
+	// Compress new pages in parallel using NumCPU goroutines.
+	newCompressed := make([]compressedPage, len(newPages))
+	if len(newPages) > 0 {
+		var wg sync.WaitGroup
+		workers := runtime.NumCPU()
+		if workers > len(newPages) {
+			workers = len(newPages)
+		}
+		work := make(chan int, len(newPages))
+		for i := range newPages {
+			work <- i
+		}
+		close(work)
+
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				enc := getZstdEncoder()
+				defer putZstdEncoder(enc)
+				for i := range work {
+					c := enc.EncodeAll(newPages[i].data, nil)
+					newCompressed[i] = compressedPage{
+						offset:     newPages[i].offset,
+						compressed: c,
+						crc32:      crc32.ChecksumIEEE(c),
+					}
+				}
+			}()
+		}
+		wg.Wait()
+	}
 
 	var buf bytes.Buffer
 
@@ -303,19 +379,15 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		indexEntries = append(indexEntries, ie)
 	}
 
-	// Compress and write new pages.
-	for _, p := range newPages {
-		if len(p.data) != PageSize {
-			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
-		}
-		compressed := enc.EncodeAll(p.data, nil)
+	// Write newly compressed pages.
+	for _, cp := range newCompressed {
 		ie := blockIndexEntry{
-			PageOffset: p.offset,
+			PageOffset: cp.offset,
 			DataOffset: uint64(buf.Len()),
-			DataLen:    uint32(len(compressed)),
-			CRC32:      crc32.ChecksumIEEE(compressed),
+			DataLen:    uint32(len(cp.compressed)),
+			CRC32:      cp.crc32,
 		}
-		buf.Write(compressed)
+		buf.Write(cp.compressed)
 		indexEntries = append(indexEntries, ie)
 	}
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/internal/streammux"
+	"github.com/semistrict/loophole/storage2"
 )
 
 // Client talks to a running loophole daemon over its Unix socket.
@@ -88,7 +89,13 @@ func (c *Client) EnsureDaemon() error {
 
 // Flush flushes the volume to S3.
 func (c *Client) Flush(ctx context.Context) error {
-	_, err := c.rpc(ctx, "POST", "/flush", nil)
+	_, err := c.post(ctx, "/flush")
+	return err
+}
+
+// FlushVolume flushes a named volume (daemon socket).
+func (c *Client) FlushVolume(ctx context.Context, volume string) error {
+	_, err := c.post(ctx, "/flush", "volume", volume)
 	return err
 }
 
@@ -96,26 +103,26 @@ func (c *Client) Flush(ctx context.Context) error {
 // socket, the volume is implicit. When called on the daemon socket, pass the
 // volume name via CompactVolume.
 func (c *Client) Compact(ctx context.Context) error {
-	_, err := c.rpc(ctx, "POST", "/compact", nil)
+	_, err := c.post(ctx, "/compact")
 	return err
 }
 
 // CompactVolume triggers L0→L1 compaction on a named volume (daemon socket).
 func (c *Client) CompactVolume(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/compact", map[string]string{"volume": volume})
+	_, err := c.post(ctx, "/compact", "volume", volume)
 	return err
 }
 
 // ChrootSnapshot creates a snapshot (chroot socket: POST /snapshot).
 func (c *Client) ChrootSnapshot(ctx context.Context, name string) error {
-	_, err := c.rpc(ctx, "POST", "/snapshot", map[string]string{"name": name})
+	_, err := c.post(ctx, "/snapshot", "name", name)
 	return err
 }
 
 // ChrootClone clones the volume (chroot socket: POST /clone).
 // Returns the mountpoint where the clone was mounted.
 func (c *Client) ChrootClone(ctx context.Context, clone string) (string, error) {
-	resp, err := c.rpc(ctx, "POST", "/clone", map[string]string{"clone": clone})
+	resp, err := c.post(ctx, "/clone", "clone", clone)
 	if err != nil {
 		return "", err
 	}
@@ -154,7 +161,7 @@ type ChrootLayerResponse struct {
 
 // ChrootStatus returns volume status info (chroot socket: GET /status).
 func (c *Client) ChrootStatus(ctx context.Context) (*ChrootStatusResponse, error) {
-	resp, err := c.rpc(ctx, "GET", "/status", nil)
+	resp, err := c.get(ctx, "/status")
 	if err != nil {
 		return nil, err
 	}
@@ -171,14 +178,14 @@ func (c *Client) ChrootStatus(ctx context.Context) (*ChrootStatusResponse, error
 type CreateParams = loophole.CreateParams
 
 func (c *Client) Create(ctx context.Context, p CreateParams) error {
-	_, err := c.rpc(ctx, "POST", "/create", p)
+	_, err := c.post(ctx, "/create", p)
 	return err
 }
 
 // BreakLease clears a lease on a volume. Returns true if the holder
 // released gracefully, false if it timed out and was force-cleared.
 func (c *Client) BreakLease(ctx context.Context, volume string, force bool) (graceful bool, err error) {
-	resp, err := c.rpc(ctx, "POST", "/break-lease", map[string]any{
+	resp, err := c.post(ctx, "/break-lease", map[string]any{
 		"volume": volume,
 		"force":  force,
 	})
@@ -194,59 +201,43 @@ func (c *Client) BreakLease(ctx context.Context, volume string, force bool) (gra
 
 // Delete removes a volume.
 func (c *Client) Delete(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/delete", map[string]string{
-		"volume": volume,
-	})
+	_, err := c.post(ctx, "/delete", "volume", volume)
 	return err
 }
 
 // Mount mounts an existing volume at mountpoint.
 func (c *Client) Mount(ctx context.Context, volume, mountpoint string) error {
-	_, err := c.rpc(ctx, "POST", "/mount", map[string]string{
-		"volume":     volume,
-		"mountpoint": mountpoint,
-	})
+	_, err := c.post(ctx, "/mount", "volume", volume, "mountpoint", mountpoint)
 	return err
 }
 
 // Unmount unmounts the filesystem at mountpoint.
 func (c *Client) Unmount(ctx context.Context, mountpoint string) error {
-	_, err := c.rpc(ctx, "POST", "/unmount", map[string]string{
-		"mountpoint": mountpoint,
-	})
+	_, err := c.post(ctx, "/unmount", "mountpoint", mountpoint)
 	return err
 }
 
 // Clone freezes the source, clones it, and mounts the clone.
 func (c *Client) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMountpoint string) error {
-	_, err := c.rpc(ctx, "POST", "/clone", map[string]string{
-		"mountpoint":       srcMountpoint,
-		"clone":            cloneName,
-		"clone_mountpoint": cloneMountpoint,
-	})
+	_, err := c.post(ctx, "/clone", "mountpoint", srcMountpoint, "clone", cloneName, "clone_mountpoint", cloneMountpoint)
 	return err
 }
 
 // Snapshot creates a snapshot of the volume at mountpoint.
 // Freeze makes a volume permanently immutable.
 func (c *Client) Freeze(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/freeze", map[string]string{"volume": volume})
+	_, err := c.post(ctx, "/freeze", "volume", volume)
 	return err
 }
 
 func (c *Client) Snapshot(ctx context.Context, mountpoint, name string) error {
-	_, err := c.rpc(ctx, "POST", "/snapshot", map[string]string{
-		"mountpoint": mountpoint,
-		"name":       name,
-	})
+	_, err := c.post(ctx, "/snapshot", "mountpoint", mountpoint, "name", name)
 	return err
 }
 
 // DeviceAttach opens a volume and returns the FUSE device path.
 func (c *Client) DeviceAttach(ctx context.Context, volume string) (string, error) {
-	resp, err := c.rpc(ctx, "POST", "/device/attach", map[string]string{
-		"volume": volume,
-	})
+	resp, err := c.post(ctx, "/device/attach", "volume", volume)
 	if err != nil {
 		return "", err
 	}
@@ -259,27 +250,19 @@ func (c *Client) DeviceAttach(ctx context.Context, volume string) (string, error
 
 // DeviceDetach closes a volume device.
 func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/device/detach", map[string]string{
-		"volume": volume,
-	})
+	_, err := c.post(ctx, "/device/detach", "volume", volume)
 	return err
 }
 
 // DeviceSnapshot creates a snapshot at the device level.
 func (c *Client) DeviceSnapshot(ctx context.Context, volume, snapshot string) error {
-	_, err := c.rpc(ctx, "POST", "/device/snapshot", map[string]string{
-		"volume":   volume,
-		"snapshot": snapshot,
-	})
+	_, err := c.post(ctx, "/device/snapshot", "volume", volume, "snapshot", snapshot)
 	return err
 }
 
 // DeviceClone clones a volume and returns the device path.
 func (c *Client) DeviceClone(ctx context.Context, volume, clone string) (string, error) {
-	resp, err := c.rpc(ctx, "POST", "/device/clone", map[string]string{
-		"volume": volume,
-		"clone":  clone,
-	})
+	resp, err := c.post(ctx, "/device/clone", "volume", volume, "clone", clone)
 	if err != nil {
 		return "", err
 	}
@@ -288,6 +271,158 @@ func (c *Client) DeviceClone(ctx context.Context, volume, clone string) (string,
 		return "", fmt.Errorf("decode device/clone response: %w", err)
 	}
 	return result.Device, nil
+}
+
+// DeviceDD imports a raw disk image into a new volume via the daemon.
+// It first creates the volume with the given params (NoFormat is forced true),
+// then reads from body in BlockSize chunks and sends each as a separate
+// request so the server can write them directly to L2.
+func (c *Client) DeviceDD(ctx context.Context, p CreateParams, body io.Reader, progress io.Writer) error {
+	p.NoFormat = true
+	if err := c.Create(ctx, p); err != nil {
+		return fmt.Errorf("create volume: %w", err)
+	}
+
+	const chunkSize = storage2.BlockSize
+	buf := make([]byte, chunkSize)
+	var offset uint64
+
+	for {
+		n, readErr := io.ReadFull(body, buf)
+		if n > 0 {
+			if err := c.ddWriteBlock(ctx, p.Volume, offset, buf[:n]); err != nil {
+				return err
+			}
+			offset += uint64(n)
+			if progress != nil && offset%(64<<20) == 0 {
+				_, _ = fmt.Fprintf(progress, "  %d MiB / %d MiB\n", offset>>20, p.Size>>20)
+			}
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read input: %w", readErr)
+		}
+	}
+
+	if progress != nil {
+		_, _ = fmt.Fprintf(progress, "  %d MiB written\n", offset>>20)
+	}
+
+	// Flush and release the volume ref so it can be opened by others.
+	if _, err := c.post(ctx, "/device/dd/finalize?volume="+p.Volume); err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64, data []byte) error {
+	path := fmt.Sprintf("/device/dd/write?volume=%s&offset=%d", volume, offset)
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://loophole"+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = int64(len(data))
+	if h := loophole.SelfHash(); h != "" {
+		req.Header.Set("X-Binary-Hash", h)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("dd write at offset %d: %w", offset, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("dd write at offset %d: status %d: %s", offset, resp.StatusCode, body)
+	}
+	return nil
+}
+
+// DeviceDDRead reads a volume's raw block data in BlockSize chunks and writes
+// it to dst. The volume must already be open. This is the read counterpart of
+// DeviceDD (write). The caller must open the volume first (e.g. via Create or
+// by having previously written to it).
+func (c *Client) DeviceDDRead(ctx context.Context, volume string, size uint64, dst io.Writer, progress io.Writer) error {
+	const chunkSize = storage2.BlockSize
+	var offset uint64
+
+	for offset < size {
+		readSize := min(uint64(chunkSize), size-offset)
+
+		data, err := c.ddReadBlock(ctx, volume, offset, readSize)
+		if err != nil {
+			return err
+		}
+		if _, err := dst.Write(data); err != nil {
+			return fmt.Errorf("write output at offset %d: %w", offset, err)
+		}
+		offset += uint64(len(data))
+		if progress != nil && offset%(64<<20) == 0 {
+			_, _ = fmt.Fprintf(progress, "  %d MiB / %d MiB\n", offset>>20, size>>20)
+		}
+	}
+
+	if progress != nil {
+		_, _ = fmt.Fprintf(progress, "  %d MiB read\n", offset>>20)
+	}
+	return nil
+}
+
+func (c *Client) ddReadBlock(ctx context.Context, volume string, offset, size uint64) ([]byte, error) {
+	path := fmt.Sprintf("/device/dd/read?volume=%s&offset=%d&size=%d", volume, offset, size)
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://loophole"+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	if h := loophole.SelfHash(); h != "" {
+		req.Header.Set("X-Binary-Hash", h)
+	}
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("dd read at offset %d: %w", offset, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("dd read at offset %d: %w", offset, err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("dd read at offset %d: status %d: %s", offset, resp.StatusCode, data)
+	}
+	return data, nil
+}
+
+// VolumeInfo returns metadata about a volume (does not need to be open).
+func (c *Client) VolumeInfo(ctx context.Context, volume string) (loophole.VolumeInfo, error) {
+	resp, err := c.get(ctx, "/volume-info?volume="+volume)
+	if err != nil {
+		return loophole.VolumeInfo{}, err
+	}
+	var info loophole.VolumeInfo
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return loophole.VolumeInfo{}, err
+	}
+	return info, nil
+}
+
+// VolumeDebugInfo returns debug information about an open volume.
+func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage2.VolumeDebugInfo, error) {
+	resp, err := c.get(ctx, "/debug/volume?volume="+volume)
+	if err != nil {
+		return storage2.VolumeDebugInfo{}, err
+	}
+	var info storage2.VolumeDebugInfo
+	if err := json.Unmarshal(resp, &info); err != nil {
+		return storage2.VolumeDebugInfo{}, err
+	}
+	return info, nil
 }
 
 // FileResult holds the websocket connection from a file command.
@@ -422,7 +557,7 @@ func (c *Client) serveFileRead(conn *websocket.Conn, path string, id uint32) {
 
 // ListVolumes returns all volume names from the store (not just open ones).
 func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
-	resp, err := c.rpc(ctx, "GET", "/volumes", nil)
+	resp, err := c.get(ctx, "/volumes")
 	if err != nil {
 		return nil, err
 	}
@@ -435,13 +570,13 @@ func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
 
 // Shutdown asks the daemon to shut down gracefully.
 func (c *Client) Shutdown(ctx context.Context) error {
-	_, err := c.rpc(ctx, "POST", "/shutdown", nil)
+	_, err := c.post(ctx, "/shutdown")
 	return err
 }
 
 // ShutdownWait blocks until the daemon has finished flushing and releasing leases.
 func (c *Client) ShutdownWait(ctx context.Context) error {
-	_, err := c.rpc(ctx, "GET", "/shutdown/wait", nil)
+	_, err := c.get(ctx, "/shutdown/wait")
 	return err
 }
 
@@ -478,7 +613,7 @@ func (c *Client) Metrics(ctx context.Context) (string, error) {
 
 // Status returns the daemon status.
 func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
-	resp, err := c.rpc(ctx, "GET", "/status", nil)
+	resp, err := c.get(ctx, "/status")
 	if err != nil {
 		return nil, err
 	}
@@ -499,39 +634,31 @@ type DBCreateParams struct {
 
 // DBCreate creates a new SQLite database volume.
 func (c *Client) DBCreate(ctx context.Context, p DBCreateParams) error {
-	_, err := c.rpc(ctx, "POST", "/db/create", p)
+	_, err := c.post(ctx, "/db/create", p)
 	return err
 }
 
 // DBSnapshot creates a snapshot of a SQLite database volume.
 func (c *Client) DBSnapshot(ctx context.Context, volume, snapshot string) error {
-	_, err := c.rpc(ctx, "POST", "/db/snapshot", map[string]string{
-		"volume":   volume,
-		"snapshot": snapshot,
-	})
+	_, err := c.post(ctx, "/db/snapshot", "volume", volume, "snapshot", snapshot)
 	return err
 }
 
 // DBBranch creates a writable branch of a SQLite database volume.
 func (c *Client) DBBranch(ctx context.Context, volume, branch string) error {
-	_, err := c.rpc(ctx, "POST", "/db/branch", map[string]string{
-		"volume": volume,
-		"branch": branch,
-	})
+	_, err := c.post(ctx, "/db/branch", "volume", volume, "branch", branch)
 	return err
 }
 
 // DBFlush flushes a SQLite database volume to S3.
 func (c *Client) DBFlush(ctx context.Context, volume string) error {
-	_, err := c.rpc(ctx, "POST", "/db/flush", map[string]string{
-		"volume": volume,
-	})
+	_, err := c.post(ctx, "/db/flush", "volume", volume)
 	return err
 }
 
 // DBList returns all SQLite database volumes.
 func (c *Client) DBList(ctx context.Context) ([]string, error) {
-	resp, err := c.rpc(ctx, "GET", "/db/ls", nil)
+	resp, err := c.get(ctx, "/db/ls")
 	if err != nil {
 		return nil, err
 	}
@@ -556,7 +683,28 @@ func (c *Client) NBDSock(ctx context.Context) (string, error) {
 
 // --- internal ---
 
-func (c *Client) rpc(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
+func (c *Client) post(ctx context.Context, path string, args ...any) (json.RawMessage, error) {
+	return c.rpc(ctx, "POST", path, args...)
+}
+
+func (c *Client) get(ctx context.Context, path string, args ...any) (json.RawMessage, error) {
+	return c.rpc(ctx, "GET", path, args...)
+}
+
+func (c *Client) rpc(ctx context.Context, method, path string, args ...any) (json.RawMessage, error) {
+	var body any
+	switch len(args) {
+	case 0:
+		// no body
+	case 1:
+		body = args[0]
+	default:
+		m := make(map[string]string, len(args)/2)
+		for i := 0; i+1 < len(args); i += 2 {
+			m[args[i].(string)] = args[i+1].(string)
+		}
+		body = m
+	}
 	var bodyReader io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)

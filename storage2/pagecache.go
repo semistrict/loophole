@@ -243,7 +243,7 @@ func (c *PageCache) runBudgetLoop() {
 			newCount, _ := c.store.CountPages()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)
-			slog.Info("pagecache: budget adjusted",
+			slog.Debug("pagecache: budget adjusted",
 				"budget_mb", c.budget>>20,
 				"old_budget_mb", oldBudget>>20,
 				"used_mb", c.usedBytes>>20,
