@@ -9,7 +9,7 @@ import (
 )
 
 func pk(tl string, idx PageIdx) cacheKey {
-	return cacheKey{LayerID: tl, PageIdx: idx}
+	return cacheKey{BlobKey: tl, PageIdx: idx}
 }
 
 type mockPage struct {
@@ -113,8 +113,8 @@ func (s *mockStore) EvictLow(count int) ([]int, error) {
 		if items[i].credits != items[j].credits {
 			return items[i].credits < items[j].credits
 		}
-		if items[i].key.LayerID != items[j].key.LayerID {
-			return items[i].key.LayerID < items[j].key.LayerID
+		if items[i].key.BlobKey != items[j].key.BlobKey {
+			return items[i].key.BlobKey < items[j].key.BlobKey
 		}
 		return items[i].key.PageIdx < items[j].key.PageIdx
 	})

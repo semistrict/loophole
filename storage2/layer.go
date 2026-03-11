@@ -316,14 +316,7 @@ func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageId
 		}
 	}
 
-	// 3. Page cache — allocating copy.
-	if ly.diskCache != nil {
-		if data, release := ly.diskCache.GetPagePinned(ly.pageCacheKey(pageIdx)); data != nil {
-			return data, release, nil
-		}
-	}
-
-	// 4+. L0/L1/L2/zeros — allocating path (data comes from S3 or is zeros).
+	// 3+. L0/L1/L2/zeros — allocating path (page cache checked per-blob inside readPageWith).
 	_ = staleSnapshot // readPageWith handles stale snapshot refresh internally
 	data, err := ly.readPageWith(ctx, snap, pageIdx)
 	if err != nil {
@@ -363,16 +356,6 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		}
 	}
 
-	// 3. Page cache (frozen layer data is immutable).
-	if ly.diskCache != nil {
-		if cached := ly.diskCache.GetPage(ly.pageCacheKey(pageIdx)); cached != nil {
-			metrics.CacheHits.Inc()
-			metrics.PageReadSource.WithLabelValues("cache").Inc()
-			return cached, nil
-		}
-		metrics.CacheMisses.Inc()
-	}
-
 	// If a frozen memtable was cleaned up, refresh the L0 list from the layer
 	// since the flush guarantees the L0 entry exists before cleanup.
 	l0 := snap.l0
@@ -388,23 +371,30 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		if !l0HasPage(l0e, pageIdx) {
 			continue
 		}
+		if data := ly.cachedPage(l0e.Key, pageIdx); data != nil {
+			return data, nil
+		}
 		data, err := ly.readFromL0(ctx, l0e, pageIdx)
 		if err != nil {
 			return nil, err
 		}
-		ly.cachePage(pageIdx, data)
+		ly.cachePage(l0e.Key, pageIdx, data)
 		metrics.PageReadSource.WithLabelValues("l0").Inc()
 		return data, nil
 	}
 
 	// 5. L1 (sparse blocks).
 	if layer, seq := snap.l1.Find(pageIdx.Block()); layer != "" {
+		blobKey := blockKey(layer, "l1", seq, pageIdx.Block())
+		if data := ly.cachedPage(blobKey, pageIdx); data != nil {
+			return data, nil
+		}
 		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
 		if err != nil {
 			return nil, err
 		}
 		if found {
-			ly.cachePage(pageIdx, data)
+			ly.cachePage(blobKey, pageIdx, data)
 			metrics.PageReadSource.WithLabelValues("l1").Inc()
 			return data, nil
 		}
@@ -413,12 +403,16 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 
 	// 6. L2 (dense blocks).
 	if layer, seq := snap.l2.Find(pageIdx.Block()); layer != "" {
+		blobKey := blockKey(layer, "l2", seq, pageIdx.Block())
+		if data := ly.cachedPage(blobKey, pageIdx); data != nil {
+			return data, nil
+		}
 		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
 		if err != nil {
 			return nil, err
 		}
 		if found {
-			ly.cachePage(pageIdx, data)
+			ly.cachePage(blobKey, pageIdx, data)
 			metrics.PageReadSource.WithLabelValues("l2").Inc()
 			return data, nil
 		}
@@ -429,13 +423,23 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	return zeroPage[:], nil
 }
 
-func (ly *layer) pageCacheKey(pageIdx PageIdx) cacheKey {
-	return cacheKey{LayerID: ly.id, PageIdx: pageIdx}
+func (ly *layer) cachedPage(blobKey string, pageIdx PageIdx) []byte {
+	if ly.diskCache == nil {
+		return nil
+	}
+	key := cacheKey{BlobKey: blobKey, PageIdx: pageIdx}
+	if data := ly.diskCache.GetPage(key); data != nil {
+		metrics.CacheHits.Inc()
+		metrics.PageReadSource.WithLabelValues("cache").Inc()
+		return data
+	}
+	metrics.CacheMisses.Inc()
+	return nil
 }
 
-func (ly *layer) cachePage(pageIdx PageIdx, data []byte) {
+func (ly *layer) cachePage(blobKey string, pageIdx PageIdx, data []byte) {
 	if ly.diskCache != nil {
-		ly.diskCache.PutPage(ly.pageCacheKey(pageIdx), data)
+		ly.diskCache.PutPage(cacheKey{BlobKey: blobKey, PageIdx: pageIdx}, data)
 	}
 }
 
@@ -760,7 +764,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 	}
 
 	flushStart := time.Now()
-	slog.Info("flush: uploading L0", "layer", ly.id, "key", l0entry.Key, "pages", len(entries), "bytes", len(data))
+	slog.Debug("flush: uploading L0", "layer", ly.id, "key", l0entry.Key, "pages", len(entries), "bytes", len(data))
 
 	// Upload with retry (no backoff — retries are immediate to avoid
 	// blocking the synctest bubble with timer waits while holding flushMu).
@@ -769,7 +773,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		err = ly.store.PutReader(ctx, l0entry.Key, bytes.NewReader(data))
 		if err == nil {
 			metrics.FlushUploadDuration.Observe(time.Since(uploadStart).Seconds())
-			slog.Info("flush: uploaded L0", "layer", ly.id, "key", l0entry.Key, "bytes", len(data), "dur", time.Since(flushStart))
+			slog.Debug("flush: uploaded L0", "layer", ly.id, "key", l0entry.Key, "bytes", len(data), "dur", time.Since(flushStart))
 			break
 		}
 		if attempt == maxRetries-1 {
@@ -794,7 +798,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 	// Update page cache with flushed data so L0 reads hit the cache.
 	for _, e := range entries {
 		if data, err := mt.readData(e.slot); err == nil {
-			ly.cachePage(e.pageIdx, data)
+			ly.cachePage(l0entry.Key, e.pageIdx, data)
 		}
 	}
 
@@ -813,7 +817,7 @@ func (ly *layer) flushMemtable(mt *memtable, maxRetries int) error {
 		ly.mu.Unlock()
 		return fmt.Errorf("save index: %w", err)
 	}
-	slog.Info("flush: saved index", "layer", ly.id, "dur", time.Since(idxStart), "total_dur", time.Since(flushStart))
+	slog.Debug("flush: saved index", "layer", ly.id, "dur", time.Since(idxStart), "total_dur", time.Since(flushStart))
 
 	metrics.FlushDuration.Observe(time.Since(flushStart).Seconds())
 	return nil
@@ -1349,6 +1353,17 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 		}
 		if r.pb != nil {
 			ly.blockCache.put(r.key, r.pb)
+			// Update the page cache for all pages in this block so stale
+			// entries (from a previous compaction that wrote the same block
+			// key) are overwritten with the correct merged data.
+			if ly.diskCache != nil {
+				for _, ie := range r.pb.index {
+					pageIdx := PageIdx(uint64(r.blockAddr)*BlockPages + uint64(ie.PageOffset))
+					if data, _, err := r.pb.findPage(context.Background(), pageIdx); err == nil && data != nil {
+						ly.cachePage(r.key, pageIdx, data)
+					}
+				}
+			}
 		}
 	}
 

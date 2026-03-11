@@ -261,8 +261,13 @@ func (s *Snapshotter) Remove(ctx context.Context, req *snapshotspb.RemoveSnapsho
 		}
 	}
 
-	// After unmount, the FUSE RELEASE callback may still be in-flight.
-	// Wait for the volume to be fully closed before deleting.
+	// Release the manager's ref on the volume. Combined with Unmount
+	// releasing the mount ref, this drops refs to zero and triggers
+	// volume destruction. Then wait for destruction to complete (the
+	// FUSE RELEASE callback may still be in-flight in async drivers).
+	if err := s.backend.VM().CloseVolume(meta.VolumeName); err != nil {
+		slog.Warn("snapshotter: close volume on remove", "key", key, "error", err)
+	}
 	if err := s.backend.VM().WaitClosed(ctx, meta.VolumeName); err != nil {
 		slog.Warn("snapshotter: wait closed on remove", "key", key, "error", err)
 	}

@@ -166,7 +166,7 @@ func (s *sqliteStore) WriteSlot(slot int, data []byte) error {
 
 func (s *sqliteStore) LookupPage(key cacheKey) (int, bool, error) {
 	var slot int
-	err := s.stmtLookup.QueryRow(key.LayerID, int64(key.PageIdx)).Scan(&slot)
+	err := s.stmtLookup.QueryRow(key.BlobKey, int64(key.PageIdx)).Scan(&slot)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -177,13 +177,13 @@ func (s *sqliteStore) LookupPage(key cacheKey) (int, bool, error) {
 }
 
 func (s *sqliteStore) InsertPage(key cacheKey, slot int) error {
-	_, err := s.stmtInsert.Exec(key.LayerID, int64(key.PageIdx), slot)
+	_, err := s.stmtInsert.Exec(key.BlobKey, int64(key.PageIdx), slot)
 	return err
 }
 
 func (s *sqliteStore) DeletePage(key cacheKey) (int, error) {
 	var slot int
-	err := s.stmtDelete.QueryRow(key.LayerID, int64(key.PageIdx)).Scan(&slot)
+	err := s.stmtDelete.QueryRow(key.BlobKey, int64(key.PageIdx)).Scan(&slot)
 	if err != nil {
 		return -1, err
 	}
@@ -203,7 +203,7 @@ func (s *sqliteStore) BumpCredits(keys []cacheKey) error {
 	stmt := tx.Stmt(s.stmtBump)
 	defer util.SafeClose(stmt, "close bump credits stmt")
 	for k, n := range counts {
-		if _, err := stmt.Exec(int64(n), k.LayerID, int64(k.PageIdx)); err != nil {
+		if _, err := stmt.Exec(int64(n), k.BlobKey, int64(k.PageIdx)); err != nil {
 			return err
 		}
 	}

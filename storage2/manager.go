@@ -267,6 +267,19 @@ func (m *Manager) WaitClosed(ctx context.Context, name string) error {
 	}
 }
 
+// CloseVolume releases the manager's ref on a volume, triggering destruction
+// if no other refs remain (e.g. mounts). Use this after Unmount to fully close
+// a volume that was opened via OpenVolume/NewVolume.
+func (m *Manager) CloseVolume(name string) error {
+	m.mu.Lock()
+	v, ok := m.volumes[name]
+	m.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	return v.ReleaseRef()
+}
+
 func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 	m.mu.Lock()
 	if _, ok := m.volumes[name]; ok {

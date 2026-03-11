@@ -12,9 +12,12 @@ const (
 	budgetInterval = 30 * time.Second
 )
 
-// cacheKey identifies a page in the PageCache.
+// cacheKey identifies a cached page by the S3 blob key that contains it
+// and the absolute page index. Using the blob key (not the reading layer's
+// ID) ensures that clones, relayered volumes, and frozen layers sharing the
+// same underlying S3 objects all hit the same cache entries.
 type cacheKey struct {
-	LayerID string
+	BlobKey string
 	PageIdx PageIdx
 }
 
@@ -50,6 +53,7 @@ type PageCache struct {
 	store      cacheStore
 	usedBytes  int64
 	budget     int64
+	budgetAt   time.Time // when budget was last computed
 	arenaSlots int
 	freeSlots  []int
 	accessBuf  []cacheKey
@@ -79,6 +83,7 @@ func newPageCacheWithStore(store cacheStore) (*PageCache, error) {
 	}
 
 	c.budget = c.computeBudgetLocked()
+	c.budgetAt = time.Now()
 	c.arenaSlots = c.computeArenaSlotsLocked()
 	if err := c.store.AllocArena(c.arenaSlots); err != nil {
 		return nil, err
@@ -233,6 +238,7 @@ func (c *PageCache) runBudgetLoop() {
 			oldUsed := c.usedBytes
 			oldCount, _ := c.store.CountPages()
 			c.budget = c.computeBudgetLocked()
+			c.budgetAt = time.Now()
 			c.evictUntilWithinBudgetLocked()
 			newCount, _ := c.store.CountPages()
 			var m runtime.MemStats
@@ -290,7 +296,11 @@ func (c *PageCache) ensureCapacityLocked(delta int64) bool {
 	if delta <= 0 {
 		return true
 	}
-	c.budget = c.computeBudgetLocked()
+	// Throttle Statfs calls: only recompute budget if stale (>1s).
+	if now := time.Now(); now.Sub(c.budgetAt) > time.Second {
+		c.budget = c.computeBudgetLocked()
+		c.budgetAt = now
+	}
 	if delta > c.budget {
 		return false
 	}
