@@ -15,3 +15,4 @@ docker-config/
 cmd/wasm/web/public/loophole.wasm
 *.prof
 *.test
+/loophole
