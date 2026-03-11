@@ -37,6 +37,7 @@ type VolumeManager interface {
 	Volumes() []string
 	ListAllVolumes(ctx context.Context) ([]string, error)
 	ListVolumesByType(ctx context.Context, volType string) ([]string, error)
+	CloseVolume(name string) error
 	DeleteVolume(ctx context.Context, name string) error
 	WaitClosed(ctx context.Context, name string) error
 	VolumeInfo(ctx context.Context, name string) (VolumeInfo, error)

@@ -73,16 +73,7 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 		}
 	}
 
-	// 3. Page cache.
-	if ly.diskCache != nil {
-		if cached := ly.diskCache.GetPage(ly.pageCacheKey(pageIdx)); cached != nil {
-			add("  [3] pageCache: zero=%v hash=%s", isZero(cached), hash(cached))
-		} else {
-			add("  [3] pageCache: miss")
-		}
-	} else {
-		add("  [3] pageCache: none")
-	}
+	// 3. Page cache (checked per-blob in L0/L1/L2 sections below).
 
 	// 4. L0 files (newest first).
 	for i := len(l0entries) - 1; i >= 0; i-- {
