@@ -222,7 +222,7 @@ func (s *Snapshotter) Commit(ctx context.Context, req *snapshotspb.CommitSnapsho
 		return nil, status.Errorf(codes.FailedPrecondition, "snapshot %q is not active", key)
 	}
 
-	if err := s.backend.FreezeVolume(ctx, meta.VolumeName); err != nil {
+	if err := s.backend.FreezeVolume(ctx, meta.VolumeName, false); err != nil {
 		return nil, status.Errorf(codes.Internal, "freeze: %v", err)
 	}
 

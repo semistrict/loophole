@@ -663,7 +663,10 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 
 		// Wait for decay (20s with no RPCs) then send another call.
 		// It should take the slow interval again.
-		time.Sleep(leasePollDecay + leasePollInterval)
+		// Sleep just past the decay threshold (21s) so the ticker resets
+		// to slow (10s). The next slow tick is at ~31s, well beyond our
+		// 1.5s assertion window.
+		time.Sleep(leasePollDecay + 2*time.Second)
 		beforeSlow := callCount
 		go func() {
 			r, err := caller.Call(t.Context(), holder.Token(), "ping", nil)

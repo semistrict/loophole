@@ -17,7 +17,7 @@ func startTestNBDServer(t *testing.T) string {
 	mgr := testManager(t)
 
 	// Create and format a volume so the superblock exists.
-	vol, err := mgr.NewVolume(t.Context(), loophole.CreateParams{Volume: "testdb", Size: 256 * 1024 * 1024})
+	vol, err := mgr.NewVolume(loophole.CreateParams{Volume: "testdb", Size: 256 * 1024 * 1024})
 	require.NoError(t, err)
 	err = FormatVolume(t.Context(), vol)
 	require.NoError(t, err)

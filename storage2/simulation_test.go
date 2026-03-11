@@ -743,7 +743,7 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 	name := fmt.Sprintf("vol-%d", sim.nextVolID)
 	sim.nextVolID++
 
-	v, err := node.manager.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
+	v, err := node.manager.NewVolume(loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		return // S3 faults can cause creation failures
 	}
@@ -1098,7 +1098,7 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 	}
 
 	// Open the snapshot temporarily.
-	snapVol, err := node.manager.OpenVolume(ctx, snapName)
+	snapVol, err := node.manager.OpenVolume(snapName)
 	if err != nil {
 		return
 	}
@@ -1377,7 +1377,7 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 }
 
 func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name string) {
-	v, err := node.manager.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
+	v, err := node.manager.NewVolume(loophole.CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		sim.t.Fatalf("create volume %s: %v", name, err)
 	}
@@ -1396,7 +1396,7 @@ func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name str
 }
 
 func (sim *Simulation) acquireVolume(ctx context.Context, node *SimNode, name string) {
-	_, err := node.manager.OpenVolume(ctx, name)
+	_, err := node.manager.OpenVolume(name)
 	if err != nil {
 		return
 	}
@@ -1464,7 +1464,7 @@ func (sim *Simulation) FullScan() {
 			sim.t.Fatalf("full scan: vol %s timeline mismatch: oracle=%s s3=%s", volName, timelineID, ref.LayerID)
 		}
 
-		v, err := m.OpenVolume(ctx, volName)
+		v, err := m.OpenVolume(volName)
 		if err != nil {
 			// Volume may have been created during a fault window and
 			// partially written. Skip unloadable volumes.

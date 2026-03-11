@@ -385,6 +385,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
 	mux.HandleFunc("POST /clone", d.handleClone)
+	registerVolumeCmds(mux, d)
 	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("shutdown requested")
@@ -416,7 +417,13 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
 	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
 	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
-
+	// Also register at /pprof/ so goroutine dumps work through the CF
+	// scheduler which strips the /debug/ prefix.
+	mux.HandleFunc("GET /pprof/", pprof.Index)
+	mux.HandleFunc("GET /pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("GET /pprof/profile", pprof.Profile)
+	mux.HandleFunc("GET /pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("GET /pprof/trace", pprof.Trace)
 	return mux
 }
 
@@ -430,7 +437,7 @@ func (d *Daemon) instrument(next http.Handler) http.Handler {
 		}
 
 		// Skip endpoints that hijack the connection or don't need metrics.
-		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
+		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/pprof" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -517,7 +524,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	slog.Info("create (clone from zygote)", "volume", req.Volume, "zygote", zygoteVolume)
 
 	// Open the zygote volume (frozen layers need no lease).
-	zygote, err := d.backend.VM().OpenVolume(ctx, zygoteVolume)
+	zygote, err := d.backend.VM().OpenVolume(zygoteVolume)
 	if err != nil {
 		slog.Error("open zygote failed", "err", err)
 		writeError(w, 500, fmt.Errorf("open zygote: %w", err))
@@ -638,14 +645,15 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Volume string `json:"volume"`
+		Volume  string `json:"volume"`
+		Compact bool   `json:"compact"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, err)
 		return
 	}
-	slog.Info("freeze", "volume", req.Volume)
-	if err := d.backend.FreezeVolume(r.Context(), req.Volume); err != nil {
+	slog.Info("freeze", "volume", req.Volume, "compact", req.Compact)
+	if err := d.backend.FreezeVolume(r.Context(), req.Volume, req.Compact); err != nil {
 		slog.Error("freeze failed", "volume", req.Volume, "err", err)
 		writeError(w, 500, err)
 		return

@@ -164,7 +164,7 @@ func TestLayerCompactL0(t *testing.T) {
 	assert.Greater(t, l0Count, 0, "expected L0 entries after flush")
 
 	// CompactL0 may skip if below trigger threshold.
-	_ = ly.CompactL0(ctx)
+	_ = ly.CompactL0()
 
 	// Verify all pages still readable.
 	for pageAddr, exp := range expected {

@@ -87,7 +87,7 @@ func TestE2E_ChrootSocketSnapshot(t *testing.T) {
 	require.NoError(t, c.ChrootSnapshot(ctx, "csock-snap-v1"))
 
 	// Open the snapshot volume to verify it was created and is read-only.
-	snapVol, err := testDaemon.Backend().VM().OpenVolume(ctx, "csock-snap-v1")
+	snapVol, err := testDaemon.Backend().VM().OpenVolume("csock-snap-v1")
 	require.NoError(t, err, "snapshot volume should be openable")
 	require.True(t, snapVol.ReadOnly(), "snapshot should be read-only")
 	t.Cleanup(func() {

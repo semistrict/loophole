@@ -9,20 +9,16 @@ import (
 	"io"
 	"sort"
 
-	"github.com/klauspost/compress/dict"
-	"github.com/klauspost/compress/zstd"
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/internal/util"
 )
 
 // Block file format (L1 and L2):
 //
-//   [header][dict bytes][compressed page data...][index entries...]
+//   [header][compressed page data...][index entries...]
 //
-// The header stores a shared zstd dictionary trained from the pages in the
-// block. Each page is independently compressed using that dictionary and has
-// its own CRC32. To read a single page, fetch the header (for the dictionary)
-// then GetRange the compressed page bytes.
+// Each page is independently compressed with plain zstd (no dictionary) and
+// has its own CRC32. DictSize in the header is always 0 (reserved for
+// format compat). Compressed entries can be copied verbatim between blocks.
 //
 // L1 blocks are sparse (only changed pages). L2 blocks are dense (all pages
 // in the 4MB region that have data). Both use the same format.
@@ -59,8 +55,8 @@ type blockPage struct {
 	data   []byte // PageSize bytes
 }
 
-// buildBlock serializes pages into the block file format with an optional
-// shared zstd dictionary. Pages must belong to the same block address.
+// buildBlock serializes pages into the block file format using plain zstd
+// compression (no dictionary). Pages must belong to the same block address.
 // Returns the serialized blob.
 func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 	if len(pages) == 0 {
@@ -72,41 +68,16 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 		return pages[i].offset < pages[j].offset
 	})
 
-	// Train a shared dictionary from the page data.
-	var dictBytes []byte
-	if len(pages) >= 4 {
-		samples := make([][]byte, len(pages))
-		for i, p := range pages {
-			samples[i] = p.data
-		}
-		dictBytes = tryBuildDict(samples)
-	}
-
-	// Create encoder (with or without dictionary).
-	var encOpts []zstd.EOption
-	encOpts = append(encOpts,
-		zstd.WithEncoderLevel(zstd.SpeedDefault),
-		zstd.WithEncoderConcurrency(1),
-	)
-	if len(dictBytes) > 0 {
-		encOpts = append(encOpts, zstd.WithEncoderDict(dictBytes))
-	}
-	enc, err := zstd.NewWriter(nil, encOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create encoder: %w", err)
-	}
-	defer util.SafeClose(enc, "zstd encoder")
+	enc := getZstdEncoder()
+	defer putZstdEncoder(enc)
 
 	var buf bytes.Buffer
 
 	// Reserve space for header.
 	buf.Write(make([]byte, blockHeaderSize))
 
-	// Write dictionary.
+	// No dictionary — DictOffset points right after header, DictSize=0.
 	dictOffset := uint64(buf.Len())
-	if len(dictBytes) > 0 {
-		buf.Write(dictBytes)
-	}
 
 	// Compress each page and record index entries.
 	dataOffset := uint64(buf.Len())
@@ -140,7 +111,7 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 		Version:    blockVersion,
 		BlockIdx:   blockIdx,
 		NumEntries: uint32(len(pages)),
-		DictSize:   uint32(len(dictBytes)),
+		DictSize:   0,
 		DictOffset: dictOffset,
 		DataOffset: dataOffset,
 		IdxOffset:  idxOffset,
@@ -233,36 +204,6 @@ func (pb *parsedBlock) findPage(ctx context.Context, pageIdx PageIdx) ([]byte, b
 	return data, true, nil
 }
 
-// readAllPages reads and decompresses all pages in the block. Returns a map
-// of page offset → decompressed data.
-func (pb *parsedBlock) readAllPages(ctx context.Context, blockIdx BlockIdx) (map[uint16][]byte, error) {
-	pages := make(map[uint16][]byte, len(pb.index))
-	for i := range pb.index {
-		ie := &pb.index[i]
-		pageIdx := blockIdx.PageIdx(ie.PageOffset)
-		data, err := pb.decompressPage(ctx, ie, pageIdx)
-		if err != nil {
-			return nil, err
-		}
-		pages[ie.PageOffset] = data
-	}
-	return pages, nil
-}
-
-// tryBuildDict attempts to build a zstd shared dictionary from samples.
-// Returns nil if building fails (e.g. low-entropy data).
-func tryBuildDict(samples [][]byte) []byte {
-	d, err := dict.BuildZstdDict(samples, dict.Options{
-		MaxDictSize: 32 * 1024,
-		HashBytes:   6,
-		ZstdLevel:   zstd.SpeedDefault,
-	})
-	if err != nil {
-		return nil
-	}
-	return d
-}
-
 func (pb *parsedBlock) decompressPage(ctx context.Context, ie *blockIndexEntry, pageIdx PageIdx) ([]byte, error) {
 	// Fetch compressed data.
 	var compressed []byte
@@ -289,17 +230,8 @@ func (pb *parsedBlock) decompressPage(ctx context.Context, ie *blockIndexEntry, 
 		return nil, fmt.Errorf("CRC mismatch for page %d", pageIdx)
 	}
 
-	// Decompress with dictionary.
-	var decOpts []zstd.DOption
-	decOpts = append(decOpts, zstd.WithDecoderConcurrency(1))
-	if len(pb.dictBytes) > 0 {
-		decOpts = append(decOpts, zstd.WithDecoderDicts(pb.dictBytes))
-	}
-	dec, err := zstd.NewReader(nil, decOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("create decoder: %w", err)
-	}
-	defer dec.Close()
+	dec := getZstdDecoder()
+	defer putZstdDecoder(dec)
 
 	decompressed, err := dec.DecodeAll(compressed, nil)
 	if err != nil {
@@ -309,4 +241,115 @@ func (pb *parsedBlock) decompressPage(ctx context.Context, ie *blockIndexEntry, 
 		return nil, fmt.Errorf("decompressed size %d, expected %d", len(decompressed), PageSize)
 	}
 	return decompressed, nil
+}
+
+// compressedBlockPage is a pre-compressed page entry that can be copied
+// verbatim into the output block.
+type compressedBlockPage struct {
+	offset     uint16
+	compressed []byte
+	crc32      uint32
+}
+
+// compressedEntriesExcluding returns compressed entries for pages NOT in
+// the exclude set. Requires pb.data to be non-nil (full blob mode).
+func (pb *parsedBlock) compressedEntriesExcluding(exclude map[uint16]struct{}) []compressedBlockPage {
+	entries := make([]compressedBlockPage, 0, len(pb.index))
+	for _, ie := range pb.index {
+		if _, skip := exclude[ie.PageOffset]; skip {
+			continue
+		}
+		end := ie.DataOffset + uint64(ie.DataLen)
+		entries = append(entries, compressedBlockPage{
+			offset:     ie.PageOffset,
+			compressed: pb.data[ie.DataOffset:end],
+			crc32:      ie.CRC32,
+		})
+	}
+	return entries
+}
+
+// patchBlock builds a block from a mix of pre-compressed entries (copied
+// verbatim) and new uncompressed pages (compressed during build). Entries
+// are sorted by page offset for binary search on read.
+func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []blockPage) ([]byte, error) {
+	totalEntries := len(existing) + len(newPages)
+	if totalEntries == 0 {
+		return nil, fmt.Errorf("no pages")
+	}
+
+	enc := getZstdEncoder()
+	defer putZstdEncoder(enc)
+
+	var buf bytes.Buffer
+
+	// Reserve space for header.
+	buf.Write(make([]byte, blockHeaderSize))
+
+	dictOffset := uint64(buf.Len())
+	dataOffset := uint64(buf.Len())
+
+	indexEntries := make([]blockIndexEntry, 0, totalEntries)
+
+	// Write pre-compressed entries verbatim.
+	for _, e := range existing {
+		ie := blockIndexEntry{
+			PageOffset: e.offset,
+			DataOffset: uint64(buf.Len()),
+			DataLen:    uint32(len(e.compressed)),
+			CRC32:      e.crc32,
+		}
+		buf.Write(e.compressed)
+		indexEntries = append(indexEntries, ie)
+	}
+
+	// Compress and write new pages.
+	for _, p := range newPages {
+		if len(p.data) != PageSize {
+			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
+		}
+		compressed := enc.EncodeAll(p.data, nil)
+		ie := blockIndexEntry{
+			PageOffset: p.offset,
+			DataOffset: uint64(buf.Len()),
+			DataLen:    uint32(len(compressed)),
+			CRC32:      crc32.ChecksumIEEE(compressed),
+		}
+		buf.Write(compressed)
+		indexEntries = append(indexEntries, ie)
+	}
+
+	// Sort index entries by page offset for binary search on read.
+	sort.Slice(indexEntries, func(i, j int) bool {
+		return indexEntries[i].PageOffset < indexEntries[j].PageOffset
+	})
+
+	// Write index.
+	idxOffset := uint64(buf.Len())
+	for _, ie := range indexEntries {
+		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
+			return nil, fmt.Errorf("write index entry: %w", err)
+		}
+	}
+
+	// Backfill header.
+	hdr := blockHeader{
+		Magic:      blockMagic,
+		Version:    blockVersion,
+		BlockIdx:   blockIdx,
+		NumEntries: uint32(len(indexEntries)),
+		DictSize:   0,
+		DictOffset: dictOffset,
+		DataOffset: dataOffset,
+		IdxOffset:  idxOffset,
+	}
+
+	result := buf.Bytes()
+	var hdrBuf bytes.Buffer
+	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
+		return nil, fmt.Errorf("encode header: %w", err)
+	}
+	copy(result[:blockHeaderSize], hdrBuf.Bytes())
+
+	return result, nil
 }

@@ -19,7 +19,7 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 
 ## Utilities
 
-- Use `util.SafeClose(c, msg)` from `internal/util` for `defer` closing `io.Closer` values instead of `defer func() { _ = c.Close() }()`
+- **Always use `util.SafeClose(c, msg)`** from `internal/util` when discarding a `Close()` error — both in `defer` and in error-cleanup paths. Never write bare `c.Close()` or `_ = c.Close()`. Example: `defer util.SafeClose(f, "close file")` or in an error path: `util.SafeClose(db, "close db on init failure")`
 
 ## Running locally
 
@@ -88,26 +88,33 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 - `make cf-demo-bin` — cross-compile linux/amd64 binary (nosqlite nolwext4) to `cf-demo/bin/loophole`
 - **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
 - Deployed URL: `https://cf-demo.ramon3525.workers.dev`
-- **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. A `destroy()` + `start()` cycle does NOT guarantee the new image — the rollout may still be in progress. Give it a minute or two after deploy before destroying/restarting. Verify the new binary is running by checking `md5sum /usr/local/bin/loophole` via the host exec endpoint (no volume param): `POST /debug/sandbox/exec?cmd=md5sum+/usr/local/bin/loophole`
+- **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. Give it a minute or two after deploy. Verify the new binary by SSH-ing in and running `md5sum /usr/bin/loophole`.
+
+### CF architecture
+
+The app uses three Durable Objects:
+- **Scheduler** (`cf-demo/src/scheduler.ts`) — singleton that bin-packs volumes across containers. Routes `/api/*` and `/debug/*` are forwarded to the container daemon.
+- **SandboxContainer** (`cf-demo/src/container.ts`) — wraps the CF Container runtime. Starts/stops containers, notifies Scheduler on stop.
+- **VolumeActor** (`cf-demo/src/volume-actor.ts`) — per-volume DO that manages volume lifecycle.
+
+API requests go: Worker → Scheduler DO → Container (daemon HTTP API).
 
 ### CF debug endpoints
 
-The `/c/<container-id>/debug/` routes proxy to the container's loophole daemon. The default container ID is `cf-singleton-container`.
-
-**TanStack route handlers** (in `cf-demo/src/routes/c/$id/debug/`):
-- `GET /debug/state` — container state (`{"status":"healthy"}`)
-- `GET /debug/env` — R2 credentials summary (redacted)
-- `GET /debug/test` — container state + daemon status fetch
-- `POST /debug/start` — start the container
-- `POST /debug/boot` — boot sequence (browser-only, returns HTML)
-- `POST /debug/destroy` — destroy the container
-
-**Passthrough proxy** (`GET|POST /debug/$splat` → daemon HTTP API):
+The Scheduler forwards `/debug/*` requests to the container daemon (stripping the `/debug/` prefix):
+- `POST /debug/stop-all` — stop all containers (handled by Scheduler, use after deploy to force new image)
 - `POST /debug/mount` — mount a volume: `{"volume":"...","mountpoint":"..."}`
 - `POST /debug/clone` — clone a volume: `{"mountpoint":"<src>","clone":"<name>","clone_mountpoint":"<mp>"}`
+- `POST /debug/snapshot` — snapshot a volume: `{"mountpoint":"...","name":"..."}`
 - `POST /debug/sandbox/exec?volume=<vol>&cmd=<cmd>` — run a command in the sandbox
 - `GET /debug/status` — daemon status JSON
 - `GET /debug/volumes` — list loaded volumes
+
+### SSH into CF container
+
+```
+bin/loophole-darwin-arm64 ssh --url https://cf-demo.ramon3525.workers.dev --volume <volume-name>
+```
 
 ### CF container logs (Axiom)
 
@@ -135,10 +142,9 @@ axiom query "['deepagent'] | where _time > now(-1h) | where volume == 'sandbox-1
 - Use `-f json` for machine-readable output.
 - The `dur` field is in nanoseconds (e.g. 1924547003 = ~1.9s).
 
-**Example: clone zygote and run a command:**
+**Example: clone zygote and run a command via debug endpoints:**
 ```
-BASE=https://cf-demo.ramon3525.workers.dev/c/cf-singleton-container/debug
-curl -X POST "$BASE/start"
+BASE=https://cf-demo.ramon3525.workers.dev/debug
 curl -X POST "$BASE/mount" -H 'Content-Type: application/json' -d '{"volume":"zygote-ubuntu-2404","mountpoint":"zygote-ubuntu-2404"}'
 curl -X POST "$BASE/clone" -H 'Content-Type: application/json' -d '{"mountpoint":"zygote-ubuntu-2404","clone":"sandbox-1","clone_mountpoint":"sandbox-1"}'
 curl -X POST "$BASE/sandbox/exec?volume=sandbox-1&cmd=cat+/etc/os-release"

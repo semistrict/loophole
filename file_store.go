@@ -93,7 +93,7 @@ func (f *FileStore) PutBytesCAS(_ context.Context, key string, data []byte, etag
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(p, data, 0644); err != nil {
+	if err := atomicWriteFile(p, data); err != nil {
 		return "", fmt.Errorf("write %s: %w", key, err)
 	}
 	newEtag := fmt.Sprintf(`"%x"`, sha256.Sum256(data))
@@ -109,7 +109,7 @@ func (f *FileStore) PutReader(_ context.Context, key string, r io.Reader) error 
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, data, 0644)
+	return atomicWriteFile(p, data)
 }
 
 func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, meta ...map[string]string) error {
@@ -140,7 +140,7 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, m
 	}
 	if len(meta) > 0 && meta[0] != nil {
 		metaData, _ := json.Marshal(meta[0])
-		if werr := os.WriteFile(f.metaPath(key), metaData, 0644); werr != nil {
+		if werr := atomicWriteFile(f.metaPath(key), metaData); werr != nil {
 			slog.Warn("write metadata sidecar failed", "path", f.metaPath(key), "error", werr)
 		}
 	}
@@ -189,7 +189,29 @@ func (f *FileStore) SetMeta(_ context.Context, key string, meta map[string]strin
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(f.metaPath(key), data, 0644)
+	return atomicWriteFile(f.metaPath(key), data)
+}
+
+// atomicWriteFile writes data to path atomically by writing to a temp file
+// in the same directory and then renaming. This prevents data loss if the
+// process crashes mid-write (os.WriteFile truncates before writing, so a
+// crash after truncation but before write completion leaves a corrupt file).
+func atomicWriteFile(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func (f *FileStore) ListKeys(_ context.Context, prefix string) ([]ObjectInfo, error) {

@@ -68,7 +68,7 @@ func Create(ctx context.Context, mgr loophole.VolumeManager, name string, opts .
 		return nil, fmt.Errorf("volume size %d too small (minimum %d)", o.size, MinVolumeSize)
 	}
 
-	vol, err := mgr.NewVolume(ctx, loophole.CreateParams{Volume: name, Size: o.size, Type: loophole.VolumeTypeSQLite})
+	vol, err := mgr.NewVolume(loophole.CreateParams{Volume: name, Size: o.size, Type: loophole.VolumeTypeSQLite})
 	if err != nil {
 		return nil, fmt.Errorf("create volume: %w", err)
 	}
@@ -89,7 +89,7 @@ func Open(ctx context.Context, mgr loophole.VolumeManager, name string, opts ...
 		fn(&o)
 	}
 
-	vol, err := mgr.OpenVolume(ctx, name)
+	vol, err := mgr.OpenVolume(name)
 	if err != nil {
 		return nil, fmt.Errorf("open volume: %w", err)
 	}
@@ -140,7 +140,7 @@ func (db *DB) Snapshot(ctx context.Context, name string) error {
 
 // OpenSnapshot opens a snapshot as a read-only DB.
 func OpenSnapshot(ctx context.Context, mgr loophole.VolumeManager, name string) (*DB, error) {
-	vol, err := mgr.OpenVolume(ctx, name)
+	vol, err := mgr.OpenVolume(name)
 	if err != nil {
 		return nil, fmt.Errorf("open snapshot: %w", err)
 	}
@@ -194,7 +194,7 @@ func (db *DB) Branch(ctx context.Context, name string) (*DB, error) {
 // The returned DB re-reads the superblock and layer map on each refresh tick,
 // so new queries see the latest flushed state.
 func OpenFollow(ctx context.Context, mgr loophole.VolumeManager, name string, interval time.Duration) (*DB, error) {
-	vol, err := mgr.OpenVolume(ctx, name)
+	vol, err := mgr.OpenVolume(name)
 	if err != nil {
 		return nil, fmt.Errorf("open volume for follow: %w", err)
 	}

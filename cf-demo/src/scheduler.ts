@@ -52,6 +52,16 @@ export class Scheduler extends DurableObject<Env> {
       return this.forwardDeleteVolume(volume)
     }
 
+    // Stop all containers (for forcing new image rollout after deploy)
+    if (path === '/debug/stop-all' && request.method === 'POST') {
+      return this.handleStopAll()
+    }
+
+    // Force-kill all containers (SIGKILL — for when stop hangs on frozen FS)
+    if (path === '/debug/kill-all' && request.method === 'POST') {
+      return this.handleKillAll()
+    }
+
     // Debug routes — forward to any container
     if (path.startsWith('/debug/')) {
       return this.forwardToAnyContainer(request)
@@ -195,6 +205,47 @@ export class Scheduler extends DurableObject<Env> {
         body: JSON.stringify({ volume }),
       }),
     )
+  }
+
+  private async handleStopAll(): Promise<Response> {
+    const containers = [
+      ...this.sql.exec<{ name: string }>('SELECT name FROM containers'),
+    ]
+    const stopped: string[] = []
+    const errors: string[] = []
+    for (const row of containers) {
+      try {
+        const container = getContainer(this.env.SANDBOX, row.name)
+        await container.stop()
+        stopped.push(row.name)
+      } catch (e) {
+        errors.push(`${row.name}: ${e}`)
+      }
+    }
+    // Clear all assignments and counts since containers are gone.
+    this.sql.exec('DELETE FROM assignments')
+    this.sql.exec('UPDATE containers SET volume_count = 0')
+    return Response.json({ stopped, errors })
+  }
+
+  private async handleKillAll(): Promise<Response> {
+    const containers = [
+      ...this.sql.exec<{ name: string }>('SELECT name FROM containers'),
+    ]
+    const killed: string[] = []
+    const errors: string[] = []
+    for (const row of containers) {
+      try {
+        const container = getContainer(this.env.SANDBOX, row.name)
+        await container.destroy()
+        killed.push(row.name)
+      } catch (e) {
+        errors.push(`${row.name}: ${e}`)
+      }
+    }
+    this.sql.exec('DELETE FROM assignments')
+    this.sql.exec('UPDATE containers SET volume_count = 0')
+    return Response.json({ killed, errors })
   }
 
   private pickAnyContainer(): string {

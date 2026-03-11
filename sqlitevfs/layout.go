@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	headerSize   = 4096       // One LSM page at the start of the volume.
+	headerSize   = 4096       // One page at the start of the volume.
 	magic        = "SQVFS002" // Volume format identifier.
 	version      = 2
 	mainDBOffset = headerSize // MainDB data starts right after the header.

@@ -19,16 +19,10 @@ import (
 // errMemtableFull is returned when the memtable is full.
 var errMemtableFull = fmt.Errorf("memtable full")
 
-// memEntry is one entry in the memtable's index.
-type memEntry struct {
-	slot      int
-	tombstone bool
-}
-
-// sortedEntry pairs a page address with its memEntry for iteration.
+// sortedEntry pairs a page address with its mmap slot for iteration.
 type sortedEntry struct {
 	pageIdx PageIdx
-	memEntry
+	slot    int
 }
 
 // memtable is the in-memory write buffer backed by a memory-mapped file.
@@ -40,7 +34,7 @@ type memtable struct {
 	file     *os.File
 	path     string
 	mmap     []byte
-	index    map[PageIdx]memEntry
+	index    map[PageIdx]int // pageIdx → mmap slot
 	nextSlot int
 	maxPages int
 	startSeq uint64
@@ -81,7 +75,7 @@ func newMemtable(dir string, startSeq uint64, maxPages int) (*memtable, error) {
 		file:     f,
 		path:     path,
 		mmap:     mapping,
-		index:    make(map[PageIdx]memEntry),
+		index:    make(map[PageIdx]int),
 		maxPages: maxPages,
 		startSeq: startSeq,
 	}, nil
@@ -100,8 +94,8 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	}
 
 	var slot int
-	if existing, ok := mt.index[pageIdx]; ok && !existing.tombstone {
-		slot = existing.slot
+	if existing, ok := mt.index[pageIdx]; ok {
+		slot = existing
 	} else {
 		if mt.nextSlot >= mt.maxPages {
 			return errMemtableFull
@@ -114,19 +108,7 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	off := slot * PageSize
 	copy(mt.mmap[off:off+PageSize], data)
 
-	mt.index[pageIdx] = memEntry{slot: slot}
-	return nil
-}
-
-func (mt *memtable) putTombstone(pageIdx PageIdx) error {
-	mt.mu.Lock()
-	defer mt.mu.Unlock()
-
-	if mt.frozen {
-		return fmt.Errorf("memtable is frozen")
-	}
-
-	mt.index[pageIdx] = memEntry{tombstone: true}
+	mt.index[pageIdx] = slot
 	return nil
 }
 
@@ -136,18 +118,14 @@ func (mt *memtable) isEmpty() bool {
 	return len(mt.index) == 0
 }
 
-func (mt *memtable) get(pageIdx PageIdx) (memEntry, bool) {
+func (mt *memtable) get(pageIdx PageIdx) (int, bool) {
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
-	e, ok := mt.index[pageIdx]
-	return e, ok
+	slot, ok := mt.index[pageIdx]
+	return slot, ok
 }
 
-func (mt *memtable) readData(e memEntry) ([]byte, error) {
-	if e.tombstone {
-		return zeroPage[:], nil
-	}
-
+func (mt *memtable) readData(slot int) ([]byte, error) {
 	mt.pins.Add(1)
 	defer mt.pins.Add(-1)
 
@@ -155,7 +133,7 @@ func (mt *memtable) readData(e memEntry) ([]byte, error) {
 		return nil, errmemtableCleanedUp
 	}
 
-	off := e.slot * PageSize
+	off := slot * PageSize
 	buf := make([]byte, PageSize)
 	copy(buf, mt.mmap[off:off+PageSize])
 	return buf, nil
@@ -164,18 +142,14 @@ func (mt *memtable) readData(e memEntry) ([]byte, error) {
 // readDataPinned returns a zero-copy slice into the mmap and a release
 // function that must be called when the caller is done with the data.
 // The pin prevents cleanup (munmap) until released.
-func (mt *memtable) readDataPinned(e memEntry) ([]byte, func(), error) {
-	if e.tombstone {
-		return zeroPage[:], func() {}, nil
-	}
-
+func (mt *memtable) readDataPinned(slot int) ([]byte, func(), error) {
 	mt.pins.Add(1)
 	if mt.closed.Load() {
 		mt.pins.Add(-1)
 		return nil, nil, errmemtableCleanedUp
 	}
 
-	off := e.slot * PageSize
+	off := slot * PageSize
 	return mt.mmap[off : off+PageSize], func() { mt.pins.Add(-1) }, nil
 }
 
@@ -191,8 +165,8 @@ func (mt *memtable) entries() []sortedEntry {
 	defer mt.mu.RUnlock()
 
 	out := make([]sortedEntry, 0, len(mt.index))
-	for addr, e := range mt.index {
-		out = append(out, sortedEntry{pageIdx: addr, memEntry: e})
+	for addr, slot := range mt.index {
+		out = append(out, sortedEntry{pageIdx: addr, slot: slot})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].pageIdx < out[j].pageIdx

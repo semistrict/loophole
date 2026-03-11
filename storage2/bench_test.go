@@ -46,9 +46,8 @@ func BenchmarkS3Ops(b *testing.B) {
 	b.Run("Write64Flush", func(b *testing.B) {
 		store := loophole.NewMemStore()
 		m := newBenchManager(b, store, defaultBenchConfig)
-		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+		v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -76,7 +75,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+		v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -108,9 +107,8 @@ func BenchmarkS3Ops(b *testing.B) {
 	b.Run("Snapshot", func(b *testing.B) {
 		store := loophole.NewMemStore()
 		m := newBenchManager(b, store, defaultBenchConfig)
-		ctx := context.Background()
 
-		v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+		v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -140,9 +138,8 @@ func BenchmarkS3Ops(b *testing.B) {
 		for range b.N {
 			store := loophole.NewMemStore()
 			m := newBenchManager(b, store, defaultBenchConfig)
-			ctx := context.Background()
 
-			v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+			v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -176,9 +173,8 @@ func BenchmarkS3Ops(b *testing.B) {
 				FlushThreshold:  4 * PageSize,
 				MaxFrozenTables: 2,
 			})
-			ctx := context.Background()
 
-			v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
+			v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -197,7 +193,7 @@ func BenchmarkS3Ops(b *testing.B) {
 			}
 
 			store.ResetCounts()
-			if err := vol.layer.CompactL0(ctx); err != nil {
+			if err := vol.layer.CompactL0(); err != nil {
 				b.Fatal(err)
 			}
 			reportS3Counts(b, store, 1)
@@ -238,7 +234,7 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 
 	// Write the data once.
 	m := newBenchManager(b, store, defaultBenchConfig)
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "vol", Size: totalPages * PageSize})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: totalPages * PageSize})
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -262,7 +258,7 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 	for range b.N {
 		// Fresh manager each iteration — no cached layers.
 		m2 := newBenchManager(b, store, defaultBenchConfig)
-		v2, err := m2.OpenVolume(ctx, "vol")
+		v2, err := m2.OpenVolume("vol")
 		if err != nil {
 			b.Fatal(err)
 		}

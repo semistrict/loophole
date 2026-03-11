@@ -13,10 +13,10 @@ import (
 )
 
 // L0 file format:
-//   [header][compressed page data...][index entries...]
+//
+//	[header][compressed page data...][index entries...]
 //
 // Each page is independently zstd-compressed with its own CRC32.
-// Tombstones are index entries with ValueLen=0.
 
 var l0Magic = [4]byte{'L', 'H', 'L', '0'}
 
@@ -34,10 +34,10 @@ type l0Header struct {
 const l0HeaderSize = 4 + 2 + 8 + 8 + 4 + 8 // 34 bytes
 
 type l0IndexEntry struct {
-	PageIdx     PageIdx
-	ValueOffset uint64
-	ValueLen    uint32 // 0 = tombstone
-	CRC32       uint32
+	PageIdx    PageIdx
+	DataOffset uint64
+	DataLen    uint32
+	CRC32      uint32
 }
 
 const l0IndexEntrySize = 8 + 8 + 4 + 4 // 24 bytes
@@ -59,32 +59,23 @@ func buildL0(mt *memtable, layerID string, entries []sortedEntry, writeLeaseSeq 
 
 	// Write compressed page data and build index.
 	indexEntries := make([]l0IndexEntry, 0, len(entries))
-	var pages []PageIdx
-	var tombstones []PageIdx
+	pages := make([]PageIdx, 0, len(entries))
 
 	for _, e := range entries {
+		pageData, err := mt.readData(e.slot)
+		if err != nil {
+			return nil, l0Entry{}, fmt.Errorf("read page %d: %w", e.pageIdx, err)
+		}
+		compressed := encoder.EncodeAll(pageData, nil)
 		ie := l0IndexEntry{
-			PageIdx:     e.pageIdx,
-			ValueOffset: uint64(buf.Len()),
+			PageIdx:    e.pageIdx,
+			DataOffset: uint64(buf.Len()),
+			DataLen:    uint32(len(compressed)),
+			CRC32:      crc32.ChecksumIEEE(compressed),
 		}
-
-		if e.tombstone {
-			ie.ValueLen = 0
-			ie.CRC32 = 0
-			tombstones = append(tombstones, e.pageIdx)
-		} else {
-			pageData, err := mt.readData(e.memEntry)
-			if err != nil {
-				return nil, l0Entry{}, fmt.Errorf("read page %d: %w", e.pageIdx, err)
-			}
-			compressed := encoder.EncodeAll(pageData, nil)
-			ie.ValueLen = uint32(len(compressed))
-			ie.CRC32 = crc32.ChecksumIEEE(compressed)
-			buf.Write(compressed)
-			pages = append(pages, e.pageIdx)
-		}
-
+		buf.Write(compressed)
 		indexEntries = append(indexEntries, ie)
+		pages = append(pages, e.pageIdx)
 	}
 
 	// Write index section.
@@ -115,10 +106,9 @@ func buildL0(mt *memtable, layerID string, entries []sortedEntry, writeLeaseSeq 
 	key := fmt.Sprintf("layers/%s/l0/%016x-%016x-%016x", layerID, writeLeaseSeq, mt.startSeq, mt.endSeq)
 
 	return result, l0Entry{
-		Key:        key,
-		Pages:      pages,
-		Tombstones: tombstones,
-		Size:       int64(len(result)),
+		Key:   key,
+		Pages: pages,
+		Size:  int64(len(result)),
 	}, nil
 }
 
@@ -171,17 +161,30 @@ func (p *parsedL0) findPage(ctx context.Context, pageIdx PageIdx) ([]byte, bool,
 	}
 
 	ie := &p.index[i]
-
-	// Tombstone.
-	if ie.ValueLen == 0 {
-		return zeroPage[:], true, nil
-	}
-
-	data, err := readCompressedPage(ctx, p.data, p.store, p.key, ie.ValueOffset, ie.ValueLen, ie.CRC32, pageIdx)
+	data, err := readCompressedPage(ctx, p.data, p.store, p.key, ie.DataOffset, ie.DataLen, ie.CRC32, pageIdx)
 	if err != nil {
 		return nil, false, err
 	}
 	return data, true, nil
+}
+
+// compressedEntry extracts the compressed bytes for a single page without
+// decompressing. Returns the block-relative offset, compressed data, and CRC.
+// Requires p.data to be non-nil (full blob mode).
+func (p *parsedL0) compressedEntry(pageIdx PageIdx) (compressedBlockPage, bool) {
+	i := sort.Search(len(p.index), func(i int) bool {
+		return p.index[i].PageIdx >= pageIdx
+	})
+	if i >= len(p.index) || p.index[i].PageIdx != pageIdx {
+		return compressedBlockPage{}, false
+	}
+	ie := &p.index[i]
+	end := ie.DataOffset + uint64(ie.DataLen)
+	return compressedBlockPage{
+		offset:     uint16(pageIdx % BlockPages),
+		compressed: p.data[ie.DataOffset:end],
+		crc32:      ie.CRC32,
+	}, true
 }
 
 // readCompressedPage fetches a compressed page from a blob or via S3 GetRange,
@@ -191,7 +194,7 @@ func readCompressedPage(ctx context.Context, data []byte, store loophole.ObjectS
 	if data != nil {
 		end := offset + uint64(length)
 		if end > uint64(len(data)) {
-			return nil, fmt.Errorf("value extends beyond data: offset=%d len=%d size=%d", offset, length, len(data))
+			return nil, fmt.Errorf("data extends beyond blob: offset=%d len=%d size=%d", offset, length, len(data))
 		}
 		compressed = data[offset:end]
 	} else {

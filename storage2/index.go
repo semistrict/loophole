@@ -15,20 +15,19 @@ type layerIndex struct {
 
 // l0Entry describes a single L0 flush file and the pages it contains.
 type l0Entry struct {
-	Key        string    `json:"key"`
-	Pages      []PageIdx `json:"pages"`
-	Tombstones []PageIdx `json:"tombstones,omitempty"`
-	Size       int64     `json:"size"`
+	Key   string    `json:"key"`
+	Pages []PageIdx `json:"pages"`
+	Size  int64     `json:"size"`
 }
 
 // blockRange maps a contiguous range of block indices [Start, End) to
 // the layer that owns the blobs. The blob key for block index N in
 // layer L is "layers/{L}/l1/{N}" or "layers/{L}/l2/{N}".
 type blockRange struct {
-	Start         BlockIdx `json:"start"`                     // inclusive
-	End           BlockIdx `json:"end"`                       // exclusive
-	Layer         string   `json:"layer"`                     // layer ID that owns the blobs
-	WriteLeaseSeq uint64   `json:"write_lease_seq,omitempty"` // lease seq embedded in blob keys
+	Start         BlockIdx `json:"start"`           // inclusive
+	End           BlockIdx `json:"end"`             // exclusive
+	Layer         string   `json:"layer"`           // layer ID that owns the blobs
+	WriteLeaseSeq uint64   `json:"write_lease_seq"` // lease seq embedded in blob keys
 }
 
 // l0HasPage checks if an L0 entry contains the given page.
@@ -41,21 +40,11 @@ func l0HasPage(e *l0Entry, pageIdx PageIdx) bool {
 	return false
 }
 
-// l0HasTombstone checks if an L0 entry has a tombstone for the given page.
-func l0HasTombstone(e *l0Entry, pageIdx PageIdx) bool {
-	for _, t := range e.Tombstones {
-		if t == pageIdx {
-			return true
-		}
-	}
-	return false
-}
-
 // totalL0Pages returns the total number of page entries across all L0 files.
 func totalL0Pages(entries []l0Entry) int {
 	n := 0
 	for i := range entries {
-		n += len(entries[i].Pages) + len(entries[i].Tombstones)
+		n += len(entries[i].Pages)
 	}
 	return n
 }
@@ -173,8 +162,8 @@ func removeBlockAddr(ranges []blockRange, blockAddr BlockIdx) []blockRange {
 		ranges[i].End = blockAddr
 	default:
 		// Split range into two.
-		left := blockRange{Start: r.Start, End: blockAddr, Layer: r.Layer}
-		right := blockRange{Start: blockAddr + 1, End: r.End, Layer: r.Layer}
+		left := blockRange{Start: r.Start, End: blockAddr, Layer: r.Layer, WriteLeaseSeq: r.WriteLeaseSeq}
+		right := blockRange{Start: blockAddr + 1, End: r.End, Layer: r.Layer, WriteLeaseSeq: r.WriteLeaseSeq}
 		ranges[i] = left
 		ranges = append(ranges[:i+1], append([]blockRange{right}, ranges[i+1:]...)...)
 	}

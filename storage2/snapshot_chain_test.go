@@ -21,7 +21,7 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	m := newTestManager(t, store, cfg)
 
 	// Create root volume and write data.
-	v, err := m.NewVolume(ctx, loophole.CreateParams{Volume: "root", Size: 1024 * 1024})
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "root", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 
 	// Open the leaf on a fresh manager so everything is loaded from S3.
 	m2 := newTestManager(t, store, cfg)
-	leaf, err := m2.OpenVolume(ctx, fmt.Sprintf("c%d", chainLen-1))
+	leaf, err := m2.OpenVolume(fmt.Sprintf("c%d", chainLen-1))
 	if err != nil {
 		t.Fatal(err)
 	}

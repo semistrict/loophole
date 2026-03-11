@@ -34,6 +34,7 @@ func chrootRootCmd() *cobra.Command {
 
 	root.AddCommand(
 		chrootFlushCmd(),
+		chrootCompactCmd(),
 		chrootSnapshotCmd(),
 		chrootCloneCmd(),
 		chrootStatusCmd(),
@@ -57,6 +58,23 @@ func chrootFlushCmd() *cobra.Command {
 				return err
 			}
 			fmt.Println("flushed")
+			return nil
+		},
+	}
+}
+
+func chrootCompactCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "compact",
+		Short: "Compact L0→L1 (may take a while)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := chrootClient()
+			fmt.Println("compacting...")
+			if err := c.Compact(cmd.Context()); err != nil {
+				return err
+			}
+			fmt.Println("done")
 			return nil
 		},
 	}
@@ -158,7 +176,7 @@ func printChrootStatus(s *client.ChrootStatusResponse) {
 	fmt.Println(ly.FrozenCount)
 	fmt.Println()
 
-	_, _ = header.Println("LSM")
+	_, _ = header.Println("Compaction")
 	_, _ = lbl.Print("  L0 files   ")
 	fmt.Println(ly.L0Count)
 	_, _ = lbl.Print("  L0 pages   ")
