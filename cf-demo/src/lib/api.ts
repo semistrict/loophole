@@ -47,13 +47,13 @@ export const createVolume = createServerFn({ method: 'POST' })
     await schedulerJson(res)
   })
 
-export const snapshotVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { mountpoint: string; name: string }) => data)
+export const checkpointVolume = createServerFn({ method: 'POST' })
+  .inputValidator((data: { mountpoint: string }) => data)
   .handler(async ({ data }) => {
-    const res = await schedulerFetch('/debug/snapshot', {
+    const res = await schedulerFetch('/debug/checkpoint', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mountpoint: data.mountpoint, name: data.name }),
+      body: JSON.stringify({ mountpoint: data.mountpoint }),
     })
     await schedulerJson(res)
   })

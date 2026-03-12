@@ -37,7 +37,6 @@ var volumeCommands = []volCmd{
 	{method: "GET", path: "/status", handler: cmdStatus, chrootOnly: true},
 	{method: "POST", path: "/flush", handler: cmdFlush},
 	{method: "POST", path: "/compact", handler: cmdCompact},
-	{method: "POST", path: "/snapshot", handler: cmdSnapshot, chrootOnly: true},
 	{method: "POST", path: "/checkpoint", handler: cmdCheckpoint, chrootOnly: true},
 	{method: "POST", path: "/clone", handler: cmdClone, chrootOnly: true},
 }
@@ -73,26 +72,6 @@ func cmdCompact(a volCmdArgs) (any, error) {
 		return nil, fmt.Errorf("compact: %w", err)
 	}
 	slog.Info("compact: done", "volume", a.volName)
-	return map[string]string{"status": "ok"}, nil
-}
-
-func cmdSnapshot(a volCmdArgs) (any, error) {
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := json.Unmarshal(a.body, &req); err != nil {
-		return nil, err
-	}
-	if req.Name == "" {
-		return nil, fmt.Errorf("name is required")
-	}
-	if a.mountpoint == "" {
-		return nil, fmt.Errorf("mountpoint is required for snapshot")
-	}
-	slog.Info("snapshot", "mountpoint", a.mountpoint, "name", req.Name)
-	if err := a.backend.Snapshot(context.Background(), a.mountpoint, req.Name); err != nil {
-		return nil, fmt.Errorf("snapshot: %w", err)
-	}
 	return map[string]string{"status": "ok"}, nil
 }
 

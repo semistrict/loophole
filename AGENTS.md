@@ -8,14 +8,12 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 
 ## Building and testing
 
-- **ALWAYS use `make` targets** — they build the lwext4 C static library and set CGO_LDFLAGS automatically. Never run `go build` or `go test` directly.
+- **ALWAYS use `make` targets** — they capture the supported build and test entrypoints for this repo. Never run `go build` or `go test` directly.
 - `make build` — build all packages
 - `make test` — run all unit tests
 - `make test RUN=TestName` — run a specific test across all packages
-- `make e2e-inprocess` — run e2e tests in-process (no FUSE/NBD/root required, works on macOS)
-- `make e2e-inprocess RUN=TestName` — run a specific e2e test
-- Firecracker-specific e2e tests do **not** run natively on macOS; run them in the local Lima Linux VM instead:
-  `limactl shell fc bash -lc 'cd /Users/ramon/src/loophole && LOOPHOLE_RUN_FIRECRACKER_E2E=1 make e2e-inprocess RUN=TestE2E_FirecrackerCycledSnapshotRestore'`
+- `make e2e-fuse` — run the Linux kernel ext4-over-FUSE e2e tests
+- `make e2e-fuse RUN=TestName` — run a specific e2e test
 - E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e-fuse'`
 - Set `LOG_LEVEL=debug` to enable slog debug output in e2e tests
 
@@ -50,18 +48,18 @@ Use this to diagnose stuck operations (e.g. freeze blocked on S3 upload).
 
 When debugging the daemon on a remote Linux machine (e.g. Fly), these techniques work well:
 
-**Grep structured logs from the log file.** The daemon writes JSON-structured logs to `~/.loophole/<profile>.log`. Use `grep "snapshotter:"` or similar to filter for specific subsystems. This is much more reliable than trying to read interleaved console output.
+**Grep structured logs from the log file.** The daemon writes JSON-structured logs to `~/.loophole/<profile>.log`. Use `grep "checkpoint"` or other subsystem strings to filter for specific operations. This is much more reliable than trying to read interleaved console output.
 
 **Use `fly ssh console -C` for clean output.** When the daemon runs in the foreground with debug logging, its output floods the terminal. Use a separate SSH connection to run commands with clean stdout:
 ```
-fly ssh console -a loophole-test -C 'ctr run --snapshotter loophole --rm docker.io/library/alpine:latest test /bin/echo hello'
+fly ssh console -a loophole-test -C 'bin/loophole-linux-amd64 -p tigris status'
 ```
 
 **Goroutine dumps for stuck operations.** When something hangs, grab a goroutine dump via pprof to see exactly where it's blocked:
 ```
 fly ssh console -a loophole-test -C 'curl --unix-socket /root/.loophole/tigris.sock "http://localhost/debug/pprof/goroutine?debug=2"'
 ```
-Grep for your subsystem (e.g. `WaitClosed`, `snapshotter`, `grpc`) to find the stuck goroutine. This is how the FUSE Lookup ref leak was diagnosed — the dump showed `WaitClosed` blocked in `sync.Cond.Wait` because `OnForget` (kernel inode eviction) was indefinitely delayed.
+Grep for your subsystem (e.g. `WaitClosed`, `checkpoint`, `grpc`) to find the stuck goroutine. This is how the FUSE Lookup ref leak was diagnosed — the dump showed `WaitClosed` blocked in `sync.Cond.Wait` because `OnForget` (kernel inode eviction) was indefinitely delayed.
 
 **Watch goroutine count in heartbeat.** The daemon logs `goroutines=N` every 5 seconds. A steadily climbing count indicates a goroutine leak. A stable but unexpectedly high count may indicate a stuck operation.
 
@@ -127,7 +125,7 @@ The Scheduler forwards `/debug/*` requests to the container daemon (stripping th
 - `POST /debug/stop-all` — stop all containers (handled by Scheduler, use after deploy to force new image)
 - `POST /debug/mount` — mount a volume: `{"volume":"...","mountpoint":"..."}`
 - `POST /debug/clone` — clone a volume: `{"mountpoint":"<src>","clone":"<name>","clone_mountpoint":"<mp>"}`
-- `POST /debug/snapshot` — snapshot a volume: `{"mountpoint":"...","name":"..."}`
+- `POST /debug/checkpoint` — create a checkpoint for a mounted volume: `{"mountpoint":"..."}`
 - `POST /debug/sandbox/exec?volume=<vol>&cmd=<cmd>` — run a command in the sandbox
 - `GET /debug/status` — daemon status JSON
 - `GET /debug/volumes` — list loaded volumes

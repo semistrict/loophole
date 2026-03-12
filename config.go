@@ -17,19 +17,15 @@ type Config struct {
 
 // Profile is a named set of connection parameters.
 type Profile struct {
-	Endpoint          string `toml:"endpoint"`
-	Bucket            string `toml:"bucket"`
-	Prefix            string `toml:"prefix"`
-	AccessKey         string `toml:"access_key"`
-	SecretKey         string `toml:"secret_key"`
-	Region            string `toml:"region"`
-	Mode              string `toml:"mode"`
-	NBDSocket         string `toml:"nbd_socket"`
-	SnapshotterSocket string `toml:"snapshotter_socket"`
-	LogLevel          string `toml:"log_level"`
-	SandboxMode       string `toml:"sandbox_mode"`
-	LocalDir          string `toml:"local_dir"`
-	DaemonURL         string `toml:"daemon_url"` // remote daemon base URL (e.g. https://cf-demo.ramon3525.workers.dev)
+	Endpoint  string `toml:"endpoint"`
+	Bucket    string `toml:"bucket"`
+	Prefix    string `toml:"prefix"`
+	AccessKey string `toml:"access_key"`
+	SecretKey string `toml:"secret_key"`
+	Region    string `toml:"region"`
+	LogLevel  string `toml:"log_level"`
+	LocalDir  string `toml:"local_dir"`
+	DaemonURL string `toml:"daemon_url"` // remote daemon base URL (e.g. https://cf-demo.ramon3525.workers.dev)
 }
 
 // LoadConfig reads ~/.loophole/config.toml. Returns an empty Config (not an
@@ -82,28 +78,15 @@ func (c *Config) Resolve(name string) (Instance, error) {
 		return Instance{}, fmt.Errorf("profile %q: bucket, local_dir, or daemon_url is required", name)
 	}
 	return Instance{
-		ProfileName:       name,
-		Bucket:            p.Bucket,
-		Prefix:            p.Prefix,
-		Endpoint:          p.Endpoint,
-		LocalDir:          p.LocalDir,
-		AccessKey:         p.AccessKey,
-		SecretKey:         p.SecretKey,
-		Region:            p.Region,
-		Mode:              Mode(p.Mode),
-		NBDSocket:         p.NBDSocket,
-		SnapshotterSocket: p.SnapshotterSocket,
-		LogLevel:          p.LogLevel,
-		SandboxMode:       firstNonEmpty(p.SandboxMode, DefaultSandboxMode()),
-		DaemonURL:         p.DaemonURL,
+		ProfileName: name,
+		Bucket:      p.Bucket,
+		Prefix:      p.Prefix,
+		Endpoint:    p.Endpoint,
+		LocalDir:    p.LocalDir,
+		AccessKey:   p.AccessKey,
+		SecretKey:   p.SecretKey,
+		Region:      p.Region,
+		LogLevel:    p.LogLevel,
+		DaemonURL:   p.DaemonURL,
 	}, nil
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

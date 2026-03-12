@@ -1,8 +1,7 @@
 package loophole
 
 const (
-	SandboxModeChroot      = "chroot"
-	SandboxModeFirecracker = "firecracker"
+	SandboxModeChroot = "chroot"
 )
 
 // DefaultSandboxMode returns the default sandbox runtime for /sandbox/exec.

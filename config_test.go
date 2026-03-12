@@ -25,9 +25,7 @@ prefix = "vms"
 access_key = "tid_xxx"
 secret_key = "tsec_xxx"
 region = "auto"
-mode = "fuse"
 log_level = "debug"
-sandbox_mode = "firecracker"
 `), 0o644)
 	require.NoError(t, err)
 
@@ -53,9 +51,7 @@ sandbox_mode = "firecracker"
 	require.Equal(t, "tid_xxx", inst.AccessKey)
 	require.Equal(t, "tsec_xxx", inst.SecretKey)
 	require.Equal(t, "auto", inst.Region)
-	require.Equal(t, Mode("fuse"), inst.Mode)
 	require.Equal(t, "debug", inst.LogLevel)
-	require.Equal(t, SandboxModeFirecracker, inst.SandboxMode)
 }
 
 func TestLoadConfigMissing(t *testing.T) {
@@ -86,16 +82,4 @@ func TestResolveMissingBucket(t *testing.T) {
 	_, err := cfg.Resolve("bad")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "bucket, local_dir, or daemon_url is required")
-}
-
-func TestResolveSandboxModeDefault(t *testing.T) {
-	cfg := &Config{
-		Profiles: map[string]Profile{
-			"test": {Bucket: "bucket"},
-		},
-	}
-
-	inst, err := cfg.Resolve("test")
-	require.NoError(t, err)
-	require.Equal(t, DefaultSandboxMode(), inst.SandboxMode)
 }

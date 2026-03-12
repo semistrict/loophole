@@ -35,7 +35,7 @@ func chrootRootCmd() *cobra.Command {
 	root.AddCommand(
 		chrootFlushCmd(),
 		chrootCompactCmd(),
-		chrootSnapshotCmd(),
+		chrootCheckpointCmd(),
 		chrootCloneCmd(),
 		chrootStatusCmd(),
 	)
@@ -80,17 +80,18 @@ func chrootCompactCmd() *cobra.Command {
 	}
 }
 
-func chrootSnapshotCmd() *cobra.Command {
+func chrootCheckpointCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "snapshot <name>",
-		Short: "Create a snapshot of this volume",
-		Args:  cobra.ExactArgs(1),
+		Use:   "checkpoint",
+		Short: "Create a checkpoint of this volume",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := chrootClient()
-			if err := c.ChrootSnapshot(cmd.Context(), args[0]); err != nil {
+			cpID, err := c.ChrootCheckpoint(cmd.Context())
+			if err != nil {
 				return err
 			}
-			fmt.Printf("snapshot %q created\n", args[0])
+			fmt.Printf("checkpoint %s created\n", cpID)
 			return nil
 		},
 	}

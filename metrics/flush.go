@@ -32,13 +32,6 @@ var (
 		Help:      "Blocks that failed to upload and were re-dirtied.",
 	}))
 
-	FlushTombstones = reg(prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: "loophole",
-		Subsystem: "flush",
-		Name:      "tombstones_total",
-		Help:      "Zero-blocks flushed as tombstones (or deleted).",
-	}))
-
 	BackpressureWaits = reg(prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "loophole",
 		Subsystem: "flush",

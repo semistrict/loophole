@@ -25,7 +25,6 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/metrics"
-	"github.com/semistrict/loophole/nbdserve"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -37,12 +36,8 @@ type Daemon struct {
 	diskCache *storage2.PageCache
 	ln        net.Listener
 
-	nbdSock       string                      // set once NBD server is started
-	nbdLn         net.Listener                // NBD listener, closed on shutdown
-	grpcLn        net.Listener                //nolint:unused // used on linux (snapshotter_linux.go)
-	grpcSrv       interface{ GracefulStop() } //nolint:unused // used on linux (snapshotter_linux.go)
-	startupErr    string                      // non-fatal startup error (e.g. bad S3 creds)
-	skipHashCheck bool                        // skip binary hash check (embedded mode)
+	startupErr    string // non-fatal startup error (e.g. bad S3 creds)
+	skipHashCheck bool   // skip binary hash check (embedded mode)
 
 	axiomClose func() // flushes and closes the axiom handler; nil if axiom is not configured
 
@@ -67,12 +62,6 @@ type Options struct {
 func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
 	foreground := opts.Foreground
 	socketMode := opts.SocketMode
-	if inst.Mode == "" {
-		inst.Mode = loophole.DefaultMode()
-	}
-	if inst.DefaultFSType == "" {
-		inst.DefaultFSType = loophole.DefaultFSType()
-	}
 	logPath := dir.Log(inst.ProfileName)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
@@ -227,9 +216,6 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 
 	d.sandboxRuntime, err = newSandboxRuntime(d)
 	if err != nil {
-		if d.nbdLn != nil {
-			_ = d.nbdLn.Close()
-		}
 		if d.ln != nil {
 			_ = d.ln.Close()
 		}
@@ -238,27 +224,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		}
 		return nil, err
 	}
-	slog.Info("sandbox runtime selected", "configured_mode", d.inst.SandboxMode, "debug", d.sandboxDebugInfo())
-
-	// Always start an NBD server for db commands (requires a working backend).
-	if d.backend != nil {
-		nbdSock := inst.NBDSocket
-		if nbdSock == "" {
-			nbdSock = dir.NBD(inst.ProfileName)
-		}
-		if err := d.startNBD(nbdSock); err != nil {
-			return nil, fmt.Errorf("start NBD server: %w", err)
-		}
-
-		// Start snapshotter gRPC server if configured.
-		grpcSock := inst.SnapshotterSocket
-		if grpcSock == "" {
-			grpcSock = dir.GRPC(inst.ProfileName)
-		}
-		if err := d.startSnapshotter(grpcSock); err != nil {
-			slog.Warn("snapshotter gRPC server failed to start", "error", err)
-		}
-	}
+	slog.Info("sandbox runtime selected", "mode", loophole.DefaultSandboxMode(), "debug", d.sandboxDebugInfo())
 
 	return d, nil
 }
@@ -336,19 +302,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		}
 		close(d.doneCh)
 
-		// Stop snapshotter gRPC server.
-		d.stopSnapshotter()
-
 		// Now stop accepting requests and remove sockets.
-		if d.nbdLn != nil {
-			slog.Info("shutdown: closing NBD listener")
-			if err := d.nbdLn.Close(); err != nil {
-				slog.Warn("shutdown: NBD listener close error", "error", err)
-			}
-			if err := os.Remove(d.nbdSock); err != nil {
-				slog.Warn("shutdown: remove NBD socket", "path", d.nbdSock, "error", err)
-			}
-		}
 		slog.Info("shutdown: closing HTTP server")
 		if err := srv.Close(); err != nil {
 			slog.Warn("shutdown: http server close error", "error", err)
@@ -363,7 +317,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		}
 	}()
 
-	slog.Info("daemon ready", "mode", d.inst.Mode, "socket", d.dir.Socket(d.inst.ProfileName))
+	slog.Info("daemon ready", "mode", "fuse", "socket", d.dir.Socket(d.inst.ProfileName))
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil
@@ -396,14 +350,11 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 	mux.HandleFunc("POST /device/attach", d.handleDeviceAttach)
 	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
-	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
 	mux.HandleFunc("POST /device/checkpoint", d.handleDeviceCheckpoint)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 	mux.HandleFunc("POST /device/dd/write", d.handleDeviceDDWrite)
 	mux.HandleFunc("GET /device/dd/read", d.handleDeviceDDRead)
 	mux.HandleFunc("POST /device/dd/finalize", d.handleDeviceDDFinalize)
-
-	d.registerDBRoutes(mux)
 
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /delete", d.handleDelete)
@@ -411,13 +362,11 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /mount", d.handleMount)
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
-	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)
 	mux.HandleFunc("POST /clone-from-checkpoint", d.handleCloneFromCheckpoint)
 	mux.HandleFunc("GET /checkpoints", d.handleListCheckpoints)
 	registerVolumeCmds(mux, d)
-	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
 		slog.Info("shutdown requested")
 		writeJSON(w, map[string]string{"status": "shutting_down"})
@@ -436,10 +385,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /sandbox/pty/{id}/resize", d.handlePTYResize)
 	mux.HandleFunc("DELETE /sandbox/pty/{id}", d.handlePTYKill)
 	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
-	mux.HandleFunc("POST /sandbox/vm/snapshot", d.handleVMSnapshot)
-	mux.HandleFunc("POST /sandbox/vm/restore", d.handleVMRestore)
 	mux.HandleFunc("GET /sandbox/runtime", d.handleSandboxRuntime)
-	mux.HandleFunc("GET /sandbox/log", d.handleSandboxLog)
 	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)
 	mux.HandleFunc("GET /sandbox/stat", d.handleStat)
 
@@ -475,7 +421,7 @@ func (d *Daemon) instrument(next http.Handler) http.Handler {
 		}
 
 		// Skip endpoints that hijack the connection or don't need metrics.
-		if r.URL.Path == "/file" || r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/pprof" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
+		if r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/pprof" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -521,37 +467,6 @@ func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
 		return true
 	}
 	return false
-}
-
-// --- NBD ---
-
-func (d *Daemon) startNBD(sockPath string) error {
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0700); err != nil {
-		return fmt.Errorf("create NBD dir: %w", err)
-	}
-
-	// Remove any leftover socket from a previous daemon.
-	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		slog.Warn("remove stale NBD socket", "path", sockPath, "error", err)
-	}
-
-	srv := nbdserve.NewServer(d.backend.VM())
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		return fmt.Errorf("listen NBD socket %s: %w", sockPath, err)
-	}
-
-	d.nbdSock = sockPath
-	d.nbdLn = ln
-	slog.Info("NBD server started", "socket", sockPath)
-
-	go func() {
-		if err := srv.ServeListener(ln); err != nil {
-			slog.Error("NBD server error", "error", err)
-		}
-	}()
-
-	return nil
 }
 
 // --- helpers ---

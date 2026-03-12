@@ -408,7 +408,6 @@ func (v *volume) ReleaseRef() error {
 }
 
 func (v *volume) destroy() error {
-	v.fireBeforeClose()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if !v.readOnly.Load() {

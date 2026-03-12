@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils'
 import {
   listVolumes as listVolumesFn,
   createVolume as createVolumeFn,
-  snapshotVolume as snapshotVolumeFn,
+  checkpointVolume as checkpointVolumeFn,
   cloneVolume as cloneVolumeFn,
   deleteVolume as deleteVolumeFn,
 } from '@/lib/api'
@@ -38,7 +38,7 @@ interface SidebarProps {
 
 type ModalState =
   | { type: 'create' }
-  | { type: 'snapshot'; volume: string }
+  | { type: 'checkpoint'; volume: string }
   | { type: 'clone'; volume: string }
   | { type: 'delete'; volume: string }
   | null
@@ -55,7 +55,7 @@ export default function Sidebar({
 
   const listVolumes = useServerFn(listVolumesFn)
   const createVolume = useServerFn(createVolumeFn)
-  const snapshotVolume = useServerFn(snapshotVolumeFn)
+  const checkpointVolume = useServerFn(checkpointVolumeFn)
   const cloneVolume = useServerFn(cloneVolumeFn)
   const deleteVolume = useServerFn(deleteVolumeFn)
 
@@ -73,9 +73,9 @@ export default function Sidebar({
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
-  const snapshotMutation = useMutation({
-    mutationFn: (input: { mountpoint: string; name: string }) =>
-      snapshotVolume({ data: input }),
+  const checkpointMutation = useMutation({
+    mutationFn: (input: { mountpoint: string }) =>
+      checkpointVolume({ data: input }),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
@@ -96,7 +96,7 @@ export default function Sidebar({
 
   const submitting =
     createMutation.isPending ||
-    snapshotMutation.isPending ||
+    checkpointMutation.isPending ||
     cloneMutation.isPending ||
     deleteMutation.isPending
 
@@ -114,10 +114,8 @@ export default function Sidebar({
         createMutation.mutate({ volume: name })
         break
       }
-      case 'snapshot': {
-        const name = (form.get('name') as string).trim()
-        if (!name) { setModalError('Name is required'); return }
-        snapshotMutation.mutate({ mountpoint: modal.volume, name })
+      case 'checkpoint': {
+        checkpointMutation.mutate({ mountpoint: modal.volume })
         break
       }
       case 'clone': {
@@ -183,9 +181,9 @@ export default function Sidebar({
               <span className="truncate flex-1">{vol}</span>
               <div className="hidden group-hover:flex items-center gap-0.5">
                 <button
-                  onClick={(e) => { e.stopPropagation(); setModal({ type: 'snapshot', volume: vol }) }}
+                  onClick={(e) => { e.stopPropagation(); setModal({ type: 'checkpoint', volume: vol }) }}
                   className="p-0.5 rounded hover:bg-background/50"
-                  title="Snapshot"
+                  title="Checkpoint"
                 >
                   <Camera size={10} />
                 </button>
@@ -247,26 +245,22 @@ export default function Sidebar({
         </DialogContent>
       </Dialog>
 
-      {/* Snapshot Dialog */}
-      <Dialog open={modal?.type === 'snapshot'} onOpenChange={(open) => { if (!open) setModal(null); setModalError(null) }}>
+      {/* Checkpoint Dialog */}
+      <Dialog open={modal?.type === 'checkpoint'} onOpenChange={(open) => { if (!open) setModal(null); setModalError(null) }}>
         <DialogContent>
           <form onSubmit={handleSubmit}>
             <DialogHeader>
-              <DialogTitle>Snapshot</DialogTitle>
+              <DialogTitle>Checkpoint</DialogTitle>
               <DialogDescription>
-                Create a snapshot of <span className="font-mono text-foreground">{modal?.type === 'snapshot' ? modal.volume : ''}</span>.
+                Create a checkpoint of <span className="font-mono text-foreground">{modal?.type === 'checkpoint' ? modal.volume : ''}</span>. The system will assign the checkpoint ID.
               </DialogDescription>
             </DialogHeader>
             <div className="grid gap-3 py-4">
-              <div className="grid gap-1.5">
-                <Label htmlFor="snap-name">Snapshot name</Label>
-                <Input id="snap-name" name="name" placeholder="snap-1" autoFocus />
-              </div>
               {modalError && <p className="text-xs text-destructive">{modalError}</p>}
             </div>
             <DialogFooter>
               <Button type="submit" disabled={submitting} size="sm">
-                {submitting ? 'Creating...' : 'Snapshot'}
+                {submitting ? 'Creating...' : 'Checkpoint'}
               </Button>
             </DialogFooter>
           </form>

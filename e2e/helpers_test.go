@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,49 +19,27 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
-	"github.com/semistrict/loophole/storage2"
 )
 
-// mode returns the LOOPHOLE_MODE for tests, using DefaultMode() as fallback.
-func mode() loophole.Mode {
-	return loophole.DefaultMode()
-}
-
-// fsType returns the LOOPHOLE_DEFAULT_FS for tests.
-func fsType() loophole.FSType {
-	return loophole.DefaultFSType()
-}
-
-// defaultVolumeType returns the volume type string matching the current fsType.
 func defaultVolumeType() string {
-	return string(fsType())
+	return "ext4"
 }
 
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 
 // needsRoot returns true if the mode requires root privileges.
 func needsRoot() bool {
-	return mode().NeedsRoot()
+	return true
 }
 
 // needsRealMount returns true if the mode does real filesystem mounts.
 func needsRealMount() bool {
-	switch mode() {
-	case loophole.ModeInProcess:
-		return false
-	default:
-		return true
-	}
+	return true
 }
 
 // needsKernelExt4 returns true if the mode uses kernel ext4 (needs sync, FIFREEZE, etc.).
 func needsKernelExt4() bool {
-	switch mode() {
-	case loophole.ModeFUSE, loophole.ModeNBD, loophole.ModeTestNBDTCP:
-		return true
-	default:
-		return false
-	}
+	return true
 }
 
 func defaultEndpoint() string {
@@ -90,24 +67,6 @@ func skipKernelOnly(t *testing.T) {
 	}
 }
 
-// ---------- Volume manager + disk cache (for tests that bypass the daemon) ----------
-
-// newVolumeManager creates a VolumeManager with a real disk cache, matching
-// the production daemon configuration. The cache and manager are cleaned up
-// automatically via t.Cleanup.
-func newVolumeManager(t testing.TB, store loophole.ObjectStore) *storage2.Manager {
-	t.Helper()
-	cacheDir := t.TempDir()
-	dc, err := storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	require.NoError(t, err)
-	vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, dc)
-	t.Cleanup(func() {
-		_ = vm.Close(t.Context())
-		_ = dc.Close()
-	})
-	return vm
-}
-
 // ---------- testBackend: wraps client + daemon for tests ----------
 
 // testBackend routes control operations (Create, Mount, Clone, etc.) through
@@ -118,6 +77,7 @@ type testBackend struct {
 	c                 *client.Client
 	createdVols       []string
 	mountedMPs        []string
+	deviceVols        []string
 }
 
 func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error {
@@ -164,10 +124,6 @@ func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName, clone
 	return nil
 }
 
-func (b *testBackend) Snapshot(ctx context.Context, mountpoint, name string) error {
-	return b.c.Snapshot(ctx, mountpoint, name)
-}
-
 func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
 	return b.c.Checkpoint(ctx, mountpoint)
 }
@@ -182,19 +138,40 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 }
 
 func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
-	return b.c.Freeze(ctx, volume)
+	if err := b.c.Freeze(ctx, volume); err != nil {
+		return err
+	}
+	filtered := b.mountedMPs[:0]
+	for _, mp := range b.mountedMPs {
+		if b.VolumeAt(mp) == volume || !b.IsMounted(mp) {
+			continue
+		}
+		filtered = append(filtered, mp)
+	}
+	b.mountedMPs = filtered
+	return nil
 }
 
 func (b *testBackend) DeviceAttach(ctx context.Context, volume string) (string, error) {
-	return b.c.DeviceAttach(ctx, volume)
+	path, err := b.c.DeviceAttach(ctx, volume)
+	if err != nil {
+		return "", err
+	}
+	b.deviceVols = append(b.deviceVols, volume)
+	return path, nil
 }
 
 func (b *testBackend) DeviceDetach(ctx context.Context, volume string) error {
-	return b.c.DeviceDetach(ctx, volume)
-}
-
-func (b *testBackend) DeviceSnapshot(ctx context.Context, volume, snapshot string) error {
-	return b.c.DeviceSnapshot(ctx, volume, snapshot)
+	err := b.c.DeviceDetach(ctx, volume)
+	if err == nil {
+		for i, vol := range b.deviceVols {
+			if vol == volume {
+				b.deviceVols = append(b.deviceVols[:i], b.deviceVols[i+1:]...)
+				break
+			}
+		}
+	}
+	return err
 }
 
 func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
@@ -211,6 +188,7 @@ func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) (st
 		return "", err
 	}
 	b.createdVols = append(b.createdVols, clone)
+	b.deviceVols = append(b.deviceVols, clone)
 	return path, nil
 }
 
@@ -229,6 +207,9 @@ func (b *testBackend) cleanup() {
 		if needsRealMount() {
 			_ = os.Remove(mp)
 		}
+	}
+	for _, vol := range b.deviceVols {
+		_ = b.c.DeviceDetach(ctx, vol)
 	}
 	for _, vol := range b.createdVols {
 		_ = b.c.Delete(ctx, vol)
@@ -417,7 +398,7 @@ func mountVolume(t testing.TB, name string) (testFS, *testBackend) {
 
 // mountpoint returns a mountpoint path for a volume name.
 // For modes with real mounts, returns a temp directory.
-// For in-process lwext4 mode, returns a logical key.
+// Returns the backing mountpoint path used by kernel ext4.
 func mountpoint(t testing.TB, volume string) string {
 	if needsRealMount() {
 		// Don't use t.TempDir() — its cleanup fires in LIFO order and would

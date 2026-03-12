@@ -3,13 +3,11 @@
 package daemon
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"os/exec"
 	"path"
 	"time"
 )
@@ -45,83 +43,6 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := d.sandboxRuntime.Exec(r.Context(), volume, cmdStr)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, result)
-}
-
-func hostExec(ctx context.Context, cmdStr string) (*ExecResult, error) {
-	result, err := runExecCommand(exec.CommandContext(ctx, "sh", "-c", cmdStr))
-	if err != nil {
-		return nil, err
-	}
-	return &result, nil
-}
-
-func (d *Daemon) handleVMSnapshot(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
-		return
-	}
-	cloner, ok := d.sandboxRuntime.(sandboxRuntimeCloner)
-	if !ok {
-		writeError(w, http.StatusNotFound, fmt.Errorf("sandbox runtime does not support VM snapshots"))
-		return
-	}
-
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	if req.Volume == "" {
-		writeError(w, 400, fmt.Errorf("missing volume"))
-		return
-	}
-
-	snap, err := cloner.SnapshotVM(r.Context(), req.Volume)
-	if err != nil {
-		writeError(w, 500, err)
-		return
-	}
-	writeJSON(w, snap)
-}
-
-func (d *Daemon) handleVMRestore(w http.ResponseWriter, r *http.Request) {
-	if d.rejectIfShuttingDown(w) {
-		return
-	}
-	cloner, ok := d.sandboxRuntime.(sandboxRuntimeCloner)
-	if !ok {
-		writeError(w, http.StatusNotFound, fmt.Errorf("sandbox runtime does not support VM restore"))
-		return
-	}
-
-	var req struct {
-		SnapshotPath   string `json:"snapshot_path"`
-		MemCloneVolume string `json:"mem_clone_volume"`
-		SourceVolume   string `json:"source_volume"`
-		CloneName      string `json:"clone_name"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	if req.SnapshotPath == "" || req.MemCloneVolume == "" || req.CloneName == "" {
-		writeError(w, 400, fmt.Errorf("missing required fields: snapshot_path, mem_clone_volume, clone_name"))
-		return
-	}
-
-	snap := &VMSnapshot{
-		SnapshotPath:   req.SnapshotPath,
-		MemCloneVolume: req.MemCloneVolume,
-		SourceVolume:   req.SourceVolume,
-	}
-
-	result, err := cloner.RestoreVM(r.Context(), snap, req.CloneName)
 	if err != nil {
 		writeError(w, 500, err)
 		return

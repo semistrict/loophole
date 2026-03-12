@@ -7,9 +7,7 @@ import (
 
 // Volume types.
 const (
-	VolumeTypeExt4   = "ext4"
-	VolumeTypeXFS    = "xfs"
-	VolumeTypeSQLite = "sqlite"
+	VolumeTypeExt4 = "ext4"
 )
 
 // CheckpointInfo describes a volume checkpoint.
@@ -95,7 +93,6 @@ type Volume interface {
 	// without waiting for the S3 upload. Falls back to synchronous Flush if
 	// no background loop is running.
 	FlushLocal() error
-	Snapshot(snapshotName string) error
 	Checkpoint() (string, error)
 	Clone(cloneName string) (Volume, error)
 	CopyFrom(src Volume, srcOff, dstOff, length uint64) (uint64, error)
@@ -107,8 +104,4 @@ type Volume interface {
 	// OnBeforeFreeze registers a hook called before the volume is frozen.
 	// Hooks fire in LIFO order. If any hook returns an error, freeze aborts.
 	OnBeforeFreeze(fn func() error)
-
-	// OnBeforeClose registers a hook called when the last ref is released.
-	// Hooks fire in LIFO order. Errors are logged but don't prevent close.
-	OnBeforeClose(fn func())
 }

@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 )
 
@@ -24,7 +23,7 @@ func punchHole(t *testing.T, fd int, offset, length int64) {
 
 func requireReadOnlyErr(t *testing.T, err error) {
 	t.Helper()
-	require.Error(t, err, "operation should fail on read-only snapshot")
+	require.Error(t, err, "operation should fail on a read-only volume")
 	var errno unix.Errno
 	require.True(t, errors.As(err, &errno), "expected errno, got %T: %v", err, err)
 	switch errno {
@@ -112,42 +111,6 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	require.Equal(t, make([]byte, 4096), buf)
 }
 
-func TestE2E_PunchHoleSnapshotIsReadOnly(t *testing.T) {
-	skipKernelOnly(t)
-	b := newBackend(t)
-	ctx := t.Context()
-
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "tomb-ro-parent"}))
-	parentDev, err := b.DeviceAttach(ctx, "tomb-ro-parent")
-	require.NoError(t, err)
-
-	data := make([]byte, 4096)
-	for i := range data {
-		data[i] = 'R'
-	}
-	f, err := os.OpenFile(parentDev, os.O_RDWR, 0)
-	require.NoError(t, err)
-	_, err = f.WriteAt(data, 0)
-	require.NoError(t, err)
-	require.NoError(t, f.Close())
-	syncFS(t, parentDev)
-
-	require.NoError(t, b.DeviceSnapshot(ctx, "tomb-ro-parent", "tomb-ro-snap"))
-
-	snapDev, err := b.DeviceAttach(ctx, "tomb-ro-snap")
-	require.NoError(t, err)
-
-	fd, err := unix.Open(snapDev, unix.O_RDWR, 0)
-	if err != nil {
-		requireReadOnlyErr(t, err)
-		return
-	}
-	defer unix.Close(fd)
-
-	err = unix.Fallocate(fd, unix.FALLOC_FL_KEEP_SIZE|unix.FALLOC_FL_PUNCH_HOLE, 0, 4096)
-	requireReadOnlyErr(t, err)
-}
-
 func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 	skipKernelOnly(t)
 	b := newBackend(t)
@@ -186,9 +149,6 @@ func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 
 func TestE2E_PunchHolePartialBlock(t *testing.T) {
 	skipKernelOnly(t)
-	if mode() == loophole.ModeNBD || mode() == loophole.ModeTestNBDTCP {
-		t.Skip("NBD does not support sub-block-aligned punch holes")
-	}
 	b := newBackend(t)
 	ctx := t.Context()
 

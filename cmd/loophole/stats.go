@@ -65,7 +65,6 @@ func printStats(fams map[string]*dto.MetricFamily) {
 func printVolumes(fams map[string]*dto.MetricFamily) {
 	_, _ = header.Println("Volumes")
 	printGauge(fams, "loophole_volume_open_volumes", "open")
-	printHistSummary(fams, "loophole_volume_snapshot_duration_seconds", "snapshot")
 	printHistSummary(fams, "loophole_volume_clone_duration_seconds", "clone")
 	fmt.Println()
 }

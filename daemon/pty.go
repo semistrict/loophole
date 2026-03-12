@@ -26,6 +26,10 @@ import (
 
 var nextPTYID atomic.Int64
 
+var wsUpgrader = websocket.Upgrader{
+	CheckOrigin: func(*http.Request) bool { return true },
+}
+
 func ptyStart(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
 	return pty.StartWithSize(cmd, &pty.Winsize{Cols: cols, Rows: rows})
 }

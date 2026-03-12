@@ -92,7 +92,6 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.6.0
-	github.com/Merovius/nbd v0.0.0-20240812113926-fd65a54c9949
 	github.com/axiomhq/axiom-go v0.31.0
 	github.com/creack/pty/v2 v2.0.1
 	github.com/ergochat/readline v0.1.3
@@ -102,12 +101,10 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/hanwen/go-fuse/v2 v2.9.1-0.20260222100901-a7c12435d151
 	github.com/klauspost/compress v1.18.4
-	github.com/mattn/go-sqlite3 v1.14.34
 	github.com/muesli/termenv v0.16.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/prometheus/common v0.67.5
-	github.com/psanford/sqlite3vfs v0.0.0-20251127171934-4e34e03a991a
 	github.com/sevlyar/go-daemon v0.1.6
 	github.com/spf13/cobra v1.10.2
 	github.com/vito/midterm v0.2.4

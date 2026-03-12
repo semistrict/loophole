@@ -62,16 +62,14 @@ func TestMain(m *testing.M) {
 
 	dir := loophole.Dir(tmpDir)
 	inst := loophole.Instance{
-		ProfileName:   "test",
-		Bucket:        envOrDefault("BUCKET", "testbucket"),
-		Prefix:        fmt.Sprintf("test-%s", uuid.NewString()[:8]),
-		Endpoint:      defaultEndpoint(),
-		AccessKey:     envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
-		SecretKey:     envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
-		Region:        envOrDefault("AWS_REGION", "us-east-1"),
-		Mode:          loophole.DefaultMode(),
-		DefaultFSType: loophole.DefaultFSType(),
-		LogLevel:      os.Getenv("LOG_LEVEL"),
+		ProfileName: "test",
+		Bucket:      envOrDefault("BUCKET", "testbucket"),
+		Prefix:      fmt.Sprintf("test-%s", uuid.NewString()[:8]),
+		Endpoint:    defaultEndpoint(),
+		AccessKey:   envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
+		SecretKey:   envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
+		Region:      envOrDefault("AWS_REGION", "us-east-1"),
+		LogLevel:    os.Getenv("LOG_LEVEL"),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

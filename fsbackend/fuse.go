@@ -23,18 +23,14 @@ type FUSEDriver struct {
 	pageSize int
 }
 
-var _ Driver[fuseMount] = (*FUSEDriver)(nil)
-var _ DevicePather = (*FUSEDriver)(nil)
-var _ VolumeRegistrar = (*FUSEDriver)(nil)
-
-// NewFUSEDriver starts the FUSE block device server and returns a type-erased driver.
-func NewFUSEDriver(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (AnyDriver, error) {
+// NewFUSEDriver starts the FUSE block device server.
+func NewFUSEDriver(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (*FUSEDriver, error) {
 	fuseblockdev.UnmountStale(fuseDir)
 	srv, err := fuseblockdev.Start(fuseDir, opts)
 	if err != nil {
 		return nil, err
 	}
-	return EraseDriver[fuseMount](&FUSEDriver{fuse: srv, pageSize: vm.PageSize()}), nil
+	return &FUSEDriver{fuse: srv, pageSize: vm.PageSize()}, nil
 }
 
 // NewFUSE starts the FUSE block device server and returns a Service.
@@ -43,7 +39,7 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 	if err != nil {
 		return nil, err
 	}
-	return New(vm, d, loophole.VolumeTypeExt4, loophole.VolumeTypeXFS), nil
+	return NewBackend(vm, d), nil
 }
 
 func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {

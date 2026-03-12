@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/linuxutil"
 )
@@ -220,15 +219,8 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 }
 
 func TestE2E_ConcurrentMountCycles(t *testing.T) {
-	if !needsKernelExt4() {
-		t.Skip("concurrent mount test only supported in kernel ext4 mode (lwext4 has per-process mount limits)")
-	}
-
 	b := newBackend(t)
 	nWorkers := 10
-	if mode() == loophole.ModeNBD {
-		nWorkers = 5
-	}
 	if maxLoop, err := linuxutil.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
 		t.Logf("capping workers to max_loop=%d", maxLoop)
 		nWorkers = maxLoop
@@ -279,9 +271,7 @@ func logKernelDebug(t *testing.T, mountpoint, volume string) {
 // TestE2E_NBDDeviceExclOpen checks whether a freshly-connected NBD device
 // can be opened with O_EXCL, which mkfs.ext4 uses to detect "in use" devices.
 func TestE2E_NBDDeviceExclOpen(t *testing.T) {
-	if mode() != loophole.ModeNBD {
-		t.Skip("NBD-only test")
-	}
+	t.Skip("test removed with NBD backend")
 
 	b := newBackend(t)
 	ctx := t.Context()

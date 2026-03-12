@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/semistrict/loophole"
 )
 
 func TestMain(m *testing.M) {
@@ -23,4 +25,17 @@ func TestMain(m *testing.M) {
 		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	}
 	os.Exit(m.Run())
+}
+
+type snapshotCapableVolume interface {
+	Snapshot(string) error
+}
+
+func snapshotVolume(t testing.TB, v loophole.Volume, name string) error {
+	t.Helper()
+	sv, ok := v.(snapshotCapableVolume)
+	if !ok {
+		t.Fatalf("volume %T does not implement Snapshot", v)
+	}
+	return sv.Snapshot(name)
 }

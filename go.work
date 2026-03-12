@@ -2,10 +2,7 @@ go 1.25.2
 
 use (
 	.
-	./third_party/bbolt
 	./third_party/compress
 	./third_party/go-fuse
-	./third_party/merovius-nbd
-	./third_party/go-sqlite3
 	./third_party/prometheus-client
 )

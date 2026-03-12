@@ -43,7 +43,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "loophole",
 		Short: "S3-backed FUSE filesystem with instant copy-on-write clones",
-		Long:  "Loophole exposes a virtual block device backed by S3 with instant snapshots and clones.",
+		Long:  "Loophole exposes a virtual block device backed by S3 with checkpoints and clones.",
 		CompletionOptions: cobra.CompletionOptions{
 			HiddenDefaultCmd: true,
 		},

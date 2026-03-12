@@ -19,7 +19,6 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/daemon"
-	"github.com/semistrict/loophole/filecmd"
 )
 
 func addCommands(root *cobra.Command) {
@@ -31,20 +30,17 @@ func addCommands(root *cobra.Command) {
 		mountCmd(),
 		unmountCmd(),
 		freezeCmd(),
-		snapshotCmd(),
 		checkpointCmd(),
 		cloneCmd(),
 		checkpointsCmd(),
 		statusCmd(),
 		statsCmd(),
 		deviceCmd(),
-		fileCmd(),
 		breakLeaseCmd(),
 		migrateCmd(),
 		sshCmd(),
 		controlRshCmd(),
 	)
-	addDBCommands(root)
 }
 
 func startDaemon(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts daemon.Options) error {
@@ -126,7 +122,7 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path after creation")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
-	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume/filesystem type (ext4, xfs); default from LOOPHOLE_DEFAULT_FS or ext4")
+	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume/filesystem type (ext4); default ext4")
 	return cmd
 }
 
@@ -280,39 +276,6 @@ func freezeCmd() *cobra.Command {
 	}
 }
 
-func snapshotCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:        "snapshot [mountpoint] <name>",
-		Short:      "Create a snapshot (deprecated: use checkpoint)",
-		Long:       "If run from within a loophole mount, the mountpoint can be omitted.",
-		Hidden:     true,
-		Deprecated: "use 'checkpoint' instead",
-		Args:       cobra.RangeArgs(1, 2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var mountpoint, name string
-			if len(args) == 2 {
-				mountpoint, name = args[0], args[1]
-			} else {
-				mp, err := detectMountpoint()
-				if err != nil {
-					return fmt.Errorf("no mountpoint given and %w", err)
-				}
-				mountpoint, name = mp, args[0]
-			}
-			sock, err := socketFromMountpoint(mountpoint)
-			if err != nil {
-				return err
-			}
-			c := client.NewFromSocket(sock)
-			if err := c.Snapshot(cmd.Context(), mountpoint, name); err != nil {
-				return err
-			}
-			fmt.Printf("snapshot %q created\n", name)
-			return nil
-		},
-	}
-}
-
 func checkpointCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "checkpoint [mountpoint]",
@@ -433,58 +396,6 @@ func statusCmd() *cobra.Command {
 	}
 }
 
-// --- File subcommands ---
-
-func fileCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "file",
-		Short: "File operations on mounted volumes",
-	}
-	for _, reg := range filecmd.Commands {
-		cmd.AddCommand(makeFileSubcmd(reg))
-	}
-	return cmd
-}
-
-func makeFileSubcmd(reg filecmd.Command) *cobra.Command {
-	return &cobra.Command{
-		Use:                reg.Usage,
-		Short:              reg.Short,
-		DisableFlagParsing: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			args = extractProfileFlag(args)
-
-			for _, a := range args {
-				if a == "-h" || a == "--help" {
-					return cmd.Help()
-				}
-			}
-
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
-
-			// Send argv as [commandName, args...] to the server.
-			argv := append([]string{reg.Name}, args...)
-			result, err := c.File(cmd.Context(), argv)
-			if err != nil {
-				return err
-			}
-			defer func() { _ = result.Close() }()
-
-			code, err := result.Demux(os.Stdout, os.Stderr)
-			if err != nil {
-				return err
-			}
-			if code != 0 {
-				os.Exit(int(code))
-			}
-			return nil
-		},
-	}
-}
-
 // --- Device subcommands ---
 
 func deviceCmd() *cobra.Command {
@@ -498,7 +409,6 @@ func deviceCmd() *cobra.Command {
 		deviceStartCmd(),
 		deviceAttachCmd(),
 		deviceDetachCmd(),
-		deviceSnapshotCmd(),
 		deviceCheckpointCmd(),
 		deviceCloneCmd(),
 		deviceDDCmd(),
@@ -548,27 +458,6 @@ func deviceDetachCmd() *cobra.Command {
 				return err
 			}
 			return c.DeviceDetach(cmd.Context(), args[0])
-		},
-	}
-}
-
-func deviceSnapshotCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:        "snapshot <volume> <name>",
-		Short:      "Snapshot a volume device (deprecated: use checkpoint)",
-		Hidden:     true,
-		Deprecated: "use 'device checkpoint' instead",
-		Args:       cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
-			if err := c.DeviceSnapshot(cmd.Context(), args[0], args[1]); err != nil {
-				return err
-			}
-			fmt.Printf("snapshot %q created\n", args[1])
-			return nil
 		},
 	}
 }
@@ -677,8 +566,8 @@ Examples:
 
 			_ = bsFlag // reserved for future use
 
-			srcVol, _, srcIsVol := filecmd.ParseVolPath(ifFlag)
-			dstVol, _, dstIsVol := filecmd.ParseVolPath(ofFlag)
+			srcVol, _, srcIsVol := parseVolPath(ifFlag)
+			dstVol, _, dstIsVol := parseVolPath(ofFlag)
 
 			if srcIsVol && dstIsVol {
 				return fmt.Errorf("both if and of are volumes; at least one must be a local file")
@@ -702,7 +591,7 @@ Examples:
 	cmd.Flags().StringVar(&ifFlag, "if", "", "input: local file or volume:")
 	cmd.Flags().StringVar(&ofFlag, "of", "", "output: local file or volume:")
 	cmd.Flags().StringVar(&bsFlag, "bs", "", "block size (e.g. 1M, 4M); default 4M")
-	cmd.Flags().StringVar(&typeFlag, "type", "", "volume type for import (ext4, xfs); default ext4")
+	cmd.Flags().StringVar(&typeFlag, "type", "", "volume type for import (ext4); default ext4")
 
 	return cmd
 }
@@ -710,7 +599,10 @@ Examples:
 // deviceDDImport writes a local file into a new volume.
 func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume, volType string) error {
 	if volType == "" {
-		volType = string(loophole.DefaultFSType())
+		volType = loophole.VolumeTypeExt4
+	}
+	if volType != loophole.VolumeTypeExt4 {
+		return fmt.Errorf("unsupported volume type %q", volType)
 	}
 
 	f, err := os.Open(filePath)
@@ -793,38 +685,21 @@ func parseSize(s string) (uint64, error) {
 	return n, nil
 }
 
+func parseVolPath(s string) (volume, path string, isVol bool) {
+	i := strings.IndexByte(s, ':')
+	if i < 0 {
+		return "", s, false
+	}
+	prefix := s[:i]
+	if strings.ContainsRune(prefix, '/') {
+		return "", s, false
+	}
+	return prefix, s[i+1:], true
+}
+
 // extractProfileFlag strips -p/--profile from args and sets globalProfile.
 // Needed for subcommands with DisableFlagParsing where cobra can't handle
 // persistent flags.
-func extractProfileFlag(args []string) []string {
-	var out []string
-	for i := 0; i < len(args); i++ {
-		if (args[i] == "-p" || args[i] == "--profile") && i+1 < len(args) {
-			globalProfile = args[i+1]
-			i++ // skip value
-			continue
-		}
-		if strings.HasPrefix(args[i], "-p=") {
-			globalProfile = args[i][3:]
-			continue
-		}
-		if strings.HasPrefix(args[i], "--profile=") {
-			globalProfile = args[i][10:]
-			continue
-		}
-		if args[i] == "--pid" && i+1 < len(args) {
-			globalPID, _ = strconv.Atoi(args[i+1])
-			i++
-			continue
-		}
-		if strings.HasPrefix(args[i], "--pid=") {
-			globalPID, _ = strconv.Atoi(args[i][6:])
-			continue
-		}
-		out = append(out, args[i])
-	}
-	return out
-}
 
 // resolveClientOnly returns a client for the current profile without
 // starting the daemon. Used by commands like stop that shouldn't auto-start.
@@ -853,7 +728,7 @@ func resolveClient() (*client.Client, error) {
 	}
 	c := client.New(dir, inst)
 	c.Bin = selfBin
-	c.Sudo = runtime.GOOS == "linux" && inst.Mode.NeedsRoot()
+	c.Sudo = runtime.GOOS == "linux"
 	c.Profile = inst.ProfileName
 	if err := c.EnsureDaemon(); err != nil {
 		return nil, err

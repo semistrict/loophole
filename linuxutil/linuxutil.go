@@ -95,38 +95,6 @@ func FindMount(mountpoint string) (string, error) {
 	return "", scanner.Err()
 }
 
-// FindMountBySource returns the mountpoint for a given source device
-// (e.g. "/dev/nbd0") by reading /proc/self/mountinfo. Returns "" if not found.
-func FindMountBySource(source string) string {
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
-		return ""
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			slog.Warn("close failed", "error", err)
-		}
-	}()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 5 {
-			continue
-		}
-		mp := fields[4]
-		for i, f := range fields {
-			if f == "-" && i+2 < len(fields) {
-				if fields[i+2] == source {
-					return mp
-				}
-				break
-			}
-		}
-	}
-	return ""
-}
-
 const (
 	fiFreeze = 0xC0045877
 	fiThaw   = 0xC0045878
@@ -416,19 +384,13 @@ func LoopDetachPath(devPath string) error {
 
 // mkfsExt4Features is the pinned set of ext4 features for mkfs.ext4.
 // Pinning avoids surprises when mkfs.ext4 defaults change across distro versions.
-// These match Debian bookworm e2fsprogs 1.47 defaults and are all supported by lwext4.
+// These match Debian bookworm e2fsprogs 1.47 defaults.
 const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
 	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
 	"dir_nlink,extra_isize,metadata_csum"
 
-// mkfsArgs returns the mkfs command and arguments for the given filesystem type.
-func mkfsArgs(fstype, device string) (string, []string) {
-	switch fstype {
-	case "xfs":
-		return "mkfs.xfs", []string{"-f", "-q", device}
-	default: // ext4
-		return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
-	}
+func mkfsArgs(device string) (string, []string) {
+	return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
 }
 
 // FormatFS creates a filesystem on a block device via a loop device.
@@ -443,17 +405,7 @@ func FormatFS(ctx context.Context, devicePath, fstype string, optimalIOSize int)
 		}
 	}()
 
-	cmd, args := mkfsArgs(fstype, dev.Path)
-	if err := run(ctx, cmd, args...); err != nil {
-		return fmt.Errorf("%s: %w", cmd, err)
-	}
-	return nil
-}
-
-// FormatFSDirect creates a filesystem directly on a block device
-// (e.g. /dev/nbdN) without loop device setup.
-func FormatFSDirect(ctx context.Context, blockDev, fstype string) error {
-	cmd, args := mkfsArgs(fstype, blockDev)
+	cmd, args := mkfsArgs(dev.Path)
 	if err := run(ctx, cmd, args...); err != nil {
 		return fmt.Errorf("%s: %w", cmd, err)
 	}
@@ -475,21 +427,13 @@ func MountFS(ctx context.Context, devicePath, mountpoint, fstype string, opts Lo
 		return "", err
 	}
 
-	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: fstype, ReadOnly: opts.ReadOnly, NoAtime: true, NoUUID: fstype == "xfs"}); err != nil {
+	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: fstype, ReadOnly: opts.ReadOnly, NoAtime: true}); err != nil {
 		if derr := dev.Detach(); derr != nil {
 			slog.Warn("loop detach failed", "error", derr)
 		}
 		return "", err
 	}
 	return dev.Path, nil
-}
-
-// MountFSDirect mounts a filesystem directly on a block device (e.g. /dev/nbdN).
-func MountFSDirect(ctx context.Context, blockDev, mountpoint, fstype string) error {
-	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
-		return err
-	}
-	return Mount(MountOpts{Source: blockDev, Mountpoint: mountpoint, FSType: fstype, NoAtime: true, NoUUID: fstype == "xfs"})
 }
 
 // UnmountLoop unmounts the filesystem and detaches the loop device.

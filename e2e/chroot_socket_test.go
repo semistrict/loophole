@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,35 +70,6 @@ func TestE2E_ChrootSocketFlush(t *testing.T) {
 
 	// Verify file still readable after flush.
 	require.Equal(t, "flush me\n", string(tfs.ReadFile(t, "flush-test.txt")))
-}
-
-func TestE2E_ChrootSocketSnapshot(t *testing.T) {
-	skipE2E(t)
-	b, mp, c := setupChrootSocketVolume(t, "csock-snap")
-
-	tfs := newTestFS(t, b, mp)
-	tfs.WriteFile(t, "snap-test.txt", []byte("snapshot data\n"))
-	if needsKernelExt4() {
-		syncFS(t, mp)
-	}
-
-	ctx := t.Context()
-	require.NoError(t, c.ChrootSnapshot(ctx, "csock-snap-v1"))
-
-	// Open the snapshot volume to verify it was created and is read-only.
-	snapVol, err := testDaemon.Backend().VM().OpenVolume("csock-snap-v1")
-	require.NoError(t, err, "snapshot volume should be openable")
-	require.True(t, snapVol.ReadOnly(), "snapshot should be read-only")
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = snapVol.ReleaseRef()
-		_ = testDaemon.Backend().VM().DeleteVolume(ctx, "csock-snap-v1")
-	})
-
-	// Source volume should still be writable after snapshot.
-	tfs.WriteFile(t, "after-snap.txt", []byte("still writable\n"))
-	require.Equal(t, "still writable\n", string(tfs.ReadFile(t, "after-snap.txt")))
 }
 
 func TestE2E_ChrootSocketClone(t *testing.T) {

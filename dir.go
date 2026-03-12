@@ -44,16 +44,6 @@ func (d Dir) Cache(profile string) string {
 	return filepath.Join(string(d), "cache", profile)
 }
 
-// NBD returns the NBD Unix socket path for the given profile.
-func (d Dir) NBD(profile string) string {
-	return filepath.Join(string(d), profile+".nbd.sock")
-}
-
-// GRPC returns the default gRPC (snapshotter) socket path for the given profile.
-func (d Dir) GRPC(profile string) string {
-	return filepath.Join(string(d), profile+".grpc.sock")
-}
-
 // MountSymlink returns the symlink path that maps a user mountpoint back to
 // the daemon socket. This allows post-mount commands to find the daemon.
 func (d Dir) MountSymlink(mountpoint string) string {

@@ -18,7 +18,7 @@ import (
 )
 
 // startChrootSocket creates a restricted Unix socket that is bind-mounted into
-// the chroot at /.loophole. It serves only flush, snapshot, and clone
+// the chroot at /.loophole. It serves only flush, checkpoint, and clone
 // operations, scoped to the volume mounted at the given mountpoint.
 //
 // The socket and bind-mount target both live on the host filesystem (tmpdir),

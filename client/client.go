@@ -4,7 +4,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,10 +16,7 @@ import (
 	godaemon "github.com/sevlyar/go-daemon"
 	"time"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/internal/streammux"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -110,12 +106,6 @@ func (c *Client) Compact(ctx context.Context) error {
 // CompactVolume triggers L0→L1 compaction on a named volume (daemon socket).
 func (c *Client) CompactVolume(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/compact", "volume", volume)
-	return err
-}
-
-// ChrootSnapshot creates a snapshot (chroot socket: POST /snapshot).
-func (c *Client) ChrootSnapshot(ctx context.Context, name string) error {
-	_, err := c.post(ctx, "/snapshot", "name", name)
 	return err
 }
 
@@ -236,15 +226,9 @@ func (c *Client) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMount
 	return err
 }
 
-// Snapshot creates a snapshot of the volume at mountpoint.
 // Freeze makes a volume permanently immutable.
 func (c *Client) Freeze(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/freeze", "volume", volume)
-	return err
-}
-
-func (c *Client) Snapshot(ctx context.Context, mountpoint, name string) error {
-	_, err := c.post(ctx, "/snapshot", "mountpoint", mountpoint, "name", name)
 	return err
 }
 
@@ -314,12 +298,6 @@ func (c *Client) DeviceAttach(ctx context.Context, volume string) (string, error
 // DeviceDetach closes a volume device.
 func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/device/detach", "volume", volume)
-	return err
-}
-
-// DeviceSnapshot creates a snapshot at the device level.
-func (c *Client) DeviceSnapshot(ctx context.Context, volume, snapshot string) error {
-	_, err := c.post(ctx, "/device/snapshot", "volume", volume, "snapshot", snapshot)
 	return err
 }
 
@@ -488,136 +466,6 @@ func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage2.V
 	return info, nil
 }
 
-// FileResult holds the websocket connection from a file command.
-// Callers must call Demux to consume stdout/stderr and get the exit code,
-// then Close to release the connection.
-type FileResult struct {
-	conn *websocket.Conn
-	mux  *streammux.Reader
-}
-
-// Demux reads all frames, writing stdout/stderr to the given writers.
-// Returns the exit code from the daemon.
-func (fr *FileResult) Demux(stdout, stderr io.Writer) (int32, error) {
-	return fr.mux.Demux(stdout, stderr)
-}
-
-// Close releases the underlying websocket connection.
-func (fr *FileResult) Close() error {
-	return fr.conn.Close()
-}
-
-// File runs a file command (cat, ls, tar, etc.) and returns a FileResult
-// for streaming stdout/stderr. The argv is sent as-is to the server.
-// The server may request files from the client via the bidirectional protocol.
-func (c *Client) File(ctx context.Context, argv []string) (*FileResult, error) {
-	dialer := websocket.Dialer{
-		NetDialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-			return net.Dial("unix", c.sock)
-		},
-	}
-
-	hdrs := http.Header{}
-	if h := loophole.SelfHash(); h != "" {
-		hdrs.Set("X-Binary-Hash", h)
-	}
-
-	conn, _, err := dialer.DialContext(ctx, "ws://loophole/file", hdrs)
-	if err != nil {
-		return nil, fmt.Errorf("no daemon running (socket %s): %w", c.sock, err)
-	}
-
-	// Send argv as first text message.
-	argvJSON, _ := json.Marshal(argv)
-	if err := conn.WriteMessage(websocket.TextMessage, argvJSON); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-
-	// The connection is now bidirectional:
-	// - Server sends binary messages: streammux frames (stdout/stderr/exit)
-	// - Server sends text messages: read requests {"read": "path", "id": N}
-	// - Client sends binary messages: file data with 4-byte uint32 id prefix
-
-	// We need a goroutine to read all messages and route them:
-	// binary → streammux pipe, text → file request handler.
-	smuxR, smuxW := io.Pipe()
-
-	go func() {
-		defer func() { _ = smuxW.Close() }()
-		for {
-			msgType, msg, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			switch msgType {
-			case websocket.BinaryMessage:
-				// Streammux frame from server.
-				if _, err := smuxW.Write(msg); err != nil {
-					return
-				}
-			case websocket.TextMessage:
-				// Read request from server.
-				var req struct {
-					Read string `json:"read"`
-					ID   uint32 `json:"id"`
-				}
-				if json.Unmarshal(msg, &req) != nil {
-					continue
-				}
-				go c.serveFileRead(conn, req.Read, req.ID)
-			}
-		}
-	}()
-
-	return &FileResult{
-		conn: conn,
-		mux:  streammux.NewReader(smuxR),
-	}, nil
-}
-
-// serveFileRead opens a file (or stdin for "-") and streams it to the server
-// as binary websocket messages with a 4-byte id prefix.
-func (c *Client) serveFileRead(conn *websocket.Conn, path string, id uint32) {
-	var r io.ReadCloser
-	if path == "-" {
-		r = os.Stdin
-	} else {
-		f, err := os.Open(path)
-		if err != nil {
-			// Send EOF immediately on error.
-			idBuf := make([]byte, 4)
-			binary.BigEndian.PutUint32(idBuf, id)
-			_ = conn.WriteMessage(websocket.BinaryMessage, idBuf)
-			return
-		}
-		r = f
-	}
-	defer func() {
-		if path != "-" {
-			_ = r.Close()
-		}
-	}()
-
-	buf := make([]byte, 64*1024+4)
-	binary.BigEndian.PutUint32(buf[:4], id)
-
-	for {
-		n, err := r.Read(buf[4:])
-		if n > 0 {
-			if wErr := conn.WriteMessage(websocket.BinaryMessage, buf[:4+n]); wErr != nil {
-				return
-			}
-		}
-		if err != nil {
-			break
-		}
-	}
-
-	// Send EOF: just the 4-byte id with no data.
-	_ = conn.WriteMessage(websocket.BinaryMessage, buf[:4])
-}
-
 // ListVolumes returns all volume names from the store (not just open ones).
 func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
 	resp, err := c.get(ctx, "/volumes")
@@ -647,7 +495,6 @@ type StatusResponse struct {
 	S3      string            `json:"s3"`
 	Mode    string            `json:"mode"`
 	Socket  string            `json:"socket"`
-	NBDSock string            `json:"nbd_sock"`
 	Fuse    string            `json:"fuse"`
 	Volumes []string          `json:"volumes"`
 	Mounts  map[string]string `json:"mounts"`
@@ -685,63 +532,6 @@ func (c *Client) Status(ctx context.Context) (*StatusResponse, error) {
 		return nil, err
 	}
 	return &status, nil
-}
-
-// --- DB methods ---
-
-// DBCreateParams are the parameters for creating a SQLite database volume.
-type DBCreateParams struct {
-	Volume string `json:"volume"`
-	Size   uint64 `json:"size,omitempty"`
-}
-
-// DBCreate creates a new SQLite database volume.
-func (c *Client) DBCreate(ctx context.Context, p DBCreateParams) error {
-	_, err := c.post(ctx, "/db/create", p)
-	return err
-}
-
-// DBSnapshot creates a snapshot of a SQLite database volume.
-func (c *Client) DBSnapshot(ctx context.Context, volume, snapshot string) error {
-	_, err := c.post(ctx, "/db/snapshot", "volume", volume, "snapshot", snapshot)
-	return err
-}
-
-// DBBranch creates a writable branch of a SQLite database volume.
-func (c *Client) DBBranch(ctx context.Context, volume, branch string) error {
-	_, err := c.post(ctx, "/db/branch", "volume", volume, "branch", branch)
-	return err
-}
-
-// DBFlush flushes a SQLite database volume to S3.
-func (c *Client) DBFlush(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/db/flush", "volume", volume)
-	return err
-}
-
-// DBList returns all SQLite database volumes.
-func (c *Client) DBList(ctx context.Context) ([]string, error) {
-	resp, err := c.get(ctx, "/db/ls")
-	if err != nil {
-		return nil, err
-	}
-	var result struct{ Volumes []string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, err
-	}
-	return result.Volumes, nil
-}
-
-// NBDSock returns the NBD socket path from the daemon status.
-func (c *Client) NBDSock(ctx context.Context) (string, error) {
-	status, err := c.Status(ctx)
-	if err != nil {
-		return "", err
-	}
-	if status.NBDSock == "" {
-		return "", fmt.Errorf("daemon has no NBD server running")
-	}
-	return status.NBDSock, nil
 }
 
 // --- internal ---

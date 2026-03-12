@@ -468,7 +468,7 @@ func TestSnapshotThenFlush(t *testing.T) {
 	}
 
 	// Snapshot freezes the memLayer.
-	if err := v.Snapshot("snap"); err != nil {
+	if err := snapshotVolume(t, v, "snap"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -553,7 +553,7 @@ func TestSnapshot(t *testing.T) {
 	}
 
 	// Snapshot.
-	if err := v.Snapshot("snap1"); err != nil {
+	if err := snapshotVolume(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -695,7 +695,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := v.Snapshot("snap1"); err != nil {
+	if err := snapshotVolume(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -743,7 +743,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot parent -> snap1
-	if err := v.Snapshot("snap1"); err != nil {
+	if err := snapshotVolume(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -763,7 +763,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot snap1-clone -> snap2
-	if err := snap1.Snapshot("snap2"); err != nil {
+	if err := snapshotVolume(t, snap1, "snap2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -822,7 +822,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot before compaction.
-	if err := v.Snapshot("snap-pre"); err != nil {
+	if err := snapshotVolume(t, v, "snap-pre"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -833,7 +833,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot after compaction.
-	if err := v.Snapshot("snap-post"); err != nil {
+	if err := snapshotVolume(t, v, "snap-post"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -893,7 +893,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Snapshot("snap1"); err != nil {
+	if err := snapshotVolume(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -965,7 +965,7 @@ func TestVolumeReadOnlyGuards(t *testing.T) {
 	})
 
 	t.Run("Snapshot", func(t *testing.T) {
-		err := v.Snapshot("snap")
+		err := snapshotVolume(t, v, "snap")
 		if err == nil || !strings.Contains(err.Error(), "read-only") {
 			t.Fatalf("expected read-only error, got: %v", err)
 		}
@@ -1500,14 +1500,14 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated createChild failure"),
 	})
-	err = v.Snapshot("snap")
+	err = snapshotVolume(t, v, "snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated createChild failure") {
 		t.Fatalf("expected createChild failure, got: %v", err)
 	}
 
 	// Clear — snapshot should work.
 	store.ClearAllFaults()
-	if err := v.Snapshot("snap"); err != nil {
+	if err := snapshotVolume(t, v, "snap"); err != nil {
 		t.Fatalf("snapshot retry: %v", err)
 	}
 }
@@ -1537,7 +1537,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
-	err = v.Snapshot("snap")
+	err = snapshotVolume(t, v, "snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated putVolumeRef failure") {
 		t.Fatalf("expected putVolumeRef failure, got: %v", err)
 	}

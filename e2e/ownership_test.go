@@ -7,7 +7,6 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/semistrict/loophole"
 	"github.com/stretchr/testify/require"
 )
 
@@ -44,9 +43,6 @@ func TestE2E_MkdirOwnership(t *testing.T) {
 }
 
 func TestE2E_RootAndLostFoundOwnership(t *testing.T) {
-	if fsType() != loophole.FSExt4 {
-		t.Skipf("lost+found is ext4-specific, got %s", fsType())
-	}
 	mp := stressMountGo(t, "own-root").mountpoint
 
 	uid := uint32(os.Getuid())

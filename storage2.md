@@ -3,7 +3,7 @@
 ## Overview
 
 Replace the current ancestor-pointer-with-beforeSeq design with a simpler model:
-- Layers are **immutable once frozen**. Snapshots freeze the current layer and move the volume to a new child.
+- Layers are **immutable once frozen**. Checkpoints freeze the current layer and move the volume to a new child.
 - Each layer's index is **self-contained** — it references all data files it needs (including inherited ones from ancestors). No recursive ancestor traversal.
 - Data files are organized into three levels: **L0** (4KB pages), **L1** (sparse 4MB blocks), **L2** (dense 4MB blocks). Compaction merges upward: L0 → L1 → L2.
 - A single `index.json` per layer stores all level metadata atomically.
@@ -127,7 +127,7 @@ No `beforeSeq`. No ancestor pointer. No recursive `readPage`.
 
 Unchanged: writes go into the memtable, which is flushed to an L0 file when it reaches the threshold.
 
-## Snapshot
+## Checkpoint
 
 1. Flush the active layer's memtable to L0.
 2. Freeze the layer (mark immutable, stop periodic flush).
@@ -140,7 +140,7 @@ Cost: O(size of index files) — copying metadata, not data. The actual S3 blobs
 
 ## Clone
 
-Same as snapshot, but the clone gets its own volume ref pointing to a new child layer. The original volume also moves to a new child (both start with the same inherited entries).
+Same as a checkpoint, but the clone gets its own volume ref pointing to a new child layer. The original volume also moves to a new child (both start with the same inherited entries).
 
 ## Compaction
 

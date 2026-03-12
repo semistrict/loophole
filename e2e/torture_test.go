@@ -18,11 +18,11 @@ import (
 	"github.com/semistrict/loophole/client"
 )
 
-// TestE2E_Torture is a multi-phase torture test that exercises snapshot, clone,
+// TestE2E_Torture is a multi-phase torture test that exercises branching, clone,
 // remount, overwrite, delete, and data integrity across a branching tree of
 // volumes. The scenario:
 //
-//	root ──snapshot "s1"──► clone-a ──snapshot "s2"──► clone-b
+//	root ──clone-a──► clone-a ──clone-b──► clone-b
 //	  │                       │                          │
 //	  │ (continues writing)   │ (modifies clone-a)       │ (modifies clone-b)
 //	  ▼                       ▼                          ▼
@@ -48,7 +48,7 @@ func TestE2E_Torture(t *testing.T) {
 	rootFS.WriteFile(t, "tiny.txt", []byte("tiny\n"))
 	rootFS.WriteFile(t, "deep/nested/path/here/buried.txt", []byte("buried treasure\n"))
 
-	// 1MB random file — we'll track its hash across snapshots.
+	// 1MB random file — we'll track its hash across clones.
 	blob1 := make([]byte, 1*1024*1024)
 	_, err := rand.Read(blob1)
 	require.NoError(t, err)
@@ -62,10 +62,10 @@ func TestE2E_Torture(t *testing.T) {
 	rootFS.WriteFile(t, "blob5.bin", blob5)
 	blob5Hash := sha256hex(blob5)
 
-	// File we'll delete later — should survive in snapshot.
+	// File we'll delete later — should survive in the clone.
 	rootFS.WriteFile(t, "doomed.txt", []byte("I will be deleted\n"))
 
-	// File we'll overwrite later — snapshot should have original.
+	// File we'll overwrite later — the clone should have the original.
 	rootFS.WriteFile(t, "overwrite-me.txt", []byte("original content\n"))
 
 	// Symlink.
@@ -82,7 +82,7 @@ func TestE2E_Torture(t *testing.T) {
 	assertOwnership(t, filepath.Join(rootMP, "deep"), uid, gid)
 	assertOwnership(t, filepath.Join(rootMP, "tiny.txt"), uid, gid)
 
-	// --- Phase 2: Snapshot + Clone-A ---
+	// --- Phase 2: Clone-A ---
 
 	cloneAMP := mountpoint(t, "tort-clone-a")
 	require.NoError(t, b.Clone(ctx, rootMP, "tort-clone-a", cloneAMP))
@@ -137,7 +137,7 @@ func TestE2E_Torture(t *testing.T) {
 	cloneAFS.MkdirAll(t, "clone-a-dir/sub")
 	cloneAFS.WriteFile(t, "clone-a-dir/sub/new.txt", []byte("new in clone-a\n"))
 
-	// --- Phase 6: Second snapshot — clone clone-a → clone-b ---
+	// --- Phase 6: Second branch — clone clone-a → clone-b ---
 
 	cloneBMP := mountpoint(t, "tort-clone-b")
 	require.NoError(t, b.Clone(ctx, cloneAMP, "tort-clone-b", cloneBMP))
@@ -276,7 +276,7 @@ func TestE2E_Torture(t *testing.T) {
 	require.Equal(t, "level-d\n", string(cloneDFS.ReadFile(t, "clone-d.txt")))
 	// clone-d should NOT see clone-c.txt yet — it was written after the clone.
 	require.False(t, cloneDFS.Exists(t, "clone-c.txt"),
-		"clone-d should not see clone-c.txt written after snapshot")
+		"clone-d should not see clone-c.txt written after branching")
 
 	// Unmount the whole chain in reverse order, remount clone-d, verify.
 	require.NoError(t, b.Unmount(ctx, cloneDMP))

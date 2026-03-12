@@ -224,7 +224,6 @@ func (v *frozenVolume) ReleaseRef() error {
 	}
 	slog.Debug("frozenVolume: ReleaseRef", "volume", v.name, "refsAfter", newRefs)
 	if newRefs == 0 {
-		v.fireBeforeClose()
 		v.manager.closeVolume(v.name)
 		v.layer.Close()
 	}

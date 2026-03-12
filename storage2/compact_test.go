@@ -620,7 +620,7 @@ func TestSnapshotS3OpCount(t *testing.T) {
 	store.ResetCounts()
 
 	// Snapshot: this triggers branch() → Flush + Snapshot(child) + relayer().
-	require.NoError(t, v.Snapshot("snap-1"))
+	require.NoError(t, snapshotVolume(t, v, "snap-1"))
 
 	t.Logf("Snapshot S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
 		store.Count(loophole.OpGet),
@@ -640,7 +640,7 @@ func TestSnapshotS3OpCount(t *testing.T) {
 
 	// Now do a second snapshot with no new writes (empty memtable).
 	store.ResetCounts()
-	require.NoError(t, v.Snapshot("snap-2"))
+	require.NoError(t, snapshotVolume(t, v, "snap-2"))
 
 	t.Logf("Snapshot (no dirty data) S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
 		store.Count(loophole.OpGet),

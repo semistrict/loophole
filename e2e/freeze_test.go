@@ -9,7 +9,7 @@ import (
 )
 
 // TestE2E_FreezeFlushesFilesystemCache verifies that freezing a volume
-// flushes the filesystem cache (e.g. lwext4 write-back cache) before
+// flushes the filesystem cache before
 // persisting data to S3. Without this, cached metadata blocks (block
 // bitmaps, group descriptors) may never reach the volume and subsequent
 // mounts will see ext4 corruption.
@@ -23,9 +23,8 @@ func TestE2E_FreezeFlushesFilesystemCache(t *testing.T) {
 	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: volName}))
 	require.NoError(t, b.Mount(ctx, volName, mp))
 
-	// Write test files through the mounted filesystem (lwext4 with
-	// write-back caching, or kernel ext4). This leaves dirty metadata
-	// in the filesystem cache.
+	// Write test files through the mounted filesystem. This leaves dirty
+	// metadata in the filesystem cache.
 	tfs := newTestFS(t, b, mp)
 	randomMD5 := writeTestFiles(t, tfs)
 
@@ -36,7 +35,6 @@ func TestE2E_FreezeFlushesFilesystemCache(t *testing.T) {
 	// Re-mount the frozen volume read-only and verify all files survived.
 	mp2 := mountpoint(t, volName+"-ro")
 	require.NoError(t, b.Mount(ctx, volName, mp2))
-	b.mountedMPs = append(b.mountedMPs, mp2)
 
 	verifyTestFiles(t, newTestFS(t, b, mp2), randomMD5)
 }
@@ -64,7 +62,6 @@ func TestE2E_FreezeAndClonePreservesData(t *testing.T) {
 	// Mount the frozen volume read-only.
 	frozenMP := mountpoint(t, volName+"-frozen")
 	require.NoError(t, b.Mount(ctx, volName, frozenMP))
-	b.mountedMPs = append(b.mountedMPs, frozenMP)
 
 	// Clone from the frozen volume.
 	cloneName := "frz-cln-child"

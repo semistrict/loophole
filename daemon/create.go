@@ -30,7 +30,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Size > 0 {
 		slog.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
 		if req.Type == "" {
-			req.Type = string(loophole.DefaultFSType())
+			req.Type = loophole.VolumeTypeExt4
 		}
 		if err := d.backend.Create(ctx, req); err != nil {
 			slog.Error("create volume failed", "err", err)

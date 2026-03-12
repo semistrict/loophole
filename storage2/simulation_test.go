@@ -506,7 +506,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 	snapName := fmt.Sprintf("%s-snap-%d", volName, sim.nextVolID)
 	sim.nextVolID++
 
-	err := v.Snapshot(snapName)
+	err := snapshotVolume(sim.t, v, snapName)
 	if err != nil {
 		return
 	}
