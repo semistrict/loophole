@@ -18,7 +18,7 @@ func NewFUSEDriver(_ string, _ loophole.VolumeManager, _ *fuseblockdev.Options) 
 	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
 }
 
-func NewFUSE(_ string, _ loophole.VolumeManager, _ *fuseblockdev.Options) (Service, error) {
+func NewFUSE(_ string, _ loophole.VolumeManager, _ *fuseblockdev.Options) (*Backend, error) {
 	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
 }
 
@@ -41,6 +41,6 @@ func (f *FUSEDriver) Close(context.Context) error            { return nil }
 func (f *FUSEDriver) RegisterVolume(string, loophole.Volume) {}
 func (f *FUSEDriver) UnregisterVolume(string)                {}
 func (f *FUSEDriver) DevicePath(string) string               { return "" }
-func (f *FUSEDriver) FS(fuseMount) (FS, error) {
+func (f *FUSEDriver) FS(fuseMount) (*RootFS, error) {
 	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
 }

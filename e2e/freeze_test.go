@@ -20,7 +20,7 @@ func TestE2E_FreezeFlushesFilesystemCache(t *testing.T) {
 	volName := "frz-cache"
 	mp := mountpoint(t, volName)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: volName}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: volName}))
 	require.NoError(t, b.Mount(ctx, volName, mp))
 
 	// Write test files through the mounted filesystem. This leaves dirty
@@ -50,7 +50,7 @@ func TestE2E_FreezeAndClonePreservesData(t *testing.T) {
 	volName := "frz-cln-parent"
 	mp := mountpoint(t, volName)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: volName}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: volName}))
 	require.NoError(t, b.Mount(ctx, volName, mp))
 
 	tfs := newTestFS(t, b, mp)

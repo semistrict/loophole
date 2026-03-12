@@ -13,7 +13,7 @@ func TestE2E_ClonePreservesData(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cln-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cln-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cln-parent"}))
 	err := b.Mount(ctx, "cln-parent", parentMP)
 	require.NoError(t, err)
 
@@ -35,7 +35,7 @@ func TestE2E_CloneBranchesAreIndependent(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cln-ind-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cln-ind-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cln-ind-parent"}))
 	err := b.Mount(ctx, "cln-ind-parent", parentMP)
 	require.NoError(t, err)
 

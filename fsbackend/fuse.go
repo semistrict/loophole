@@ -8,7 +8,6 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
-	"github.com/semistrict/loophole/linuxutil"
 )
 
 // fuseMount is the per-mount handle for FUSEDriver.
@@ -33,8 +32,8 @@ func NewFUSEDriver(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev
 	return &FUSEDriver{fuse: srv, pageSize: vm.PageSize()}, nil
 }
 
-// NewFUSE starts the FUSE block device server and returns a Service.
-func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (Service, error) {
+// NewFUSE starts the FUSE block device server and returns a backend.
+func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (*Backend, error) {
 	d, err := NewFUSEDriver(fuseDir, vm, opts)
 	if err != nil {
 		return nil, err
@@ -45,7 +44,7 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Debug("fuse: formatting", "volume", vol.Name(), "device", devPath, "pageSize", f.pageSize)
-	err := linuxutil.FormatFS(ctx, devPath, vol.VolumeType(), f.pageSize)
+	err := formatFS(ctx, devPath, f.pageSize)
 	slog.Debug("fuse: format done", "volume", vol.Name(), "error", err)
 	return err
 }
@@ -53,7 +52,7 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
 	devPath := f.fuse.DevicePath(vol.Name())
 	slog.Debug("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
-	loopDev, err := linuxutil.MountFS(ctx, devPath, mountpoint, vol.VolumeType(), linuxutil.LoopAttachOpts{
+	loopDev, err := mountFS(ctx, devPath, mountpoint, loopAttachOpts{
 		OptimalIOSize: f.pageSize,
 		ReadOnly:      vol.ReadOnly(),
 	})
@@ -67,11 +66,11 @@ func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint 
 
 func (f *FUSEDriver) Unmount(ctx context.Context, h fuseMount) error {
 	slog.Debug("fuse: unmounting", "mountpoint", h.mountpoint)
-	if err := linuxutil.UnmountLoop(ctx, h.mountpoint); err != nil {
+	if err := unmountLoop(ctx, h.mountpoint); err != nil {
 		return err
 	}
 	if h.loopDev != "" {
-		if err := linuxutil.LoopDetachPath(h.loopDev); err != nil {
+		if err := loopDetachPath(h.loopDev); err != nil {
 			slog.Warn("loop detach failed", "device", h.loopDev, "error", err)
 		}
 	}
@@ -92,14 +91,14 @@ func (f *FUSEDriver) Close(ctx context.Context) error {
 
 func (f *FUSEDriver) Freeze(ctx context.Context, h fuseMount) error {
 	slog.Debug("fuse: freezing", "mountpoint", h.mountpoint)
-	err := linuxutil.Freeze(h.mountpoint)
+	err := freezeFS(h.mountpoint)
 	slog.Debug("fuse: freeze done", "mountpoint", h.mountpoint, "error", err)
 	return err
 }
 
 func (f *FUSEDriver) Thaw(ctx context.Context, h fuseMount) error {
 	slog.Debug("fuse: thawing", "mountpoint", h.mountpoint)
-	err := linuxutil.Thaw(h.mountpoint)
+	err := thawFS(h.mountpoint)
 	slog.Debug("fuse: thaw done", "mountpoint", h.mountpoint, "error", err)
 	return err
 }
@@ -116,6 +115,6 @@ func (f *FUSEDriver) DevicePath(volumeName string) string {
 	return f.fuse.DevicePath(volumeName)
 }
 
-func (f *FUSEDriver) FS(h fuseMount) (FS, error) {
-	return NewOSFS(h.mountpoint), nil
+func (f *FUSEDriver) FS(h fuseMount) (*RootFS, error) {
+	return NewRootFS(h.mountpoint), nil
 }

@@ -7,12 +7,11 @@ import (
 	"hash/crc32"
 	"io"
 	mrand "math/rand/v2"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/semistrict/loophole/fsbackend"
 )
 
 // Go reimplementations of the fsx/fio stress tests so they run without
@@ -35,8 +34,8 @@ func stressMountGo(t *testing.T, name string) testFS {
 	return tfs
 }
 
-// createFile creates a file via fsbackend.FS and returns the handle.
-func createFile(t *testing.T, tfs testFS, name string) fsbackend.File {
+// createFile creates a file via the rooted test filesystem and returns the handle.
+func createFile(t *testing.T, tfs testFS, name string) *os.File {
 	t.Helper()
 	f, err := tfs.fs.Create(name)
 	require.NoError(t, err)
@@ -44,8 +43,8 @@ func createFile(t *testing.T, tfs testFS, name string) fsbackend.File {
 	return f
 }
 
-// openFile opens a file via fsbackend.FS and returns the handle.
-func openFile(t *testing.T, tfs testFS, name string) fsbackend.File {
+// openFile opens a file via the rooted test filesystem and returns the handle.
+func openFile(t *testing.T, tfs testFS, name string) *os.File {
 	t.Helper()
 	f, err := tfs.fs.Open(name)
 	require.NoError(t, err)
@@ -57,7 +56,7 @@ func openFile(t *testing.T, tfs testFS, name string) fsbackend.File {
 
 // fsxRun performs N random file operations (read, write, truncate) on a single
 // file, verifying the file contents match an in-memory reference after each op.
-func fsxRun(t *testing.T, f fsbackend.File, fileSize, ops int, seed int64) {
+func fsxRun(t *testing.T, f *os.File, fileSize, ops int, seed int64) {
 	t.Helper()
 
 	rng := mrand.New(mrand.NewPCG(uint64(seed), 0))

@@ -19,7 +19,7 @@ type volCmdArgs struct {
 	vol        loophole.Volume
 	volName    string
 	mountpoint string
-	backend    fsbackend.Service
+	backend    *fsbackend.Backend
 	body       json.RawMessage
 }
 
@@ -42,11 +42,8 @@ var volumeCommands = []volCmd{
 }
 
 func cmdStatus(a volCmdArgs) (any, error) {
-	type debugInfoProvider interface {
-		DebugInfo() storage2.VolumeDebugInfo
-	}
-	if dp, ok := a.vol.(debugInfoProvider); ok {
-		return dp.DebugInfo(), nil
+	if info, ok := storage2.DebugInfo(a.vol); ok {
+		return info, nil
 	}
 	return map[string]string{"status": "ok", "volume": a.volName}, nil
 }
@@ -118,7 +115,7 @@ func cmdClone(a volCmdArgs) (any, error) {
 }
 
 // resolveVolume finds the volume from either a volume name or mountpoint.
-func resolveVolume(backend fsbackend.Service, volume, mountpoint string) (volName, mp string, vol loophole.Volume, err error) {
+func resolveVolume(backend *fsbackend.Backend, volume, mountpoint string) (volName, mp string, vol loophole.Volume, err error) {
 	if mountpoint != "" {
 		volName = backend.VolumeAt(mountpoint)
 		if volName == "" {

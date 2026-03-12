@@ -6,80 +6,12 @@ package fsbackend
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"sync"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/internal/util"
 )
-
-// Service is the non-generic interface that Backend implements.
-// The daemon and HTTP handlers use this.
-type Service interface {
-	Create(ctx context.Context, p loophole.CreateParams) error
-	Mount(ctx context.Context, volume, mountpoint string) error
-	Unmount(ctx context.Context, mountpoint string) error
-	Checkpoint(ctx context.Context, mountpoint string) (string, error)
-	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
-	CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error
-	MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error
-	FreezeVolume(ctx context.Context, volume string, compact bool) error
-	Thaw(ctx context.Context, mountpoint string) error
-	FS(mountpoint string) (FS, error)
-	// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
-	FSForVolume(ctx context.Context, volume string) (FS, error)
-	DeviceAttach(ctx context.Context, volume string) (string, error)
-	DeviceDetach(ctx context.Context, volume string) error
-	DeviceCheckpoint(ctx context.Context, volume string) (string, error)
-	DeviceClone(ctx context.Context, volume, clone string) (string, error)
-	DevicePath(volume string) (string, error)
-	// OnBeforeUnmount registers a callback that fires (LIFO) before the
-	// filesystem at mountpoint is unmounted. Use this for cleanup that must
-	// precede FS unmount (e.g. chroot bind-mount teardown).
-	OnBeforeUnmount(mountpoint string, fn func())
-	IsMounted(mountpoint string) bool
-	IsVolumeMounted(volume string) bool
-	VolumeAt(mountpoint string) string
-	MountpointForVolume(volume string) string
-	Mounts() map[string]string
-	VM() loophole.VolumeManager
-	Close(ctx context.Context) error
-}
-
-// FS provides path-based filesystem operations on a mounted volume.
-// The remaining kernel ext4 path delegates to os.* operations on the mount.
-type FS interface {
-	ReadFile(name string) ([]byte, error)
-	WriteFile(name string, data []byte, perm fs.FileMode) error
-	MkdirAll(name string, perm fs.FileMode) error
-	Remove(name string) error
-	Stat(name string) (fs.FileInfo, error)
-	Lstat(name string) (fs.FileInfo, error)
-	ReadDir(name string) ([]string, error)
-	Open(name string) (File, error)
-	Create(name string) (File, error)
-	Symlink(target, name string) error
-	Readlink(name string) (string, error)
-	Chmod(name string, mode fs.FileMode) error
-	Lchown(name string, uid, gid int) error
-	Chtimes(name string, mtime int64) error
-	Rename(oldName, newName string) error
-	Link(existingPath, newPath string) error
-	RemoveAll(name string) error
-}
-
-// File is an open file handle.
-type File interface {
-	Read(p []byte) (int, error)
-	Write(p []byte) (int, error)
-	ReadAt(p []byte, off int64) (int, error)
-	WriteAt(p []byte, off int64) (int, error)
-	Seek(offset int64, whence int) (int64, error)
-	Truncate(size int64) error
-	Sync() error
-	Close() error
-}
 
 // mountEntry stores the volume, driver-specific handle, and the driver
 // that created the mount.
@@ -112,10 +44,7 @@ func NewBackend(vm loophole.VolumeManager, driver *FUSEDriver) *Backend {
 }
 
 // driverFor returns the single surviving driver.
-func (b *Backend) driverFor(volType string) (*FUSEDriver, error) {
-	if volType != loophole.VolumeTypeExt4 {
-		return nil, fmt.Errorf("unsupported volume type %q", volType)
-	}
+func (b *Backend) driverFor() (*FUSEDriver, error) {
 	if b.driver == nil {
 		return nil, fmt.Errorf("filesystem backend is not available")
 	}
@@ -144,7 +73,7 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 		return nil
 	}
 
-	driver, err := b.driverFor(volType)
+	driver, err := b.driverFor()
 	if err != nil {
 		return err
 	}
@@ -348,7 +277,7 @@ func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
 }
 
 // FS returns a filesystem handle for the given mountpoint.
-func (b *Backend) FS(mountpoint string) (FS, error) {
+func (b *Backend) FS(mountpoint string) (*RootFS, error) {
 	entry, err := b.entry(mountpoint)
 	if err != nil {
 		return nil, err
@@ -356,8 +285,8 @@ func (b *Backend) FS(mountpoint string) (FS, error) {
 	return entry.driver.FS(entry.handle)
 }
 
-// FSForVolume returns an FS for a volume by name, auto-mounting if needed.
-func (b *Backend) FSForVolume(ctx context.Context, volume string) (FS, error) {
+// FSForVolume returns a rooted filesystem for a volume by name, auto-mounting if needed.
+func (b *Backend) FSForVolume(ctx context.Context, volume string) (*RootFS, error) {
 	b.mu.Lock()
 	for _, entry := range b.mounts {
 		if entry.vol.Name() == volume {
@@ -395,7 +324,7 @@ func (b *Backend) DeviceAttach(ctx context.Context, volume string) (string, erro
 	if err := vol.AcquireRef(); err != nil {
 		return "", fmt.Errorf("acquire ref for device attach: %w", err)
 	}
-	driver, err := b.driverFor(vol.VolumeType())
+	driver, err := b.driverFor()
 	if err != nil {
 		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
 		return "", err
@@ -410,7 +339,7 @@ func (b *Backend) DeviceDetach(ctx context.Context, volume string) error {
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
 	}
-	driver, _ := b.driverFor(vol.VolumeType())
+	driver, _ := b.driverFor()
 	if driver != nil {
 		driver.UnregisterVolume(volume)
 	}
@@ -432,7 +361,7 @@ func (b *Backend) DeviceClone(ctx context.Context, volume string, clone string) 
 	if vol == nil {
 		return "", fmt.Errorf("volume %q not open", volume)
 	}
-	driver, err := b.driverFor(vol.VolumeType())
+	driver, err := b.driverFor()
 	if err != nil {
 		return "", err
 	}
@@ -610,7 +539,7 @@ func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoi
 		return fmt.Errorf("acquire ref for mount: %w", err)
 	}
 
-	driver, err := b.driverFor(vol.VolumeType())
+	driver, err := b.driverFor()
 	if err != nil {
 		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
 		return err

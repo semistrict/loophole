@@ -22,21 +22,12 @@ import (
 )
 
 type chrootSandboxRuntime struct {
-	backend fsbackend.Service
+	backend *fsbackend.Backend
 }
 
-func newChrootSandboxRuntime(backend fsbackend.Service) SandboxRuntime {
-	return &chrootSandboxRuntime{backend: backend}
-}
-
-func (r *chrootSandboxRuntime) DebugInfo() any {
-	return map[string]any{
-		"type": "chroot",
-	}
-}
-
-func (r *chrootSandboxRuntime) Exec(ctx context.Context, volume string, cmdStr string) (ExecResult, error) {
-	cmd, err := r.command(ctx, volume, cmdStr)
+func execSandboxCommand(ctx context.Context, backend *fsbackend.Backend, volume string, cmdStr string) (ExecResult, error) {
+	runtime := chrootSandboxRuntime{backend: backend}
+	cmd, err := runtime.command(ctx, volume, cmdStr)
 	if err != nil {
 		return ExecResult{}, err
 	}
@@ -75,7 +66,7 @@ func runExecCommand(cmd *exec.Cmd) (ExecResult, error) {
 	}, nil
 }
 
-func mountpointForVolume(backend fsbackend.Service, volume string) string {
+func mountpointForVolume(backend *fsbackend.Backend, volume string) string {
 	for mp, volName := range backend.Mounts() {
 		if volName == volume {
 			return mp
@@ -98,7 +89,7 @@ var chrootEnv = []string{
 // prepareChrootEnv sets up bind mounts and config files inside a chroot
 // mountpoint. This is done once per mountpoint and cached. A before_unmount
 // callback is registered on the backend to tear down bind mounts automatically.
-func prepareChrootEnv(mountpoint string, backend fsbackend.Service) {
+func prepareChrootEnv(mountpoint string, backend *fsbackend.Backend) {
 	if _, loaded := preparedChroots.LoadOrStore(mountpoint, true); loaded {
 		return
 	}
@@ -165,7 +156,7 @@ func prepareChrootEnv(mountpoint string, backend fsbackend.Service) {
 
 // chrootCmd builds an exec.Cmd that runs argv inside a chroot at mountpoint.
 // It ensures the chroot environment (proc, sys, dev, resolv.conf) is set up.
-func chrootCmd(mountpoint string, backend fsbackend.Service, argv ...string) *exec.Cmd {
+func chrootCmd(mountpoint string, backend *fsbackend.Backend, argv ...string) *exec.Cmd {
 	prepareChrootEnv(mountpoint, backend)
 	args := append([]string{mountpoint}, argv...)
 	cmd := exec.Command("/usr/sbin/chroot", args...)
@@ -174,7 +165,7 @@ func chrootCmd(mountpoint string, backend fsbackend.Service, argv ...string) *ex
 	return cmd
 }
 
-func chrootCmdContext(ctx context.Context, mountpoint string, backend fsbackend.Service, argv ...string) *exec.Cmd {
+func chrootCmdContext(ctx context.Context, mountpoint string, backend *fsbackend.Backend, argv ...string) *exec.Cmd {
 	prepareChrootEnv(mountpoint, backend)
 	args := append([]string{mountpoint}, argv...)
 	cmd := exec.CommandContext(ctx, "/usr/sbin/chroot", args...)

@@ -8,42 +8,40 @@ import (
 	"time"
 )
 
-// osFS implements FS by delegating to os.* with a mountpoint prefix.
-// Used by kernel backends (FUSE, NBD).
-type osFS struct {
+// RootFS delegates filesystem operations to os.* under a mountpoint root.
+type RootFS struct {
 	root string
 }
 
-// NewOSFS creates an FS backed by real OS operations rooted at mountpoint.
-func NewOSFS(mountpoint string) FS {
-	return &osFS{root: mountpoint}
+func NewRootFS(mountpoint string) *RootFS {
+	return &RootFS{root: mountpoint}
 }
 
-func (f *osFS) path(name string) string {
+func (f *RootFS) path(name string) string {
 	return filepath.Join(f.root, name)
 }
 
-func (f *osFS) ReadFile(name string) ([]byte, error) {
+func (f *RootFS) ReadFile(name string) ([]byte, error) {
 	return os.ReadFile(f.path(name))
 }
 
-func (f *osFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
+func (f *RootFS) WriteFile(name string, data []byte, perm fs.FileMode) error {
 	return os.WriteFile(f.path(name), data, perm)
 }
 
-func (f *osFS) MkdirAll(name string, perm fs.FileMode) error {
+func (f *RootFS) MkdirAll(name string, perm fs.FileMode) error {
 	return os.MkdirAll(f.path(name), perm)
 }
 
-func (f *osFS) Remove(name string) error {
+func (f *RootFS) Remove(name string) error {
 	return os.Remove(f.path(name))
 }
 
-func (f *osFS) Stat(name string) (fs.FileInfo, error) {
+func (f *RootFS) Stat(name string) (fs.FileInfo, error) {
 	return os.Stat(f.path(name))
 }
 
-func (f *osFS) ReadDir(name string) ([]string, error) {
+func (f *RootFS) ReadDir(name string) ([]string, error) {
 	entries, err := os.ReadDir(f.path(name))
 	if err != nil {
 		return nil, err
@@ -56,47 +54,47 @@ func (f *osFS) ReadDir(name string) ([]string, error) {
 	return names, nil
 }
 
-func (f *osFS) Open(name string) (File, error) {
+func (f *RootFS) Open(name string) (*os.File, error) {
 	return os.Open(f.path(name))
 }
 
-func (f *osFS) Create(name string) (File, error) {
+func (f *RootFS) Create(name string) (*os.File, error) {
 	return os.Create(f.path(name))
 }
 
-func (f *osFS) Lstat(name string) (fs.FileInfo, error) {
+func (f *RootFS) Lstat(name string) (fs.FileInfo, error) {
 	return os.Lstat(f.path(name))
 }
 
-func (f *osFS) Symlink(target, name string) error {
+func (f *RootFS) Symlink(target, name string) error {
 	return os.Symlink(target, f.path(name))
 }
 
-func (f *osFS) Readlink(name string) (string, error) {
+func (f *RootFS) Readlink(name string) (string, error) {
 	return os.Readlink(f.path(name))
 }
 
-func (f *osFS) Chmod(name string, mode fs.FileMode) error {
+func (f *RootFS) Chmod(name string, mode fs.FileMode) error {
 	return os.Chmod(f.path(name), mode)
 }
 
-func (f *osFS) Lchown(name string, uid, gid int) error {
+func (f *RootFS) Lchown(name string, uid, gid int) error {
 	return os.Lchown(f.path(name), uid, gid)
 }
 
-func (f *osFS) Chtimes(name string, mtime int64) error {
+func (f *RootFS) Chtimes(name string, mtime int64) error {
 	t := time.Unix(mtime, 0)
 	return os.Chtimes(f.path(name), t, t)
 }
 
-func (f *osFS) Rename(oldName, newName string) error {
+func (f *RootFS) Rename(oldName, newName string) error {
 	return os.Rename(f.path(oldName), f.path(newName))
 }
 
-func (f *osFS) Link(existingPath, newPath string) error {
+func (f *RootFS) Link(existingPath, newPath string) error {
 	return os.Link(f.path(existingPath), f.path(newPath))
 }
 
-func (f *osFS) RemoveAll(name string) error {
+func (f *RootFS) RemoveAll(name string) error {
 	return os.RemoveAll(f.path(name))
 }

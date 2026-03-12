@@ -60,7 +60,7 @@ func setupBusyboxVolume(t *testing.T, name string) (*testBackend, string) {
 	b := newBackend(t)
 	mp := mountpoint(t, name)
 
-	require.NoError(t, b.Create(t.Context(), client.CreateParams{Type: defaultVolumeType(), Volume: name}))
+	require.NoError(t, b.Create(t.Context(), client.CreateParams{Volume: name}))
 	require.NoError(t, b.Mount(t.Context(), name, mp))
 
 	tfs := newTestFS(t, b, mp)

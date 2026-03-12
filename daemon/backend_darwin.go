@@ -9,6 +9,6 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 )
 
-func createBackend(_ loophole.VolumeManager, _ loophole.Instance, _ loophole.Dir) (fsbackend.Service, error) {
+func createBackend(_ loophole.VolumeManager, _ loophole.Instance, _ loophole.Dir) (*fsbackend.Backend, error) {
 	return nil, fmt.Errorf("kernel ext4 via FUSE is not supported on macOS")
 }

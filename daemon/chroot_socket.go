@@ -24,7 +24,7 @@ import (
 // The socket and bind-mount target both live on the host filesystem (tmpdir),
 // never on the ext4 volume. This ensures cleanup doesn't touch the volume,
 // which may be frozen (FIFREEZE) at teardown time.
-func startChrootSocket(mountpoint string, backend fsbackend.Service) (cleanup func(), err error) {
+func startChrootSocket(mountpoint string, backend *fsbackend.Backend) (cleanup func(), err error) {
 	// Host-side socket in a temp directory.
 	hostSock := filepath.Join(os.TempDir(), "loophole-chroot-"+filepath.Base(mountpoint)+".sock")
 	_ = os.Remove(hostSock)
@@ -72,7 +72,7 @@ func startChrootSocket(mountpoint string, backend fsbackend.Service) (cleanup fu
 }
 
 // registerChrootVolumeCmds registers all volume commands on a chroot socket mux.
-func registerChrootVolumeCmds(mux *http.ServeMux, mountpoint string, backend fsbackend.Service) {
+func registerChrootVolumeCmds(mux *http.ServeMux, mountpoint string, backend *fsbackend.Backend) {
 	for _, cmd := range volumeCommands {
 		cmd := cmd
 		mux.HandleFunc(cmd.method+" "+cmd.path, func(w http.ResponseWriter, r *http.Request) {

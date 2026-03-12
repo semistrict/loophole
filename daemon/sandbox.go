@@ -42,7 +42,7 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := d.sandboxRuntime.Exec(r.Context(), volume, cmdStr)
+	result, err := execSandboxCommand(r.Context(), d.backend, volume, cmdStr)
 	if err != nil {
 		writeError(w, 500, err)
 		return

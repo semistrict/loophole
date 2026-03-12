@@ -15,7 +15,7 @@ func TestE2E_VolumeFileExists(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "testvolume"})
+	err := b.Create(ctx, client.CreateParams{Volume: "testvolume"})
 	require.NoError(t, err)
 
 	device, err := b.DeviceAttach(ctx, "testvolume")

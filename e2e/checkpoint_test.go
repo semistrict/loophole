@@ -15,7 +15,7 @@ func TestE2E_CheckpointPreservesData(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cp-pres-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cp-pres-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cp-pres-parent"}))
 	require.NoError(t, b.Mount(ctx, "cp-pres-parent", parentMP))
 
 	tfs := newTestFS(t, b, parentMP)
@@ -41,7 +41,7 @@ func TestE2E_CheckpointParentStaysWritable(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "cp-writable")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cp-writable"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cp-writable"}))
 	require.NoError(t, b.Mount(ctx, "cp-writable", mp))
 
 	tfs := newTestFS(t, b, mp)
@@ -64,7 +64,7 @@ func TestE2E_CheckpointCloneIsIndependent(t *testing.T) {
 	ctx := t.Context()
 	parentMP := mountpoint(t, "cp-ind-parent")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cp-ind-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cp-ind-parent"}))
 	require.NoError(t, b.Mount(ctx, "cp-ind-parent", parentMP))
 
 	parentFS := newTestFS(t, b, parentMP)
@@ -105,7 +105,7 @@ func TestE2E_MultipleCheckpoints(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "cp-multi")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cp-multi"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cp-multi"}))
 	require.NoError(t, b.Mount(ctx, "cp-multi", mp))
 
 	tfs := newTestFS(t, b, mp)
@@ -165,7 +165,7 @@ func TestE2E_CheckpointMultipleClones(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "cp-mc")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "cp-mc"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "cp-mc"}))
 	require.NoError(t, b.Mount(ctx, "cp-mc", mp))
 
 	tfs := newTestFS(t, b, mp)

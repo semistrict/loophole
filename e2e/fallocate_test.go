@@ -39,7 +39,7 @@ func TestE2E_PunchHoleZerosData(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 	mp := mountpoint(t, "punch-zeros")
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "punch-zeros"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-zeros"}))
 	err := b.Mount(ctx, "punch-zeros", mp)
 	require.NoError(t, err)
 
@@ -77,7 +77,7 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	ctx := t.Context()
 
 	// Write to parent, clone, punch in child.
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "tomb-parent"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "tomb-parent"}))
 	parentDev, err := b.DeviceAttach(ctx, "tomb-parent")
 	require.NoError(t, err)
 
@@ -116,7 +116,7 @@ func TestE2E_PunchHoleNoAncestorDeletesBlock(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "punch-del"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-del"}))
 	dev, err := b.DeviceAttach(ctx, "punch-del")
 	require.NoError(t, err)
 
@@ -152,7 +152,7 @@ func TestE2E_PunchHolePartialBlock(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: "punch-partial"}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "punch-partial"}))
 	dev, err := b.DeviceAttach(ctx, "punch-partial")
 	require.NoError(t, err)
 

@@ -80,7 +80,6 @@ func createCmd() *cobra.Command {
 	var mountpoint string
 	var sizeStr string
 	var noFormat bool
-	var volType string
 	cmd := &cobra.Command{
 		Use:   "create <volume>",
 		Short: "Create and format a new volume",
@@ -103,7 +102,6 @@ func createCmd() *cobra.Command {
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
-				Type:     volType,
 			}); err != nil {
 				return err
 			}
@@ -120,7 +118,6 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path after creation")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
-	cmd.Flags().StringVarP(&volType, "type", "t", "", "volume/filesystem type (ext4); default ext4")
 	return cmd
 }
 
@@ -520,7 +517,7 @@ func deviceFlushCmd() *cobra.Command {
 }
 
 func deviceDDCmd() *cobra.Command {
-	var ifFlag, ofFlag, bsFlag, typeFlag string
+	var ifFlag, ofFlag, bsFlag string
 
 	cmd := &cobra.Command{
 		Use:   "dd [if=<source>] [of=<dest>]",
@@ -534,7 +531,7 @@ Export (volume → file): reads raw volume data and writes it to a file.
 Examples:
   loophole device dd if=/path/to/rootfs.ext4 of=myvolume:
   loophole device dd if=myvolume: of=/path/to/output.img
-  loophole device dd if=/path/to/rootfs.ext4 of=myvolume: type=ext4`,
+  loophole device dd if=/path/to/rootfs.ext4 of=myvolume:`,
 		Args:                  cobra.ArbitraryArgs,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -551,8 +548,6 @@ Examples:
 					ofFlag = v
 				case "bs":
 					bsFlag = v
-				case "type":
-					typeFlag = v
 				default:
 					return fmt.Errorf("unknown parameter %q", k)
 				}
@@ -580,7 +575,7 @@ Examples:
 			}
 
 			if dstIsVol {
-				return deviceDDImport(cmd, c, ifFlag, dstVol, typeFlag)
+				return deviceDDImport(cmd, c, ifFlag, dstVol)
 			}
 			return deviceDDExport(cmd, c, srcVol, ofFlag)
 		},
@@ -589,20 +584,12 @@ Examples:
 	cmd.Flags().StringVar(&ifFlag, "if", "", "input: local file or volume:")
 	cmd.Flags().StringVar(&ofFlag, "of", "", "output: local file or volume:")
 	cmd.Flags().StringVar(&bsFlag, "bs", "", "block size (e.g. 1M, 4M); default 4M")
-	cmd.Flags().StringVar(&typeFlag, "type", "", "volume type for import (ext4); default ext4")
 
 	return cmd
 }
 
 // deviceDDImport writes a local file into a new volume.
-func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume, volType string) error {
-	if volType == "" {
-		volType = loophole.VolumeTypeExt4
-	}
-	if volType != loophole.VolumeTypeExt4 {
-		return fmt.Errorf("unsupported volume type %q", volType)
-	}
-
+func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open image: %w", err)
@@ -614,13 +601,12 @@ func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume, volT
 		return fmt.Errorf("stat image: %w", err)
 	}
 	size := uint64(fi.Size())
-	fmt.Printf("Import: %s (%d bytes, %.1f GiB) → %s (type=%s)\n",
-		filePath, size, float64(size)/(1<<30), volume, volType)
+	fmt.Printf("Import: %s (%d bytes, %.1f GiB) → %s\n",
+		filePath, size, float64(size)/(1<<30), volume)
 
 	return c.DeviceDD(cmd.Context(), client.CreateParams{
 		Volume: volume,
 		Size:   size,
-		Type:   volType,
 	}, f, os.Stdout)
 }
 

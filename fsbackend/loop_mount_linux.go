@@ -1,9 +1,6 @@
 //go:build linux
 
-// Package linuxutil provides direct syscall-based Linux utilities,
-// replacing exec calls to mount, umount, findmnt, fsfreeze, and losetup.
-// Requires Linux 6+.
-package linuxutil
+package fsbackend
 
 import (
 	"bufio"
@@ -19,19 +16,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// MountOpts configures a filesystem mount.
-type MountOpts struct {
+type mountOpts struct {
 	Source     string
 	Mountpoint string
-	FSType     string
 	ReadOnly   bool
 	NoAtime    bool
 	NoBarrier  bool
-	NoUUID     bool // XFS: allow duplicate UUIDs (needed for clones)
 }
 
-// Mount mounts a filesystem with the given options.
-func Mount(opts MountOpts) error {
+func mountExt4(opts mountOpts) error {
 	var flags uintptr
 	if opts.ReadOnly {
 		flags |= unix.MS_RDONLY
@@ -43,27 +36,21 @@ func Mount(opts MountOpts) error {
 	if opts.NoBarrier {
 		parts = append(parts, "nobarrier")
 	}
-	if opts.NoUUID {
-		parts = append(parts, "nouuid")
-	}
 	data := strings.Join(parts, ",")
-	if err := unix.Mount(opts.Source, opts.Mountpoint, opts.FSType, flags, data); err != nil {
+	if err := unix.Mount(opts.Source, opts.Mountpoint, "ext4", flags, data); err != nil {
 		return fmt.Errorf("mount %s on %s: %w", opts.Source, opts.Mountpoint, err)
 	}
 	return nil
 }
 
-// Unmount unmounts the filesystem at mountpoint.
-func Unmount(mountpoint string) error {
+func unmountFS(mountpoint string) error {
 	if err := unix.Unmount(mountpoint, 0); err != nil {
 		return fmt.Errorf("umount %s: %w", mountpoint, err)
 	}
 	return nil
 }
 
-// FindMount returns the source device for a given mountpoint by reading
-// /proc/self/mountinfo. Returns ("", nil) if not found.
-func FindMount(mountpoint string) (string, error) {
+func findMountSource(mountpoint string) (string, error) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
 		return "", err
@@ -76,18 +63,15 @@ func FindMount(mountpoint string) (string, error) {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		// mountinfo format: id parent major:minor root mount-point options ... - fstype source super-options
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 5 {
 			continue
 		}
-		mp := fields[4]
-		if mp != mountpoint {
+		if fields[4] != mountpoint {
 			continue
 		}
-		// Find the separator "-" to get fstype and source.
-		for i, f := range fields {
-			if f == "-" && i+2 < len(fields) {
+		for i, field := range fields {
+			if field == "-" && i+2 < len(fields) {
 				return fields[i+2], nil
 			}
 		}
@@ -100,8 +84,7 @@ const (
 	fiThaw   = 0xC0045878
 )
 
-// Freeze quiesces the filesystem at mountpoint (FIFREEZE ioctl).
-func Freeze(mountpoint string) error {
+func freezeFS(mountpoint string) error {
 	f, err := os.Open(mountpoint)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", mountpoint, err)
@@ -118,8 +101,7 @@ func Freeze(mountpoint string) error {
 	return nil
 }
 
-// Thaw resumes the filesystem at mountpoint (FITHAW ioctl).
-func Thaw(mountpoint string) error {
+func thawFS(mountpoint string) error {
 	f, err := os.Open(mountpoint)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", mountpoint, err)
@@ -154,16 +136,12 @@ func MaxLoopDevices() (int, error) {
 	return n, nil
 }
 
-// Loop device support.
-
 const (
 	loopClearFD    = 0x4C01
 	loopConfigure  = 0x4C0A
 	loopCtlGetFree = 0x4C82
 
-	loFlagsReadOnly  = 1
-	loFlagsAutoclear = 4
-	loFlagsDirectIO  = 16
+	loFlagsReadOnly = 1
 
 	loNameSize = 64
 	loKeySize  = 32
@@ -192,29 +170,16 @@ type loopConfig struct {
 	Reserved  [8]uint64
 }
 
-// LoopDevice represents an attached loop device.
-type LoopDevice struct {
+type loopDevice struct {
 	Path string
 }
 
-// LoopAttachOpts configures loop device attachment.
-type LoopAttachOpts struct {
-	OptimalIOSize int  // preferred I/O size hint for sysfs (0 = skip)
-	ReadOnly      bool // attach in read-only mode
+type loopAttachOpts struct {
+	OptimalIOSize int
+	ReadOnly      bool
 }
 
-// LoopAttach finds a free loop device, attaches it to the file at backingPath
-// with O_DIRECT and autoclear, and returns the LoopDevice.
-//
-// OptimalIOSize hints the preferred I/O size to the block layer via sysfs
-// (optimal_io_size and minimum_io_size). The logical sector size is always
-// set to 4096 via LOOP_CONFIGURE. Failures to set sysfs tunables are logged
-// as warnings but do not prevent attach.
-//
-// The kernel's GET_FREE and CONFIGURE ioctls are not atomic, so a concurrent
-// caller can grab the same device number. We retry up to 6 times on EBUSY,
-// mirroring the strategy used by util-linux's losetup.
-func LoopAttach(backingPath string, opts LoopAttachOpts) (*LoopDevice, error) {
+func loopAttach(backingPath string, opts loopAttachOpts) (*loopDevice, error) {
 	openFlags := unix.O_RDWR | unix.O_CLOEXEC
 	if opts.ReadOnly {
 		openFlags = unix.O_RDONLY | unix.O_CLOEXEC
@@ -233,14 +198,13 @@ func LoopAttach(backingPath string, opts LoopAttachOpts) (*LoopDevice, error) {
 	for attempt := range maxRetries {
 		devPath, err := loopConfigure1(backingFD, opts.ReadOnly)
 		if err == nil {
-			dev := &LoopDevice{Path: devPath}
+			dev := &loopDevice{Path: devPath}
 			dev.tuneBlockQueue(opts.OptimalIOSize)
 			return dev, nil
 		}
 		if !isEBUSY(err) {
 			return nil, fmt.Errorf("loop attach: %w", err)
 		}
-		// EBUSY: another process grabbed this device, retry.
 		_ = attempt
 	}
 	return nil, fmt.Errorf("loop attach: all %d attempts got EBUSY", maxRetries)
@@ -260,8 +224,6 @@ func isEBUSY(err error) bool {
 	return false
 }
 
-// loopConfigure1 does a single GET_FREE + CONFIGURE attempt.
-// Returns the device path on success, or a wrapped EBUSY on contention.
 func loopConfigure1(backingFD int, readOnly bool) (string, error) {
 	ctl, err := os.OpenFile("/dev/loop-control", os.O_RDWR, 0)
 	if err != nil {
@@ -276,8 +238,6 @@ func loopConfigure1(backingFD int, readOnly bool) (string, error) {
 	}
 
 	devPath := fmt.Sprintf("/dev/loop%d", nr)
-
-	// In containers without udev, the device node may not exist yet.
 	if _, err := os.Stat(devPath); os.IsNotExist(err) {
 		dev := unix.Mkdev(7, uint32(nr))
 		if err := unix.Mknod(devPath, unix.S_IFBLK|0o660, int(dev)); err != nil && !os.IsExist(err) {
@@ -294,19 +254,16 @@ func loopConfigure1(backingFD int, readOnly bool) (string, error) {
 		return "", fmt.Errorf("open %s: %w", devPath, err)
 	}
 
-	var loFlags uint32
+	var flags uint32
 	if readOnly {
-		loFlags |= loFlagsReadOnly
+		flags |= loFlagsReadOnly
 	}
 	cfg := loopConfig{
 		FD:        uint32(backingFD),
 		BlockSize: 4096,
-		Info:      loopInfo64{Flags: loFlags},
+		Info:      loopInfo64{Flags: flags},
 	}
-	_, _, errno := unix.Syscall(unix.SYS_IOCTL,
-		uintptr(loopFile.Fd()),
-		uintptr(loopConfigure),
-		uintptr(unsafe.Pointer(&cfg)))
+	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(loopFile.Fd()), uintptr(loopConfigure), uintptr(unsafe.Pointer(&cfg)))
 	if cerr := loopFile.Close(); cerr != nil {
 		slog.Warn("close failed", "error", cerr)
 	}
@@ -317,13 +274,10 @@ func loopConfigure1(backingFD int, readOnly bool) (string, error) {
 	return devPath, nil
 }
 
-// tuneBlockQueue sets optimal_io_size and minimum_io_size on the loop
-// device's block queue via sysfs. Failures are logged as warnings.
-func (d *LoopDevice) tuneBlockQueue(optimalIOSize int) {
+func (d *loopDevice) tuneBlockQueue(optimalIOSize int) {
 	if optimalIOSize <= 0 {
 		return
 	}
-	// d.Path is e.g. "/dev/loop5" → sysfs base is "loop5".
 	base := d.Path[len("/dev/"):]
 	val := fmt.Sprintf("%d", optimalIOSize)
 	for _, param := range []string{"optimal_io_size", "minimum_io_size"} {
@@ -334,24 +288,16 @@ func (d *LoopDevice) tuneBlockQueue(optimalIOSize int) {
 	}
 }
 
-// Detach detaches the loop device from its backing file.
-func (d *LoopDevice) Detach() error {
-	return LoopDetachPath(d.Path)
+func (d *loopDevice) Detach() error {
+	return loopDetachPath(d.Path)
 }
 
-// LoopDetachPath detaches the loop device at the given path (e.g. "/dev/loop0").
-//
-// On modern kernels (5.12+), LOOP_CLR_FD schedules cleanup asynchronously via
-// loop_schedule_rundown. We close our fd immediately (so the refcount drops)
-// and then poll the sysfs backing_file to confirm the device is fully released
-// before returning to the caller.
-func LoopDetachPath(devPath string) error {
+func loopDetachPath(devPath string) error {
 	f, err := os.OpenFile(devPath, os.O_RDONLY, 0)
 	if err != nil {
 		return fmt.Errorf("open %s: %w", devPath, err)
 	}
 	err = unix.IoctlSetInt(int(f.Fd()), loopClearFD, 0)
-	// Close immediately so the kernel can proceed with async cleanup.
 	if cerr := f.Close(); cerr != nil {
 		slog.Warn("close failed", "error", cerr)
 	}
@@ -359,11 +305,6 @@ func LoopDetachPath(devPath string) error {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
 	}
 
-	// Poll sysfs until backing_file clears.
-	// LOOP_CLR_FD may clear synchronously or set AUTOCLEAR if another
-	// process still has the device open. In that case the loop device is
-	// not fully detached yet, and callers that depend on the backing file
-	// being closed must not proceed as though cleanup is complete.
 	base := devPath[len("/dev/"):]
 	sysPath := fmt.Sprintf("/sys/block/%s/loop/backing_file", base)
 	for range 5_000 {
@@ -371,7 +312,7 @@ func LoopDetachPath(devPath string) error {
 		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 			return nil
 		}
-		_ = unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil) // 1ms
+		_ = unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil)
 	}
 	data, err := os.ReadFile(sysPath)
 	if err != nil {
@@ -380,11 +321,6 @@ func LoopDetachPath(devPath string) error {
 	return fmt.Errorf("loop device %s still attached after detach request (backing_file=%q)", devPath, strings.TrimSpace(string(data)))
 }
 
-// Kernel filesystem format/mount helpers.
-
-// mkfsExt4Features is the pinned set of ext4 features for mkfs.ext4.
-// Pinning avoids surprises when mkfs.ext4 defaults change across distro versions.
-// These match Debian bookworm e2fsprogs 1.47 defaults.
 const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
 	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
 	"dir_nlink,extra_isize,metadata_csum"
@@ -393,9 +329,8 @@ func mkfsArgs(device string) (string, []string) {
 	return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
 }
 
-// FormatFS creates a filesystem on a block device via a loop device.
-func FormatFS(ctx context.Context, devicePath, fstype string, optimalIOSize int) error {
-	dev, err := LoopAttach(devicePath, LoopAttachOpts{OptimalIOSize: optimalIOSize})
+func formatFS(ctx context.Context, devicePath string, optimalIOSize int) error {
+	dev, err := loopAttach(devicePath, loopAttachOpts{OptimalIOSize: optimalIOSize})
 	if err != nil {
 		return fmt.Errorf("loop attach: %w", err)
 	}
@@ -406,16 +341,14 @@ func FormatFS(ctx context.Context, devicePath, fstype string, optimalIOSize int)
 	}()
 
 	cmd, args := mkfsArgs(dev.Path)
-	if err := run(ctx, cmd, args...); err != nil {
+	if err := runHelper(ctx, cmd, args...); err != nil {
 		return fmt.Errorf("%s: %w", cmd, err)
 	}
 	return nil
 }
 
-// MountFS attaches a loop device to devicePath and mounts a filesystem at mountpoint.
-// Returns the loop device path for cleanup.
-func MountFS(ctx context.Context, devicePath, mountpoint, fstype string, opts LoopAttachOpts) (loopDevice string, err error) {
-	dev, err := LoopAttach(devicePath, opts)
+func mountFS(ctx context.Context, devicePath, mountpoint string, opts loopAttachOpts) (loopDevicePath string, err error) {
+	dev, err := loopAttach(devicePath, opts)
 	if err != nil {
 		return "", fmt.Errorf("loop attach: %w", err)
 	}
@@ -427,7 +360,7 @@ func MountFS(ctx context.Context, devicePath, mountpoint, fstype string, opts Lo
 		return "", err
 	}
 
-	if err := Mount(MountOpts{Source: dev.Path, Mountpoint: mountpoint, FSType: fstype, ReadOnly: opts.ReadOnly, NoAtime: true}); err != nil {
+	if err := mountExt4(mountOpts{Source: dev.Path, Mountpoint: mountpoint, ReadOnly: opts.ReadOnly, NoAtime: true}); err != nil {
 		if derr := dev.Detach(); derr != nil {
 			slog.Warn("loop detach failed", "error", derr)
 		}
@@ -436,26 +369,26 @@ func MountFS(ctx context.Context, devicePath, mountpoint, fstype string, opts Lo
 	return dev.Path, nil
 }
 
-// UnmountLoop unmounts the filesystem and detaches the loop device.
-func UnmountLoop(ctx context.Context, mountpoint string) error {
-	loopDev, _ := FindMount(mountpoint)
+func unmountLoop(ctx context.Context, mountpoint string) error {
+	loopDev, _ := findMountSource(mountpoint)
 
 	slog.Info("unmount start", "mountpoint", mountpoint, "loopDev", loopDev)
-	if err := Unmount(mountpoint); err != nil {
+	if err := unmountFS(mountpoint); err != nil {
 		slog.Info("unmount failed", "mountpoint", mountpoint, "error", err)
 		return err
 	}
 	slog.Info("unmount done", "mountpoint", mountpoint)
 
 	if loopDev != "" {
-		if err := LoopDetachPath(loopDev); err != nil {
+		if err := loopDetachPath(loopDev); err != nil {
 			slog.Warn("loop detach failed", "device", loopDev, "error", err)
 		}
 	}
+	_ = ctx
 	return nil
 }
 
-func run(ctx context.Context, name string, args ...string) error {
+func runHelper(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

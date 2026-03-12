@@ -21,10 +21,6 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 )
 
-func defaultVolumeType() string {
-	return "ext4"
-}
-
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
 
 // needsRoot returns true if the mode requires root privileges.
@@ -73,11 +69,11 @@ func skipKernelOnly(t *testing.T) {
 // the daemon's HTTP API via the client, while providing direct access to the
 // daemon's backend for FS and VolumeManager operations.
 type testBackend struct {
-	fsbackend.Service // embedded for FS(), VM(), etc.
-	c                 *client.Client
-	createdVols       []string
-	mountedMPs        []string
-	deviceVols        []string
+	*fsbackend.Backend
+	c           *client.Client
+	createdVols []string
+	mountedMPs  []string
+	deviceVols  []string
 }
 
 func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error {
@@ -227,7 +223,7 @@ func newBackend(t testing.TB) *testBackend {
 	}
 
 	b := &testBackend{
-		Service: testDaemon.Backend(),
+		Backend: testDaemon.Backend(),
 		c:       testClient,
 	}
 	t.Cleanup(b.cleanup)
@@ -236,9 +232,9 @@ func newBackend(t testing.TB) *testBackend {
 
 // ---------- testFS: unified file I/O ----------
 
-// testFS wraps fsbackend.FS for test convenience methods.
+// testFS wraps a rooted filesystem for test convenience methods.
 type testFS struct {
-	fs         fsbackend.FS
+	fs         *fsbackend.RootFS
 	mountpoint string
 }
 
@@ -387,7 +383,7 @@ func mountVolume(t testing.TB, name string) (testFS, *testBackend) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 512 * 1024 * 1024, Type: defaultVolumeType()}) // 512MB — XFS needs ≥300MB, 8GB is too slow through FUSE
+	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 512 * 1024 * 1024}) // 512MB keeps the FUSE e2e path reasonably fast
 	require.NoError(t, err)
 
 	mp := mountpoint(t, name)

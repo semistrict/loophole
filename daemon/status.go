@@ -66,11 +66,6 @@ func (d *Daemon) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, info)
 }
 
-// debugInfoProvider is implemented by storage2.volume and storage2.frozenVolume.
-type debugInfoProvider interface {
-	DebugInfo() storage2.VolumeDebugInfo
-}
-
 func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
 	if d.backend == nil {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
@@ -86,10 +81,10 @@ func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, fmt.Errorf("volume %q not open", name))
 		return
 	}
-	dp, ok := vol.(debugInfoProvider)
+	info, ok := storage2.DebugInfo(vol)
 	if !ok {
 		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", name))
 		return
 	}
-	writeJSON(w, dp.DebugInfo())
+	writeJSON(w, info)
 }

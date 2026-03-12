@@ -29,9 +29,6 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// If size is specified, create a fresh volume (used for zygote creation).
 	if req.Size > 0 {
 		slog.Info("create (fresh volume)", "volume", req.Volume, "size", req.Size)
-		if req.Type == "" {
-			req.Type = loophole.VolumeTypeExt4
-		}
 		if err := d.backend.Create(ctx, req); err != nil {
 			slog.Error("create volume failed", "err", err)
 			writeError(w, 500, fmt.Errorf("create: %w", err))

@@ -29,7 +29,7 @@ func TestE2E_FreezeWithActiveProcess(t *testing.T) {
 	vol := "freeze-active"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: vol}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	// Write a file so the volume isn't empty.
@@ -86,7 +86,7 @@ func TestE2E_UnmountWithActiveProcess(t *testing.T) {
 	vol := "unmount-active"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Type: defaultVolumeType(), Volume: vol}))
+	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	tfs := newTestFS(t, b, mp)

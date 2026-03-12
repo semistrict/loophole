@@ -32,7 +32,7 @@ import (
 type Daemon struct {
 	inst      loophole.Instance
 	dir       loophole.Dir
-	backend   fsbackend.Service
+	backend   *fsbackend.Backend
 	diskCache *storage2.PageCache
 	ln        net.Listener
 
@@ -43,12 +43,10 @@ type Daemon struct {
 
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
-
-	sandboxRuntime SandboxRuntime
 }
 
-// Backend returns the underlying fsbackend.Service.
-func (d *Daemon) Backend() fsbackend.Service { return d.backend }
+// Backend returns the underlying backend.
+func (d *Daemon) Backend() *fsbackend.Backend { return d.backend }
 
 // Start initializes everything and returns a Daemon ready to Serve.
 // Options configures daemon startup.
@@ -132,7 +130,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	}
 
 	var diskCache *storage2.PageCache
-	var backend fsbackend.Service
+	var backend *fsbackend.Backend
 	if store != nil {
 		// Create volume manager
 		cacheDir := dir.Cache(inst.ProfileName)
@@ -211,18 +209,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		shutdownCh: make(chan struct{}),
 		doneCh:     make(chan struct{}),
 	}
-
-	d.sandboxRuntime, err = newSandboxRuntime(d)
-	if err != nil {
-		if d.ln != nil {
-			_ = d.ln.Close()
-		}
-		if d.diskCache != nil {
-			_ = d.diskCache.Close()
-		}
-		return nil, err
-	}
-	slog.Info("sandbox runtime selected", "mode", loophole.DefaultSandboxMode(), "debug", d.sandboxDebugInfo())
+	slog.Info("sandbox runtime selected", "type", "chroot", "debug", d.sandboxDebugInfo())
 
 	return d, nil
 }
@@ -274,13 +261,6 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		close(d.shutdownCh)
 
 		slog.Info("shutdown: start")
-
-		if closer, ok := d.sandboxRuntime.(sandboxRuntimeCloser); ok {
-			slog.Info("shutdown: closing sandbox runtime")
-			if err := closer.Close(context.Background()); err != nil {
-				slog.Warn("shutdown: sandbox runtime close error", "error", err)
-			}
-		}
 
 		if d.backend != nil {
 			slog.Info("shutdown: closing backend (flush volumes, release leases)")
