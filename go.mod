@@ -107,7 +107,6 @@ require (
 	github.com/prometheus/common v0.67.5
 	github.com/sevlyar/go-daemon v0.1.6
 	github.com/spf13/cobra v1.10.2
-	github.com/vito/midterm v0.2.4
 	golang.org/x/sys v0.41.0
 )
 

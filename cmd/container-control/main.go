@@ -20,27 +20,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/semistrict/loophole/internal/util"
 )
 
 const controlSecretHeader = "X-Control-Secret"
-
-const (
-	wsStreamStdout byte = 1
-	wsStreamStderr byte = 2
-)
-
-type wsExecInputControl struct {
-	Type   string `json:"type"`
-	Signal string `json:"signal,omitempty"`
-}
-
-type wsExecOutputControl struct {
-	Type     string `json:"type"`
-	ExitCode int    `json:"exitCode,omitempty"`
-	Error    string `json:"error,omitempty"`
-}
 
 func main() {
 	if len(os.Args) >= 2 {
@@ -311,8 +294,6 @@ func (s *controlServer) handleControl(w http.ResponseWriter, r *http.Request) {
 		s.handleExec(w, r)
 	case "/control/upload":
 		s.handleUpload(w, r)
-	case "/control/ws-exec", "/control/rsync":
-		s.handleWSExec(w, r)
 	case "/control/bg-exec":
 		s.handleBGExec(w, r)
 	case "/control/set-proxy":
@@ -657,183 +638,6 @@ func pidOf(cmd *exec.Cmd) int {
 		return 0
 	}
 	return cmd.Process.Pid
-}
-
-func (s *controlServer) handleWSExec(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if strings.ToLower(r.Header.Get("Upgrade")) != "websocket" {
-		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
-		return
-	}
-
-	args := r.URL.Query()["arg"]
-	if len(args) == 0 || args[0] == "" {
-		http.Error(w, "missing arg query parameter", http.StatusBadRequest)
-		return
-	}
-	cwd := r.URL.Query().Get("cwd")
-
-	ctx, cancel := context.WithCancel(r.Context())
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	cmd.Env = os.Environ()
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		http.Error(w, fmt.Sprintf("stdin pipe: %v", err), http.StatusInternalServerError)
-		return
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		util.SafeClose(stdin, "close ws-exec stdin after stdout pipe failure")
-		http.Error(w, fmt.Sprintf("stdout pipe: %v", err), http.StatusInternalServerError)
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		util.SafeClose(stdin, "close ws-exec stdin after stderr pipe failure")
-		http.Error(w, fmt.Sprintf("stderr pipe: %v", err), http.StatusInternalServerError)
-		return
-	}
-	if err := cmd.Start(); err != nil {
-		util.SafeClose(stdin, "close ws-exec stdin after start failure")
-		http.Error(w, fmt.Sprintf("start command: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(_ *http.Request) bool { return true },
-	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		cancel()
-		_ = cmd.Wait()
-		return
-	}
-	defer func() { _ = conn.Close() }()
-
-	var wsMu sync.Mutex
-	writeWSJSON := func(payload wsExecOutputControl) error {
-		wsMu.Lock()
-		defer wsMu.Unlock()
-		return conn.WriteJSON(payload)
-	}
-	writeWSStream := func(stream byte, data []byte) error {
-		frame := make([]byte, 1+len(data))
-		frame[0] = stream
-		copy(frame[1:], data)
-
-		wsMu.Lock()
-		defer wsMu.Unlock()
-		return conn.WriteMessage(websocket.BinaryMessage, frame)
-	}
-
-	var streams sync.WaitGroup
-	streams.Add(2)
-	go func() {
-		defer streams.Done()
-		streamPipeToWS(stdout, wsStreamStdout, writeWSStream, cancel)
-	}()
-	go func() {
-		defer streams.Done()
-		streamPipeToWS(stderr, wsStreamStderr, writeWSStream, cancel)
-	}()
-
-	stdinClosed := false
-	closeStdin := func() {
-		if !stdinClosed {
-			stdinClosed = true
-			util.SafeClose(stdin, "close ws-exec stdin")
-		}
-	}
-
-	go func() {
-		defer closeStdin()
-		for {
-			msgType, data, err := conn.ReadMessage()
-			if err != nil {
-				cancel()
-				return
-			}
-
-			switch msgType {
-			case websocket.BinaryMessage:
-				if _, err := stdin.Write(data); err != nil {
-					cancel()
-					return
-				}
-			case websocket.TextMessage:
-				var msg wsExecInputControl
-				if err := json.Unmarshal(data, &msg); err != nil {
-					cancel()
-					return
-				}
-				switch msg.Type {
-				case "stdinClose":
-					closeStdin()
-				case "signal":
-					if sig, err := parseSignal(msg.Signal); err == nil && cmd.Process != nil {
-						_ = cmd.Process.Signal(sig)
-					}
-				}
-			}
-		}
-	}()
-
-	waitErr := cmd.Wait()
-	streams.Wait()
-
-	exitCode, execErr := processExit(waitErr)
-	if execErr != nil {
-		_ = writeWSJSON(wsExecOutputControl{
-			Type:  "exit",
-			Error: execErr.Error(),
-		})
-		return
-	}
-	_ = writeWSJSON(wsExecOutputControl{
-		Type:     "exit",
-		ExitCode: exitCode,
-	})
-}
-
-func streamPipeToWS(r io.Reader, stream byte, write func(byte, []byte) error, cancel context.CancelFunc) {
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if writeErr := write(stream, buf[:n]); writeErr != nil {
-				cancel()
-				return
-			}
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				cancel()
-			}
-			return
-		}
-	}
-}
-
-func parseSignal(name string) (syscall.Signal, error) {
-	switch strings.ToUpper(name) {
-	case "INT", "SIGINT":
-		return syscall.SIGINT, nil
-	case "TERM", "SIGTERM":
-		return syscall.SIGTERM, nil
-	case "KILL", "SIGKILL":
-		return syscall.SIGKILL, nil
-	default:
-		return 0, fmt.Errorf("unsupported signal %q", name)
-	}
 }
 
 func processExit(err error) (int, error) {

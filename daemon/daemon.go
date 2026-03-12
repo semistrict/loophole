@@ -44,7 +44,6 @@ type Daemon struct {
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
 
-	ptyMgr         *ptyManager // manages midterm-backed PTY sessions
 	sandboxRuntime SandboxRuntime
 }
 
@@ -211,7 +210,6 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		startupErr: startupErr,
 		shutdownCh: make(chan struct{}),
 		doneCh:     make(chan struct{}),
-		ptyMgr:     newPtyManager(),
 	}
 
 	d.sandboxRuntime, err = newSandboxRuntime(d)
@@ -276,8 +274,6 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		close(d.shutdownCh)
 
 		slog.Info("shutdown: start")
-		slog.Info("shutdown: killing PTY sessions")
-		d.ptyMgr.killAll()
 
 		if closer, ok := d.sandboxRuntime.(sandboxRuntimeCloser); ok {
 			slog.Info("shutdown: closing sandbox runtime")
@@ -377,13 +373,6 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 		writeJSON(w, map[string]string{"status": "done"})
 	})
 
-	mux.HandleFunc("GET /sandbox/shell", d.handleShellCompat)
-	mux.HandleFunc("POST /sandbox/pty", d.handlePTYCreate)
-	mux.HandleFunc("GET /sandbox/pty", d.handlePTYList)
-	mux.HandleFunc("GET /sandbox/pty/{id}/ws", d.handlePTYWebSocket)
-	mux.HandleFunc("GET /sandbox/pty/{id}/screen", d.handlePTYScreen)
-	mux.HandleFunc("POST /sandbox/pty/{id}/resize", d.handlePTYResize)
-	mux.HandleFunc("DELETE /sandbox/pty/{id}", d.handlePTYKill)
 	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
 	mux.HandleFunc("GET /sandbox/runtime", d.handleSandboxRuntime)
 	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)

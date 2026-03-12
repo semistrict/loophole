@@ -1,14 +1,12 @@
 import { PanelLeft, Plus } from 'lucide-react'
 
 interface HeaderProps {
-  terminalTitle: string
   sidebarOpen: boolean
   onToggleSidebar: () => void
   onNewSandbox?: () => void
 }
 
 export default function Header({
-  terminalTitle,
   sidebarOpen,
   onToggleSidebar,
   onNewSandbox,
@@ -25,9 +23,7 @@ export default function Header({
       <span className="text-xs font-mono font-bold tracking-wider text-foreground uppercase">
         Loophole
       </span>
-      <span className="flex-1 text-xs font-mono text-muted-foreground truncate text-center">
-        {terminalTitle}
-      </span>
+      <span className="flex-1" />
       {onNewSandbox && (
         <button
           onClick={onNewSandbox}

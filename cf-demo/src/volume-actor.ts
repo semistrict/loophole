@@ -34,7 +34,7 @@ export class VolumeActor extends DurableObject<Env> {
       return new Response(`container setup failed: ${e}`, { status: 502 })
     }
 
-    // Inject volume query param so daemon handlers (e.g. /sandbox/shell) know which volume.
+    // Inject volume query param so daemon handlers know which volume to operate on.
     const fwdUrl = new URL(`http://container${path}${url.search}`)
     if (!fwdUrl.searchParams.has('volume')) {
       fwdUrl.searchParams.set('volume', volume)

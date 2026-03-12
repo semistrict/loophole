@@ -56,7 +56,6 @@ func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, ins
 		skipHashCheck: true,
 		shutdownCh:    make(chan struct{}),
 		doneCh:        make(chan struct{}),
-		ptyMgr:        newPtyManager(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -76,7 +75,6 @@ func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, ins
 		<-ctx.Done()
 		close(d.shutdownCh)
 		slog.Info("embed: shutdown start")
-		d.ptyMgr.killAll()
 		close(d.doneCh)
 		util.SafeClose(srv, "embed: close http server")
 		util.SafeRun(func() error { return os.Remove(sockPath) }, "embed: remove socket")

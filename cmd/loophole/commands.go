@@ -38,8 +38,6 @@ func addCommands(root *cobra.Command) {
 		deviceCmd(),
 		breakLeaseCmd(),
 		migrateCmd(),
-		sshCmd(),
-		controlRshCmd(),
 	)
 }
 
