@@ -1,25 +1,19 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/daemon"
 )
 
-var selfBin string
 var globalProfile string
 var globalPID int
 
 func main() {
-	selfBin, _ = os.Executable()
 	var root *cobra.Command
 	if inChroot() {
 		root = chrootRootCmd()
@@ -54,59 +48,9 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVarP(&globalProfile, "profile", "p", "", "Named profile (default: default_profile from config, or first defined)")
 	root.PersistentFlags().IntVar(&globalPID, "pid", 0, "Connect to an embedded loophole daemon in the process with this PID")
 
-	root.AddCommand(startCmd())
 	addCommands(root)
 
 	return root
-}
-
-func startCmd() *cobra.Command {
-	var foreground bool
-	var socketMode uint32
-	var listenAddr string
-
-	cmd := &cobra.Command{
-		Use:   "start",
-		Short: "Start the loophole daemon",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := loophole.DefaultDir()
-			inst, err := resolveProfile(dir)
-			if err != nil {
-				return err
-			}
-
-			if foreground {
-				running, err := checkExistingDaemon(dir, inst)
-				if err != nil {
-					return err
-				}
-				if running {
-					return nil
-				}
-				ctx := context.Background()
-				return startDaemon(ctx, inst, dir, daemon.Options{
-					Foreground: true,
-					SocketMode: os.FileMode(socketMode),
-					ListenAddr: listenAddr,
-				})
-			}
-
-			// Background: use resolveClient which calls EnsureDaemon.
-			_, err = resolveClient()
-			if err != nil {
-				return err
-			}
-			fmt.Printf("loophole started (%s)\n", inst.URL())
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVarP(&foreground, "foreground", "f", false, "Run in foreground instead of daemonizing")
-	cmd.Flags().Uint32Var(&socketMode, "socket-mode", 0, "Socket file permissions (e.g. 0666); 0 means use default umask")
-	cmd.Flags().StringVar(&listenAddr, "listen", "", "Listen address (e.g. tcp://0.0.0.0:8080); default is Unix socket")
-
-	return cmd
 }
 
 // resolveProfile loads the config and resolves the current profile.
@@ -116,24 +60,4 @@ func resolveProfile(dir loophole.Dir) (loophole.Instance, error) {
 		return loophole.Instance{}, err
 	}
 	return cfg.Resolve(globalProfile)
-}
-
-// checkExistingDaemon checks whether a daemon is already running for this profile.
-// If the socket file exists but no daemon is listening, it is removed with a warning.
-func checkExistingDaemon(dir loophole.Dir, inst loophole.Instance) (running bool, err error) {
-	sockPath := dir.Socket(inst.ProfileName)
-	if _, err := os.Stat(sockPath); os.IsNotExist(err) {
-		return false, nil
-	}
-	c := client.NewFromSocket(sockPath)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	status, err := c.Status(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: removing stale socket %s\n", sockPath)
-		_ = os.Remove(sockPath)
-		return false, nil
-	}
-	fmt.Fprintf(os.Stderr, "loophole already running (%s)\n", status.S3)
-	return true, nil
 }

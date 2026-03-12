@@ -29,27 +29,31 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	require.NoError(t, err)
 
 	volName := "dd-direct-l2-test"
-
-	err = testClient.DeviceDD(ctx, client.CreateParams{
-		Volume: volName,
-		Size:   dataSize,
-		Type:   "ext4",
-	}, bytes.NewReader(data), nil)
+	require.NoError(t, b.Create(ctx, client.CreateParams{
+		Volume:   volName,
+		Size:     dataSize,
+		Type:     "ext4",
+		NoFormat: true,
+	}))
+	owner, err := b.ensureDeviceOwner(ctx, volName)
 	require.NoError(t, err)
-	b.createdVols = append(b.createdVols, volName)
+	err = owner.client.DeviceDDWriteExisting(ctx, volName, bytes.NewReader(data), nil)
+	require.NoError(t, err)
 
 	// Read all data back via the dd read API.
 	var readBuf bytes.Buffer
-	err = testClient.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
+	err = owner.client.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 
 	// Check that data went directly to L2, not through memtable/L0/L1.
-	info, err := testClient.VolumeDebugInfo(ctx, volName)
+	info, err := owner.client.VolumeDebugInfo(ctx, volName)
 	require.NoError(t, err)
 
-	t.Logf("layer debug info: L0=%d L1=%d L2=%d memtable=%d",
-		info.Layer.L0Count, info.Layer.L1Ranges, info.Layer.L2Ranges, info.Layer.MemtablePages)
+	if debugCountersEnabled() {
+		t.Logf("layer debug info: L0=%d L1=%d L2=%d memtable=%d",
+			info.Layer.L0Count, info.Layer.L1Ranges, info.Layer.L2Ranges, info.Layer.MemtablePages)
+	}
 
 	assert.Equal(t, 0, info.Layer.L0Count, "L0 should be empty (direct L2 path)")
 	assert.Equal(t, 0, info.Layer.L1Ranges, "L1 should be empty (direct L2 path)")
@@ -72,18 +76,20 @@ func TestE2E_DeviceDD_ReadBack(t *testing.T) {
 	require.NoError(t, err)
 
 	volName := "dd-readback-test"
-
-	err = testClient.DeviceDD(ctx, client.CreateParams{
-		Volume: volName,
-		Size:   dataSize,
-		Type:   "ext4",
-	}, bytes.NewReader(data), nil)
+	require.NoError(t, b.Create(ctx, client.CreateParams{
+		Volume:   volName,
+		Size:     dataSize,
+		Type:     "ext4",
+		NoFormat: true,
+	}))
+	owner, err := b.ensureDeviceOwner(ctx, volName)
 	require.NoError(t, err)
-	b.createdVols = append(b.createdVols, volName)
+	err = owner.client.DeviceDDWriteExisting(ctx, volName, bytes.NewReader(data), nil)
+	require.NoError(t, err)
 
 	// Read all data back and compare.
 	var readBuf bytes.Buffer
-	err = testClient.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
+	err = owner.client.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 }
@@ -99,15 +105,21 @@ func TestE2E_DeviceDD_VolumeMetadata(t *testing.T) {
 
 	volName := "dd-metadata-test"
 
-	err := testClient.DeviceDD(ctx, client.CreateParams{
-		Volume: volName,
-		Size:   dataSize,
-		Type:   "ext4",
-	}, bytes.NewReader(data), nil)
+	require.NoError(t, b.Create(ctx, client.CreateParams{
+		Volume:   volName,
+		Size:     dataSize,
+		Type:     "ext4",
+		NoFormat: true,
+	}))
+	owner, err := b.ensureDeviceOwner(ctx, volName)
 	require.NoError(t, err)
-	b.createdVols = append(b.createdVols, volName)
+	err = owner.client.DeviceDDWriteExisting(ctx, volName, bytes.NewReader(data), nil)
+	require.NoError(t, err)
 
-	info, err := testClient.VolumeInfo(ctx, volName)
+	vm, cleanup, err := openDirectManager(ctx)
+	require.NoError(t, err)
+	defer cleanup()
+	info, err := vm.VolumeInfo(ctx, volName)
 	require.NoError(t, err)
 	assert.Equal(t, "ext4", info.Type)
 	assert.Equal(t, dataSize, info.Size)

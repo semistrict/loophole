@@ -59,10 +59,12 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	}
 
 	// Log total S3 ops for chain construction + open.
-	t.Logf("S3 ops for chain construction + open: Get=%d PutCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet), store.Count(loophole.OpPutBytesCAS),
-		store.Count(loophole.OpPutReader), store.Count(loophole.OpPutIfNotExists),
-		store.Count(loophole.OpListKeys), store.Count(loophole.OpDeleteObject))
+	if debugCountersEnabled() {
+		t.Logf("S3 ops for chain construction + open: Get=%d PutCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet), store.Count(loophole.OpPutBytesCAS),
+			store.Count(loophole.OpPutReader), store.Count(loophole.OpPutIfNotExists),
+			store.Count(loophole.OpListKeys), store.Count(loophole.OpDeleteObject))
+	}
 
 	// Reset S3 counters, then read.
 	store.ResetCounts()
@@ -76,7 +78,9 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	}
 
 	gets := store.Count(loophole.OpGet)
-	t.Logf("S3 gets for one read across %d-deep chain: %d", chainLen, gets)
+	if debugCountersEnabled() {
+		t.Logf("S3 gets for one read across %d-deep chain: %d", chainLen, gets)
+	}
 	if gets > 20 {
 		t.Fatalf("expected few S3 gets for a read, got %d (chain depth %d)", gets, chainLen)
 	}
@@ -87,7 +91,9 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	gets2 := store.Count(loophole.OpGet)
-	t.Logf("S3 gets for second read: %d", gets2)
+	if debugCountersEnabled() {
+		t.Logf("S3 gets for second read: %d", gets2)
+	}
 	if gets2 != 0 {
 		t.Fatalf("expected 0 S3 gets for cached read, got %d", gets2)
 	}

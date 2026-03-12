@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage2"
 )
 
@@ -345,6 +346,41 @@ func (c *Client) DeviceDD(ctx context.Context, p CreateParams, body io.Reader, p
 	return nil
 }
 
+// DeviceDDWriteExisting writes a raw disk image into an already-open volume.
+func (c *Client) DeviceDDWriteExisting(ctx context.Context, volume string, body io.Reader, progress io.Writer) error {
+	const chunkSize = storage2.BlockSize
+	buf := make([]byte, chunkSize)
+	var offset uint64
+
+	for {
+		n, readErr := io.ReadFull(body, buf)
+		if n > 0 {
+			if err := c.ddWriteBlock(ctx, volume, offset, buf[:n]); err != nil {
+				return err
+			}
+			offset += uint64(n)
+			if progress != nil && offset%(64<<20) == 0 {
+				_, _ = fmt.Fprintf(progress, "  %d MiB written\n", offset>>20)
+			}
+		}
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read input: %w", readErr)
+		}
+	}
+
+	if progress != nil {
+		_, _ = fmt.Fprintf(progress, "  %d MiB written\n", offset>>20)
+	}
+
+	if _, err := c.post(ctx, "/device/dd/finalize?volume="+volume); err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64, data []byte) error {
 	path := fmt.Sprintf("/device/dd/write?volume=%s&offset=%d", volume, offset)
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://loophole"+path, bytes.NewReader(data))
@@ -353,10 +389,6 @@ func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64,
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
 	req.ContentLength = int64(len(data))
-	if h := loophole.SelfHash(); h != "" {
-		req.Header.Set("X-Binary-Hash", h)
-	}
-
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("dd write at offset %d: %w", offset, err)
@@ -407,10 +439,6 @@ func (c *Client) ddReadBlock(ctx context.Context, volume string, offset, size ui
 	if err != nil {
 		return nil, err
 	}
-	if h := loophole.SelfHash(); h != "" {
-		req.Header.Set("X-Binary-Hash", h)
-	}
-
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("dd read at offset %d: %w", offset, err)
@@ -479,12 +507,18 @@ func (c *Client) ShutdownWait(ctx context.Context) error {
 }
 
 type StatusResponse struct {
-	S3      string            `json:"s3"`
-	Mode    string            `json:"mode"`
-	Socket  string            `json:"socket"`
-	Fuse    string            `json:"fuse"`
-	Volumes []string          `json:"volumes"`
-	Mounts  map[string]string `json:"mounts"`
+	S3         string            `json:"s3"`
+	Mode       string            `json:"mode"`
+	Socket     string            `json:"socket"`
+	Fuse       string            `json:"fuse"`
+	Volume     string            `json:"volume"`
+	Mountpoint string            `json:"mountpoint"`
+	Device     string            `json:"device"`
+	Cache      string            `json:"cache"`
+	Log        string            `json:"log"`
+	State      string            `json:"state"`
+	Volumes    []string          `json:"volumes"`
+	Mounts     map[string]string `json:"mounts"`
 }
 
 // Metrics returns the raw Prometheus metrics text from the daemon.
@@ -561,10 +595,6 @@ func (c *Client) rpc(ctx context.Context, method, path string, args ...any) (jso
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if h := loophole.SelfHash(); h != "" {
-		req.Header.Set("X-Binary-Hash", h)
-	}
-
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("no daemon running (socket %s)", c.sock)
@@ -627,16 +657,17 @@ func (c *Client) startDaemon() error {
 		}
 	}
 
-	// Build the start command args. Always use --foreground since we handle
-	// backgrounding via go-daemon / cmd.Start().
+	// Build the daemon start command args. Use the hidden internal.start
+	// entrypoint so auto-start works without exposing a public start command.
 	var args []string
 	if c.Profile != "" {
-		args = append(args, "-p", c.Profile, "start", "--foreground")
+		args = append(args, "-p", c.Profile, "internal.start")
 	} else {
-		args = append(args, "start", "--foreground", c.Inst.URL())
+		args = append(args, "internal.start")
 	}
 
 	logPath := c.Dir.Log(c.Inst.ProfileName)
+	waitCh := make(chan error, 1)
 
 	if c.Sudo && os.Getuid() != 0 {
 		sudoArgs := append([]string{"-E", bin}, args...)
@@ -652,13 +683,13 @@ func (c *Client) startDaemon() error {
 		cmd.Stderr = logFile
 		cmd.SysProcAttr = daemonSysProcAttr()
 		if err := cmd.Start(); err != nil {
-			_ = logFile.Close()
+			util.SafeClose(logFile, "close daemon log file on start failure")
 			return fmt.Errorf("start daemon: %w", err)
 		}
-		_ = logFile.Close()
-		if err := cmd.Process.Release(); err != nil {
-			slog.Warn("process release failed", "error", err)
-		}
+		go func() {
+			waitCh <- cmd.Wait()
+			util.SafeClose(logFile, "close daemon log file after process exit")
+		}()
 	} else {
 		cntxt := &godaemon.Context{
 			LogFileName: logPath,
@@ -669,7 +700,10 @@ func (c *Client) startDaemon() error {
 			return fmt.Errorf("start daemon: %w", err)
 		}
 		if child != nil {
-			_ = child.Release()
+			go func() {
+				_, err := child.Wait()
+				waitCh <- err
+			}()
 		}
 	}
 
@@ -678,6 +712,33 @@ func (c *Client) startDaemon() error {
 		if isSocketAlive(c.sock) {
 			return nil
 		}
+		select {
+		case err := <-waitCh:
+			msg := fmt.Sprintf("daemon exited before socket was ready (log: %s)", logPath)
+			if err != nil {
+				msg = fmt.Sprintf("%s: %v", msg, err)
+			}
+			if tail := tailTextFile(logPath, 40); tail != "" {
+				msg = fmt.Sprintf("%s\n%s", msg, tail)
+			}
+			return fmt.Errorf("%s", msg)
+		default:
+		}
 	}
 	return fmt.Errorf("daemon did not start within 30s (socket: %s, log: %s)", c.sock, c.Dir.Log(c.Inst.ProfileName))
+}
+
+func tailTextFile(path string, maxLines int) string {
+	if maxLines <= 0 {
+		maxLines = 40
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := bytes.Split(data, []byte{'\n'})
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return string(bytes.Join(lines, []byte{'\n'}))
 }

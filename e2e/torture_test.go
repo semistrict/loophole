@@ -85,7 +85,8 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 2: Clone-A ---
 
 	cloneAMP := mountpoint(t, "tort-clone-a")
-	require.NoError(t, b.Clone(ctx, rootMP, "tort-clone-a", cloneAMP))
+	require.NoError(t, b.Clone(ctx, rootMP, "tort-clone-a"))
+	require.NoError(t, b.Mount(ctx, "tort-clone-a", cloneAMP))
 	cloneAFS := newTestFS(t, b, cloneAMP)
 
 	// Verify clone-a has all root data.
@@ -140,7 +141,8 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 6: Second branch — clone clone-a → clone-b ---
 
 	cloneBMP := mountpoint(t, "tort-clone-b")
-	require.NoError(t, b.Clone(ctx, cloneAMP, "tort-clone-b", cloneBMP))
+	require.NoError(t, b.Clone(ctx, cloneAMP, "tort-clone-b"))
+	require.NoError(t, b.Mount(ctx, "tort-clone-b", cloneBMP))
 	cloneBFS := newTestFS(t, b, cloneBMP)
 
 	// clone-b should have everything from clone-a's current state.
@@ -257,11 +259,13 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 12: Deep clone chain — clone-b → clone-c → clone-d ---
 
 	cloneCMP := mountpoint(t, "tort-clone-c")
-	require.NoError(t, b.Clone(ctx, cloneBMP, "tort-clone-c", cloneCMP))
+	require.NoError(t, b.Clone(ctx, cloneBMP, "tort-clone-c"))
+	require.NoError(t, b.Mount(ctx, "tort-clone-c", cloneCMP))
 	cloneCFS := newTestFS(t, b, cloneCMP)
 
 	cloneDMP := mountpoint(t, "tort-clone-d")
-	require.NoError(t, b.Clone(ctx, cloneCMP, "tort-clone-d", cloneDMP))
+	require.NoError(t, b.Clone(ctx, cloneCMP, "tort-clone-d"))
+	require.NoError(t, b.Mount(ctx, "tort-clone-d", cloneDMP))
 	cloneDFS := newTestFS(t, b, cloneDMP)
 
 	// Write unique data at each level.

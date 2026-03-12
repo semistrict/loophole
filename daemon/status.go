@@ -21,13 +21,23 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"state":         state,
 		"s3":            d.inst.URL(),
 		"mode":          "fuse",
-		"socket":        d.dir.Socket(d.inst.ProfileName),
+		"socket":        d.socket,
+		"cache":         d.dir.Cache(d.inst.ProfileName),
 		"log":           d.dir.Log(d.inst.ProfileName),
 		"sandbox_debug": d.sandboxDebugInfo(),
 	}
 	if d.backend != nil {
 		status["volumes"] = d.backend.VM().Volumes()
 		status["mounts"] = d.backend.Mounts()
+	}
+	if d.managedVolume != "" {
+		status["volume"] = d.managedVolume
+	}
+	if d.mountpoint != "" {
+		status["mountpoint"] = d.mountpoint
+	}
+	if d.devicePath != "" {
+		status["device"] = d.devicePath
 	}
 	if d.startupErr != "" {
 		status["error"] = d.startupErr

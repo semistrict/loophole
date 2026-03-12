@@ -32,12 +32,16 @@ import (
 type Daemon struct {
 	inst      loophole.Instance
 	dir       loophole.Dir
+	socket    string
 	backend   *fsbackend.Backend
 	diskCache *storage2.PageCache
 	ln        net.Listener
 
-	startupErr    string // non-fatal startup error (e.g. bad S3 creds)
-	skipHashCheck bool   // skip binary hash check (embedded mode)
+	managedVolume string
+	mountpoint    string
+	devicePath    string
+
+	startupErr string // non-fatal startup error (e.g. bad S3 creds)
 
 	axiomClose func() // flushes and closes the axiom handler; nil if axiom is not configured
 
@@ -54,6 +58,7 @@ type Options struct {
 	Foreground bool
 	SocketMode os.FileMode
 	ListenAddr string // If set (e.g. "tcp://0.0.0.0:8080"), listen on this address instead of Unix socket.
+	SocketPath string
 }
 
 func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
@@ -133,6 +138,9 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	var backend *fsbackend.Backend
 	if store != nil {
 		// Create volume manager
+		// The page cache remains profile-scoped even though each process now
+		// manages a single volume. That lets all owner processes for a profile
+		// share the same on-disk cache.
 		cacheDir := dir.Cache(inst.ProfileName)
 		var err error
 		diskCache, err = storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
@@ -177,7 +185,10 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		}
 		slog.Info("listening on TCP", "addr", addr)
 	} else {
-		sockPath := dir.Socket(inst.ProfileName)
+		sockPath := opts.SocketPath
+		if sockPath == "" {
+			sockPath = dir.Socket(inst.ProfileName)
+		}
 		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 			return nil, err
 		}
@@ -201,6 +212,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	d := &Daemon{
 		inst:       inst,
 		dir:        dir,
+		socket:     socketPathFromOptions(dir, inst, opts),
 		backend:    backend,
 		diskCache:  diskCache,
 		ln:         ln,
@@ -279,13 +291,13 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		close(d.doneCh)
 
 		// Now stop accepting requests and remove sockets.
+		d.removeOwnerLinks()
 		slog.Info("shutdown: closing HTTP server")
 		if err := srv.Close(); err != nil {
 			slog.Warn("shutdown: http server close error", "error", err)
 		}
-		sockPath := d.dir.Socket(d.inst.ProfileName)
-		if err := os.Remove(sockPath); err != nil {
-			slog.Warn("shutdown: remove socket", "path", sockPath, "error", err)
+		if err := os.Remove(d.socket); err != nil {
+			slog.Warn("shutdown: remove socket", "path", d.socket, "error", err)
 		}
 		slog.Info("shutdown: complete")
 		if d.axiomClose != nil {
@@ -293,7 +305,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		}
 	}()
 
-	slog.Info("daemon ready", "mode", "fuse", "socket", d.dir.Socket(d.inst.ProfileName))
+	slog.Info("daemon ready", "mode", "fuse", "socket", d.socket)
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil
@@ -324,19 +336,12 @@ func (d *Daemon) rejectIfShuttingDown(w http.ResponseWriter) bool {
 func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("POST /device/attach", d.handleDeviceAttach)
-	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
 	mux.HandleFunc("POST /device/checkpoint", d.handleDeviceCheckpoint)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 	mux.HandleFunc("POST /device/dd/write", d.handleDeviceDDWrite)
 	mux.HandleFunc("GET /device/dd/read", d.handleDeviceDDRead)
 	mux.HandleFunc("POST /device/dd/finalize", d.handleDeviceDDFinalize)
 
-	mux.HandleFunc("POST /create", d.handleCreate)
-	mux.HandleFunc("POST /delete", d.handleDelete)
-	mux.HandleFunc("POST /break-lease", d.handleBreakLease)
-	mux.HandleFunc("POST /mount", d.handleMount)
-	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)
@@ -379,15 +384,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 // instrument wraps a handler with logging and metrics.
 func (d *Daemon) instrument(next http.Handler) http.Handler {
-	serverHash := loophole.SelfHash()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !d.skipHashCheck && r.URL.Path != "/shutdown" {
-			if clientHash := r.Header.Get("X-Binary-Hash"); clientHash != "" && serverHash != "" && clientHash != serverHash {
-				writeError(w, http.StatusConflict, fmt.Errorf("binary mismatch: client %s != daemon %s (restart the daemon)", clientHash, serverHash))
-				return
-			}
-		}
-
 		// Skip endpoints that hijack the connection or don't need metrics.
 		if r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/pprof" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
 			next.ServeHTTP(w, r)
@@ -471,7 +468,41 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 	if err := os.Remove(symPath); err != nil && !os.IsNotExist(err) {
 		slog.Warn("remove old symlink failed", "path", symPath, "error", err)
 	}
-	if err := os.Symlink(d.dir.Socket(d.inst.ProfileName), symPath); err != nil {
+	if err := os.Symlink(d.socket, symPath); err != nil {
 		slog.Warn("create mount symlink failed", "path", symPath, "error", err)
 	}
+}
+
+func (d *Daemon) writeDeviceSymlink(devicePath string) {
+	symPath := d.dir.DeviceSymlink(devicePath)
+	if err := os.MkdirAll(filepath.Dir(symPath), 0o755); err != nil {
+		slog.Warn("create device symlink dir failed", "path", symPath, "error", err)
+		return
+	}
+	if err := os.Remove(symPath); err != nil && !os.IsNotExist(err) {
+		slog.Warn("remove old device symlink failed", "path", symPath, "error", err)
+	}
+	if err := os.Symlink(d.socket, symPath); err != nil {
+		slog.Warn("create device symlink failed", "path", symPath, "error", err)
+	}
+}
+
+func (d *Daemon) removeOwnerLinks() {
+	if d.mountpoint != "" {
+		if err := os.Remove(d.dir.MountSymlink(d.mountpoint)); err != nil && !os.IsNotExist(err) {
+			slog.Warn("remove mount symlink failed", "mountpoint", d.mountpoint, "error", err)
+		}
+	}
+	if d.devicePath != "" {
+		if err := os.Remove(d.dir.DeviceSymlink(d.devicePath)); err != nil && !os.IsNotExist(err) {
+			slog.Warn("remove device symlink failed", "device", d.devicePath, "error", err)
+		}
+	}
+}
+
+func socketPathFromOptions(dir loophole.Dir, inst loophole.Instance, opts Options) string {
+	if opts.SocketPath != "" {
+		return opts.SocketPath
+	}
+	return dir.Socket(inst.ProfileName)
 }

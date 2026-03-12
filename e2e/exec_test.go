@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -16,6 +17,17 @@ import (
 
 	"github.com/semistrict/loophole/client"
 )
+
+func findBusybox(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{"busybox.static", "busybox"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	t.Skip("busybox not found in PATH")
+	return ""
+}
 
 // execResult is the JSON response from /sandbox/exec.
 type execResult struct {
@@ -27,7 +39,10 @@ type execResult struct {
 // sandboxExec calls the daemon's /sandbox/exec endpoint over the unix socket.
 func sandboxExec(t *testing.T, volume, cmd string) execResult {
 	t.Helper()
-	sock := testClient.Socket()
+	if volume == "" {
+		t.Skip("host-only sandbox exec no longer exists without a volume owner")
+	}
+	sock := testDir.VolumeSocket(volume)
 	hc := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
@@ -118,12 +133,5 @@ func TestE2E_ExecHasProc(t *testing.T) {
 }
 
 func TestE2E_ExecWithoutVolume(t *testing.T) {
-	skipE2E(t)
-	b := newBackend(t)
-	_ = b
-
-	// Without a volume, exec should run on the host (no chroot).
-	r := sandboxExec(t, "", "echo+hello")
-	require.Equal(t, 0, r.ExitCode)
-	require.Equal(t, "hello\n", r.Stdout)
+	t.Skip("host-only sandbox exec is not supported in the single-volume owner model")
 }

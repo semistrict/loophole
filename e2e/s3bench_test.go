@@ -38,8 +38,10 @@ func TestS3Bench(t *testing.T) {
 			}
 		}
 		elapsed := time.Since(start)
-		t.Logf("%d objects in %v = %.1f objects/sec, avg latency %.1fms",
-			n, elapsed, float64(n)/elapsed.Seconds(), float64(elapsed.Milliseconds())/float64(n))
+		if debugCountersEnabled() {
+			t.Logf("%d objects in %v = %.1f objects/sec, avg latency %.1fms",
+				n, elapsed, float64(n)/elapsed.Seconds(), float64(elapsed.Milliseconds())/float64(n))
+		}
 	})
 
 	// --- Upload throughput: 20 concurrent 4MB uploads ---
@@ -74,9 +76,11 @@ func TestS3Bench(t *testing.T) {
 		elapsed := time.Since(start)
 
 		totalBytes := uploaded.Load() * blockSize
-		t.Logf("%d x 4MB blocks, %d concurrent: %v elapsed, %.1f MB/s",
-			uploaded.Load(), concurrent, elapsed,
-			float64(totalBytes)/elapsed.Seconds()/1024/1024)
+		if debugCountersEnabled() {
+			t.Logf("%d x 4MB blocks, %d concurrent: %v elapsed, %.1f MB/s",
+				uploaded.Load(), concurrent, elapsed,
+				float64(totalBytes)/elapsed.Seconds()/1024/1024)
+		}
 	})
 
 	// --- Single object latency: 10 sequential 4MB uploads ---
@@ -94,8 +98,10 @@ func TestS3Bench(t *testing.T) {
 			}
 		}
 		elapsed := time.Since(start)
-		t.Logf("%d x 4MB sequential: %v elapsed, avg %.0fms per upload, %.1f MB/s",
-			n, elapsed, float64(elapsed.Milliseconds())/float64(n),
-			float64(n*blockSize)/elapsed.Seconds()/1024/1024)
+		if debugCountersEnabled() {
+			t.Logf("%d x 4MB sequential: %v elapsed, avg %.0fms per upload, %.1f MB/s",
+				n, elapsed, float64(elapsed.Milliseconds())/float64(n),
+				float64(n*blockSize)/elapsed.Seconds()/1024/1024)
+		}
 	})
 }

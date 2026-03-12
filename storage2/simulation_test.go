@@ -177,7 +177,7 @@ func (sim *Simulation) Run() {
 		// different race windows between auto-flush and explicit operations.
 		time.Sleep(time.Duration(sim.rng.IntN(6)) * time.Millisecond)
 
-		if tick%50 == 0 {
+		if debugCountersEnabled() && tick%50 == 0 {
 			sim.t.Logf("tick %d: %d volumes, %d timelines, goroutines=%d", tick, len(sim.volumeTimelines), len(sim.timelineIDs), runtime.NumGoroutine())
 		}
 	}

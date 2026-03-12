@@ -5,6 +5,9 @@ package fsbackend
 import (
 	"context"
 	"log/slog"
+	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
@@ -18,18 +21,19 @@ type fuseMount struct {
 
 // FUSEDriver implements Driver using FUSE block device files + loop devices + kernel FS.
 type FUSEDriver struct {
-	fuse     *fuseblockdev.Server
+	baseDir  string
+	opts     *fuseblockdev.Options
 	pageSize int
+
+	mu            sync.Mutex
+	fuse          *fuseblockdev.Server
+	managedVolume string
+	mountDir      string
 }
 
 // NewFUSEDriver starts the FUSE block device server.
 func NewFUSEDriver(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (*FUSEDriver, error) {
-	fuseblockdev.UnmountStale(fuseDir)
-	srv, err := fuseblockdev.Start(fuseDir, opts)
-	if err != nil {
-		return nil, err
-	}
-	return &FUSEDriver{fuse: srv, pageSize: vm.PageSize()}, nil
+	return &FUSEDriver{baseDir: fuseDir, opts: opts, pageSize: vm.PageSize()}, nil
 }
 
 // NewFUSE starts the FUSE block device server and returns a backend.
@@ -42,7 +46,10 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 }
 
 func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
-	devPath := f.fuse.DevicePath(vol.Name())
+	if err := f.ensureServer(vol.Name(), vol); err != nil {
+		return err
+	}
+	devPath := f.devicePathLocked()
 	slog.Debug("fuse: formatting", "volume", vol.Name(), "device", devPath, "pageSize", f.pageSize)
 	err := formatFS(ctx, devPath, f.pageSize)
 	slog.Debug("fuse: format done", "volume", vol.Name(), "error", err)
@@ -50,7 +57,10 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 }
 
 func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
-	devPath := f.fuse.DevicePath(vol.Name())
+	if err := f.ensureServer(vol.Name(), vol); err != nil {
+		return fuseMount{}, err
+	}
+	devPath := f.devicePathLocked()
 	slog.Debug("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
 	loopDev, err := mountFS(ctx, devPath, mountpoint, loopAttachOpts{
 		OptimalIOSize: f.pageSize,
@@ -69,16 +79,17 @@ func (f *FUSEDriver) Unmount(ctx context.Context, h fuseMount) error {
 	if err := unmountLoop(ctx, h.mountpoint); err != nil {
 		return err
 	}
-	if h.loopDev != "" {
-		if err := loopDetachPath(h.loopDev); err != nil {
-			slog.Warn("loop detach failed", "device", h.loopDev, "error", err)
-		}
-	}
 	slog.Debug("fuse: unmount done", "mountpoint", h.mountpoint)
 	return nil
 }
 
 func (f *FUSEDriver) Close(ctx context.Context) error {
+	f.mu.Lock()
+	srv := f.fuse
+	f.mu.Unlock()
+	if srv == nil {
+		return nil
+	}
 	if err := f.fuse.Unmount(); err != nil {
 		// fusermount3 can fail if a loop device or other consumer still
 		// holds a FUSE file descriptor open. Fall back to lazy unmount
@@ -104,17 +115,76 @@ func (f *FUSEDriver) Thaw(ctx context.Context, h fuseMount) error {
 }
 
 func (f *FUSEDriver) RegisterVolume(name string, vol loophole.Volume) {
-	f.fuse.Add(name, vol)
+	if err := f.ensureServer(name, vol); err != nil {
+		panic(err)
+	}
 }
 
 func (f *FUSEDriver) UnregisterVolume(name string) {
-	f.fuse.Remove(name)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.fuse != nil {
+		f.fuse.Remove("file")
+	}
 }
 
 func (f *FUSEDriver) DevicePath(volumeName string) string {
-	return f.fuse.DevicePath(volumeName)
+	if err := f.ensureServer(volumeName, nil); err != nil {
+		return ""
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.devicePathLocked()
 }
 
 func (f *FUSEDriver) FS(h fuseMount) (*RootFS, error) {
 	return NewRootFS(h.mountpoint), nil
+}
+
+func (f *FUSEDriver) ensureServer(volume string, vol loophole.Volume) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.fuse != nil {
+		if f.managedVolume != volume {
+			return &volumeScopedFUSEError{current: f.managedVolume, requested: volume}
+		}
+		if vol != nil {
+			f.fuse.Add("file", vol)
+		}
+		return nil
+	}
+
+	mountDir := filepath.Join(f.baseDir, safeVolumeDir(volume))
+	fuseblockdev.UnmountStale(mountDir)
+	srv, err := fuseblockdev.Start(mountDir, f.opts)
+	if err != nil {
+		return err
+	}
+	f.fuse = srv
+	f.managedVolume = volume
+	f.mountDir = mountDir
+	if vol != nil {
+		f.fuse.Add("file", vol)
+	}
+	return nil
+}
+
+func (f *FUSEDriver) devicePathLocked() string {
+	return filepath.Join(f.mountDir, "file")
+}
+
+type volumeScopedFUSEError struct {
+	current   string
+	requested string
+}
+
+func (e *volumeScopedFUSEError) Error() string {
+	return "fuse driver already bound to volume " + e.current + " (requested " + e.requested + ")"
+}
+
+func safeVolumeDir(name string) string {
+	name = strings.ReplaceAll(name, "%", "%25")
+	name = strings.ReplaceAll(name, "/", "%2F")
+	return name
 }

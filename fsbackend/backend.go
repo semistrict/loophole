@@ -60,7 +60,7 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size, "type", p.Type)
 	volType := p.Type
 	if volType == "" {
-		panic("fsbackend: CreateParams.Type must be set")
+		volType = loophole.VolumeTypeExt4
 	}
 	p.Type = volType
 

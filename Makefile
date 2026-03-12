@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test deps e2e e2e-fuse bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-assets fly-bin
+.PHONY: build loophole install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-assets fly-bin
 
 .DEFAULT_GOAL := loophole
 
@@ -31,6 +31,11 @@ check:
 fmt:
 	gofmt -w -s $$(find . -name '*.go' -not -path './third_party/*' -not -path './old/*')
 
+# Remove generated binaries and test artifacts.
+clean:
+	rm -rf $(BINDIR)
+	rm -f cf-demo/bin/loophole cf-demo/bin/container-control
+
 # Run unit tests (excludes e2e/linuxutil which require Linux)
 # Usage: make test [RUN=TestName]
 UNIT_PKGS := $(shell go list -tags "$(BUILDTAGS)" ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
@@ -55,12 +60,9 @@ fly-bin:
 deps:
 	./download-deps.sh
 
-# Run unit tests plus the Linux FUSE e2e suite.
-e2e: test e2e-fuse
-
-# Run e2e tests (FUSE + losetup + kernel ext4)
-# Usage: make e2e-fuse [RUN=TestName]
-e2e-fuse:
+# Run e2e tests (losetup + kernel ext4 over FUSE).
+# Usage: make e2e [RUN=TestName]
+e2e:
 	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run FUSE benchmarks.

@@ -29,6 +29,12 @@ func (d Dir) Socket(profile string) string {
 	return filepath.Join(string(d), profile+".sock")
 }
 
+// VolumeSocket returns the Unix socket path for a single-volume owner process.
+func (d Dir) VolumeSocket(volume string) string {
+	h := sha256.Sum256([]byte(volume))
+	return filepath.Join(string(d), "volumes", fmt.Sprintf("%x.sock", h[:6]))
+}
+
 // Fuse returns the internal FUSE mount directory for the given profile.
 func (d Dir) Fuse(profile string) string {
 	return filepath.Join(string(d), "fuse", profile)
@@ -53,4 +59,15 @@ func (d Dir) MountSymlink(mountpoint string) string {
 	}
 	h := sha256.Sum256([]byte(abs))
 	return filepath.Join(string(d), "mounts", fmt.Sprintf("%x.sock", h[:6]))
+}
+
+// DeviceSymlink returns the symlink path that maps a block-device path back to
+// the owner socket. This allows device-level commands to find the process.
+func (d Dir) DeviceSymlink(device string) string {
+	abs, err := filepath.Abs(device)
+	if err != nil {
+		abs = device
+	}
+	h := sha256.Sum256([]byte(abs))
+	return filepath.Join(string(d), "devices", fmt.Sprintf("%x.sock", h[:6]))
 }

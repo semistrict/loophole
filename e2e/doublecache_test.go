@@ -37,7 +37,9 @@ func TestE2E_DoubleCaching(t *testing.T) {
 	marker := make([]byte, 128)
 	_, err := rand.Read(marker)
 	require.NoError(t, err)
-	t.Logf("marker: %s", hex.EncodeToString(marker[:32])+"...")
+	if debugCountersEnabled() {
+		t.Logf("marker: %s", hex.EncodeToString(marker[:32])+"...")
+	}
 
 	// Write a file containing the marker repeated to fill 1MB.
 	const fileSize = 1024 * 1024
@@ -61,9 +63,11 @@ func TestE2E_DoubleCaching(t *testing.T) {
 		uniquePFNs[pfn]++
 	}
 
-	t.Logf("virtual pages containing marker: %d", len(pfns))
-	t.Logf("unique physical frames (PFNs):   %d", len(uniquePFNs))
-	t.Logf("ratio (virt/phys): %.2f", float64(len(pfns))/float64(max(len(uniquePFNs), 1)))
+	if debugCountersEnabled() {
+		t.Logf("virtual pages containing marker: %d", len(pfns))
+		t.Logf("unique physical frames (PFNs):   %d", len(uniquePFNs))
+		t.Logf("ratio (virt/phys): %.2f", float64(len(pfns))/float64(max(len(uniquePFNs), 1)))
+	}
 
 	// If virt > phys, some virtual pages share the same physical frame
 	// (e.g. shared mmap). If virt == phys, each copy is a distinct
@@ -74,8 +78,10 @@ func TestE2E_DoubleCaching(t *testing.T) {
 	// Without DIRECT_IO + writeback: ~512+ pages (memLayer + kernel page cache)
 	pagesPerCopy := fileSize / 4096
 	copies := float64(len(pfns)) / float64(pagesPerCopy)
-	t.Logf("estimated copies in memory: %.1f (%.0f pages / %d pages-per-copy)",
-		copies, float64(len(pfns)), pagesPerCopy)
+	if debugCountersEnabled() {
+		t.Logf("estimated copies in memory: %.1f (%.0f pages / %d pages-per-copy)",
+			copies, float64(len(pfns)), pagesPerCopy)
+	}
 }
 
 // findMarkerPFNs scans all readable mapped regions of the current process,

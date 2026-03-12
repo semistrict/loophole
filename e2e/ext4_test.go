@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/linuxutil"
+	"github.com/semistrict/loophole/fsbackend"
 )
 
 func TestE2E_FormatCreatesMountableExt4(t *testing.T) {
@@ -221,7 +221,7 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 func TestE2E_ConcurrentMountCycles(t *testing.T) {
 	b := newBackend(t)
 	nWorkers := 10
-	if maxLoop, err := linuxutil.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
+	if maxLoop, err := fsbackend.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
 		t.Logf("capping workers to max_loop=%d", maxLoop)
 		nWorkers = maxLoop
 	}

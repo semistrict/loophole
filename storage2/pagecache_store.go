@@ -32,37 +32,15 @@ func newSQLiteStore(dir string) (*sqliteStore, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", filepath.Join(dir, "index.db"))
+	if err := initializeSQLiteStore(dir); err != nil {
+		return nil, err
+	}
+
+	db, err := sql.Open("sqlite", sqliteStoreDSN(filepath.Join(dir, "index.db")))
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
-		"PRAGMA busy_timeout=5000",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			util.SafeClose(db, "close db after pragma failure")
-			return nil, fmt.Errorf("%s: %w", pragma, err)
-		}
-	}
-
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS pages (
-		layer_id TEXT    NOT NULL,
-		page_idx INTEGER NOT NULL,
-		slot     INTEGER NOT NULL UNIQUE,
-		credits  INTEGER NOT NULL DEFAULT 1,
-		PRIMARY KEY (layer_id, page_idx)
-	) WITHOUT ROWID`); err != nil {
-		util.SafeClose(db, "close db after table creation failure")
-		return nil, err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_pages_credits ON pages (credits)`); err != nil {
-		util.SafeClose(db, "close db after index creation failure")
-		return nil, err
-	}
 
 	s := &sqliteStore{dir: dir, db: db}
 
@@ -92,6 +70,63 @@ func newSQLiteStore(dir string) (*sqliteStore, error) {
 
 func newDefaultStore(dir string) (cacheStore, error) {
 	return newSQLiteStore(dir)
+}
+
+func initializeSQLiteStore(dir string) error {
+	lockPath := filepath.Join(dir, "index.db.init.lock")
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open sqlite init lock: %w", err)
+	}
+	defer util.SafeClose(lockFile, "close sqlite init lock")
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock sqlite init file: %w", err)
+	}
+	defer func() {
+		if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+			panic(fmt.Sprintf("unlock sqlite init file: %v", err))
+		}
+	}()
+
+	dbPath := filepath.Join(dir, "index.db")
+	db, err := sql.Open("sqlite", sqliteStoreDSN(dbPath))
+	if err != nil {
+		return err
+	}
+	defer util.SafeClose(db, "close sqlite init db")
+	db.SetMaxOpenConns(1)
+
+	var journalMode string
+	if err := db.QueryRow(`PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		return fmt.Errorf("PRAGMA journal_mode: %w", err)
+	}
+	if journalMode != "wal" {
+		if err := db.QueryRow(`PRAGMA journal_mode=WAL`).Scan(&journalMode); err != nil {
+			return fmt.Errorf("PRAGMA journal_mode=WAL: %w", err)
+		}
+		if journalMode != "wal" {
+			return fmt.Errorf("PRAGMA journal_mode=WAL: got %q", journalMode)
+		}
+	}
+
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS pages (
+		layer_id TEXT    NOT NULL,
+		page_idx INTEGER NOT NULL,
+		slot     INTEGER NOT NULL UNIQUE,
+		credits  INTEGER NOT NULL DEFAULT 1,
+		PRIMARY KEY (layer_id, page_idx)
+	) WITHOUT ROWID`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_pages_credits ON pages (credits)`); err != nil {
+		return err
+	}
+	return nil
+}
+
+func sqliteStoreDSN(dbPath string) string {
+	return fmt.Sprintf("file:%s?_pragma=busy_timeout(30000)&_pragma=synchronous(NORMAL)", dbPath)
 }
 
 // --- Arena ---

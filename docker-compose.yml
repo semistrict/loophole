@@ -23,8 +23,8 @@ services:
       - .:/app
       - go-mod:/go/pkg/mod
       - go-cache:/root/.cache/go-build
-      - ./docker-config:/root/.loophole-config
       - loophole-data:/root/.loophole
+      - ./docker-config/config.toml:/root/.loophole/config.toml:ro
       - /tmp/linux-clone-test/linux:/mnt/linux-src:ro
     depends_on:
       - s3

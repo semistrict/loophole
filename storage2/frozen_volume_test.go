@@ -47,12 +47,14 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("Setup complete. S3 keys in store: %d", len(store.Keys("")))
-	t.Logf("Setup ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
+	if debugCountersEnabled() {
+		t.Logf("Setup complete. S3 keys in store: %d", len(store.Keys("")))
+		t.Logf("Setup ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+	}
 
 	// Phase 2: Fresh manager — simulate a different node opening the frozen
 	// zygote and cloning from it. This is the path the cf-demo daemon takes.
@@ -66,13 +68,15 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Logf("--- After OpenVolume(zygote) ---")
-	t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
-	t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	if debugCountersEnabled() {
+		t.Logf("--- After OpenVolume(zygote) ---")
+		t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+		t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	}
 
 	if !zygote.ReadOnly() {
 		t.Fatal("expected zygote to be read-only")
@@ -83,13 +87,15 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 
 	clone := cloneOpen(t, zygote, "my-sandbox")
 
-	t.Logf("--- After Clone(my-sandbox) ---")
-	t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
-	t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	if debugCountersEnabled() {
+		t.Logf("--- After Clone(my-sandbox) ---")
+		t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+		t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	}
 
 	// Verify clone has the data.
 	buf := make([]byte, PageSize)
@@ -104,13 +110,15 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 		}
 	}
 
-	t.Logf("--- After reading 3 pages from clone ---")
-	t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
-	t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	if debugCountersEnabled() {
+		t.Logf("--- After reading 3 pages from clone ---")
+		t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet), store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS), store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists), store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+		t.Logf("  BytesRx=%d BytesTx=%d", store.BytesRx(), store.BytesTx())
+	}
 
 	// Verify clone is writable.
 	page[0] = 0xFF

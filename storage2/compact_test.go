@@ -619,61 +619,73 @@ func TestSnapshotS3OpCount(t *testing.T) {
 	// Snapshot: this triggers branch() → Flush + Snapshot(child) + relayer().
 	require.NoError(t, snapshotVolume(t, v, "snap-1"))
 
-	t.Logf("Snapshot S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet),
-		store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS),
-		store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists),
-		store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
+	if debugCountersEnabled() {
+		t.Logf("Snapshot S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet),
+			store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS),
+			store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists),
+			store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+	}
 
 	totalPuts := store.Count(loophole.OpPutReader) +
 		store.Count(loophole.OpPutIfNotExists) +
 		store.Count(loophole.OpPutBytesCAS) +
 		store.Count(loophole.OpPutBytes)
 	totalGets := store.Count(loophole.OpGet)
-	t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts, totalGets, totalPuts+totalGets)
+	if debugCountersEnabled() {
+		t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts, totalGets, totalPuts+totalGets)
+	}
 
 	// Now do a second snapshot with no new writes (empty memtable).
 	store.ResetCounts()
 	require.NoError(t, snapshotVolume(t, v, "snap-2"))
 
-	t.Logf("Snapshot (no dirty data) S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet),
-		store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS),
-		store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists),
-		store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
+	if debugCountersEnabled() {
+		t.Logf("Snapshot (no dirty data) S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet),
+			store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS),
+			store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists),
+			store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+	}
 
 	totalPuts2 := store.Count(loophole.OpPutReader) +
 		store.Count(loophole.OpPutIfNotExists) +
 		store.Count(loophole.OpPutBytesCAS) +
 		store.Count(loophole.OpPutBytes)
 	totalGets2 := store.Count(loophole.OpGet)
-	t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts2, totalGets2, totalPuts2+totalGets2)
+	if debugCountersEnabled() {
+		t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts2, totalGets2, totalPuts2+totalGets2)
+	}
 
 	// Now measure Clone (same as Snapshot + creates a volume ref).
 	store.ResetCounts()
 	clone := cloneOpen(t, v, "clone-1")
 
-	t.Logf("Clone S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
-		store.Count(loophole.OpGet),
-		store.Count(loophole.OpPutBytes),
-		store.Count(loophole.OpPutBytesCAS),
-		store.Count(loophole.OpPutReader),
-		store.Count(loophole.OpPutIfNotExists),
-		store.Count(loophole.OpListKeys),
-		store.Count(loophole.OpDeleteObject))
+	if debugCountersEnabled() {
+		t.Logf("Clone S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
+			store.Count(loophole.OpGet),
+			store.Count(loophole.OpPutBytes),
+			store.Count(loophole.OpPutBytesCAS),
+			store.Count(loophole.OpPutReader),
+			store.Count(loophole.OpPutIfNotExists),
+			store.Count(loophole.OpListKeys),
+			store.Count(loophole.OpDeleteObject))
+	}
 
 	totalPuts3 := store.Count(loophole.OpPutReader) +
 		store.Count(loophole.OpPutIfNotExists) +
 		store.Count(loophole.OpPutBytesCAS) +
 		store.Count(loophole.OpPutBytes)
 	totalGets3 := store.Count(loophole.OpGet)
-	t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts3, totalGets3, totalPuts3+totalGets3)
+	if debugCountersEnabled() {
+		t.Logf("Total: %d PUTs, %d GETs = %d S3 ops", totalPuts3, totalGets3, totalPuts3+totalGets3)
+	}
 
 	_ = clone
 }

@@ -2098,7 +2098,7 @@ func TestMemLayerOverwriteReusesSlot(t *testing.T) {
 	}
 }
 
-// TestPunchHoleFlushReopenRead reproduces the e2e-fuse "bad message" bug:
+// TestPunchHoleFlushReopenRead reproduces the e2e "bad message" bug:
 // write data, punch holes over some of it, flush, reopen from S3, read back.
 func TestPunchHoleFlushReopenRead(t *testing.T) {
 	store := loophole.NewMemStore()

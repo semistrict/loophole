@@ -38,11 +38,11 @@ bin/loophole-darwin-arm64 -p r2 clone --from-checkpoint <checkpoint_id> myvolume
 ```bash
 make build
 make test
-docker compose run --rm go bash -c 'make e2e-fuse'
+docker compose run --rm go bash -c 'make e2e'
 ```
 
 ## Notes
 
 - The supported filesystem path is ext4 via kernel mount over the FUSE block device backend.
 - Checkpoints replace the old public snapshot command surface.
-- The daemon auto-starts when a command needs it.
+- `create`, `mount`, and `device attach` run a single-volume owner process in the foreground.

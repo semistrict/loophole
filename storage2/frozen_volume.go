@@ -117,11 +117,6 @@ func (v *frozenVolume) Clone(cloneName string) error {
 	m := v.manager
 	ctx := context.Background()
 
-	// Ensure lease manager is running so we can embed our token.
-	if err := m.lease.EnsureStarted(ctx); err != nil {
-		return fmt.Errorf("start lease: %w", err)
-	}
-
 	// Build the child index in memory — inherits all L0/L1/L2 from the zygote.
 	childID := m.idGen()
 	idx := v.layer.index
@@ -134,11 +129,9 @@ func (v *frozenVolume) Clone(cloneName string) error {
 	}
 
 	ref := volumeRef{
-		LayerID:       childID,
-		Size:          v.size,
-		Type:          v.volType,
-		LeaseToken:    m.lease.Token(),
-		WriteLeaseSeq: 1,
+		LayerID: childID,
+		Size:    v.size,
+		Type:    v.volType,
 	}
 	refData, err := json.Marshal(ref)
 	if err != nil {

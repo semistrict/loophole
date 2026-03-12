@@ -305,20 +305,22 @@ func loopDetachPath(devPath string) error {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
 	}
 
+	// LOOP_CLR_FD is only a detach request. The loop device may remain visible
+	// until its backing file stack fully unwinds (notably when the backing file
+	// is provided by our FUSE server). Do a short best-effort poll so plain
+	// unmounts still clean up quickly, but don't block shutdown on a detach that
+	// will complete asynchronously once the FUSE server closes.
 	base := devPath[len("/dev/"):]
 	sysPath := fmt.Sprintf("/sys/block/%s/loop/backing_file", base)
-	for range 5_000 {
+	for range 100 {
 		data, err := os.ReadFile(sysPath)
 		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 			return nil
 		}
-		_ = unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil)
+		_ = unix.Nanosleep(&unix.Timespec{Nsec: 10_000_000}, nil)
 	}
-	data, err := os.ReadFile(sysPath)
-	if err != nil {
-		return fmt.Errorf("wait for %s detach: %w", devPath, err)
-	}
-	return fmt.Errorf("loop device %s still attached after detach request (backing_file=%q)", devPath, strings.TrimSpace(string(data)))
+	slog.Debug("loop detach still pending after request", "device", devPath)
+	return nil
 }
 
 const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +

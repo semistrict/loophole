@@ -1,5 +1,7 @@
 NB: this is a completely new system with no users. Don't worry about backwards compatibility ever.
 
+When choosing between a quick patch and the intended architecture, always do the right architectural fix. Do not preserve or reintroduce obsolete behavior just to get tests passing faster.
+
 **NEVER use `npm` or `npx`. Always use `pnpm` and `pnpm exec` (or `pnpm dlx`) instead.**
 
 ## Third-party dependencies
@@ -12,9 +14,9 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make build` — build all packages
 - `make test` — run all unit tests
 - `make test RUN=TestName` — run a specific test across all packages
-- `make e2e-fuse` — run the Linux kernel ext4-over-FUSE e2e tests
-- `make e2e-fuse RUN=TestName` — run a specific e2e test
-- E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e-fuse'`
+- `make e2e` — run the Linux kernel ext4-over-FUSE e2e tests
+- `make e2e RUN=TestName` — run a specific e2e test
+- E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e'`
 - Set `LOG_LEVEL=debug` to enable slog debug output in e2e tests
 
 ## Utilities
@@ -26,13 +28,13 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 Config lives in `~/.loophole/config.toml`. Each `[profiles.<name>]` section defines an S3/R2 backend. Use `-p <profile>` to select one (e.g. `bin/loophole-darwin-arm64 -p r2 ...`).
 
 - `make loophole` — build macOS binary to `bin/loophole-darwin-arm64`
-- The daemon auto-starts when any command needs it. No need to run `start` explicitly.
-- `bin/loophole-darwin-arm64 -p r2 status` — check daemon status
-- `bin/loophole-darwin-arm64 -p r2 stop` — stop daemon
+- `bin/loophole-darwin-arm64 -p r2 create myvol` — create, mount, and keep the owner process in the foreground
+- `bin/loophole-darwin-arm64 -p r2 status myvol` — check the owner process for a mounted/attached volume
+- `bin/loophole-darwin-arm64 -p r2 shutdown myvol` — gracefully stop the owner process
 
 ### Daemon log file
 
-Logs go to `~/.loophole/<profile>.log`. The auto-start daemon (via go-daemon) redirects stdout and stderr to this file, so C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file.
+Logs go to `~/.loophole/<profile>.log` for the foreground owner process. C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file.
 
 Set `log_level = "debug"` in the profile config for debug output.
 

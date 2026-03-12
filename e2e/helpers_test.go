@@ -9,7 +9,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,6 +22,8 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/storage2"
 )
 
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
@@ -63,83 +68,134 @@ func skipKernelOnly(t *testing.T) {
 	}
 }
 
-// ---------- testBackend: wraps client + daemon for tests ----------
+// ---------- testBackend: owner-process harness for tests ----------
 
-// testBackend routes control operations (Create, Mount, Clone, etc.) through
-// the daemon's HTTP API via the client, while providing direct access to the
-// daemon's backend for FS and VolumeManager operations.
+type testOwner struct {
+	cmd        *exec.Cmd
+	client     *client.Client
+	done       chan error
+	logPath    string
+	volume     string
+	mountpoint string
+	device     string
+}
+
 type testBackend struct {
-	*fsbackend.Backend
-	c           *client.Client
+	mu          sync.Mutex
+	owners      map[string]*testOwner
 	createdVols []string
 	mountedMPs  []string
 	deviceVols  []string
 }
 
 func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error {
-	// The daemon's handleCreate interprets Size==0 as "clone from zygote".
-	// Tests always want fresh volumes, so set a default size.
 	if p.Size == 0 {
 		p.Size = defaultVolumeSize
 	}
-	if err := b.c.Create(ctx, p); err != nil {
+	if !p.NoFormat {
+		formatMount, err := os.MkdirTemp("", "loophole-e2e-format-*")
+		if err != nil {
+			return err
+		}
+		owner, err := startCreateOwner(ctx, p, formatMount)
+		if err != nil {
+			_ = os.Remove(formatMount)
+			return err
+		}
+		if err := shutdownOwner(ctx, owner); err != nil {
+			_ = os.Remove(formatMount)
+			return err
+		}
+		if err := os.Remove(formatMount); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		b.trackCreated(p.Volume)
+		return nil
+	}
+	vm, cleanup, err := openDirectManager(ctx)
+	if err != nil {
 		return err
 	}
-	b.createdVols = append(b.createdVols, p.Volume)
+	defer cleanup()
+	if _, err := vm.NewVolume(p); err != nil {
+		return err
+	}
+	b.trackCreated(p.Volume)
 	return nil
 }
 
 func (b *testBackend) Mount(ctx context.Context, volume, mountpoint string) error {
-	if err := b.c.Mount(ctx, volume, mountpoint); err != nil {
+	owner, err := startMountedOwner(ctx, volume, mountpoint)
+	if err != nil {
 		return err
 	}
-	b.mountedMPs = append(b.mountedMPs, mountpoint)
+	b.mu.Lock()
+	b.owners[volume] = owner
+	b.mountedMPs = appendTracked(b.mountedMPs, owner.mountpoint)
+	b.mu.Unlock()
 	return nil
 }
 
 func (b *testBackend) Unmount(ctx context.Context, mountpoint string) error {
-	err := b.c.Unmount(ctx, mountpoint)
-	if err == nil {
-		// Remove from tracked list.
-		for i, mp := range b.mountedMPs {
-			if mp == mountpoint {
-				b.mountedMPs = append(b.mountedMPs[:i], b.mountedMPs[i+1:]...)
-				break
-			}
-		}
+	owner := b.ownerByMountpoint(mountpoint)
+	if owner == nil {
+		return fmt.Errorf("no owner for mountpoint %s", mountpoint)
 	}
-	return err
+	if err := shutdownOwner(ctx, owner); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	delete(b.owners, owner.volume)
+	b.mountedMPs = removeTracked(b.mountedMPs, owner.mountpoint)
+	b.mu.Unlock()
+	return nil
 }
 
 func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName string) error {
-	if err := b.c.Clone(ctx, client.CloneParams{
+	owner := b.ownerByMountpoint(srcMountpoint)
+	if owner == nil {
+		return fmt.Errorf("no owner for mountpoint %s", srcMountpoint)
+	}
+	if err := owner.client.Clone(ctx, client.CloneParams{
 		Mountpoint: srcMountpoint,
 		Clone:      cloneName,
 	}); err != nil {
 		return err
 	}
-	b.createdVols = append(b.createdVols, cloneName)
+	b.trackCreated(cloneName)
 	return nil
 }
 
 func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
-	return b.c.Checkpoint(ctx, mountpoint)
+	owner := b.ownerByMountpoint(mountpoint)
+	if owner == nil {
+		return "", fmt.Errorf("no owner for mountpoint %s", mountpoint)
+	}
+	return owner.client.Checkpoint(ctx, mountpoint)
 }
 
 func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
-	if err := b.c.Clone(ctx, client.CloneParams{
+	owner, err := b.ensureDeviceOwner(ctx, volume)
+	if err != nil {
+		return err
+	}
+	if err := owner.client.Clone(ctx, client.CloneParams{
 		Volume:     volume,
 		Checkpoint: checkpointID,
 		Clone:      cloneName,
 	}); err != nil {
 		return err
 	}
-	b.createdVols = append(b.createdVols, cloneName)
+	b.trackCreated(cloneName)
 	return nil
 }
 
 func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
-	if err := b.c.Freeze(ctx, volume); err != nil {
+	owner, err := b.ensureOwnerForVolume(ctx, volume)
+	if err != nil {
+		return err
+	}
+	if err := owner.client.Freeze(ctx, volume); err != nil {
 		return err
 	}
 	filtered := b.mountedMPs[:0]
@@ -154,70 +210,99 @@ func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact b
 }
 
 func (b *testBackend) DeviceAttach(ctx context.Context, volume string) (string, error) {
-	path, err := b.c.DeviceAttach(ctx, volume)
+	owner, err := startAttachedOwner(ctx, volume)
 	if err != nil {
 		return "", err
 	}
-	b.deviceVols = append(b.deviceVols, volume)
-	return path, nil
+	b.mu.Lock()
+	b.owners[volume] = owner
+	b.deviceVols = appendTracked(b.deviceVols, volume)
+	b.mu.Unlock()
+	return owner.device, nil
 }
 
 func (b *testBackend) DeviceDetach(ctx context.Context, volume string) error {
-	err := b.c.DeviceDetach(ctx, volume)
-	if err == nil {
-		for i, vol := range b.deviceVols {
-			if vol == volume {
-				b.deviceVols = append(b.deviceVols[:i], b.deviceVols[i+1:]...)
-				break
-			}
-		}
+	owner := b.ownerByVolume(volume)
+	if owner == nil {
+		return fmt.Errorf("no owner for volume %s", volume)
 	}
-	return err
+	if err := shutdownOwner(ctx, owner); err != nil {
+		return err
+	}
+	b.mu.Lock()
+	delete(b.owners, volume)
+	b.deviceVols = removeTracked(b.deviceVols, volume)
+	b.mu.Unlock()
+	return nil
 }
 
 func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
-	return b.c.ListCheckpoints(ctx, volume)
+	vm, cleanup, err := openDirectManager(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	return vm.ListCheckpoints(ctx, volume)
 }
 
 func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
-	return b.c.DeviceCheckpoint(ctx, volume)
+	owner, err := b.ensureDeviceOwner(ctx, volume)
+	if err != nil {
+		return "", err
+	}
+	return owner.client.DeviceCheckpoint(ctx, volume)
 }
 
 func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) error {
-	if err := b.c.DeviceClone(ctx, client.DeviceCloneParams{Volume: volume, Clone: clone}); err != nil {
+	owner, err := b.ensureDeviceOwner(ctx, volume)
+	if err != nil {
 		return err
 	}
-	b.createdVols = append(b.createdVols, clone)
+	if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{Volume: volume, Clone: clone}); err != nil {
+		return err
+	}
+	b.trackCreated(clone)
 	return nil
 }
 
-// Close is a no-op — the shared daemon owns the backend.
 func (b *testBackend) Close(ctx context.Context) error {
+	b.cleanup()
 	return nil
 }
 
-// cleanup unmounts and deletes all volumes created by this test.
 func (b *testBackend) cleanup() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for _, mp := range b.mountedMPs {
-		_ = b.c.Unmount(ctx, mp)
-		// Remove the mount directory (only relevant for real mounts).
+	b.mu.Lock()
+	owners := make([]*testOwner, 0, len(b.owners))
+	for _, owner := range b.owners {
+		owners = append(owners, owner)
+	}
+	mounted := append([]string(nil), b.mountedMPs...)
+	deviceVols := append([]string(nil), b.deviceVols...)
+	created := append([]string(nil), b.createdVols...)
+	b.mu.Unlock()
+	for _, owner := range owners {
+		_ = shutdownOwner(ctx, owner)
+	}
+	for _, mp := range mounted {
 		if needsRealMount() {
 			_ = os.Remove(mp)
 		}
 	}
-	for _, vol := range b.deviceVols {
-		_ = b.c.DeviceDetach(ctx, vol)
+	_ = deviceVols
+	vm, cleanup, err := openDirectManager(ctx)
+	if err != nil {
+		return
 	}
-	for _, vol := range b.createdVols {
-		_ = b.c.Delete(ctx, vol)
+	defer cleanup()
+	for _, vol := range created {
+		_ = vm.DeleteVolume(ctx, vol)
 	}
 }
 
 // ---------- Backend creation ----------
 
-// newBackend returns a testBackend that routes operations through the daemon's HTTP API.
 func newBackend(t testing.TB) *testBackend {
 	t.Helper()
 	skipE2E(t)
@@ -226,8 +311,7 @@ func newBackend(t testing.TB) *testBackend {
 	}
 
 	b := &testBackend{
-		Backend: testDaemon.Backend(),
-		c:       testClient,
+		owners: make(map[string]*testOwner),
 	}
 	t.Cleanup(b.cleanup)
 	return b
@@ -409,4 +493,244 @@ func mountpoint(t testing.TB, volume string) string {
 		return dir
 	}
 	return "/" + volume
+}
+
+func (b *testBackend) FS(mountpoint string) (*fsbackend.RootFS, error) {
+	return fsbackend.NewRootFS(mountpoint), nil
+}
+
+func (b *testBackend) VolumeAt(mountpoint string) string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, owner := range b.owners {
+		if owner.mountpoint == mountpoint {
+			return owner.volume
+		}
+	}
+	return ""
+}
+
+func (b *testBackend) IsMounted(mountpoint string) bool {
+	return b.VolumeAt(mountpoint) != ""
+}
+
+func (b *testBackend) ownerByVolume(volume string) *testOwner {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.owners[volume]
+}
+
+func (b *testBackend) ownerByMountpoint(mountpoint string) *testOwner {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, owner := range b.owners {
+		if owner.mountpoint == mountpoint {
+			return owner
+		}
+	}
+	return nil
+}
+
+func (b *testBackend) trackCreated(volume string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.createdVols = appendTracked(b.createdVols, volume)
+}
+
+func (b *testBackend) ensureOwnerForVolume(ctx context.Context, volume string) (*testOwner, error) {
+	if owner := b.ownerByVolume(volume); owner != nil {
+		return owner, nil
+	}
+	return startAttachedOwner(ctx, volume)
+}
+
+func (b *testBackend) ensureDeviceOwner(ctx context.Context, volume string) (*testOwner, error) {
+	if owner := b.ownerByVolume(volume); owner != nil {
+		return owner, nil
+	}
+	owner, err := startAttachedOwner(ctx, volume)
+	if err != nil {
+		return nil, err
+	}
+	b.mu.Lock()
+	b.owners[volume] = owner
+	b.deviceVols = appendTracked(b.deviceVols, volume)
+	b.mu.Unlock()
+	return owner, nil
+}
+
+func appendTracked(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func removeTracked(values []string, value string) []string {
+	for i, existing := range values {
+		if existing == value {
+			return append(values[:i], values[i+1:]...)
+		}
+	}
+	return values
+}
+
+func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
+	var store loophole.ObjectStore
+	var err error
+	if testInst.LocalDir != "" {
+		store, err = loophole.NewFileStore(testInst.LocalDir)
+	} else {
+		store, err = loophole.NewS3Store(ctx, testInst)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	vm := storage2.NewVolumeManager(store, testDir.Cache(testInst.ProfileName), storage2.Config{}, nil, nil)
+	return vm, func() {
+		_ = vm.Close(context.Background())
+	}, nil
+}
+
+func startMountedOwner(ctx context.Context, volume, mountpoint string) (*testOwner, error) {
+	owner, err := startOwnerProcess(ctx, volume, "mount", volume, mountpoint)
+	if err != nil {
+		return nil, err
+	}
+	owner.mountpoint = mountpoint
+	return owner, nil
+}
+
+func startCreateOwner(ctx context.Context, p loophole.CreateParams, mountpoint string) (*testOwner, error) {
+	args := []string{"create", "--mount", mountpoint}
+	if p.Size != 0 {
+		args = append(args, "--size", fmt.Sprintf("%d", p.Size))
+	}
+	if p.NoFormat {
+		args = append(args, "--no-format")
+	}
+	args = append(args, p.Volume)
+	owner, err := startOwnerProcess(ctx, p.Volume, args...)
+	if err != nil {
+		return nil, err
+	}
+	owner.mountpoint = mountpoint
+	return owner, nil
+}
+
+func startAttachedOwner(ctx context.Context, volume string) (*testOwner, error) {
+	owner, err := startOwnerProcess(ctx, volume, "device", "attach", volume)
+	if err != nil {
+		return nil, err
+	}
+	status, err := owner.client.Status(ctx)
+	if err != nil {
+		_ = shutdownOwner(context.Background(), owner)
+		return nil, err
+	}
+	owner.device = status.Device
+	return owner, nil
+}
+
+func startOwnerProcess(ctx context.Context, volume string, args ...string) (*testOwner, error) {
+	logPath := filepath.Join(string(testDir), fmt.Sprintf("owner-%s.log", volume))
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.Command(testBin, append([]string{"-p", testInst.ProfileName}, args...)...)
+	cmd.Env = append(os.Environ(), "LOOPHOLE_HOME="+string(testDir))
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		util.SafeClose(logFile, "close owner log file on start failure")
+		return nil, err
+	}
+	go func() {
+		done <- cmd.Wait()
+		util.SafeClose(logFile, "close owner log file")
+	}()
+
+	c := client.NewFromSocket(testDir.VolumeSocket(volume))
+	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer waitCancel()
+	for {
+		status, err := c.Status(waitCtx)
+		if err == nil {
+			owner := &testOwner{
+				cmd:     cmd,
+				client:  c,
+				done:    done,
+				logPath: logPath,
+				volume:  volume,
+			}
+			if status.Mountpoint != "" {
+				owner.mountpoint = status.Mountpoint
+			}
+			if status.Device != "" {
+				owner.device = status.Device
+			}
+			return owner, nil
+		}
+		select {
+		case err := <-done:
+			return nil, fmt.Errorf("owner for %s exited before ready: %w\n%s", volume, err, tailFile(logPath, 80))
+		case <-time.After(25 * time.Millisecond):
+		case <-waitCtx.Done():
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			<-done
+			return nil, fmt.Errorf("owner for %s did not become ready: %w\n%s", volume, waitCtx.Err(), tailFile(logPath, 80))
+		}
+	}
+}
+
+func shutdownOwner(ctx context.Context, owner *testOwner) error {
+	if owner == nil || owner.cmd == nil || owner.cmd.Process == nil {
+		return nil
+	}
+	if err := owner.cmd.Process.Signal(syscall.SIGINT); err != nil && !strings.Contains(err.Error(), "process already finished") {
+		return err
+	}
+	waitDone := make(chan error, 1)
+	go func() {
+		waitDone <- <-owner.done
+	}()
+	select {
+	case err := <-waitDone:
+		if err == nil || strings.Contains(err.Error(), "signal: interrupt") {
+			return nil
+		}
+		return err
+	case <-ctx.Done():
+		_ = owner.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case err := <-waitDone:
+			if err != nil && !strings.Contains(err.Error(), "signal: terminated") && !strings.Contains(err.Error(), "signal: interrupt") {
+				return err
+			}
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			_ = owner.cmd.Process.Kill()
+			return ctx.Err()
+		}
+	}
+}
+
+func tailFile(path string, maxLines int) string {
+	if maxLines <= 0 {
+		maxLines = 40
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	return strings.Join(lines, "\n")
 }

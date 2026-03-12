@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -130,6 +131,9 @@ func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string
 	}
 
 	// Lease file exists — check if the holder is still alive.
+	if os.Getenv("LOOPHOLE_DEBUG_LEASE") != "" {
+		panic(fmt.Sprintf("LOOPHOLE_DEBUG_LEASE: lease wait required for holder=%s token=%s", existingToken, lm.token))
+	}
 	slog.Info("lease: checking if holder is alive", "holder", existingToken, "token", lm.token)
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()

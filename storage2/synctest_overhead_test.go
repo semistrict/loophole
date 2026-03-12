@@ -55,13 +55,17 @@ func TestSynctestOverheadScalesWithGoroutines(t *testing.T) {
 	results := make([]time.Duration, len(counts))
 	for i, n := range counts {
 		results[i] = measure(t, n)
-		t.Logf("goroutines=%4d  %d ticks in %v  (%.1f µs/tick)",
-			n, ticks, results[i], float64(results[i].Microseconds())/ticks)
+		if debugCountersEnabled() {
+			t.Logf("goroutines=%4d  %d ticks in %v  (%.1f µs/tick)",
+				n, ticks, results[i], float64(results[i].Microseconds())/ticks)
+		}
 	}
 
 	// The cost at 1000 goroutines should be significantly higher than at 1.
 	ratio := float64(results[len(results)-1]) / float64(results[0])
-	t.Logf("1000 vs 1 goroutine ratio: %.1fx", ratio)
+	if debugCountersEnabled() {
+		t.Logf("1000 vs 1 goroutine ratio: %.1fx", ratio)
+	}
 	if ratio < 5 {
 		t.Fatalf("expected significant slowdown with more goroutines, got only %.1fx", ratio)
 	}

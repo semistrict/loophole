@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -19,16 +18,17 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/daemon"
+	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/storage2"
 )
 
 func addCommands(root *cobra.Command) {
 	root.AddCommand(
-		stopCmd(),
+		shutdownCmd(),
 		createCmd(),
 		deleteCmd(),
 		lsCmd(),
 		mountCmd(),
-		unmountCmd(),
 		freezeCmd(),
 		checkpointCmd(),
 		cloneCmd(),
@@ -41,36 +41,25 @@ func addCommands(root *cobra.Command) {
 	)
 }
 
-func startDaemon(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts daemon.Options) error {
-	d, err := daemon.Start(ctx, inst, dir, opts)
-	if err != nil {
-		return err
-	}
-	return d.Serve(ctx)
-}
-
-func stopCmd() *cobra.Command {
+func shutdownCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop the daemon",
-		Args:  cobra.NoArgs,
+		Use:   "shutdown <mountpoint|volume|device>",
+		Short: "Shut down a mounted or attached volume owner",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClientOnly()
+			sock, err := socketFromTarget(args[0])
 			if err != nil {
 				return err
 			}
+			c := client.NewFromSocket(sock)
 			ctx := cmd.Context()
-			status, _ := c.Status(ctx)
 			if err := c.Shutdown(ctx); err != nil {
-				return fmt.Errorf("no daemon running (socket %s)", c.Socket())
+				return err
 			}
-			// Wait for flush + lease release to complete before returning.
-			_ = c.ShutdownWait(ctx)
-			if status != nil {
-				fmt.Printf("loophole stopped (%s)\n", status.S3)
-			} else {
-				fmt.Println("loophole stopped")
+			if err := c.ShutdownWait(ctx); err != nil {
+				return err
 			}
+			fmt.Printf("shutdown %s\n", args[0])
 			return nil
 		},
 	}
@@ -82,40 +71,41 @@ func createCmd() *cobra.Command {
 	var noFormat bool
 	cmd := &cobra.Command{
 		Use:   "create <volume>",
-		Short: "Create and format a new volume",
+		Short: "Create and mount a new volume in the foreground",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
 			var size uint64
 			if sizeStr != "" {
+				var err error
 				size, err = parseSize(sizeStr)
 				if err != nil {
 					return err
 				}
 			}
-			ctx := cmd.Context()
 			volume := args[0]
-			if err := c.Create(ctx, client.CreateParams{
+			p := client.CreateParams{
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
-			}); err != nil {
+			}
+			if mountpoint == "" {
+				mountpoint = volume
+			}
+			d, err := startOwnerDaemon(cmd.Context(), volume)
+			if err != nil {
+				return err
+			}
+			actualMountpoint, err := d.CreateAndMount(cmd.Context(), p, mountpoint)
+			if err != nil {
+				d.Cleanup(context.Background())
 				return err
 			}
 			fmt.Printf("created volume %s\n", volume)
-			if mountpoint != "" {
-				if err := c.Mount(ctx, volume, mountpoint); err != nil {
-					return err
-				}
-				fmt.Printf("mounted %s at %s\n", volume, mountpoint)
-			}
-			return nil
+			fmt.Printf("mounted %s at %s\n", volume, actualMountpoint)
+			return d.Serve(cmd.Context())
 		},
 	}
-	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path after creation")
+	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path (default: volume name)")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
 	return cmd
@@ -128,10 +118,11 @@ func deleteCmd() *cobra.Command {
 		Short: "Delete a volume",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			vm, cleanup, err := openDirectManager(cmd.Context())
 			if err != nil {
 				return err
 			}
+			defer cleanup()
 			volume := args[0]
 			if !yes {
 				fmt.Printf("Delete volume %q? [y/N] ", volume)
@@ -144,7 +135,7 @@ func deleteCmd() *cobra.Command {
 					return nil
 				}
 			}
-			if err := c.Delete(cmd.Context(), volume); err != nil {
+			if err := vm.DeleteVolume(cmd.Context(), volume); err != nil {
 				return err
 			}
 			fmt.Printf("deleted volume %s\n", volume)
@@ -161,30 +152,23 @@ func lsCmd() *cobra.Command {
 		Short: "List all volumes",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			vm, cleanup, err := openDirectManager(cmd.Context())
 			if err != nil {
 				return err
 			}
+			defer cleanup()
 			ctx := cmd.Context()
-			volumes, err := c.ListVolumes(ctx)
+			volumes, err := vm.ListAllVolumes(ctx)
 			if err != nil {
 				return err
-			}
-
-			// Build volume→mountpoint map from status.
-			mounted := map[string]string{}
-			if status, err := c.Status(ctx); err == nil {
-				for mp, vol := range status.Mounts {
-					mounted[vol] = mp
-				}
 			}
 
 			green := color.New(color.FgGreen)
 			dim := color.New(color.FgHiBlack)
 			for _, v := range volumes {
-				if mp, ok := mounted[v]; ok {
+				if sock := socketForVolume(v); sock != "" {
 					_, _ = green.Print(v)
-					_, _ = dim.Printf("  %s\n", mp)
+					_, _ = dim.Printf("  %s\n", sock)
 				} else {
 					fmt.Println(v)
 				}
@@ -197,72 +181,40 @@ func lsCmd() *cobra.Command {
 func mountCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "mount <volume> [mountpoint]",
-		Short: "Mount a volume as ext4",
+		Short: "Mount a volume as ext4 in the foreground",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
 			volume := args[0]
 			mountpoint := ""
 			if len(args) == 2 {
 				mountpoint = args[1]
 			}
-			if err := c.Mount(cmd.Context(), volume, mountpoint); err != nil {
-				return err
-			}
-			if mountpoint != "" {
-				fmt.Printf("mounted %s at %s\n", volume, mountpoint)
-			} else {
-				fmt.Printf("mounted %s\n", volume)
-			}
-			return nil
-		},
-	}
-}
-
-func unmountCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "unmount <mountpoint|volume>",
-		Short: "Unmount an ext4 filesystem",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Try symlink-based lookup first (real mountpoints).
-			if sock, err := socketFromMountpoint(args[0]); err == nil {
-				c := client.NewFromSocket(sock)
-				if err := c.Unmount(cmd.Context(), args[0]); err != nil {
-					return err
-				}
-				fmt.Printf("unmounted %s\n", args[0])
-				return nil
-			}
-			// Fall back to profile-based client.
-			c, err := resolveClient()
+			d, err := startOwnerDaemon(cmd.Context(), volume)
 			if err != nil {
 				return err
 			}
-			if err := c.Unmount(cmd.Context(), args[0]); err != nil {
+			actualMountpoint, err := d.MountVolume(cmd.Context(), volume, mountpoint)
+			if err != nil {
+				d.Cleanup(context.Background())
 				return err
 			}
-			fmt.Printf("unmounted %s\n", args[0])
-			return nil
+			fmt.Printf("mounted %s at %s\n", volume, actualMountpoint)
+			return d.Serve(cmd.Context())
 		},
 	}
 }
 
 func freezeCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "freeze <volume>",
-		Short: "Freeze a volume, making it permanently immutable",
+		Use:   "freeze <mountpoint|volume|device>",
+		Short: "Freeze the volume managed by an existing owner process",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			c, err := resolveClient()
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
-			if err := c.Freeze(ctx, args[0]); err != nil {
+			if err := c.Freeze(cmd.Context(), args[0]); err != nil {
 				return err
 			}
 			fmt.Printf("volume %q frozen\n", args[0])
@@ -309,11 +261,12 @@ func checkpointsCmd() *cobra.Command {
 		Short: "List checkpoints for a volume",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			vm, cleanup, err := openDirectManager(cmd.Context())
 			if err != nil {
 				return err
 			}
-			checkpoints, err := c.ListCheckpoints(cmd.Context(), args[0])
+			defer cleanup()
+			checkpoints, err := vm.ListCheckpoints(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -336,11 +289,11 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
   loophole clone --from-checkpoint <checkpoint_id> <volume> <clone_name>`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
 			if fromCheckpoint != "" {
+				c, err := resolveOwnerClient(args[0])
+				if err != nil {
+					return err
+				}
 				if err := c.Clone(cmd.Context(), client.CloneParams{
 					Volume:     args[0],
 					Checkpoint: fromCheckpoint,
@@ -352,11 +305,10 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
 				return nil
 			}
 
-			sock, err := socketFromMountpoint(args[0])
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
-			c = client.NewFromSocket(sock)
 			if err := c.Clone(cmd.Context(), client.CloneParams{
 				Mountpoint: args[0],
 				Clone:      args[1],
@@ -373,11 +325,11 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
 
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "status",
-		Short: "Show daemon status",
-		Args:  cobra.NoArgs,
+		Use:   "status <mountpoint|volume|device>",
+		Short: "Show owner process status",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClientOnly()
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
@@ -406,9 +358,8 @@ func deviceCmd() *cobra.Command {
 	}
 
 	cmd.AddCommand(
-		deviceStartCmd(),
+		deviceCreateCmd(),
 		deviceAttachCmd(),
-		deviceDetachCmd(),
 		deviceCheckpointCmd(),
 		deviceCloneCmd(),
 		deviceDDCmd(),
@@ -418,57 +369,77 @@ func deviceCmd() *cobra.Command {
 	return cmd
 }
 
-func deviceStartCmd() *cobra.Command {
-	cmd := startCmd()
-	cmd.Short = "Start daemon in foreground"
-	// device start is always foreground — hide the flag and set it.
-	_ = cmd.Flags().MarkHidden("foreground")
-	_ = cmd.Flags().Set("foreground", "true")
+func deviceCreateCmd() *cobra.Command {
+	var sizeStr string
+	cmd := &cobra.Command{
+		Use:   "create <volume>",
+		Short: "Create and attach a new raw volume in the foreground",
+		Long:  "Create a fresh unformatted volume for raw block-device use and attach it immediately. --size is required.",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			size, err := parseSize(sizeStr)
+			if err != nil {
+				return err
+			}
+			if size == 0 {
+				return fmt.Errorf("--size is required for device create")
+			}
+
+			volume := args[0]
+			d, err := startOwnerDaemon(cmd.Context(), volume)
+			if err != nil {
+				return err
+			}
+			if err := d.Backend().Create(cmd.Context(), client.CreateParams{
+				Volume:   volume,
+				Size:     size,
+				NoFormat: true,
+			}); err != nil {
+				d.Cleanup(context.Background())
+				return err
+			}
+
+			device, err := d.AttachVolume(cmd.Context(), volume)
+			if err != nil {
+				d.Cleanup(context.Background())
+				return err
+			}
+			fmt.Printf("created raw volume %s\n%s\n", volume, device)
+			return d.Serve(cmd.Context())
+		},
+	}
+	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB)")
 	return cmd
 }
 
 func deviceAttachCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "attach <volume>",
-		Short: "Attach a volume device",
+		Short: "Attach a volume device in the foreground",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			d, err := startOwnerDaemon(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
-			device, err := c.DeviceAttach(cmd.Context(), args[0])
+			device, err := d.AttachVolume(cmd.Context(), args[0])
 			if err != nil {
+				d.Cleanup(context.Background())
 				return err
 			}
 			fmt.Println(device)
-			return nil
-		},
-	}
-}
-
-func deviceDetachCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "detach <volume>",
-		Short: "Detach a volume device",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
-			if err != nil {
-				return err
-			}
-			return c.DeviceDetach(cmd.Context(), args[0])
+			return d.Serve(cmd.Context())
 		},
 	}
 }
 
 func deviceCheckpointCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "checkpoint <volume>",
+		Use:   "checkpoint <volume|device>",
 		Short: "Checkpoint a volume device",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
@@ -489,7 +460,7 @@ func deviceCloneCmd() *cobra.Command {
 		Short: "Clone a volume device",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
@@ -514,7 +485,7 @@ func deviceFlushCmd() *cobra.Command {
 		Short: "Flush a volume's memtable to storage",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			c, err := resolveOwnerClient(args[0])
 			if err != nil {
 				return err
 			}
@@ -580,13 +551,16 @@ Examples:
 				return fmt.Errorf("neither if nor of is a volume; use volume: syntax (e.g. of=myvolume:)")
 			}
 
-			c, err := resolveClient()
+			if dstIsVol {
+				c, err := resolveOwnerClient(dstVol)
+				if err != nil {
+					return err
+				}
+				return deviceDDImport(cmd, c, ifFlag, dstVol)
+			}
+			c, err := resolveOwnerClient(srcVol)
 			if err != nil {
 				return err
-			}
-
-			if dstIsVol {
-				return deviceDDImport(cmd, c, ifFlag, dstVol)
 			}
 			return deviceDDExport(cmd, c, srcVol, ofFlag)
 		},
@@ -599,13 +573,13 @@ Examples:
 	return cmd
 }
 
-// deviceDDImport writes a local file into a new volume.
+// deviceDDImport writes a local file into an already-attached volume.
 func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("open image: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer util.SafeClose(f, "close dd import input")
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -615,10 +589,7 @@ func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume strin
 	fmt.Printf("Import: %s (%d bytes, %.1f GiB) → %s\n",
 		filePath, size, float64(size)/(1<<30), volume)
 
-	return c.DeviceDD(cmd.Context(), client.CreateParams{
-		Volume: volume,
-		Size:   size,
-	}, f, os.Stdout)
+	return c.DeviceDDWriteExisting(cmd.Context(), volume, f, os.Stdout)
 }
 
 // deviceDDExport reads a volume's raw data into a local file.
@@ -634,7 +605,7 @@ func deviceDDExport(cmd *cobra.Command, c *client.Client, volume, filePath strin
 	if err != nil {
 		return fmt.Errorf("create output file: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer util.SafeClose(f, "close dd export output")
 
 	fmt.Printf("Export: %s (%d bytes, %.1f GiB) → %s\n",
 		volume, info.Size, float64(info.Size)/(1<<30), filePath)
@@ -696,41 +667,6 @@ func parseVolPath(s string) (volume, path string, isVol bool) {
 // Needed for subcommands with DisableFlagParsing where cobra can't handle
 // persistent flags.
 
-// resolveClientOnly returns a client for the current profile without
-// starting the daemon. Used by commands like stop that shouldn't auto-start.
-func resolveClientOnly() (*client.Client, error) {
-	if globalPID != 0 {
-		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
-	}
-	dir := loophole.DefaultDir()
-	inst, err := resolveProfile(dir)
-	if err != nil {
-		return nil, err
-	}
-	return client.New(dir, inst), nil
-}
-
-// resolveClient returns a client for the current profile's daemon,
-// auto-starting it if necessary.
-func resolveClient() (*client.Client, error) {
-	if globalPID != 0 {
-		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
-	}
-	dir := loophole.DefaultDir()
-	inst, err := resolveProfile(dir)
-	if err != nil {
-		return nil, err
-	}
-	c := client.New(dir, inst)
-	c.Bin = selfBin
-	c.Sudo = runtime.GOOS == "linux"
-	c.Profile = inst.ProfileName
-	if err := c.EnsureDaemon(); err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
 func breakLeaseCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
@@ -739,12 +675,13 @@ func breakLeaseCmd() *cobra.Command {
 		Long:  "Sends a release request to the remote lease holder. With -f, forcibly clears the lease if the holder doesn't respond.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveClient()
+			vm, cleanup, err := openDirectManager(cmd.Context())
 			if err != nil {
 				return err
 			}
+			defer cleanup()
 			volume := args[0]
-			graceful, err := c.BreakLease(cmd.Context(), volume, force)
+			graceful, err := vm.BreakLease(cmd.Context(), volume, force)
 			if err != nil {
 				return err
 			}
@@ -1009,6 +946,98 @@ func socketFromMountpoint(mountpoint string) (string, error) {
 		return "", fmt.Errorf("cannot find daemon for mountpoint %q (no symlink at %s)", mountpoint, symPath)
 	}
 	return target, nil
+}
+
+func socketFromDevice(devicePath string) (string, error) {
+	dir := loophole.DefaultDir()
+	symPath := dir.DeviceSymlink(devicePath)
+	target, err := os.Readlink(symPath)
+	if err != nil {
+		return "", fmt.Errorf("cannot find owner for device %q (no symlink at %s)", devicePath, symPath)
+	}
+	return target, nil
+}
+
+func socketForVolume(volume string) string {
+	dir := loophole.DefaultDir()
+	sock := dir.VolumeSocket(volume)
+	if _, err := os.Stat(sock); err == nil {
+		return sock
+	}
+	return ""
+}
+
+func socketFromTarget(target string) (string, error) {
+	if sock, err := socketFromMountpoint(target); err == nil {
+		return sock, nil
+	}
+	if strings.HasPrefix(target, "/") {
+		if sock, err := socketFromDevice(target); err == nil {
+			return sock, nil
+		}
+	}
+	if sock := socketForVolume(target); sock != "" {
+		return sock, nil
+	}
+	return "", fmt.Errorf("cannot find running owner process for %q", target)
+}
+
+func resolveOwnerClient(target string) (*client.Client, error) {
+	if globalPID != 0 {
+		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
+	}
+	sock, err := socketFromTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	return client.NewFromSocket(sock), nil
+}
+
+func startOwnerDaemon(ctx context.Context, volume string) (*daemon.Daemon, error) {
+	dir := loophole.DefaultDir()
+	inst, err := resolveProfile(dir)
+	if err != nil {
+		return nil, err
+	}
+	socketPath := dir.VolumeSocket(volume)
+	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
+		return nil, err
+	}
+	if c := client.NewFromSocket(socketPath); true {
+		timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		defer cancel()
+		if _, err := c.Status(timeoutCtx); err == nil {
+			return nil, fmt.Errorf("volume %q is already managed at %s", volume, socketPath)
+		}
+	}
+	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("remove stale socket %s: %w", socketPath, err)
+	}
+	return daemon.Start(ctx, inst, dir, daemon.Options{
+		Foreground: true,
+		SocketPath: socketPath,
+	})
+}
+
+func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
+	dir := loophole.DefaultDir()
+	inst, err := resolveProfile(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	var store loophole.ObjectStore
+	if inst.LocalDir != "" {
+		store, err = loophole.NewFileStore(inst.LocalDir)
+	} else {
+		store, err = loophole.NewS3Store(ctx, inst)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	vm := storage2.NewVolumeManager(store, dir.Cache(inst.ProfileName), storage2.Config{}, nil, nil)
+	return vm, func() {
+		_ = vm.Close(context.Background())
+	}, nil
 }
 
 // detectMountpoint walks up from the current working directory to find

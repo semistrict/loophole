@@ -49,13 +49,12 @@ func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, ins
 	backend := fsbackend.NewBackend(vm, nil)
 
 	d := &Daemon{
-		inst:          inst,
-		backend:       backend,
-		diskCache:     diskCache,
-		ln:            ln,
-		skipHashCheck: true,
-		shutdownCh:    make(chan struct{}),
-		doneCh:        make(chan struct{}),
+		inst:       inst,
+		backend:    backend,
+		diskCache:  diskCache,
+		ln:         ln,
+		shutdownCh: make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

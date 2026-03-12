@@ -114,7 +114,9 @@ func TestFUSE_CreateMountUnmount_CleansUpLoopDevice(t *testing.T) {
 
 	require.NoError(t, b.Unmount(ctx, mp))
 
-	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "unmount should detach the loop device")
+	require.Eventually(t, func() bool {
+		return loopDevicesFor(t, b.fuseDir) == 0
+	}, 5*time.Second, 50*time.Millisecond, "unmount should detach the loop device")
 }
 
 func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
@@ -137,7 +139,9 @@ func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
 		require.NoError(t, b.Unmount(ctx, mp))
 	}
 
-	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "all loop devices should be detached after unmount")
+	require.Eventually(t, func() bool {
+		return loopDevicesFor(t, b.fuseDir) == 0
+	}, 5*time.Second, 50*time.Millisecond, "all loop devices should be detached after unmount")
 }
 
 func TestFUSE_Close_CleansUpLoopDevices(t *testing.T) {
@@ -153,7 +157,9 @@ func TestFUSE_Close_CleansUpLoopDevices(t *testing.T) {
 	// Close should unmount everything and detach loop devices.
 	require.NoError(t, b.Close(ctx))
 
-	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "Close should detach all loop devices")
+	require.Eventually(t, func() bool {
+		return loopDevicesFor(t, b.fuseDir) == 0
+	}, 5*time.Second, 50*time.Millisecond, "Close should detach all loop devices")
 }
 
 func TestFUSE_CreateDoesNotLeakLoopDevice(t *testing.T) {

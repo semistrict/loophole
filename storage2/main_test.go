@@ -27,6 +27,10 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func debugCountersEnabled() bool {
+	return os.Getenv("LOOPHOLE_DEBUG_COUNTERS") != ""
+}
+
 type snapshotCapableVolume interface {
 	Snapshot(string) error
 }

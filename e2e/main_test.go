@@ -1,13 +1,15 @@
 package e2e
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -17,15 +19,18 @@ import (
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/daemon"
 	"github.com/semistrict/loophole/metrics"
 )
 
 var (
-	testDaemon *daemon.Daemon
-	testClient *client.Client
+	testDir  loophole.Dir
+	testInst loophole.Instance
+	testBin  string
 )
+
+func debugCountersEnabled() bool {
+	return os.Getenv("LOOPHOLE_DEBUG_COUNTERS") != ""
+}
 
 func TestMain(m *testing.M) {
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
@@ -53,15 +58,14 @@ func TestMain(m *testing.M) {
 	go http.ListenAndServe(":9090", mux)
 	fmt.Println("metrics available on :9090/metrics")
 
-	// Start a shared daemon for all e2e tests.
 	tmpDir, err := os.MkdirTemp("", "loophole-e2e-*")
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	dir := loophole.Dir(tmpDir)
-	inst := loophole.Instance{
+	testDir = loophole.Dir(tmpDir)
+	testInst = loophole.Instance{
 		ProfileName: "test",
 		Bucket:      envOrDefault("BUCKET", "testbucket"),
 		Prefix:      fmt.Sprintf("test-%s", uuid.NewString()[:8]),
@@ -72,18 +76,35 @@ func TestMain(m *testing.M) {
 		LogLevel:    os.Getenv("LOG_LEVEL"),
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	d, err := daemon.Start(ctx, inst, dir, daemon.Options{Foreground: true})
+	if err := os.WriteFile(filepath.Join(string(testDir), "config.toml"), []byte(fmt.Sprintf(`default_profile = "test"
+
+[profiles.test]
+endpoint = %q
+bucket = %q
+prefix = %q
+access_key = %q
+secret_key = %q
+region = %q
+log_level = %q
+`, testInst.Endpoint, testInst.Bucket, testInst.Prefix, testInst.AccessKey, testInst.SecretKey, testInst.Region, testInst.LogLevel)), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	cwd, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
 	}
-	testDaemon = d
-	go d.Serve(ctx)
-
-	testClient = client.NewFromSocket(dir.Socket("test"))
+	repoRoot := filepath.Clean(filepath.Join(cwd, ".."))
+	cmd := exec.Command("make", "loophole")
+	cmd.Dir = repoRoot
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("build loophole binary: %v", err)
+	}
+	testBin = filepath.Join(repoRoot, "bin", fmt.Sprintf("loophole-%s-%s", runtime.GOOS, runtime.GOARCH))
 
 	code := m.Run()
-	cancel()
 	os.Exit(code)
 }
 
@@ -128,6 +149,9 @@ func labelString(labels []*dto.LabelPair) string {
 }
 
 func dumpMetricsDelta(t *testing.T, before metricsSnapshot) {
+	if !debugCountersEnabled() {
+		return
+	}
 	after := captureMetrics()
 
 	type entry struct {
@@ -166,6 +190,9 @@ var trackMetricsOnce sync.Map // t.Name() → bool
 
 func trackMetrics(t *testing.T) {
 	t.Helper()
+	if !debugCountersEnabled() {
+		return
+	}
 	if _, loaded := trackMetricsOnce.LoadOrStore(t.Name(), true); loaded {
 		return
 	}

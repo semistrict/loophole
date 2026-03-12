@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -85,17 +86,16 @@ func TestE2E_ChrootSocketClone(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, c.ChrootClone(ctx, "csock-clone-v1"))
 	cloneMP := mountpoint(t, "csock-clone-v1")
-	require.NoError(t, testClient.Mount(ctx, "csock-clone-v1", cloneMP))
+	require.NoError(t, b.Mount(ctx, "csock-clone-v1", cloneMP))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_ = testClient.Unmount(ctx, cloneMP)
-		_ = testClient.Delete(ctx, "csock-clone-v1")
+		_ = b.Unmount(ctx, cloneMP)
 		_ = os.Remove(cloneMP)
 	})
 
 	// Clone should be mounted and writable.
-	cloneFS, err := testDaemon.Backend().FS(cloneMP)
+	cloneFS, err := b.FS(cloneMP)
 	require.NoError(t, err)
 
 	// Data from the source should be present.
