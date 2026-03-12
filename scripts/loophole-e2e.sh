@@ -201,13 +201,18 @@ assert_pane_not_contains "$PANE_CLONE2" "Segmentation fault" "guest userspace cr
 assert_pane_not_contains "$PANE_CLONE2" "Unable to handle kernel NULL pointer dereference" "guest kernel crash in pane 2"
 
 log "E2E multi-generation clone heartbeat verified"
-echo
-echo "tmux session: ${SESSION_NAME}"
-echo "attach with: tmux attach -t ${SESSION_NAME}"
-echo "pane 0: original guest serial console"
-echo "pane 1: clone-1 guest serial console"
-echo "pane 2: clone-2 guest serial console"
 
-if [ "$ATTACH" = true ]; then
-    exec tmux attach -t "$SESSION_NAME"
-fi
+log "Rebooting all guest VMs to terminate Firecracker"
+for pane in "$PANE_CLONE2" "$PANE_CLONE1" "$PANE_ORIG"; do
+    tmux send-keys -t "$pane" C-c
+    sleep 0.5
+    tmux send-keys -t "$pane" "reboot" C-m
+done
+
+log "Waiting for Firecracker processes to exit"
+for pane in "$PANE_CLONE2" "$PANE_CLONE1" "$PANE_ORIG"; do
+    wait_for_pattern "$pane" "Firecracker exiting successfully" 30 "Firecracker exit in ${pane}"
+done
+
+log "All VMs terminated. Cleaning up tmux session."
+tmux kill-session -t "$SESSION_NAME" 2>/dev/null || true
