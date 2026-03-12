@@ -68,7 +68,7 @@ func TestMain(m *testing.M) {
 		Endpoint:      defaultEndpoint(),
 		AccessKey:     envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
 		SecretKey:     envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
-		Region:        envOrDefault("AWS_REGION", ""),
+		Region:        envOrDefault("AWS_REGION", "us-east-1"),
 		Mode:          loophole.DefaultMode(),
 		DefaultFSType: loophole.DefaultFSType(),
 		LogLevel:      os.Getenv("LOG_LEVEL"),

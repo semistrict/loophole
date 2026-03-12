@@ -226,6 +226,8 @@ func (sim *Simulation) opTable() []opEntry {
 		{2, sim.opCopyFrom},
 		{2, sim.opDeepClone},
 		{2, sim.opCloneFromSnapshot},
+		{5, sim.opCheckpoint},
+		{2, sim.opCloneFromCheckpoint},
 		{3, sim.opVerify},
 		{2, sim.opSnapshotIsolation},
 		{2, sim.opOpen},
@@ -1149,6 +1151,129 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 	_ = clone
 }
 
+// opCheckpoint creates a checkpoint on an owned volume. Unlike opSnapshot which
+// creates a separate named volume, a checkpoint is stored under the volume's own
+// key namespace (volumes/{name}/checkpoints/{ts}/index.json).
+func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
+	volName := sim.pickOwnedVolume(node)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil || v.ReadOnly() {
+		return
+	}
+
+	// Flush before checkpoint so unflushed writes are captured.
+	if err := v.Flush(); err != nil {
+		return
+	}
+	parentTL := sim.volumeTimelines[volName]
+	sim.oracle.RecordFlush(node.id, parentTL)
+
+	// Capture branchSeq before checkpoint.
+	var branchSeq uint64
+	if pv, ok := v.(*volume); ok {
+		branchSeq = pv.layer.nextSeq.Load()
+	}
+
+	ts, err := v.Checkpoint()
+	if err != nil {
+		return
+	}
+
+	// Read the checkpoint ref to get the child layer ID.
+	cpKey := volName + "/checkpoints/" + ts + "/index.json"
+	volRefs := sim.store.Store().At("volumes")
+	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
+	if err != nil {
+		return
+	}
+
+	sim.timelineIDs = append(sim.timelineIDs, cpRef.LayerID)
+	sim.oracle.RecordBranch(cpRef.LayerID, parentTL, branchSeq)
+
+	if sim.timelineChildren[parentTL] == nil {
+		sim.timelineChildren[parentTL] = make(map[string]bool)
+	}
+	sim.timelineChildren[parentTL][cpRef.LayerID] = true
+
+	sim.t.Logf("[%s] CHECKPOINT vol=%s parent=%s child=%s ts=%s",
+		node.id, volName, parentTL[:8], cpRef.LayerID[:8], ts)
+
+	// Re-layering: parent now has a new layer ID.
+	sim.updateParentAfterRelayer(ctx, volName, parentTL, branchSeq)
+}
+
+// opCloneFromCheckpoint picks a volume with checkpoints, lists them, picks one,
+// and clones from it using Manager.CloneFromCheckpoint.
+func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode) {
+	// Find a volume with checkpoints. Try all known volumes in deterministic order.
+	volNames := make([]string, 0, len(sim.volumeTimelines))
+	for name := range sim.volumeTimelines {
+		volNames = append(volNames, name)
+	}
+	sort.Strings(volNames)
+
+	var srcVolName string
+	var checkpoints []loophole.CheckpointInfo
+	for _, name := range volNames {
+		cps, err := node.manager.ListCheckpoints(ctx, name)
+		if err != nil || len(cps) == 0 {
+			continue
+		}
+		srcVolName = name
+		checkpoints = cps
+		break
+	}
+	if srcVolName == "" {
+		return
+	}
+
+	// Pick a random checkpoint.
+	cp := checkpoints[sim.rng.IntN(len(checkpoints))]
+
+	cloneName := fmt.Sprintf("%s-cpclone-%d", srcVolName, sim.nextVolID)
+	sim.nextVolID++
+
+	// Read the checkpoint ref to get the parent layer ID for oracle tracking.
+	cpKey := srcVolName + "/checkpoints/" + cp.ID + "/index.json"
+	volRefs := sim.store.Store().At("volumes")
+	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
+	if err != nil {
+		return
+	}
+
+	clone, err := node.manager.CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName)
+	if err != nil {
+		return
+	}
+
+	// Read the clone's volume ref.
+	ref, err := sim.getVolRef(ctx, cloneName)
+	if err != nil {
+		return
+	}
+
+	sim.t.Logf("[%s] CLONE-FROM-CP src=%s cp=%s -> child=%s",
+		node.id, srcVolName, cp.ID, ref.LayerID[:8])
+
+	sim.volumeTimelines[cloneName] = ref.LayerID
+	sim.timelineIDs = append(sim.timelineIDs, ref.LayerID)
+	sim.leases[cloneName] = node.id
+	node.volumes = append(node.volumes, cloneName)
+	sim.oracle.RecordBranch(ref.LayerID, cpRef.LayerID, 0)
+
+	if sim.timelineChildren[cpRef.LayerID] == nil {
+		sim.timelineChildren[cpRef.LayerID] = make(map[string]bool)
+	}
+	sim.timelineChildren[cpRef.LayerID][ref.LayerID] = true
+
+	sim.lastClonedVolume = cloneName
+	_ = clone
+}
+
 func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
@@ -1594,7 +1719,7 @@ func (sim *Simulation) updateParentAfterRelayer(ctx context.Context, volName str
 
 func (sim *Simulation) getVolRef(ctx context.Context, name string) (volumeRef, error) {
 	volRefs := sim.store.Store().At("volumes")
-	ref, _, err := loophole.ReadJSON[volumeRef](ctx, volRefs, name)
+	ref, _, err := loophole.ReadJSON[volumeRef](ctx, volRefs, name+"/index.json")
 	return ref, err
 }
 

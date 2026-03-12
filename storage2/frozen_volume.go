@@ -110,6 +110,10 @@ func (v *frozenVolume) Snapshot(snapshotName string) error {
 	return fmt.Errorf("cannot snapshot frozen volume %q", v.name)
 }
 
+func (v *frozenVolume) Checkpoint() (string, error) {
+	return "", fmt.Errorf("cannot checkpoint frozen volume %q", v.name)
+}
+
 // Clone creates a writable copy. No flush needed — frozen layer is immutable.
 func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 	m := v.manager
@@ -154,7 +158,7 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 		return nil
 	})
 	g.Go(func() error {
-		if err := m.volRefs.PutIfNotExists(gctx, cloneName, refData); err != nil {
+		if err := m.volRefs.PutIfNotExists(gctx, cloneName+"/index.json", refData); err != nil {
 			return fmt.Errorf("create clone ref: %w", err)
 		}
 		return nil

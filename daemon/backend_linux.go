@@ -17,9 +17,10 @@ func createBackend(vm loophole.VolumeManager, inst loophole.Instance, dir loopho
 	case loophole.ModeInProcess:
 		d, err := lwext4Driver()
 		if err != nil {
-			return nil, err
+			slog.Warn("lwext4 driver unavailable, filesystem operations will fail", "error", err)
+		} else {
+			drivers[loophole.VolumeTypeExt4] = d
 		}
-		drivers[loophole.VolumeTypeExt4] = d
 	case loophole.ModeFuseFS:
 		d, err := lwext4FUSEDriver()
 		if err != nil {

@@ -18,12 +18,14 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	status := map[string]any{
-		"state":    state,
-		"s3":       d.inst.URL(),
-		"mode":     string(d.inst.Mode),
-		"socket":   d.dir.Socket(d.inst.ProfileName),
-		"nbd_sock": d.nbdSock,
-		"log":      d.dir.Log(d.inst.ProfileName),
+		"state":         state,
+		"s3":            d.inst.URL(),
+		"mode":          string(d.inst.Mode),
+		"sandbox_mode":  d.inst.SandboxMode,
+		"socket":        d.dir.Socket(d.inst.ProfileName),
+		"nbd_sock":      d.nbdSock,
+		"log":           d.dir.Log(d.inst.ProfileName),
+		"sandbox_debug": d.sandboxDebugInfo(),
 	}
 	if d.backend != nil {
 		status["volumes"] = d.backend.VM().Volumes()

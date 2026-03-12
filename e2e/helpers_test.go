@@ -168,6 +168,19 @@ func (b *testBackend) Snapshot(ctx context.Context, mountpoint, name string) err
 	return b.c.Snapshot(ctx, mountpoint, name)
 }
 
+func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
+	return b.c.Checkpoint(ctx, mountpoint)
+}
+
+func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error {
+	if err := b.c.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName, cloneMountpoint); err != nil {
+		return err
+	}
+	b.createdVols = append(b.createdVols, cloneName)
+	b.mountedMPs = append(b.mountedMPs, cloneMountpoint)
+	return nil
+}
+
 func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
 	return b.c.Freeze(ctx, volume)
 }
@@ -182,6 +195,14 @@ func (b *testBackend) DeviceDetach(ctx context.Context, volume string) error {
 
 func (b *testBackend) DeviceSnapshot(ctx context.Context, volume, snapshot string) error {
 	return b.c.DeviceSnapshot(ctx, volume, snapshot)
+}
+
+func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
+	return b.c.ListCheckpoints(ctx, volume)
+}
+
+func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
+	return b.c.DeviceCheckpoint(ctx, volume)
 }
 
 func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) (string, error) {

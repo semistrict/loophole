@@ -1349,7 +1349,7 @@ func TestNewVolumeRefFail(t *testing.T) {
 
 	// Key-specific fault: only the volume ref write (volumes/vol) fails,
 	// not the timeline meta.json write (timelines/<uuid>/meta.json).
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/vol", loophole.Fault{
+	store.SetFault(loophole.OpPutIfNotExists, "volumes/vol/index.json", loophole.Fault{
 		Err: fmt.Errorf("simulated volume ref failure"),
 	})
 
@@ -1533,7 +1533,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 
 	// Key-specific fault: only the snapshot volume ref write (volumes/snap) fails,
 	// not the child timeline meta.json write.
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/snap", loophole.Fault{
+	store.SetFault(loophole.OpPutIfNotExists, "volumes/snap/index.json", loophole.Fault{
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
@@ -1591,7 +1591,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 	}
 
 	// Key-specific fault: only the clone volume ref write (volumes/clone) fails.
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/clone", loophole.Fault{
+	store.SetFault(loophole.OpPutIfNotExists, "volumes/clone/index.json", loophole.Fault{
 		Err: fmt.Errorf("simulated clone putVolumeRef failure"),
 	})
 
@@ -3077,4 +3077,398 @@ func TestReadAtPinPreventsCleanup(t *testing.T) {
 
 	// Release the pin.
 	release()
+}
+
+// TestDirectWritebackClone verifies that WritePagesDirect + Clone works
+// on a volume in direct writeback mode. This is the diff snapshot pattern:
+// the volume is mmap'd (direct mode), dirty pages are written via
+// WritePagesDirect, then the volume is cloned.
+func TestDirectWritebackClone(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	const volSize = 256 * PageSize
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "mem-vol", Size: volSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write initial data.
+	page := make([]byte, PageSize)
+	page[0] = 0xAA
+	if err := v.Write(page, 0); err != nil {
+		t.Fatal(err)
+	}
+	page[0] = 0xBB
+	if err := v.Write(page, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable direct writeback (simulates mmap.MapVolume).
+	if err := v.EnableDirectWriteback(); err != nil {
+		t.Fatal("EnableDirectWriteback:", err)
+	}
+
+	// Normal Write should be rejected in direct mode.
+	err = v.Write(page, 0)
+	if err == nil {
+		t.Fatal("expected error from Write() in direct mode, got nil")
+	}
+
+	// WritePagesDirect should work.
+	page[0] = 0xCC
+	if err := v.WritePagesDirect([]loophole.DirectPage{{Offset: 0, Data: append([]byte(nil), page...)}}); err != nil {
+		t.Fatalf("WritePagesDirect: %v", err)
+	}
+
+	// Clone should work even in direct mode.
+	clone, err := v.Clone("clone-1")
+	if err != nil {
+		t.Fatal("Clone in direct mode:", err)
+	}
+	defer func() { _ = clone.ReleaseRef() }()
+
+	// Clone should see the direct-written data.
+	buf := make([]byte, PageSize)
+	if _, err := clone.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xCC {
+		t.Fatalf("clone page 0: expected 0xCC, got 0x%02x", buf[0])
+	}
+
+	// Clone should see original data on unmodified pages.
+	if _, err := clone.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xBB {
+		t.Fatalf("clone page 1: expected 0xBB, got 0x%02x", buf[0])
+	}
+}
+
+// TestDirectWritebackMultiPageRange verifies that WritePagesDirect accepts
+// multi-page contiguous ranges (not just single pages).
+func TestDirectWritebackMultiPageRange(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "mem-vol", Size: 64 * PageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.EnableDirectWriteback(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a 3-page contiguous range as a single DirectPage.
+	data := make([]byte, 3*PageSize)
+	for i := range 3 {
+		binary.LittleEndian.PutUint32(data[i*PageSize:], uint32(i+10))
+	}
+	if err := v.WritePagesDirect([]loophole.DirectPage{{
+		Offset: 4 * PageSize,
+		Data:   data,
+	}}); err != nil {
+		t.Fatal("WritePagesDirect multi-page:", err)
+	}
+
+	// Read back each page individually.
+	buf := make([]byte, PageSize)
+	for i := range 3 {
+		if _, err := v.Read(ctx, buf, uint64(4+i)*PageSize); err != nil {
+			t.Fatalf("read page %d: %v", 4+i, err)
+		}
+		got := binary.LittleEndian.Uint32(buf)
+		want := uint32(i + 10)
+		if got != want {
+			t.Fatalf("page %d: expected %d, got %d", 4+i, want, got)
+		}
+	}
+}
+
+// TestDiffSnapshotClone replicates the Firecracker diff snapshot pattern:
+// 1. Create volume, write full data (simulating full memory dump), flush
+// 2. Clone volume → clone-1 (full snapshot)
+// 3. Write sparse dirty pages to the SAME volume (simulating KVM dirty pages), flush
+// 4. Clone volume again → clone-2 (diff snapshot)
+// 5. Verify clone-2 has both dirty pages AND original data
+//
+// This is the exact sequence Firecracker uses:
+//
+//	loophole_open(mem_vol) → write dirty pages → flush → clone → close
+func TestDiffSnapshotClone(t *testing.T) {
+	m := testManager(t)
+	ctx := t.Context()
+
+	const volSize = 256 * PageSize // 1 MiB
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "mem-vol", Size: volSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: Write "full memory dump" — fill every page with its page index.
+	const numPages = 256
+	page := make([]byte, PageSize)
+	for i := range numPages {
+		binary.LittleEndian.PutUint32(page, uint32(i))
+		page[4] = 0xAA // marker: original data
+		if err := v.Write(page, uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal("flush after full dump:", err)
+	}
+
+	// Step 2: Clone → clone-1 (full snapshot)
+	clone1, err := v.Clone("clone-1")
+	if err != nil {
+		t.Fatal("clone-1:", err)
+	}
+	defer func() { _ = clone1.ReleaseRef() }()
+
+	// Verify clone-1 has the original data.
+	buf := make([]byte, PageSize)
+	if _, err := clone1.Read(ctx, buf, 42*PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if binary.LittleEndian.Uint32(buf) != 42 || buf[4] != 0xAA {
+		t.Fatalf("clone-1 page 42: expected idx=42 marker=0xAA, got idx=%d marker=0x%02x",
+			binary.LittleEndian.Uint32(buf), buf[4])
+	}
+
+	// Step 3: Write sparse dirty pages to the SAME volume (simulating diff snapshot).
+	// Dirty pages: 0, 10, 42, 100, 255 — sparse subset.
+	dirtyPages := []int{0, 10, 42, 100, 255}
+	for _, pg := range dirtyPages {
+		binary.LittleEndian.PutUint32(page, uint32(pg))
+		page[4] = 0xBB // marker: dirty data
+		if err := v.Write(page, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("dirty write page %d: %v", pg, err)
+		}
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal("flush after dirty writes:", err)
+	}
+
+	// Step 4: Clone → clone-2 (diff snapshot)
+	clone2, err := v.Clone("clone-2")
+	if err != nil {
+		t.Fatal("clone-2:", err)
+	}
+	defer func() { _ = clone2.ReleaseRef() }()
+
+	// Step 5: Verify clone-2.
+
+	// Dirty pages should have the new data.
+	dirtySet := make(map[int]bool)
+	for _, pg := range dirtyPages {
+		dirtySet[pg] = true
+	}
+	for _, pg := range dirtyPages {
+		if _, err := clone2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read dirty page %d from clone-2: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xBB {
+			t.Fatalf("clone-2 dirty page %d: expected idx=%d marker=0xBB, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
+
+	// Clean pages should have the original data.
+	cleanPages := []int{1, 5, 20, 50, 128, 200, 254}
+	for _, pg := range cleanPages {
+		if _, err := clone2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read clean page %d from clone-2: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xAA {
+			t.Fatalf("clone-2 clean page %d: expected idx=%d marker=0xAA, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
+}
+
+// TestDiffSnapshotCloneReopened is like TestDiffSnapshotClone but reopens
+// the volume on a fresh manager before writing dirty pages. This simulates
+// the case where Firecracker restores from a snapshot and the daemon is a
+// fresh process that reopens the volume.
+func TestDiffSnapshotCloneReopened(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	ctx := t.Context()
+
+	// Node 1: Create volume, write full data, clone-1.
+	m1 := newTestManager(t, store, cfg)
+	v, err := m1.NewVolume(loophole.CreateParams{Volume: "mem-vol", Size: 256 * PageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	for i := range 256 {
+		binary.LittleEndian.PutUint32(page, uint32(i))
+		page[4] = 0xAA
+		if err := v.Write(page, uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	clone1, err := v.Clone("clone-1")
+	if err != nil {
+		t.Fatal("clone-1:", err)
+	}
+	_ = clone1.ReleaseRef()
+	_ = m1.Close(ctx) // shut down node 1
+
+	// Node 2: Reopen "mem-vol", write dirty pages, clone-2.
+	m2 := newTestManager(t, store, cfg)
+	v2, err := m2.OpenVolume("mem-vol")
+	if err != nil {
+		t.Fatal("reopen mem-vol:", err)
+	}
+
+	dirtyPages := []int{0, 10, 42, 100, 255}
+	for _, pg := range dirtyPages {
+		binary.LittleEndian.PutUint32(page, uint32(pg))
+		page[4] = 0xBB
+		if err := v2.Write(page, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("dirty write page %d: %v", pg, err)
+		}
+	}
+	if err := v2.Flush(); err != nil {
+		t.Fatal("flush dirty:", err)
+	}
+
+	clone2, err := v2.Clone("clone-2")
+	if err != nil {
+		t.Fatal("clone-2:", err)
+	}
+
+	// Verify dirty pages in clone-2.
+	buf := make([]byte, PageSize)
+	for _, pg := range dirtyPages {
+		if _, err := clone2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read dirty page %d: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xBB {
+			t.Fatalf("clone-2 dirty page %d: expected idx=%d marker=0xBB, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
+
+	// Verify clean pages in clone-2.
+	cleanPages := []int{1, 5, 20, 50, 128, 200, 254}
+	for _, pg := range cleanPages {
+		if _, err := clone2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read clean page %d: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xAA {
+			t.Fatalf("clone-2 clean page %d: expected idx=%d marker=0xAA, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
+}
+
+// TestDiffSnapshotCloneReadFromFreshNode tests the full scenario end-to-end:
+// create, write, clone-1, write dirty, clone-2, then open clone-2 on a
+// completely fresh manager (simulating the restored VM reading memory).
+func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
+	store := loophole.NewMemStore()
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+	}
+	ctx := t.Context()
+
+	// --- Phase 1: Full snapshot ---
+	m1 := newTestManager(t, store, cfg)
+	v, err := m1.NewVolume(loophole.CreateParams{Volume: "mem-vol", Size: 256 * PageSize})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page := make([]byte, PageSize)
+	for i := range 256 {
+		binary.LittleEndian.PutUint32(page, uint32(i))
+		page[4] = 0xAA
+		if err := v.Write(page, uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	clone1, err := v.Clone("clone-1")
+	if err != nil {
+		t.Fatal("clone-1:", err)
+	}
+	_ = clone1.ReleaseRef()
+
+	// --- Phase 2: Diff snapshot (same manager/process) ---
+	dirtyPages := []int{0, 10, 42, 100, 255}
+	for _, pg := range dirtyPages {
+		binary.LittleEndian.PutUint32(page, uint32(pg))
+		page[4] = 0xBB
+		if err := v.Write(page, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("dirty write page %d: %v", pg, err)
+		}
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal("flush dirty:", err)
+	}
+	clone2, err := v.Clone("clone-2")
+	if err != nil {
+		t.Fatal("clone-2:", err)
+	}
+	_ = clone2.ReleaseRef()
+	_ = m1.Close(ctx)
+
+	// --- Phase 3: Fresh node reads clone-2 ---
+	m2 := newTestManager(t, store, cfg)
+	c2, err := m2.OpenVolume("clone-2")
+	if err != nil {
+		t.Fatal("open clone-2:", err)
+	}
+
+	buf := make([]byte, PageSize)
+
+	// Dirty pages should have 0xBB marker.
+	for _, pg := range dirtyPages {
+		if _, err := c2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read dirty page %d: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xBB {
+			t.Fatalf("fresh-node clone-2 dirty page %d: expected idx=%d marker=0xBB, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
+
+	// Clean pages should have 0xAA marker.
+	cleanPages := []int{1, 5, 20, 50, 128, 200, 254}
+	for _, pg := range cleanPages {
+		if _, err := c2.Read(ctx, buf, uint64(pg)*PageSize); err != nil {
+			t.Fatalf("read clean page %d: %v", pg, err)
+		}
+		idx := binary.LittleEndian.Uint32(buf)
+		if idx != uint32(pg) || buf[4] != 0xAA {
+			t.Fatalf("fresh-node clone-2 clean page %d: expected idx=%d marker=0xAA, got idx=%d marker=0x%02x",
+				pg, pg, idx, buf[4])
+		}
+	}
 }

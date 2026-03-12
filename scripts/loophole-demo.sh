@@ -165,7 +165,7 @@ fi
 STORE_DIR="${WORK_DIR}/store"
 LOOPHOLE_DIR="${WORK_DIR}/loophole-config"
 VOLUME_NAME="rootfs"
-LOOPHOLE_BIN="${WORK_DIR}/loophole"
+LOOPHOLE_BIN="${LOOPHOLE_BIN:-${WORK_DIR}/loophole}"
 
 log "Writing loophole config"
 mkdir -p "$LOOPHOLE_DIR"

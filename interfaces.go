@@ -1,6 +1,9 @@
 package loophole
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // Volume types.
 const (
@@ -8,6 +11,12 @@ const (
 	VolumeTypeXFS    = "xfs"
 	VolumeTypeSQLite = "sqlite"
 )
+
+// CheckpointInfo describes a volume checkpoint.
+type CheckpointInfo struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+}
 
 // CreateParams holds the parameters for creating a new volume.
 type CreateParams struct {
@@ -29,8 +38,9 @@ type VolumeInfo struct {
 	Labels   map[string]string `json:"labels,omitempty"`
 }
 
-// DirectPage is a single full logical page to persist through a direct
-// writeback path. Offset must be 4KB-aligned and Data must be exactly 4KB.
+// DirectPage is a contiguous range of full logical pages to persist through
+// the direct writeback path. Offset must be 4KB-aligned and len(Data) must
+// be a positive multiple of 4KB (i.e. one or more complete pages).
 type DirectPage struct {
 	Offset uint64
 	Data   []byte
@@ -54,6 +64,8 @@ type VolumeManager interface {
 	// is returned. If force is true, the lease is cleared regardless.
 	// Returns true if the holder responded gracefully.
 	BreakLease(ctx context.Context, name string, force bool) (graceful bool, err error)
+	ListCheckpoints(ctx context.Context, volumeName string) ([]CheckpointInfo, error)
+	CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) (Volume, error)
 	PageSize() int
 	Close(ctx context.Context) error
 }
@@ -84,6 +96,7 @@ type Volume interface {
 	// no background loop is running.
 	FlushLocal() error
 	Snapshot(snapshotName string) error
+	Checkpoint() (string, error)
 	Clone(cloneName string) (Volume, error)
 	CopyFrom(src Volume, srcOff, dstOff, length uint64) (uint64, error)
 	Freeze() error

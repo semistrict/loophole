@@ -98,10 +98,7 @@ export class Scheduler extends DurableObject<Env> {
       containerName = candidates[0].name
     } else {
       // Create new container.
-      const count = [
-        ...this.sql.exec<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM containers'),
-      ][0].cnt
-      containerName = `container-${count}`
+      containerName = this.newContainerName()
       this.sql.exec('INSERT INTO containers (name, volume_count) VALUES (?, 0)', containerName)
     }
 
@@ -224,7 +221,7 @@ export class Scheduler extends DurableObject<Env> {
     }
     // Clear all assignments and counts since containers are gone.
     this.sql.exec('DELETE FROM assignments')
-    this.sql.exec('UPDATE containers SET volume_count = 0')
+    this.sql.exec('DELETE FROM containers')
     return Response.json({ stopped, errors })
   }
 
@@ -244,7 +241,7 @@ export class Scheduler extends DurableObject<Env> {
       }
     }
     this.sql.exec('DELETE FROM assignments')
-    this.sql.exec('UPDATE containers SET volume_count = 0')
+    this.sql.exec('DELETE FROM containers')
     return Response.json({ killed, errors })
   }
 
@@ -264,8 +261,12 @@ export class Scheduler extends DurableObject<Env> {
     if (any.length > 0) return any[0].name
 
     // No containers at all — create one.
-    const name = 'container-0'
+    const name = this.newContainerName()
     this.sql.exec('INSERT INTO containers (name, volume_count) VALUES (?, 0)', name)
     return name
+  }
+
+  private newContainerName(): string {
+    return 'fc-firecracker-1'
   }
 }

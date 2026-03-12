@@ -269,6 +269,9 @@ func (v *NBDVolume) ReleaseRef() error {
 func (v *NBDVolume) Snapshot(_ string) error {
 	return fmt.Errorf("snapshot not supported on NBD volume; use HTTP RPC")
 }
+func (v *NBDVolume) Checkpoint() (string, error) {
+	return "", fmt.Errorf("checkpoint not supported on NBD volume; use HTTP RPC")
+}
 func (v *NBDVolume) Clone(_ string) (loophole.Volume, error) {
 	return nil, fmt.Errorf("clone not supported on NBD volume; use HTTP RPC")
 }

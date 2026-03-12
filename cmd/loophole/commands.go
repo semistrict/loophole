@@ -32,7 +32,9 @@ func addCommands(root *cobra.Command) {
 		unmountCmd(),
 		freezeCmd(),
 		snapshotCmd(),
+		checkpointCmd(),
 		cloneCmd(),
+		checkpointsCmd(),
 		statusCmd(),
 		statsCmd(),
 		deviceCmd(),
@@ -40,6 +42,7 @@ func addCommands(root *cobra.Command) {
 		breakLeaseCmd(),
 		migrateCmd(),
 		sshCmd(),
+		controlRshCmd(),
 	)
 	addDBCommands(root)
 }
@@ -279,10 +282,12 @@ func freezeCmd() *cobra.Command {
 
 func snapshotCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "snapshot [mountpoint] <name>",
-		Short: "Create a snapshot",
-		Long:  "If run from within a loophole mount, the mountpoint can be omitted.",
-		Args:  cobra.RangeArgs(1, 2),
+		Use:        "snapshot [mountpoint] <name>",
+		Short:      "Create a snapshot (deprecated: use checkpoint)",
+		Long:       "If run from within a loophole mount, the mountpoint can be omitted.",
+		Hidden:     true,
+		Deprecated: "use 'checkpoint' instead",
+		Args:       cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var mountpoint, name string
 			if len(args) == 2 {
@@ -308,12 +313,84 @@ func snapshotCmd() *cobra.Command {
 	}
 }
 
-func cloneCmd() *cobra.Command {
+func checkpointCmd() *cobra.Command {
 	return &cobra.Command{
+		Use:   "checkpoint [mountpoint]",
+		Short: "Create a checkpoint of a mounted volume",
+		Long:  "If run from within a loophole mount, the mountpoint can be omitted.",
+		Args:  cobra.RangeArgs(0, 1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var mountpoint string
+			if len(args) == 1 {
+				mountpoint = args[0]
+			} else {
+				mp, err := detectMountpoint()
+				if err != nil {
+					return fmt.Errorf("no mountpoint given and %w", err)
+				}
+				mountpoint = mp
+			}
+			sock, err := socketFromMountpoint(mountpoint)
+			if err != nil {
+				return err
+			}
+			c := client.NewFromSocket(sock)
+			cpID, err := c.Checkpoint(cmd.Context(), mountpoint)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("checkpoint %s created\n", cpID)
+			return nil
+		},
+	}
+}
+
+func checkpointsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "checkpoints <volume>",
+		Short: "List checkpoints for a volume",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
+			checkpoints, err := c.ListCheckpoints(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			for _, cp := range checkpoints {
+				fmt.Printf("%s  %s\n", cp.ID, cp.CreatedAt.Format(time.RFC3339))
+			}
+			return nil
+		},
+	}
+}
+
+func cloneCmd() *cobra.Command {
+	var fromCheckpoint string
+	cmd := &cobra.Command{
 		Use:   "clone <mountpoint> <name> <clone_mountpoint>",
 		Short: "Clone a volume and mount it",
-		Args:  cobra.ExactArgs(3),
+		Long: `Clone a live mounted volume, or clone from a checkpoint.
+
+With --from-checkpoint, the first arg is the volume name (not mountpoint):
+  loophole clone --from-checkpoint <checkpoint_id> <volume> <clone_name> <clone_mountpoint>`,
+		Args: cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if fromCheckpoint != "" {
+				// args: <volume> <clone_name> <clone_mountpoint>
+				c, err := resolveClient()
+				if err != nil {
+					return err
+				}
+				if err := c.CloneFromCheckpoint(cmd.Context(), args[0], fromCheckpoint, args[1], args[2]); err != nil {
+					return err
+				}
+				fmt.Printf("cloned %s@%s to %s at %s\n", args[0], fromCheckpoint, args[1], args[2])
+				return nil
+			}
+
 			sock, err := socketFromMountpoint(args[0])
 			if err != nil {
 				return err
@@ -327,6 +404,8 @@ func cloneCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&fromCheckpoint, "from-checkpoint", "", "clone from a checkpoint ID instead of a live volume")
+	return cmd
 }
 
 func statusCmd() *cobra.Command {
@@ -420,6 +499,7 @@ func deviceCmd() *cobra.Command {
 		deviceAttachCmd(),
 		deviceDetachCmd(),
 		deviceSnapshotCmd(),
+		deviceCheckpointCmd(),
 		deviceCloneCmd(),
 		deviceDDCmd(),
 		deviceFlushCmd(),
@@ -474,9 +554,11 @@ func deviceDetachCmd() *cobra.Command {
 
 func deviceSnapshotCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "snapshot <volume> <name>",
-		Short: "Snapshot a volume device",
-		Args:  cobra.ExactArgs(2),
+		Use:        "snapshot <volume> <name>",
+		Short:      "Snapshot a volume device (deprecated: use checkpoint)",
+		Hidden:     true,
+		Deprecated: "use 'device checkpoint' instead",
+		Args:       cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := resolveClient()
 			if err != nil {
@@ -486,6 +568,26 @@ func deviceSnapshotCmd() *cobra.Command {
 				return err
 			}
 			fmt.Printf("snapshot %q created\n", args[1])
+			return nil
+		},
+	}
+}
+
+func deviceCheckpointCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "checkpoint <volume>",
+		Short: "Checkpoint a volume device",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
+			cpID, err := c.DeviceCheckpoint(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("checkpoint %s created\n", cpID)
 			return nil
 		},
 	}
@@ -892,6 +994,10 @@ func migrateCmd() *cobra.Command {
 				return fmt.Errorf("list volumes: %w", err)
 			}
 			for _, obj := range objects {
+				// Only process index.json files (volume refs).
+				if !strings.HasSuffix(obj.Key, "/index.json") || strings.Contains(obj.Key, "/checkpoints/") {
+					continue
+				}
 				raw, etag, err := loophole.ReadBytes(ctx, volRefs, obj.Key)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  skip %s: %v\n", obj.Key, err)

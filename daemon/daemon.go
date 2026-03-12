@@ -49,7 +49,8 @@ type Daemon struct {
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
 
-	ptyMgr *ptyManager // manages midterm-backed PTY sessions
+	ptyMgr         *ptyManager // manages midterm-backed PTY sessions
+	sandboxRuntime SandboxRuntime
 }
 
 // Backend returns the underlying fsbackend.Service.
@@ -224,6 +225,21 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		ptyMgr:     newPtyManager(),
 	}
 
+	d.sandboxRuntime, err = newSandboxRuntime(d)
+	if err != nil {
+		if d.nbdLn != nil {
+			_ = d.nbdLn.Close()
+		}
+		if d.ln != nil {
+			_ = d.ln.Close()
+		}
+		if d.diskCache != nil {
+			_ = d.diskCache.Close()
+		}
+		return nil, err
+	}
+	slog.Info("sandbox runtime selected", "configured_mode", d.inst.SandboxMode, "debug", d.sandboxDebugInfo())
+
 	// Always start an NBD server for db commands (requires a working backend).
 	if d.backend != nil {
 		nbdSock := inst.NBDSocket
@@ -296,6 +312,13 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		slog.Info("shutdown: start")
 		slog.Info("shutdown: killing PTY sessions")
 		d.ptyMgr.killAll()
+
+		if closer, ok := d.sandboxRuntime.(sandboxRuntimeCloser); ok {
+			slog.Info("shutdown: closing sandbox runtime")
+			if err := closer.Close(context.Background()); err != nil {
+				slog.Warn("shutdown: sandbox runtime close error", "error", err)
+			}
+		}
 
 		if d.backend != nil {
 			slog.Info("shutdown: closing backend (flush volumes, release leases)")
@@ -374,6 +397,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /device/attach", d.handleDeviceAttach)
 	mux.HandleFunc("POST /device/detach", d.handleDeviceDetach)
 	mux.HandleFunc("POST /device/snapshot", d.handleDeviceSnapshot)
+	mux.HandleFunc("POST /device/checkpoint", d.handleDeviceCheckpoint)
 	mux.HandleFunc("POST /device/clone", d.handleDeviceClone)
 	mux.HandleFunc("POST /device/dd/write", d.handleDeviceDDWrite)
 	mux.HandleFunc("GET /device/dd/read", d.handleDeviceDDRead)
@@ -388,7 +412,10 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /snapshot", d.handleSnapshot)
+	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)
+	mux.HandleFunc("POST /clone-from-checkpoint", d.handleCloneFromCheckpoint)
+	mux.HandleFunc("GET /checkpoints", d.handleListCheckpoints)
 	registerVolumeCmds(mux, d)
 	mux.HandleFunc("GET /file", d.handleFile)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {
@@ -409,6 +436,10 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /sandbox/pty/{id}/resize", d.handlePTYResize)
 	mux.HandleFunc("DELETE /sandbox/pty/{id}", d.handlePTYKill)
 	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
+	mux.HandleFunc("POST /sandbox/vm/snapshot", d.handleVMSnapshot)
+	mux.HandleFunc("POST /sandbox/vm/restore", d.handleVMRestore)
+	mux.HandleFunc("GET /sandbox/runtime", d.handleSandboxRuntime)
+	mux.HandleFunc("GET /sandbox/log", d.handleSandboxLog)
 	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)
 	mux.HandleFunc("GET /sandbox/stat", d.handleStat)
 

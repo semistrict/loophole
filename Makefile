@@ -1,4 +1,4 @@
-.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-inprocess e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4 libloophole.so libloophole.a
+.PHONY: build install check fmt test test-lwext4-c podman deps test-containerstorage test-containerstorage-nbd e2e e2e-fuse e2e-nbd e2e-testnbdtcp e2e-lwext4fuse e2e-inprocess e2e-sqlite bench-fuse liblwext4 liblwext4-wasm clean-lwext4 wasm wasm-lwext4 libloophole.so libloophole.a cf-demo-bin cf-demo-control-bin cf-demo-guest-agent-bin cf-demo-firecracker-src cf-demo-assets
 
 .DEFAULT_GOAL := loophole
 
@@ -119,6 +119,63 @@ podman:
 # Build linux/amd64 binary for cf-demo container (no CGo, no lwext4/sqlite)
 cf-demo-bin:
 	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags "nosqlite nolwext4" -o cf-demo/bin/loophole ./cmd/loophole
+
+# Build linux/amd64 stable control plane for cf-demo container.
+cf-demo-control-bin:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o cf-demo/bin/container-control ./cmd/container-control
+
+# Build linux/amd64 guest agent for Firecracker guests.
+cf-demo-guest-agent-bin:
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o cf-demo/bin/loophole-guest-agent ./cmd/loophole-guest-agent
+
+CF_DEMO_SRC_DIR := cf-demo/build/loophole-src
+CF_DEMO_FIRECRACKER_ROOT_FILES := Makefile go.mod go.sum go.work go.work.sum
+CF_DEMO_FIRECRACKER_ROOT_DIRS := \
+	capi \
+	daemon \
+	filecmd \
+	fsbackend \
+	fuseblockdev \
+	fuselwext4 \
+	internal \
+	linuxutil \
+	lwext4 \
+	metrics \
+	mmap \
+	nbdserve \
+	nbdvm \
+	snapshotter \
+	sqlitevfs \
+	storage2
+CF_DEMO_FIRECRACKER_THIRD_PARTY_DIRS := \
+	third_party/bbolt \
+	third_party/compress \
+	third_party/firecracker \
+	third_party/go-fuse \
+	third_party/go-sqlite3 \
+	third_party/lwext4 \
+	third_party/merovius-nbd \
+	third_party/prometheus-client
+
+cf-demo-firecracker-src:
+	tmpdir=$$(mktemp -d /tmp/loophole-cf-demo-src.XXXXXX) && \
+	stagedir="$$tmpdir/loophole-src" && \
+	mkdir -p "$$stagedir" && \
+	{ \
+		printf '%s\n' $(CF_DEMO_FIRECRACKER_ROOT_FILES); \
+		find . -maxdepth 1 -type f -name '*.go' -print | sed 's#^\\./##'; \
+		printf '%s\n' $(CF_DEMO_FIRECRACKER_ROOT_DIRS); \
+		printf '%s\n' $(CF_DEMO_FIRECRACKER_THIRD_PARTY_DIRS); \
+	} | while IFS= read -r path; do \
+		[ -e "$$path" ] || continue; \
+		printf '%s\0' "$$path"; \
+	done | tar --null -T - -cf - | tar -C "$$stagedir" -xf - && \
+	rm -rf $(CF_DEMO_SRC_DIR) && \
+	mkdir -p $$(dirname $(CF_DEMO_SRC_DIR)) && \
+	mv "$$stagedir" $(CF_DEMO_SRC_DIR) && \
+	rmdir "$$tmpdir"
+
+cf-demo-assets: cf-demo-control-bin
 
 # Build linux/amd64 binary for Fly test machine
 fly-bin:

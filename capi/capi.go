@@ -9,6 +9,12 @@
 package main
 
 // #include <stdint.h>
+//
+// typedef struct {
+//     uint64_t offset;
+//     const void *buf;
+//     uint32_t count;
+// } loophole_write_range;
 import "C"
 import (
 	"context"
@@ -230,6 +236,34 @@ func loophole_write(handle C.int64_t, buf unsafe.Pointer, offset C.uint64_t, cou
 		return -2
 	}
 	return C.int32_t(count)
+}
+
+// loophole_write_direct writes page ranges through the direct writeback path,
+// bypassing the memtable. The volume must be in direct writeback mode
+// (i.e. mmap'd). Each range's offset must be page-aligned and count must be
+// a positive multiple of 4096. All ranges are committed in a single operation.
+// Returns 0 on success, negative on error.
+//
+//export loophole_write_direct
+func loophole_write_direct(handle C.int64_t, ranges *C.loophole_write_range, numRanges C.uint32_t) C.int32_t {
+	vol := loadHandle(int64(handle))
+	if vol == nil {
+		return -1
+	}
+	n := int(numRanges)
+	cRanges := unsafe.Slice(ranges, n)
+	pages := make([]loophole.DirectPage, n)
+	for i := range n {
+		pages[i] = loophole.DirectPage{
+			Offset: uint64(cRanges[i].offset),
+			Data:   unsafe.Slice((*byte)(cRanges[i].buf), int(cRanges[i].count)),
+		}
+	}
+	if err := vol.WritePagesDirect(pages); err != nil {
+		slog.Error("loophole_write_direct failed", "numRanges", n, "error", err)
+		return -2
+	}
+	return 0
 }
 
 // loophole_flush flushes the volume. Returns 0 on success, negative on error.

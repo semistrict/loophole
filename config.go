@@ -27,6 +27,7 @@ type Profile struct {
 	NBDSocket         string `toml:"nbd_socket"`
 	SnapshotterSocket string `toml:"snapshotter_socket"`
 	LogLevel          string `toml:"log_level"`
+	SandboxMode       string `toml:"sandbox_mode"`
 	LocalDir          string `toml:"local_dir"`
 	DaemonURL         string `toml:"daemon_url"` // remote daemon base URL (e.g. https://cf-demo.ramon3525.workers.dev)
 }
@@ -93,6 +94,16 @@ func (c *Config) Resolve(name string) (Instance, error) {
 		NBDSocket:         p.NBDSocket,
 		SnapshotterSocket: p.SnapshotterSocket,
 		LogLevel:          p.LogLevel,
+		SandboxMode:       firstNonEmpty(p.SandboxMode, DefaultSandboxMode()),
 		DaemonURL:         p.DaemonURL,
 	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }

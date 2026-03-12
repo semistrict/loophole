@@ -119,6 +119,19 @@ func (c *Client) ChrootSnapshot(ctx context.Context, name string) error {
 	return err
 }
 
+// ChrootCheckpoint creates a checkpoint (chroot socket: POST /checkpoint).
+func (c *Client) ChrootCheckpoint(ctx context.Context) (string, error) {
+	resp, err := c.post(ctx, "/checkpoint")
+	if err != nil {
+		return "", err
+	}
+	var result struct{ Checkpoint string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Checkpoint, nil
+}
+
 // ChrootClone clones the volume (chroot socket: POST /clone).
 // Returns the mountpoint where the clone was mounted.
 func (c *Client) ChrootClone(ctx context.Context, clone string) (string, error) {
@@ -233,6 +246,56 @@ func (c *Client) Freeze(ctx context.Context, volume string) error {
 func (c *Client) Snapshot(ctx context.Context, mountpoint, name string) error {
 	_, err := c.post(ctx, "/snapshot", "mountpoint", mountpoint, "name", name)
 	return err
+}
+
+// Checkpoint creates a checkpoint and returns the checkpoint ID (timestamp).
+func (c *Client) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
+	resp, err := c.post(ctx, "/checkpoint", "mountpoint", mountpoint)
+	if err != nil {
+		return "", err
+	}
+	var result struct{ Checkpoint string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Checkpoint, nil
+}
+
+// DeviceCheckpoint creates a checkpoint at the device level.
+func (c *Client) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
+	resp, err := c.post(ctx, "/device/checkpoint", "volume", volume)
+	if err != nil {
+		return "", err
+	}
+	var result struct{ Checkpoint string }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return "", err
+	}
+	return result.Checkpoint, nil
+}
+
+// CloneFromCheckpoint creates a clone from a checkpoint and mounts it.
+func (c *Client) CloneFromCheckpoint(ctx context.Context, volume, checkpoint, clone, cloneMountpoint string) error {
+	_, err := c.post(ctx, "/clone-from-checkpoint", map[string]string{
+		"volume":           volume,
+		"checkpoint":       checkpoint,
+		"clone":            clone,
+		"clone_mountpoint": cloneMountpoint,
+	})
+	return err
+}
+
+// ListCheckpoints returns all checkpoints for a volume.
+func (c *Client) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
+	resp, err := c.get(ctx, "/checkpoints?volume="+volume)
+	if err != nil {
+		return nil, err
+	}
+	var result struct{ Checkpoints []loophole.CheckpointInfo }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Checkpoints, nil
 }
 
 // DeviceAttach opens a volume and returns the FUSE device path.

@@ -186,10 +186,8 @@ func (mr *MappedRegion) close() error {
 	}
 
 	// Release volume reference.
-	if mr.direct {
-		if err := mr.vol.DisableDirectWriteback(); err != nil {
-			errs = append(errs, fmt.Errorf("disable direct writeback: %w", err))
-		}
+	if err := mr.vol.DisableDirectWriteback(); err != nil {
+		errs = append(errs, fmt.Errorf("disable direct writeback: %w", err))
 	}
 	if err := mr.vol.ReleaseRef(); err != nil {
 		errs = append(errs, fmt.Errorf("ReleaseRef: %w", err))
@@ -529,12 +527,21 @@ func MapVolume(vol loophole.Volume, offset, size uint64, opts ...Option) (*Mappe
 		return nil, err
 	}
 
+	slog.Info("mmap: MapVolume initialized",
+		"backend", string(mr.backend),
+		"size", size,
+		"pages", size/pageSize,
+		"maxResident", cfg.maxResidentPages,
+		"direct", true,
+		"addr", fmt.Sprintf("%p", unsafe.Pointer(addr)),
+	)
+
+	if err := vol.EnableDirectWriteback(); err != nil {
+		util.SafeClose(mr, "mmap: close after direct writeback init failure")
+		return nil, fmt.Errorf("mmap: enable direct writeback: %w", err)
+	}
+	directEnabled = true
 	if mr.backend != BackendMissing {
-		if err := vol.EnableDirectWriteback(); err != nil {
-			util.SafeClose(mr, "mmap: close after direct writeback init failure")
-			return nil, fmt.Errorf("mmap: enable direct writeback: %w", err)
-		}
-		directEnabled = true
 		mr.direct = true
 	}
 

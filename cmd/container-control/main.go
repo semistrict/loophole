@@ -1,0 +1,907 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/semistrict/loophole/internal/util"
+)
+
+const controlSecretHeader = "X-Control-Secret"
+
+const (
+	wsStreamStdout byte = 1
+	wsStreamStderr byte = 2
+)
+
+type wsExecInputControl struct {
+	Type   string `json:"type"`
+	Signal string `json:"signal,omitempty"`
+}
+
+type wsExecOutputControl struct {
+	Type     string `json:"type"`
+	ExitCode int    `json:"exitCode,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func main() {
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "bg-exec":
+			if err := clientBGExec(os.Args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		case "serve":
+			// Explicit serve mode — fall through to run().
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+		}
+	}
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// clientBGExec starts a background command on a remote container-control server,
+// polls for completion, and prints the output. Exits with the remote command's exit code.
+//
+// Usage: container-control bg-exec --url URL --secret SECRET [--poll INTERVAL] -- cmd arg1 arg2 ...
+func clientBGExec(args []string) error {
+	var baseURL, secret, pollInterval string
+	var cmdArgv []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--url":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--url requires a value")
+			}
+			baseURL = args[i]
+		case "--secret":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--secret requires a value")
+			}
+			secret = args[i]
+		case "--poll":
+			i++
+			if i >= len(args) {
+				return fmt.Errorf("--poll requires a value")
+			}
+			pollInterval = args[i]
+		case "--":
+			cmdArgv = args[i+1:]
+			i = len(args)
+		default:
+			// First non-flag arg starts the command.
+			cmdArgv = args[i:]
+			i = len(args)
+		}
+	}
+
+	if baseURL == "" {
+		baseURL = os.Getenv("CONTROL_URL")
+	}
+	if secret == "" {
+		secret = os.Getenv("CONTROL_SECRET")
+	}
+	if baseURL == "" {
+		return fmt.Errorf("--url or CONTROL_URL is required")
+	}
+	if secret == "" {
+		return fmt.Errorf("--secret or CONTROL_SECRET is required")
+	}
+	if len(cmdArgv) == 0 {
+		return fmt.Errorf("no command specified")
+	}
+
+	poll := 2 * time.Second
+	if pollInterval != "" {
+		d, err := time.ParseDuration(pollInterval)
+		if err != nil {
+			return fmt.Errorf("invalid --poll value: %w", err)
+		}
+		poll = d
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+
+	// Start the job.
+	argvJSON, err := json.Marshal(cmdArgv)
+	if err != nil {
+		return fmt.Errorf("marshal argv: %w", err)
+	}
+	// If the base URL already ends with a control path segment (e.g. worker proxy URL
+	// like .../debug/control/{id}), don't add another /control/ prefix.
+	pathPrefix := "/control/bg-exec"
+	if strings.Contains(baseURL, "/control/") {
+		pathPrefix = "/bg-exec"
+	}
+	startURL := fmt.Sprintf("%s%s?argv=%s", baseURL, pathPrefix, url.QueryEscape(string(argvJSON)))
+	req, err := http.NewRequest(http.MethodPost, startURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(controlSecretHeader, secret)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("start bg-exec: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("start bg-exec: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var startResp struct {
+		ID  string `json:"id"`
+		PID int    `json:"pid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&startResp); err != nil {
+		return fmt.Errorf("decode start response: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "bg-exec: started job %s (pid %d)\n", startResp.ID, startResp.PID)
+
+	// Poll for completion.
+	pollPrefix := "/control/bg-exec"
+	if strings.Contains(baseURL, "/control/") {
+		pollPrefix = "/bg-exec"
+	}
+	pollURL := fmt.Sprintf("%s%s/%s", baseURL, pollPrefix, startResp.ID)
+	for {
+		time.Sleep(poll)
+
+		req, err := http.NewRequest(http.MethodGet, pollURL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set(controlSecretHeader, secret)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "bg-exec: poll error: %v\n", err)
+			continue
+		}
+
+		var pollResp struct {
+			Done     bool   `json:"done"`
+			ExitCode int    `json:"exitCode"`
+			Output   string `json:"output"`
+			Error    string `json:"error"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&pollResp); err != nil {
+			_ = resp.Body.Close()
+			fmt.Fprintf(os.Stderr, "bg-exec: decode poll error: %v\n", err)
+			continue
+		}
+		_ = resp.Body.Close()
+
+		if !pollResp.Done {
+			continue
+		}
+
+		// Done — print output and exit with the remote exit code.
+		fmt.Print(pollResp.Output)
+		if pollResp.Error != "" {
+			fmt.Fprintf(os.Stderr, "bg-exec: error: %s\n", pollResp.Error)
+		}
+		os.Exit(pollResp.ExitCode)
+	}
+}
+
+func run() error {
+	listenAddr := envOr("CONTROL_LISTEN_ADDR", ":8080")
+	secret := os.Getenv("CONTROL_SECRET")
+	if secret == "" {
+		return fmt.Errorf("CONTROL_SECRET is required")
+	}
+
+	proxyTarget := os.Getenv("CONTROL_PROXY_TARGET")
+	var proxy *httputil.ReverseProxy
+	if proxyTarget != "" {
+		if strings.HasPrefix(proxyTarget, "unix://") {
+			sockPath := strings.TrimPrefix(proxyTarget, "unix://")
+			proxy = &httputil.ReverseProxy{
+				Director: func(req *http.Request) {
+					req.URL.Scheme = "http"
+					req.URL.Host = "localhost"
+				},
+				Transport: &http.Transport{
+					DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+						return net.Dial("unix", sockPath)
+					},
+				},
+			}
+		} else {
+			targetURL, err := url.Parse(proxyTarget)
+			if err != nil {
+				return fmt.Errorf("parse CONTROL_PROXY_TARGET: %w", err)
+			}
+			proxy = httputil.NewSingleHostReverseProxy(targetURL)
+		}
+	}
+
+	go reapChildren()
+
+	srv := &controlServer{
+		secret:    secret,
+		container: envOrMany([]string{"CONTROL_CONTAINER_ID", "CONTAINER_DO_ID"}, "unknown"),
+		proxy:     proxy,
+		logger:    log.Default(),
+		bgJobs:    make(map[string]*bgJob),
+	}
+
+	s := &http.Server{
+		Addr:              listenAddr,
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	log.Printf("container-control listening on %s proxy=%q container=%s", listenAddr, proxyTarget, srv.container)
+	return s.ListenAndServe()
+}
+
+type bgJob struct {
+	id       string
+	cmd      *exec.Cmd
+	outFile  *os.File
+	doneCh   chan struct{}
+	exitCode int
+	execErr  string
+}
+
+type controlServer struct {
+	secret    string
+	container string
+	proxyMu   sync.RWMutex
+	proxy     *httputil.ReverseProxy
+	logger    *log.Logger
+
+	bgMu   sync.Mutex
+	bgJobs map[string]*bgJob
+	bgSeq  int
+}
+
+func (s *controlServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.URL.Path, "/control/") {
+		if r.Header.Get(controlSecretHeader) != s.secret {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.handleControl(w, r)
+		return
+	}
+
+	s.proxyMu.RLock()
+	proxy := s.proxy
+	s.proxyMu.RUnlock()
+	if proxy == nil {
+		http.Error(w, "proxy target not configured", http.StatusBadGateway)
+		return
+	}
+	proxy.ServeHTTP(w, r)
+}
+
+func (s *controlServer) handleControl(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/control/status":
+		s.handleStatus(w, r)
+	case "/control/exec":
+		s.handleExec(w, r)
+	case "/control/upload":
+		s.handleUpload(w, r)
+	case "/control/ws-exec", "/control/rsync":
+		s.handleWSExec(w, r)
+	case "/control/bg-exec":
+		s.handleBGExec(w, r)
+	case "/control/set-proxy":
+		s.handleSetProxy(w, r)
+	default:
+		if strings.HasPrefix(r.URL.Path, "/control/bg-exec/") {
+			s.handleBGExecJob(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}
+}
+
+func (s *controlServer) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	hostname, _ := os.Hostname()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"container": s.container,
+		"hostname":  hostname,
+		"pid":       os.Getpid(),
+	})
+}
+
+func (s *controlServer) handleExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	cmdText := r.URL.Query().Get("cmd")
+	if cmdText == "" {
+		http.Error(w, "missing cmd", http.StatusBadRequest)
+		return
+	}
+	cwd := r.URL.Query().Get("cwd")
+	timeout := 5 * time.Minute
+	if timeoutText := r.URL.Query().Get("timeout"); timeoutText != "" {
+		d, err := time.ParseDuration(timeoutText)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid timeout: %v", err), http.StatusBadRequest)
+			return
+		}
+		timeout = d
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-lc", cmdText)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	stdout, stderr, exitCode, err := runCommand(cmd)
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"exitCode": exitCode,
+		"stdout":   stdout,
+		"stderr":   stderr,
+		"timedOut": errors.Is(ctx.Err(), context.DeadlineExceeded),
+	})
+}
+
+func (s *controlServer) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	dstPath := r.URL.Query().Get("path")
+	if dstPath == "" {
+		http.Error(w, "missing path", http.StatusBadRequest)
+		return
+	}
+
+	mode := os.FileMode(0o644)
+	if modeText := r.URL.Query().Get("mode"); modeText != "" {
+		parsed, err := strconv.ParseUint(modeText, 8, 32)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid mode: %v", err), http.StatusBadRequest)
+			return
+		}
+		mode = os.FileMode(parsed)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		http.Error(w, fmt.Sprintf("mkdir parent: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	tmpFile, err := os.CreateTemp(filepath.Dir(dstPath), "."+filepath.Base(dstPath)+".tmp-*")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("create temp file: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tmpPath := tmpFile.Name()
+	defer func() {
+		if tmpFile != nil {
+			util.SafeClose(tmpFile, "close temp upload file")
+		}
+		if _, err := os.Stat(tmpPath); err == nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	written, err := io.Copy(tmpFile, r.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("write upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := tmpFile.Chmod(mode); err != nil {
+		http.Error(w, fmt.Sprintf("chmod temp upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := tmpFile.Close(); err != nil {
+		http.Error(w, fmt.Sprintf("close temp upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tmpFile = nil
+	if err := os.Rename(tmpPath, dstPath); err != nil {
+		http.Error(w, fmt.Sprintf("rename upload: %v", err), http.StatusInternalServerError)
+		return
+	}
+	tmpPath = ""
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":    true,
+		"path":  dstPath,
+		"bytes": written,
+		"mode":  fmt.Sprintf("%#o", mode),
+	})
+}
+
+func (s *controlServer) handleSetProxy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		http.Error(w, "missing target query parameter (e.g. unix:///path/to.sock or http://host:port)", http.StatusBadRequest)
+		return
+	}
+
+	var proxy *httputil.ReverseProxy
+	if strings.HasPrefix(target, "unix://") {
+		sockPath := strings.TrimPrefix(target, "unix://")
+		proxy = &httputil.ReverseProxy{
+			Director: func(req *http.Request) {
+				req.URL.Scheme = "http"
+				req.URL.Host = "localhost"
+			},
+			Transport: &http.Transport{
+				DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
+					return net.Dial("unix", sockPath)
+				},
+			},
+		}
+	} else {
+		targetURL, err := url.Parse(target)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("invalid target URL: %v", err), http.StatusBadRequest)
+			return
+		}
+		proxy = httputil.NewSingleHostReverseProxy(targetURL)
+	}
+
+	s.proxyMu.Lock()
+	s.proxy = proxy
+	s.proxyMu.Unlock()
+
+	s.logger.Printf("proxy target set to %s", target)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proxy": target})
+}
+
+func (s *controlServer) handleBGExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	argv := r.URL.Query()["argv"]
+	if len(argv) == 0 {
+		http.Error(w, "missing argv query parameter (JSON array or repeated argv=...)", http.StatusBadRequest)
+		return
+	}
+	// If a single argv param is provided and looks like a JSON array, parse it.
+	if len(argv) == 1 && strings.HasPrefix(argv[0], "[") {
+		var parsed []string
+		if err := json.Unmarshal([]byte(argv[0]), &parsed); err == nil && len(parsed) > 0 {
+			argv = parsed
+		}
+	}
+	if len(argv) == 0 || argv[0] == "" {
+		http.Error(w, "empty argv", http.StatusBadRequest)
+		return
+	}
+
+	cwd := r.URL.Query().Get("cwd")
+
+	s.bgMu.Lock()
+	s.bgSeq++
+	id := fmt.Sprintf("bg-%d-%d", time.Now().Unix(), s.bgSeq)
+	s.bgMu.Unlock()
+
+	outFile, err := os.CreateTemp("", "bg-exec-*.log")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("create output file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	cmd.Env = os.Environ()
+	cmd.Stdout = outFile
+	cmd.Stderr = outFile
+
+	// Wire request body as stdin if present.
+	if r.Body != nil && r.ContentLength != 0 {
+		cmd.Stdin = r.Body
+	}
+
+	if err := cmd.Start(); err != nil {
+		util.SafeClose(outFile, "close bg-exec output after start failure")
+		_ = os.Remove(outFile.Name())
+		http.Error(w, fmt.Sprintf("start command: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	job := &bgJob{
+		id:      id,
+		cmd:     cmd,
+		outFile: outFile,
+		doneCh:  make(chan struct{}),
+	}
+
+	s.bgMu.Lock()
+	s.bgJobs[id] = job
+	s.bgMu.Unlock()
+
+	go func() {
+		defer close(job.doneCh)
+		waitErr := cmd.Wait()
+		util.SafeClose(outFile, "close bg-exec output file")
+		exitCode, execErr := processExit(waitErr)
+		job.exitCode = exitCode
+		if execErr != nil {
+			job.execErr = execErr.Error()
+		}
+	}()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":      id,
+		"pid":     cmd.Process.Pid,
+		"logFile": outFile.Name(),
+	})
+}
+
+func (s *controlServer) handleBGExecJob(w http.ResponseWriter, r *http.Request) {
+	// Parse /control/bg-exec/{id}[/kill]
+	rest := strings.TrimPrefix(r.URL.Path, "/control/bg-exec/")
+	parts := strings.SplitN(rest, "/", 2)
+	id := parts[0]
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+
+	s.bgMu.Lock()
+	job, ok := s.bgJobs[id]
+	s.bgMu.Unlock()
+
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such job", "id": id})
+		return
+	}
+
+	switch action {
+	case "kill":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if job.cmd.Process != nil {
+			_ = job.cmd.Process.Kill()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"id": id, "killed": true})
+
+	case "":
+		// GET: check status. If done, return output and reap.
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		select {
+		case <-job.doneCh:
+			// Done — read output, clean up, return everything.
+			output, err := os.ReadFile(job.outFile.Name())
+			if err != nil {
+				output = []byte(fmt.Sprintf("<read error: %v>", err))
+			}
+			_ = os.Remove(job.outFile.Name())
+
+			s.bgMu.Lock()
+			delete(s.bgJobs, id)
+			s.bgMu.Unlock()
+
+			resp := map[string]any{
+				"id":       id,
+				"done":     true,
+				"exitCode": job.exitCode,
+				"output":   string(output),
+			}
+			if job.execErr != "" {
+				resp["error"] = job.execErr
+			}
+			writeJSON(w, http.StatusOK, resp)
+
+		default:
+			// Still running.
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id":   id,
+				"done": false,
+				"pid":  pidOf(job.cmd),
+			})
+		}
+
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func pidOf(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil {
+		return 0
+	}
+	return cmd.Process.Pid
+}
+
+func (s *controlServer) handleWSExec(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if strings.ToLower(r.Header.Get("Upgrade")) != "websocket" {
+		http.Error(w, "websocket upgrade required", http.StatusUpgradeRequired)
+		return
+	}
+
+	args := r.URL.Query()["arg"]
+	if len(args) == 0 || args[0] == "" {
+		http.Error(w, "missing arg query parameter", http.StatusBadRequest)
+		return
+	}
+	cwd := r.URL.Query().Get("cwd")
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
+	cmd.Env = os.Environ()
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("stdin pipe: %v", err), http.StatusInternalServerError)
+		return
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		util.SafeClose(stdin, "close ws-exec stdin after stdout pipe failure")
+		http.Error(w, fmt.Sprintf("stdout pipe: %v", err), http.StatusInternalServerError)
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		util.SafeClose(stdin, "close ws-exec stdin after stderr pipe failure")
+		http.Error(w, fmt.Sprintf("stderr pipe: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		util.SafeClose(stdin, "close ws-exec stdin after start failure")
+		http.Error(w, fmt.Sprintf("start command: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(_ *http.Request) bool { return true },
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		cancel()
+		_ = cmd.Wait()
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	var wsMu sync.Mutex
+	writeWSJSON := func(payload wsExecOutputControl) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return conn.WriteJSON(payload)
+	}
+	writeWSStream := func(stream byte, data []byte) error {
+		frame := make([]byte, 1+len(data))
+		frame[0] = stream
+		copy(frame[1:], data)
+
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return conn.WriteMessage(websocket.BinaryMessage, frame)
+	}
+
+	var streams sync.WaitGroup
+	streams.Add(2)
+	go func() {
+		defer streams.Done()
+		streamPipeToWS(stdout, wsStreamStdout, writeWSStream, cancel)
+	}()
+	go func() {
+		defer streams.Done()
+		streamPipeToWS(stderr, wsStreamStderr, writeWSStream, cancel)
+	}()
+
+	stdinClosed := false
+	closeStdin := func() {
+		if !stdinClosed {
+			stdinClosed = true
+			util.SafeClose(stdin, "close ws-exec stdin")
+		}
+	}
+
+	go func() {
+		defer closeStdin()
+		for {
+			msgType, data, err := conn.ReadMessage()
+			if err != nil {
+				cancel()
+				return
+			}
+
+			switch msgType {
+			case websocket.BinaryMessage:
+				if _, err := stdin.Write(data); err != nil {
+					cancel()
+					return
+				}
+			case websocket.TextMessage:
+				var msg wsExecInputControl
+				if err := json.Unmarshal(data, &msg); err != nil {
+					cancel()
+					return
+				}
+				switch msg.Type {
+				case "stdinClose":
+					closeStdin()
+				case "signal":
+					if sig, err := parseSignal(msg.Signal); err == nil && cmd.Process != nil {
+						_ = cmd.Process.Signal(sig)
+					}
+				}
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	streams.Wait()
+
+	exitCode, execErr := processExit(waitErr)
+	if execErr != nil {
+		_ = writeWSJSON(wsExecOutputControl{
+			Type:  "exit",
+			Error: execErr.Error(),
+		})
+		return
+	}
+	_ = writeWSJSON(wsExecOutputControl{
+		Type:     "exit",
+		ExitCode: exitCode,
+	})
+}
+
+func streamPipeToWS(r io.Reader, stream byte, write func(byte, []byte) error, cancel context.CancelFunc) {
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			if writeErr := write(stream, buf[:n]); writeErr != nil {
+				cancel()
+				return
+			}
+		}
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				cancel()
+			}
+			return
+		}
+	}
+}
+
+func parseSignal(name string) (syscall.Signal, error) {
+	switch strings.ToUpper(name) {
+	case "INT", "SIGINT":
+		return syscall.SIGINT, nil
+	case "TERM", "SIGTERM":
+		return syscall.SIGTERM, nil
+	case "KILL", "SIGKILL":
+		return syscall.SIGKILL, nil
+	default:
+		return 0, fmt.Errorf("unsupported signal %q", name)
+	}
+}
+
+func processExit(err error) (int, error) {
+	if err == nil {
+		return 0, nil
+	}
+
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode(), nil
+	}
+	if errors.Is(err, context.Canceled) {
+		return 130, nil
+	}
+	return 0, err
+}
+
+func runCommand(cmd *exec.Cmd) (stdout string, stderr string, exitCode int, err error) {
+	var outBuf strings.Builder
+	var errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err = cmd.Run()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return outBuf.String(), errBuf.String(), exitErr.ExitCode(), nil
+		}
+		return "", "", 0, err
+	}
+	return outBuf.String(), errBuf.String(), 0, nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, payload any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envOrMany(keys []string, fallback string) string {
+	for _, key := range keys {
+		if value := os.Getenv(key); value != "" {
+			return value
+		}
+	}
+	return fallback
+}
+
+func reapChildren() {
+	for {
+		var status syscall.WaitStatus
+		_, err := syscall.Wait4(-1, &status, 0, nil)
+		if err != nil {
+			if errors.Is(err, syscall.ECHILD) {
+				time.Sleep(250 * time.Millisecond)
+				continue
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+}

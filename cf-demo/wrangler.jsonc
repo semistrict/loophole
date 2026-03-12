@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "cf-demo-2",
+	"name": "cf-demo-4",
 	"compatibility_date": "2025-09-02",
 	"compatibility_flags": [
 		"nodejs_compat"
@@ -8,6 +8,9 @@
 	"main": "src/server-entry.ts",
 	"observability": {
 		"enabled": true
+	},
+	"vars": {
+		"SANDBOX_MODE": "firecracker"
 	},
 	"containers": [
 		{

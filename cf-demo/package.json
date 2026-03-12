@@ -6,9 +6,9 @@
 		"#/*": "./src/*"
 	},
 	"scripts": {
-		"dev": "make -C .. cf-demo-bin && (node scripts/docker-fuse.mjs & DOCKER_HOST=unix:///tmp/docker-fuse.sock WRANGLER_DOCKER_BIN=./scripts/docker-no-proxy.mjs vite dev --port 7935; kill %1 2>/dev/null)",
+		"dev": "make -C .. cf-demo-assets && (node scripts/docker-fuse.mjs & DOCKER_HOST=unix:///tmp/docker-fuse.sock WRANGLER_DOCKER_BIN=./scripts/docker-no-proxy.mjs vite dev --port 7935; kill %1 2>/dev/null)",
 		"typecheck": "tsc --noEmit",
-		"build": "make -C .. cf-demo-bin && vite build && pnpm run typecheck",
+		"build": "make -C .. cf-demo-assets && vite build && pnpm run typecheck",
 		"preview": "pnpm run build && vite preview",
 		"test": "vitest run",
 		"deploy": "pnpm run build && wrangler deploy",

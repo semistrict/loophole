@@ -16,3 +16,5 @@ cmd/wasm/web/public/loophole.wasm
 *.prof
 *.test
 /loophole
+/container-control
+/loophole-guest-agent

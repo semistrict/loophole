@@ -846,18 +846,12 @@ func (ly *layer) WritePagesDirectL0(pages []loophole.DirectPage) error {
 		return nil
 	}
 
-	sorted := make([]loophole.DirectPage, len(pages))
-	copy(sorted, pages)
+	// Expand multi-page ranges into individual pages and validate.
+	sorted := expandDirectPages(pages)
 	sort.Slice(sorted, func(i, j int) bool {
 		return sorted[i].Offset < sorted[j].Offset
 	})
 	for i := range sorted {
-		if sorted[i].Offset%PageSize != 0 {
-			return fmt.Errorf("direct page offset %d is not page-aligned", sorted[i].Offset)
-		}
-		if len(sorted[i].Data) != PageSize {
-			return fmt.Errorf("direct page at offset %d has size %d, want %d", sorted[i].Offset, len(sorted[i].Data), PageSize)
-		}
 		if i > 0 && sorted[i-1].Offset == sorted[i].Offset {
 			return fmt.Errorf("duplicate direct page offset %d", sorted[i].Offset)
 		}
@@ -899,6 +893,32 @@ func (ly *layer) WritePagesDirectL0(pages []loophole.DirectPage) error {
 		}
 	}
 	return nil
+}
+
+// expandDirectPages splits multi-page DirectPage ranges into individual
+// single-page entries. Each input range must be page-aligned and a positive
+// multiple of PageSize.
+func expandDirectPages(pages []loophole.DirectPage) []loophole.DirectPage {
+	n := 0
+	for _, p := range pages {
+		n += len(p.Data) / PageSize
+	}
+	out := make([]loophole.DirectPage, 0, n)
+	for _, p := range pages {
+		if p.Offset%PageSize != 0 {
+			panic(fmt.Sprintf("direct page offset %d is not page-aligned", p.Offset))
+		}
+		if len(p.Data) == 0 || len(p.Data)%PageSize != 0 {
+			panic(fmt.Sprintf("direct page at offset %d has size %d, must be a positive multiple of %d", p.Offset, len(p.Data), PageSize))
+		}
+		for off := 0; off < len(p.Data); off += PageSize {
+			out = append(out, loophole.DirectPage{
+				Offset: p.Offset + uint64(off),
+				Data:   p.Data[off : off+PageSize],
+			})
+		}
+	}
+	return out
 }
 
 func (ly *layer) commitL0Blob(data []byte, l0entry l0Entry, cached []cachedL0Page, maxRetries int) error {

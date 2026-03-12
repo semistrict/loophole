@@ -1,14 +1,18 @@
 FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash coreutils fuse3 e2fsprogs ca-certificates \
+    ca-certificates \
+    curl \
+    iptables \
+    iproute2 \
+    python3 \
+    rsync \
+    squashfs-tools \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
 
-# cache-bust: midterm
-COPY bin/loophole /usr/local/bin/loophole
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY bin/container-control /usr/local/bin/container-control
 
 EXPOSE 8080
 
-ENTRYPOINT ["/entrypoint.sh"]
+ENTRYPOINT ["/usr/local/bin/container-control"]

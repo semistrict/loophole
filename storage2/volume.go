@@ -143,10 +143,7 @@ func (v *volume) FlushLocal() error {
 }
 
 func (v *volume) branch() (string, error) {
-	if v.directRefs > 0 {
-		return "", fmt.Errorf("volume %q has active direct writeback mappings", v.name)
-	}
-	// Flush everything to S3.
+	// Flush everything to S3 (includes any pending direct L0 blobs).
 	if !v.readOnly.Load() {
 		if err := v.layer.Flush(); err != nil {
 			return "", fmt.Errorf("flush for branch: %w", err)
@@ -219,6 +216,7 @@ func (v *volume) relayer() error {
 }
 
 func (v *volume) Snapshot(snapshotName string) error {
+	slog.Warn("deprecated: use Checkpoint() instead of Snapshot()")
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -240,12 +238,35 @@ func (v *volume) Snapshot(snapshotName string) error {
 	return nil
 }
 
+func (v *volume) Checkpoint() (string, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+
+	if v.readOnly.Load() {
+		return "", fmt.Errorf("cannot checkpoint read-only volume %q", v.name)
+	}
+
+	childID, err := v.branch()
+	if err != nil {
+		return "", err
+	}
+
+	ts, err := v.manager.putCheckpoint(context.Background(), v.name, childID)
+	if err != nil {
+		return "", fmt.Errorf("create checkpoint: %w", err)
+	}
+	return ts, nil
+}
+
 func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
+	slog.Info("volume: clone starting", "src", v.name, "dst", cloneName, "directRefs", v.directRefs)
+
 	childID, err := v.branch()
 	if err != nil {
+		slog.Error("volume: clone branch failed", "src", v.name, "dst", cloneName, "error", err)
 		return nil, err
 	}
 
@@ -255,6 +276,7 @@ func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
 		return nil, fmt.Errorf("create clone ref: %w", err)
 	}
 
+	slog.Info("volume: clone completed", "src", v.name, "dst", cloneName, "childID", childID)
 	return v.manager.OpenVolume(cloneName)
 }
 

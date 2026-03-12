@@ -3,6 +3,11 @@
 
 set -euo pipefail
 
+if [ "$(id -u)" = "0" ]; then
+    echo "ERROR: do not run as root. Use sudo only for individual commands that need it." >&2
+    exit 1
+fi
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 LOOPHOLE_SRC=$(cd "${SCRIPT_DIR}/.." && pwd)
 FIRECRACKER_SRC="${FIRECRACKER_SRC:-${LOOPHOLE_SRC}/third_party/firecracker}"
@@ -16,7 +21,7 @@ CLONE_TIMEOUT="${CLONE_TIMEOUT:-120}"
 PROMPT_TIMEOUT="${PROMPT_TIMEOUT:-30}"
 STABILITY_TIMEOUT="${STABILITY_TIMEOUT:-10}"
 
-FC_BIN="${WORK_DIR}/firecracker/build/cargo_target/debug/firecracker"
+FC_BIN="${FC_BIN:-${WORK_DIR}/firecracker/build/cargo_target/debug/firecracker}"
 FC_SOCK="${WORK_DIR}/fc.sock"
 CLONE1_SOCK="${WORK_DIR}/fc-clone-${CLONE1_ID}.sock"
 CLONE2_SOCK="${WORK_DIR}/fc-clone-${CLONE2_ID}.sock"
@@ -150,7 +155,7 @@ tmux set-option -g mouse on
 PANE_ORIG="${WINDOW_TARGET}.0"
 PANE_CLONE1="${WINDOW_TARGET}.1"
 
-DEMO_CMD="cd ${LOOPHOLE_SRC} && WORK_DIR=${WORK_DIR} FIRECRACKER_SRC=${FIRECRACKER_SRC} bash scripts/loophole-demo.sh"
+DEMO_CMD="cd ${LOOPHOLE_SRC} && WORK_DIR=${WORK_DIR} FIRECRACKER_SRC=${FIRECRACKER_SRC} FC_BIN=${FC_BIN} bash scripts/loophole-demo.sh"
 if [ "$SKIP_BUILD" = true ]; then
     DEMO_CMD="${DEMO_CMD} --skip-build"
 fi

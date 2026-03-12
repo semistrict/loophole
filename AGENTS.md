@@ -14,6 +14,8 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make test RUN=TestName` — run a specific test across all packages
 - `make e2e-inprocess` — run e2e tests in-process (no FUSE/NBD/root required, works on macOS)
 - `make e2e-inprocess RUN=TestName` — run a specific e2e test
+- Firecracker-specific e2e tests do **not** run natively on macOS; run them in the local Lima Linux VM instead:
+  `limactl shell fc bash -lc 'cd /Users/ramon/src/loophole && LOOPHOLE_RUN_FIRECRACKER_E2E=1 make e2e-inprocess RUN=TestE2E_FirecrackerCycledSnapshotRestore'`
 - E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e-fuse'`
 - Set `LOG_LEVEL=debug` to enable slog debug output in e2e tests
 
@@ -86,9 +88,29 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 ## Deploying to Cloudflare
 
 - `make cf-demo-bin` — cross-compile linux/amd64 binary (nosqlite nolwext4) to `cf-demo/bin/loophole`
+- `make cf-demo-dev-lima` — run `cf-demo` locally inside the `fc` Lima VM with `wrangler dev`
+- `make cf-demo-smoke-lima` — hit the local `/debug` endpoints in Lima and verify Firecracker `exec` with `echo hello` and `/etc/os-release`
 - **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
 - Deployed URL: `https://cf-demo.ramon3525.workers.dev`
 - **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. Give it a minute or two after deploy. Verify the new binary by SSH-ing in and running `md5sum /usr/bin/loophole`.
+
+### Local CF workflow in Lima
+
+Use this loop instead of redeploying to Cloudflare while iterating on the container/daemon path:
+
+1. Start the local Worker + container runtime:
+   ```
+   make cf-demo-dev-lima
+   ```
+2. In another shell, run the smoke test:
+   ```
+   make cf-demo-smoke-lima
+   ```
+
+Overrides:
+- `LIMA_VM=<name>` — use a different Lima VM than `fc`
+- `CF_DEMO_BASE_URL=http://127.0.0.1:7935` — point smoke tests at a different local port
+- `CF_DEMO_SMOKE_VOLUME=<volume>` — use a different sandbox volume
 
 ### CF architecture
 

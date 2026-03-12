@@ -391,19 +391,25 @@ func LoopDetachPath(devPath string) error {
 		return fmt.Errorf("LOOP_CLR_FD %s: %w", devPath, err)
 	}
 
-	// Poll sysfs until backing_file clears (up to 100ms).
+	// Poll sysfs until backing_file clears.
 	// LOOP_CLR_FD may clear synchronously or set AUTOCLEAR if another
-	// process (e.g. host udev) has the device open.
+	// process still has the device open. In that case the loop device is
+	// not fully detached yet, and callers that depend on the backing file
+	// being closed must not proceed as though cleanup is complete.
 	base := devPath[len("/dev/"):]
 	sysPath := fmt.Sprintf("/sys/block/%s/loop/backing_file", base)
-	for range 100 {
+	for range 5_000 {
 		data, err := os.ReadFile(sysPath)
 		if err != nil || len(strings.TrimSpace(string(data))) == 0 {
 			return nil
 		}
 		_ = unix.Nanosleep(&unix.Timespec{Nsec: 1_000_000}, nil) // 1ms
 	}
-	return nil
+	data, err := os.ReadFile(sysPath)
+	if err != nil {
+		return fmt.Errorf("wait for %s detach: %w", devPath, err)
+	}
+	return fmt.Errorf("loop device %s still attached after detach request (backing_file=%q)", devPath, strings.TrimSpace(string(data)))
 }
 
 // Kernel filesystem format/mount helpers.

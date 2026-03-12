@@ -38,6 +38,7 @@ var volumeCommands = []volCmd{
 	{method: "POST", path: "/flush", handler: cmdFlush},
 	{method: "POST", path: "/compact", handler: cmdCompact},
 	{method: "POST", path: "/snapshot", handler: cmdSnapshot, chrootOnly: true},
+	{method: "POST", path: "/checkpoint", handler: cmdCheckpoint, chrootOnly: true},
 	{method: "POST", path: "/clone", handler: cmdClone, chrootOnly: true},
 }
 
@@ -93,6 +94,18 @@ func cmdSnapshot(a volCmdArgs) (any, error) {
 		return nil, fmt.Errorf("snapshot: %w", err)
 	}
 	return map[string]string{"status": "ok"}, nil
+}
+
+func cmdCheckpoint(a volCmdArgs) (any, error) {
+	if a.mountpoint == "" {
+		return nil, fmt.Errorf("mountpoint is required for checkpoint")
+	}
+	slog.Info("checkpoint", "mountpoint", a.mountpoint)
+	cpID, err := a.backend.Checkpoint(context.Background(), a.mountpoint)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint: %w", err)
+	}
+	return map[string]string{"status": "ok", "checkpoint": cpID}, nil
 }
 
 func cmdClone(a volCmdArgs) (any, error) {

@@ -16,6 +16,8 @@ export class SandboxContainer extends Container<Env> {
       AXIOM_TOKEN: env.AXIOM_TOKEN,
       AXIOM_DATASET: env.AXIOM_DATASET,
       CONTAINER_DO_ID: ctx.id.toString(),
+      CONTROL_SECRET: env.CONTROL_SECRET,
+      SANDBOX_MODE: env.SANDBOX_MODE,
     }
   }
 

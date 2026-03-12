@@ -15,6 +15,7 @@ type Instance struct {
 	NBDSocket         string // if set, auto-start NBD server on this path
 	SnapshotterSocket string // if set, start gRPC snapshotter on this path
 	LogLevel          string // "debug", "info", "warn", "error"; empty = "info"
+	SandboxMode       string // sandbox runtime for /sandbox/exec; empty = DefaultSandboxMode()
 	DaemonURL         string // remote daemon base URL (e.g. https://cf-demo.example.com)
 }
 

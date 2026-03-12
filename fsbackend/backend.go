@@ -89,7 +89,9 @@ type Service interface {
 	Mount(ctx context.Context, volume, mountpoint string) error
 	Unmount(ctx context.Context, mountpoint string) error
 	Snapshot(ctx context.Context, mountpoint, name string) error
+	Checkpoint(ctx context.Context, mountpoint string) (string, error)
 	Clone(ctx context.Context, mountpoint, cloneName, cloneMountpoint string) error
+	CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error
 	MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error
 	FreezeVolume(ctx context.Context, volume string, compact bool) error
 	Thaw(ctx context.Context, mountpoint string) error
@@ -99,6 +101,7 @@ type Service interface {
 	DeviceAttach(ctx context.Context, volume string) (string, error)
 	DeviceDetach(ctx context.Context, volume string) error
 	DeviceSnapshot(ctx context.Context, volume, snapshot string) error
+	DeviceCheckpoint(ctx context.Context, volume string) (string, error)
 	DeviceClone(ctx context.Context, volume, clone string) (string, error)
 	DevicePath(volume string) (string, error)
 	// OnBeforeUnmount registers a callback that fires (LIFO) before the
@@ -231,11 +234,21 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 	if volType == "" {
 		panic("fsbackend: CreateParams.Type must be set")
 	}
+	p.Type = volType
+
+	if p.NoFormat {
+		// Block-level import (e.g. device dd): just allocate storage, no driver needed.
+		if _, err := b.vm.NewVolume(p); err != nil {
+			return err
+		}
+		slog.Debug("backend: create done (no format)", "volume", p.Volume)
+		return nil
+	}
+
 	driver, err := b.driverFor(volType)
 	if err != nil {
 		return err
 	}
-	p.Type = volType
 	vol, err := b.vm.NewVolume(p)
 	if err != nil {
 		return err
@@ -244,17 +257,15 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 		slog.Debug("backend: registering volume", "volume", p.Volume)
 		vr.RegisterVolume(p.Volume, vol)
 	}
-	if !p.NoFormat {
-		slog.Debug("backend: formatting volume", "volume", p.Volume)
-		if err := driver.Format(ctx, vol); err != nil {
-			if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
-				vr.UnregisterVolume(p.Volume)
-			}
-			return fmt.Errorf("format: %w", err)
+	slog.Debug("backend: formatting volume", "volume", p.Volume)
+	if err := driver.Format(ctx, vol); err != nil {
+		if vr, ok := driver.Unwrap().(VolumeRegistrar); ok {
+			vr.UnregisterVolume(p.Volume)
 		}
-		if err := vol.Flush(); err != nil {
-			return fmt.Errorf("flush after format: %w", err)
-		}
+		return fmt.Errorf("format: %w", err)
+	}
+	if err := vol.Flush(); err != nil {
+		return fmt.Errorf("flush after format: %w", err)
 	}
 	slog.Debug("backend: create done", "volume", p.Volume)
 	return nil
@@ -305,6 +316,35 @@ func (b *Backend) Snapshot(ctx context.Context, mountpoint string, name string) 
 		}
 	}
 	return err
+}
+
+// Checkpoint freezes the filesystem, creates a checkpoint, and thaws.
+func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
+	entry, err := b.entry(mountpoint)
+	if err != nil {
+		return "", err
+	}
+
+	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
+		return "", fmt.Errorf("freeze: %w", err)
+	}
+	cpID, cpErr := entry.vol.Checkpoint()
+	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
+		slog.Error("thaw failed after checkpoint", "mountpoint", mountpoint, "error", thawErr)
+		if cpErr == nil {
+			cpErr = thawErr
+		}
+	}
+	return cpID, cpErr
+}
+
+// CloneFromCheckpoint creates a clone from a volume checkpoint and mounts it.
+func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error {
+	cloneVol, err := b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName)
+	if err != nil {
+		return err
+	}
+	return b.mountVolume(ctx, cloneVol, cloneMountpoint)
 }
 
 // Clone freezes the filesystem, clones the volume, thaws, and mounts the clone.
@@ -526,6 +566,15 @@ func (b *Backend) DeviceSnapshot(ctx context.Context, volume string, snapshot st
 		return fmt.Errorf("volume %q not open", volume)
 	}
 	return vol.Snapshot(snapshot)
+}
+
+// DeviceCheckpoint creates a checkpoint of a volume by name (no freeze/thaw).
+func (b *Backend) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
+	vol := b.vm.GetVolume(volume)
+	if vol == nil {
+		return "", fmt.Errorf("volume %q not open", volume)
+	}
+	return vol.Checkpoint()
 }
 
 // DeviceClone clones a volume and returns the clone's device path.
