@@ -105,14 +105,14 @@ func NewReader(r io.Reader) *Reader {
 	return &Reader{r: r}
 }
 
-// Frame is a single decoded frame.
-type Frame struct {
+// frame is a single decoded frame.
+type frame struct {
 	Type    byte
 	Payload []byte
 }
 
 // ExitCode returns the exit code from an Exit frame.
-func (f *Frame) ExitCode() int32 {
+func (f *frame) ExitCode() int32 {
 	if f.Type != TypeExit || len(f.Payload) < 4 {
 		return -1
 	}
@@ -120,7 +120,7 @@ func (f *Frame) ExitCode() int32 {
 }
 
 // Next reads the next frame. Returns io.EOF when the stream ends.
-func (r *Reader) Next() (*Frame, error) {
+func (r *Reader) Next() (*frame, error) {
 	var hdr [headerSize]byte
 	if _, err := io.ReadFull(r.r, hdr[:]); err != nil {
 		return nil, err
@@ -136,7 +136,7 @@ func (r *Reader) Next() (*Frame, error) {
 			return nil, fmt.Errorf("streammux: short payload: %w", err)
 		}
 	}
-	return &Frame{Type: typ, Payload: payload}, nil
+	return &frame{Type: typ, Payload: payload}, nil
 }
 
 // Demux reads all frames, writing stdout/stderr to the provided writers,

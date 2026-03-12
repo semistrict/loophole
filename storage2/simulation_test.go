@@ -112,7 +112,7 @@ func (sim *Simulation) nextLayerID() string {
 	return id
 }
 
-func (sim *Simulation) newManager(cacheDir string, fs LocalFS) *Manager {
+func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 	flushInterval := sim.config.FlushInterval
 	if flushInterval == 0 {
 		// The main loop sleeps 0-5ms per tick. A 500ms timer fires every

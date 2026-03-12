@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// SimLocalFS is an in-memory filesystem implementing LocalFS.
+// SimLocalFS is an in-memory filesystem implementing localFS.
 // Supports crash simulation: Crash() discards ephemeral files (mem/ dirs).
 type SimLocalFS struct {
 	mu    sync.Mutex
@@ -69,5 +69,5 @@ func (s *SimLocalFS) Crash() {
 	}
 }
 
-// Verify SimLocalFS implements LocalFS at compile time.
-var _ LocalFS = (*SimLocalFS)(nil)
+// Verify SimLocalFS implements localFS at compile time.
+var _ localFS = (*SimLocalFS)(nil)

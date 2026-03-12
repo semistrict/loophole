@@ -1,5 +1,3 @@
-//go:build !js
-
 package storage2
 
 import (

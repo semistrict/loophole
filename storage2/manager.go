@@ -1,5 +1,3 @@
-//go:build !js
-
 package storage2
 
 import (
@@ -54,7 +52,7 @@ type Manager struct {
 	config    Config
 	diskCache *PageCache
 	lease     *loophole.LeaseManager
-	fs        LocalFS
+	fs        localFS
 	idGen     func() string
 
 	volRefs loophole.ObjectStore // store.At("volumes")
@@ -66,24 +64,24 @@ type Manager struct {
 	onRelease  func(ctx context.Context, volumeName string)
 }
 
-// LocalFS abstracts local filesystem operations for memtable backing files.
-type LocalFS interface {
+// localFS abstracts local filesystem operations for memtable backing files.
+type localFS interface {
 	MkdirAll(path string, perm uint32) error
 }
 
-// OSLocalFS is the default LocalFS using the OS filesystem.
-type OSLocalFS struct{}
+// osLocalFS is the default localFS using the OS filesystem.
+type osLocalFS struct{}
 
-func (OSLocalFS) MkdirAll(path string, perm uint32) error {
+func (osLocalFS) MkdirAll(path string, perm uint32) error {
 	return ensureMemDir(path)
 }
 
 // NewVolumeManager creates a Manager.
-func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs LocalFS, diskCache *PageCache) *Manager {
+func NewVolumeManager(store loophole.ObjectStore, cacheDir string, config Config, fs localFS, diskCache *PageCache) *Manager {
 	store = loophole.NewRetryStore(store)
 	config.setDefaults()
 	if fs == nil {
-		fs = OSLocalFS{}
+		fs = osLocalFS{}
 	}
 	lease := loophole.NewLeaseManager(store.At("leases"))
 	m := &Manager{

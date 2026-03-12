@@ -1,10 +1,8 @@
-//go:build !js
-
 package storage2
 
 import "sync"
 
-const DefaultMaxCacheEntries = 256
+const defaultMaxCacheEntries = 256
 
 // boundedCache is a concurrency-safe bounded cache with random eviction.
 // When the cache exceeds maxEntries, a random entry is evicted on insert.
@@ -16,7 +14,7 @@ type boundedCache[T any] struct {
 
 func (c *boundedCache[T]) init(maxEntries int) {
 	if maxEntries <= 0 {
-		maxEntries = DefaultMaxCacheEntries
+		maxEntries = defaultMaxCacheEntries
 	}
 	c.entries = make(map[string]T)
 	c.maxEntries = maxEntries
@@ -34,7 +32,7 @@ func (c *boundedCache[T]) put(key string, val T) {
 	if c.entries == nil {
 		c.entries = make(map[string]T)
 		if c.maxEntries <= 0 {
-			c.maxEntries = DefaultMaxCacheEntries
+			c.maxEntries = defaultMaxCacheEntries
 		}
 	}
 	c.entries[key] = val
