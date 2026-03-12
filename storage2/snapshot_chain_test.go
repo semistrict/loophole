@@ -40,10 +40,7 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	prev := v
 	for i := range chainLen {
 		name := fmt.Sprintf("c%d", i)
-		next, err := prev.Clone(name)
-		if err != nil {
-			t.Fatalf("clone %d: %v", i, err)
-		}
+		next := cloneOpen(t, prev, name)
 		if err := prev.ReleaseRef(); err != nil {
 			t.Fatalf("release %d: %v", i, err)
 		}

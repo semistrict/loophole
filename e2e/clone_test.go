@@ -21,8 +21,9 @@ func TestE2E_ClonePreservesData(t *testing.T) {
 	randomMD5 := writeTestFiles(t, tfs)
 
 	cloneMP := mountpoint(t, "cln-clone")
-	err = b.Clone(t.Context(), parentMP, "cln-clone", cloneMP)
+	err = b.Clone(t.Context(), parentMP, "cln-clone")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cln-clone", cloneMP))
 
 	err = b.Unmount(t.Context(), parentMP)
 	require.NoError(t, err)
@@ -46,8 +47,9 @@ func TestE2E_CloneBranchesAreIndependent(t *testing.T) {
 	}
 
 	cloneMP := mountpoint(t, "cln-ind-clone")
-	err = b.Clone(t.Context(), parentMP, "cln-ind-clone", cloneMP)
+	err = b.Clone(t.Context(), parentMP, "cln-ind-clone")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cln-ind-clone", cloneMP))
 
 	err = b.Unmount(t.Context(), parentMP)
 	require.NoError(t, err)

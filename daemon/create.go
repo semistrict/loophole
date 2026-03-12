@@ -50,7 +50,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Clone from zygote to the requested name.
-	_, err = zygote.Clone(req.Volume)
+	err = zygote.Clone(req.Volume)
 	if err != nil {
 		slog.Error("clone from zygote failed", "err", err)
 		writeError(w, 500, fmt.Errorf("clone: %w", err))

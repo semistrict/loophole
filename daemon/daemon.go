@@ -340,7 +340,6 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)
-	mux.HandleFunc("POST /clone-from-checkpoint", d.handleCloneFromCheckpoint)
 	mux.HandleFunc("GET /checkpoints", d.handleListCheckpoints)
 	registerVolumeCmds(mux, d)
 	mux.HandleFunc("POST /shutdown", func(w http.ResponseWriter, r *http.Request) {

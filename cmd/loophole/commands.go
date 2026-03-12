@@ -328,24 +328,27 @@ func checkpointsCmd() *cobra.Command {
 func cloneCmd() *cobra.Command {
 	var fromCheckpoint string
 	cmd := &cobra.Command{
-		Use:   "clone <mountpoint> <name> <clone_mountpoint>",
-		Short: "Clone a volume and mount it",
-		Long: `Clone a live mounted volume, or clone from a checkpoint.
+		Use:   "clone <mountpoint-or-volume> <name>",
+		Short: "Create a clone volume",
+		Long: `Create a clone from a live mounted volume, or from a checkpoint.
 
 With --from-checkpoint, the first arg is the volume name (not mountpoint):
-  loophole clone --from-checkpoint <checkpoint_id> <volume> <clone_name> <clone_mountpoint>`,
-		Args: cobra.ExactArgs(3),
+  loophole clone --from-checkpoint <checkpoint_id> <volume> <clone_name>`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := resolveClient()
+			if err != nil {
+				return err
+			}
 			if fromCheckpoint != "" {
-				// args: <volume> <clone_name> <clone_mountpoint>
-				c, err := resolveClient()
-				if err != nil {
+				if err := c.Clone(cmd.Context(), client.CloneParams{
+					Volume:     args[0],
+					Checkpoint: fromCheckpoint,
+					Clone:      args[1],
+				}); err != nil {
 					return err
 				}
-				if err := c.CloneFromCheckpoint(cmd.Context(), args[0], fromCheckpoint, args[1], args[2]); err != nil {
-					return err
-				}
-				fmt.Printf("cloned %s@%s to %s at %s\n", args[0], fromCheckpoint, args[1], args[2])
+				fmt.Printf("created clone %s from %s@%s\n", args[1], args[0], fromCheckpoint)
 				return nil
 			}
 
@@ -353,12 +356,14 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
 			if err != nil {
 				return err
 			}
-
-			c := client.NewFromSocket(sock)
-			if err := c.Clone(cmd.Context(), args[0], args[1], args[2]); err != nil {
+			c = client.NewFromSocket(sock)
+			if err := c.Clone(cmd.Context(), client.CloneParams{
+				Mountpoint: args[0],
+				Clone:      args[1],
+			}); err != nil {
 				return err
 			}
-			fmt.Printf("cloned to %s at %s\n", args[1], args[2])
+			fmt.Printf("created clone %s\n", args[1])
 			return nil
 		},
 	}
@@ -478,7 +483,8 @@ func deviceCheckpointCmd() *cobra.Command {
 }
 
 func deviceCloneCmd() *cobra.Command {
-	return &cobra.Command{
+	var fromCheckpoint string
+	cmd := &cobra.Command{
 		Use:   "clone <volume> <name>",
 		Short: "Clone a volume device",
 		Args:  cobra.ExactArgs(2),
@@ -487,14 +493,19 @@ func deviceCloneCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			device, err := c.DeviceClone(cmd.Context(), args[0], args[1])
-			if err != nil {
+			if err := c.DeviceClone(cmd.Context(), client.DeviceCloneParams{
+				Volume:     args[0],
+				Checkpoint: fromCheckpoint,
+				Clone:      args[1],
+			}); err != nil {
 				return err
 			}
-			fmt.Println(device)
+			fmt.Printf("created clone %s\n", args[1])
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&fromCheckpoint, "from-checkpoint", "", "clone from a checkpoint ID instead of the open writable device")
+	return cmd
 }
 
 func deviceFlushCmd() *cobra.Command {

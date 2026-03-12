@@ -113,13 +113,13 @@ func (v *frozenVolume) Checkpoint() (string, error) {
 }
 
 // Clone creates a writable copy. No flush needed — frozen layer is immutable.
-func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
+func (v *frozenVolume) Clone(cloneName string) error {
 	m := v.manager
 	ctx := context.Background()
 
 	// Ensure lease manager is running so we can embed our token.
 	if err := m.lease.EnsureStarted(ctx); err != nil {
-		return nil, fmt.Errorf("start lease: %w", err)
+		return fmt.Errorf("start lease: %w", err)
 	}
 
 	// Build the child index in memory — inherits all L0/L1/L2 from the zygote.
@@ -130,7 +130,7 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 	idx.L2 = v.layer.l2Map.Ranges()
 	idxData, err := json.Marshal(idx)
 	if err != nil {
-		return nil, fmt.Errorf("marshal index for clone: %w", err)
+		return fmt.Errorf("marshal index for clone: %w", err)
 	}
 
 	ref := volumeRef{
@@ -142,7 +142,7 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 	}
 	refData, err := json.Marshal(ref)
 	if err != nil {
-		return nil, fmt.Errorf("marshal volume ref: %w", err)
+		return fmt.Errorf("marshal volume ref: %w", err)
 	}
 
 	// Write child index + volume ref in parallel — they are independent.
@@ -162,33 +162,9 @@ func (v *frozenVolume) Clone(cloneName string) (loophole.Volume, error) {
 		return nil
 	})
 	if err := g.Wait(); err != nil {
-		return nil, err
+		return err
 	}
-
-	// Build the mutable volume directly from in-memory data — no S3 re-reads.
-	cacheDir := m.cacheDir + "/layers/" + childID
-	ly, err := initLayerFromIndex(m.store, childID, m.config, m.diskCache, cacheDir, idx)
-	if err != nil {
-		return nil, fmt.Errorf("init clone layer: %w", err)
-	}
-	ly.writeLeaseSeq = 1
-
-	if m.config.FlushInterval > 0 {
-		ly.startPeriodicFlush(ctx)
-	}
-
-	vol := newVolume(cloneName, v.size, v.volType, ly, m)
-
-	m.mu.Lock()
-	if existing, ok := m.volumes[cloneName]; ok {
-		m.mu.Unlock()
-		ly.Close()
-		return existing, nil
-	}
-	m.volumes[cloneName] = vol
-	m.mu.Unlock()
-
-	return vol, nil
+	return nil
 }
 
 func (v *frozenVolume) CopyFrom(loophole.Volume, uint64, uint64, uint64) (uint64, error) {

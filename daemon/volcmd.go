@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
@@ -86,8 +85,7 @@ func cmdCheckpoint(a volCmdArgs) (any, error) {
 
 func cmdClone(a volCmdArgs) (any, error) {
 	var req struct {
-		Clone           string `json:"clone"`
-		CloneMountpoint string `json:"clone_mountpoint"`
+		Clone string `json:"clone"`
 	}
 	if err := json.Unmarshal(a.body, &req); err != nil {
 		return nil, err
@@ -98,20 +96,11 @@ func cmdClone(a volCmdArgs) (any, error) {
 	if a.mountpoint == "" {
 		return nil, fmt.Errorf("mountpoint is required for clone")
 	}
-	cloneMP := req.CloneMountpoint
-	if cloneMP == "" {
-		// Chroot case: auto-create a temp mountpoint.
-		var err error
-		cloneMP, err = os.MkdirTemp("", "loophole-clone-")
-		if err != nil {
-			return nil, fmt.Errorf("create clone mountpoint: %w", err)
-		}
-	}
-	slog.Info("clone", "mountpoint", a.mountpoint, "clone", req.Clone, "clone_mountpoint", cloneMP)
-	if err := a.backend.Clone(context.Background(), a.mountpoint, req.Clone, cloneMP); err != nil {
+	slog.Info("clone", "mountpoint", a.mountpoint, "clone", req.Clone)
+	if err := a.backend.Clone(context.Background(), a.mountpoint, req.Clone); err != nil {
 		return nil, fmt.Errorf("clone: %w", err)
 	}
-	return map[string]string{"status": "ok", "volume": req.Clone, "mountpoint": cloneMP}, nil
+	return map[string]string{"status": "ok", "volume": req.Clone}, nil
 }
 
 // resolveVolume finds the volume from either a volume name or mountpoint.

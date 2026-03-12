@@ -81,10 +81,7 @@ func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 	// Reset counters — now measure JUST the clone.
 	store.ResetCounts()
 
-	clone, err := zygote.Clone("my-sandbox")
-	if err != nil {
-		t.Fatal(err)
-	}
+	clone := cloneOpen(t, zygote, "my-sandbox")
 
 	t.Logf("--- After Clone(my-sandbox) ---")
 	t.Logf("  Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",

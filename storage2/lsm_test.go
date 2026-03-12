@@ -593,10 +593,7 @@ func TestClone(t *testing.T) {
 	}
 
 	// Clone.
-	clone, err := v.Clone("clone1")
-	if err != nil {
-		t.Fatal(err)
-	}
+	clone := cloneOpen(t, v, "clone1")
 
 	// Clone should see parent's data via ancestor.
 	buf := make([]byte, PageSize)
@@ -748,10 +745,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	}
 
 	// Open snap1 as writable clone so we can write to it.
-	snap1, err := v.Clone("snap1-clone")
-	if err != nil {
-		t.Fatal(err)
-	}
+	snap1 := cloneOpen(t, v, "snap1-clone")
 
 	// Write to snap1-clone, flush.
 	data[0] = 0x22
@@ -904,10 +898,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cloneVol, err := snapVol.Clone("snap1-clone")
-	if err != nil {
-		t.Fatal(err)
-	}
+	cloneVol := cloneOpen(t, snapVol, "snap1-clone")
 
 	buf := make([]byte, PageSize)
 	if _, err := cloneVol.Read(ctx, buf, 0); err != nil {
@@ -1566,7 +1557,7 @@ func TestCloneCreateChildFail(t *testing.T) {
 	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
 		Err: fmt.Errorf("simulated clone createChild failure"),
 	})
-	_, err = v.Clone("clone")
+	err = v.Clone("clone")
 	if err == nil || !strings.Contains(err.Error(), "simulated clone createChild failure") {
 		t.Fatalf("expected clone createChild failure, got: %v", err)
 	}
@@ -1595,7 +1586,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated clone putVolumeRef failure"),
 	})
 
-	_, err = v.Clone("clone")
+	err = v.Clone("clone")
 	if err == nil || !strings.Contains(err.Error(), "simulated clone putVolumeRef failure") {
 		t.Fatalf("expected clone putVolumeRef failure, got: %v", err)
 	}
@@ -1852,10 +1843,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Clone parent → dst. dst inherits parent's data for pages 0-3.
-	dst, err := parent.Clone("dst")
-	if err != nil {
-		t.Fatal(err)
-	}
+	dst := cloneOpen(t, parent, "dst")
 
 	// Create a separate source volume with zeros on pages 0-3
 	// (never written, so they're zeros).
@@ -3125,10 +3113,7 @@ func TestDirectWritebackClone(t *testing.T) {
 	}
 
 	// Clone should work even in direct mode.
-	clone, err := v.Clone("clone-1")
-	if err != nil {
-		t.Fatal("Clone in direct mode:", err)
-	}
+	clone := cloneOpen(t, v, "clone-1")
 	defer func() { _ = clone.ReleaseRef() }()
 
 	// Clone should see the direct-written data.
@@ -3224,10 +3209,7 @@ func TestDiffSnapshotClone(t *testing.T) {
 	}
 
 	// Step 2: Clone → clone-1 (full snapshot)
-	clone1, err := v.Clone("clone-1")
-	if err != nil {
-		t.Fatal("clone-1:", err)
-	}
+	clone1 := cloneOpen(t, v, "clone-1")
 	defer func() { _ = clone1.ReleaseRef() }()
 
 	// Verify clone-1 has the original data.
@@ -3255,10 +3237,7 @@ func TestDiffSnapshotClone(t *testing.T) {
 	}
 
 	// Step 4: Clone → clone-2 (diff snapshot)
-	clone2, err := v.Clone("clone-2")
-	if err != nil {
-		t.Fatal("clone-2:", err)
-	}
+	clone2 := cloneOpen(t, v, "clone-2")
 	defer func() { _ = clone2.ReleaseRef() }()
 
 	// Step 5: Verify clone-2.
@@ -3325,10 +3304,7 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clone1, err := v.Clone("clone-1")
-	if err != nil {
-		t.Fatal("clone-1:", err)
-	}
+	clone1 := cloneOpen(t, v, "clone-1")
 	_ = clone1.ReleaseRef()
 	_ = m1.Close(ctx) // shut down node 1
 
@@ -3351,10 +3327,7 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 		t.Fatal("flush dirty:", err)
 	}
 
-	clone2, err := v2.Clone("clone-2")
-	if err != nil {
-		t.Fatal("clone-2:", err)
-	}
+	clone2 := cloneOpen(t, v2, "clone-2")
 
 	// Verify dirty pages in clone-2.
 	buf := make([]byte, PageSize)
@@ -3413,10 +3386,7 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	clone1, err := v.Clone("clone-1")
-	if err != nil {
-		t.Fatal("clone-1:", err)
-	}
+	clone1 := cloneOpen(t, v, "clone-1")
 	_ = clone1.ReleaseRef()
 
 	// --- Phase 2: Diff snapshot (same manager/process) ---
@@ -3431,10 +3401,7 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 	if err := v.Flush(); err != nil {
 		t.Fatal("flush dirty:", err)
 	}
-	clone2, err := v.Clone("clone-2")
-	if err != nil {
-		t.Fatal("clone-2:", err)
-	}
+	clone2 := cloneOpen(t, v, "clone-2")
 	_ = clone2.ReleaseRef()
 	_ = m1.Close(ctx)
 

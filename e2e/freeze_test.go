@@ -66,7 +66,8 @@ func TestE2E_FreezeAndClonePreservesData(t *testing.T) {
 	// Clone from the frozen volume.
 	cloneName := "frz-cln-child"
 	cloneMP := mountpoint(t, cloneName)
-	require.NoError(t, b.Clone(ctx, frozenMP, cloneName, cloneMP))
+	require.NoError(t, b.Clone(ctx, frozenMP, cloneName))
+	require.NoError(t, b.Mount(ctx, cloneName, cloneMP))
 
 	// Verify data on clone.
 	verifyTestFiles(t, newTestFS(t, b, cloneMP), randomMD5)

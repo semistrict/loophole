@@ -26,8 +26,9 @@ func TestE2E_CheckpointPreservesData(t *testing.T) {
 	require.NotEmpty(t, cpID)
 
 	cloneMP := mountpoint(t, "cp-pres-clone")
-	err = b.CloneFromCheckpoint(ctx, "cp-pres-parent", cpID, "cp-pres-clone", cloneMP)
+	err = b.CloneFromCheckpoint(ctx, "cp-pres-parent", cpID, "cp-pres-clone")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-pres-clone", cloneMP))
 
 	require.NoError(t, b.Unmount(ctx, parentMP))
 
@@ -80,8 +81,9 @@ func TestE2E_CheckpointCloneIsIndependent(t *testing.T) {
 	parentFS.WriteFile(t, "parent-only.txt", []byte("parent after cp\n"))
 
 	cloneMP := mountpoint(t, "cp-ind-clone")
-	err = b.CloneFromCheckpoint(ctx, "cp-ind-parent", cpID, "cp-ind-clone", cloneMP)
+	err = b.CloneFromCheckpoint(ctx, "cp-ind-parent", cpID, "cp-ind-clone")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-ind-clone", cloneMP))
 
 	require.NoError(t, b.Unmount(ctx, parentMP))
 
@@ -137,8 +139,9 @@ func TestE2E_MultipleCheckpoints(t *testing.T) {
 
 	// Clone from cp1 — should have v1.txt but not v2.txt.
 	clone1MP := mountpoint(t, "cp-multi-c1")
-	err = b.CloneFromCheckpoint(ctx, "cp-multi", cp1, "cp-multi-c1", clone1MP)
+	err = b.CloneFromCheckpoint(ctx, "cp-multi", cp1, "cp-multi-c1")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-multi-c1", clone1MP))
 
 	require.NoError(t, b.Unmount(ctx, mp))
 
@@ -150,8 +153,9 @@ func TestE2E_MultipleCheckpoints(t *testing.T) {
 
 	// Clone from cp2 — should have both files.
 	clone2MP := mountpoint(t, "cp-multi-c2")
-	err = b.CloneFromCheckpoint(ctx, "cp-multi", cp2, "cp-multi-c2", clone2MP)
+	err = b.CloneFromCheckpoint(ctx, "cp-multi", cp2, "cp-multi-c2")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-multi-c2", clone2MP))
 
 	c2fs := newTestFS(t, b, clone2MP)
 	require.Equal(t, "version 1\n", string(c2fs.ReadFile(t, "v1.txt")))
@@ -181,12 +185,14 @@ func TestE2E_CheckpointMultipleClones(t *testing.T) {
 
 	// Create two clones from the same checkpoint.
 	clone1MP := mountpoint(t, "cp-mc-c1")
-	err = b.CloneFromCheckpoint(ctx, "cp-mc", cpID, "cp-mc-c1", clone1MP)
+	err = b.CloneFromCheckpoint(ctx, "cp-mc", cpID, "cp-mc-c1")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-mc-c1", clone1MP))
 
 	clone2MP := mountpoint(t, "cp-mc-c2")
-	err = b.CloneFromCheckpoint(ctx, "cp-mc", cpID, "cp-mc-c2", clone2MP)
+	err = b.CloneFromCheckpoint(ctx, "cp-mc", cpID, "cp-mc-c2")
 	require.NoError(t, err)
+	require.NoError(t, b.Mount(ctx, "cp-mc-c2", clone2MP))
 
 	c1fs := newTestFS(t, b, clone1MP)
 	c2fs := newTestFS(t, b, clone2MP)

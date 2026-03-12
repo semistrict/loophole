@@ -122,18 +122,10 @@ func (c *Client) ChrootCheckpoint(ctx context.Context) (string, error) {
 	return result.Checkpoint, nil
 }
 
-// ChrootClone clones the volume (chroot socket: POST /clone).
-// Returns the mountpoint where the clone was mounted.
-func (c *Client) ChrootClone(ctx context.Context, clone string) (string, error) {
-	resp, err := c.post(ctx, "/clone", "clone", clone)
-	if err != nil {
-		return "", err
-	}
-	var result struct{ Mountpoint string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", err
-	}
-	return result.Mountpoint, nil
+// ChrootClone creates an unmounted clone of the current volume.
+func (c *Client) ChrootClone(ctx context.Context, clone string) error {
+	_, err := c.post(ctx, "/clone", "clone", clone)
+	return err
 }
 
 // ChrootStatusResponse holds the response from the chroot status endpoint.
@@ -220,9 +212,16 @@ func (c *Client) Unmount(ctx context.Context, mountpoint string) error {
 	return err
 }
 
-// Clone freezes the source, clones it, and mounts the clone.
-func (c *Client) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMountpoint string) error {
-	_, err := c.post(ctx, "/clone", "mountpoint", srcMountpoint, "clone", cloneName, "clone_mountpoint", cloneMountpoint)
+// Clone creates an unmounted clone of a mounted volume or checkpoint.
+type CloneParams struct {
+	Mountpoint string `json:"mountpoint,omitempty"`
+	Volume     string `json:"volume,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	Clone      string `json:"clone"`
+}
+
+func (c *Client) Clone(ctx context.Context, p CloneParams) error {
+	_, err := c.post(ctx, "/clone", p)
 	return err
 }
 
@@ -258,17 +257,6 @@ func (c *Client) DeviceCheckpoint(ctx context.Context, volume string) (string, e
 	return result.Checkpoint, nil
 }
 
-// CloneFromCheckpoint creates a clone from a checkpoint and mounts it.
-func (c *Client) CloneFromCheckpoint(ctx context.Context, volume, checkpoint, clone, cloneMountpoint string) error {
-	_, err := c.post(ctx, "/clone-from-checkpoint", map[string]string{
-		"volume":           volume,
-		"checkpoint":       checkpoint,
-		"clone":            clone,
-		"clone_mountpoint": cloneMountpoint,
-	})
-	return err
-}
-
 // ListCheckpoints returns all checkpoints for a volume.
 func (c *Client) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
 	resp, err := c.get(ctx, "/checkpoints?volume="+volume)
@@ -301,17 +289,16 @@ func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
 	return err
 }
 
-// DeviceClone clones a volume and returns the device path.
-func (c *Client) DeviceClone(ctx context.Context, volume, clone string) (string, error) {
-	resp, err := c.post(ctx, "/device/clone", "volume", volume, "clone", clone)
-	if err != nil {
-		return "", err
-	}
-	var result struct{ Device string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("decode device/clone response: %w", err)
-	}
-	return result.Device, nil
+type DeviceCloneParams struct {
+	Volume     string `json:"volume"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	Clone      string `json:"clone"`
+}
+
+// DeviceClone creates an unattached clone of a volume or checkpoint.
+func (c *Client) DeviceClone(ctx context.Context, p DeviceCloneParams) error {
+	_, err := c.post(ctx, "/device/clone", p)
+	return err
 }
 
 // DeviceDD imports a raw disk image into a new volume via the daemon.

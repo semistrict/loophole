@@ -44,10 +44,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 		t.Fatalf("pre-clone flush: %v", err)
 	}
 
-	snap, err := v.Clone("child")
-	if err != nil {
-		t.Fatalf("clone: %v", err)
-	}
+	snap := cloneOpen(t, v, "child")
 
 	// Phase 3: Write more pages to parent after clone.
 	for i := 0; i < 5; i++ {
@@ -112,10 +109,7 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	}
 
 	// Clone.
-	child, err := v.Clone("child")
-	if err != nil {
-		t.Fatalf("clone: %v", err)
-	}
+	child := cloneOpen(t, v, "child")
 
 	// Write to parent after clone.
 	for i := 0; i < 10; i++ {

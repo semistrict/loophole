@@ -560,7 +560,10 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := v.Clone(cloneName)
+	if err := v.Clone(cloneName); err != nil {
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -620,7 +623,10 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 
 	// No pre-flush! Clone's internal freezeMemLayer + flushFrozenLayers
 	// persists unflushed data, so the child sees everything.
-	clone, err := v.Clone(cloneName)
+	if err := v.Clone(cloneName); err != nil {
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1039,7 +1045,10 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := v.Clone(cloneName)
+	if err := v.Clone(cloneName); err != nil {
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1115,9 +1124,14 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	clone, err := snapVol.Clone(cloneName)
-	if err != nil {
+	if err := snapVol.Clone(cloneName); err != nil {
 		// Close the snapshot.
+		snapVol.ReleaseRef()
+		delete(sim.leases, snapName)
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
+	if err != nil {
 		snapVol.ReleaseRef()
 		delete(sim.leases, snapName)
 		return
@@ -1245,7 +1259,10 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 		return
 	}
 
-	clone, err := node.manager.CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName)
+	if err := node.manager.CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName); err != nil {
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1339,7 +1356,10 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 
 	cloneName := fmt.Sprintf("%s-iso-%d", volName, sim.nextVolID)
 	sim.nextVolID++
-	clone, err := v.Clone(cloneName)
+	if err := v.Clone(cloneName); err != nil {
+		return
+	}
+	clone, err := node.manager.OpenVolume(cloneName)
 	if err != nil {
 		return
 	}

@@ -39,3 +39,30 @@ func snapshotVolume(t testing.TB, v loophole.Volume, name string) error {
 	}
 	return sv.Snapshot(name)
 }
+
+func cloneOpen(t testing.TB, v loophole.Volume, name string) loophole.Volume {
+	t.Helper()
+	switch vv := v.(type) {
+	case *volume:
+		if err := vv.Clone(name); err != nil {
+			t.Fatalf("clone %q: %v", name, err)
+		}
+		clone, err := vv.manager.OpenVolume(name)
+		if err != nil {
+			t.Fatalf("open clone %q: %v", name, err)
+		}
+		return clone
+	case *frozenVolume:
+		if err := vv.Clone(name); err != nil {
+			t.Fatalf("clone %q: %v", name, err)
+		}
+		clone, err := vv.manager.OpenVolume(name)
+		if err != nil {
+			t.Fatalf("open clone %q: %v", name, err)
+		}
+		return clone
+	default:
+		t.Fatalf("volume %T does not support cloneOpen", v)
+		return nil
+	}
+}

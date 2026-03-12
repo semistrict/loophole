@@ -111,12 +111,14 @@ func (b *testBackend) Unmount(ctx context.Context, mountpoint string) error {
 	return err
 }
 
-func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName, cloneMountpoint string) error {
-	if err := b.c.Clone(ctx, srcMountpoint, cloneName, cloneMountpoint); err != nil {
+func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName string) error {
+	if err := b.c.Clone(ctx, client.CloneParams{
+		Mountpoint: srcMountpoint,
+		Clone:      cloneName,
+	}); err != nil {
 		return err
 	}
 	b.createdVols = append(b.createdVols, cloneName)
-	b.mountedMPs = append(b.mountedMPs, cloneMountpoint)
 	return nil
 }
 
@@ -124,12 +126,15 @@ func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string
 	return b.c.Checkpoint(ctx, mountpoint)
 }
 
-func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error {
-	if err := b.c.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName, cloneMountpoint); err != nil {
+func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
+	if err := b.c.Clone(ctx, client.CloneParams{
+		Volume:     volume,
+		Checkpoint: checkpointID,
+		Clone:      cloneName,
+	}); err != nil {
 		return err
 	}
 	b.createdVols = append(b.createdVols, cloneName)
-	b.mountedMPs = append(b.mountedMPs, cloneMountpoint)
 	return nil
 }
 
@@ -178,14 +183,12 @@ func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (stri
 	return b.c.DeviceCheckpoint(ctx, volume)
 }
 
-func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) (string, error) {
-	path, err := b.c.DeviceClone(ctx, volume, clone)
-	if err != nil {
-		return "", err
+func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) error {
+	if err := b.c.DeviceClone(ctx, client.DeviceCloneParams{Volume: volume, Clone: clone}); err != nil {
+		return err
 	}
 	b.createdVols = append(b.createdVols, clone)
-	b.deviceVols = append(b.deviceVols, clone)
-	return path, nil
+	return nil
 }
 
 // Close is a no-op — the shared daemon owns the backend.

@@ -193,8 +193,7 @@ func TestCompactAfterClonePunchHole(t *testing.T) {
 	assert.Equal(t, byte(5), buf[1])
 
 	// Clone from parent.
-	clone, err := parent.Clone("child")
-	require.NoError(t, err)
+	clone := cloneOpen(t, parent, "child")
 
 	// Verify clone inherited the data.
 	_, err = clone.Read(ctx, buf, 5*PageSize)
@@ -275,8 +274,7 @@ func TestCompactTwiceAfterClonePunchHole(t *testing.T) {
 	require.NoError(t, parent.Flush())
 
 	// Clone from parent.
-	clone, err := parent.Clone("child")
-	require.NoError(t, err)
+	clone := cloneOpen(t, parent, "child")
 
 	// Write enough extra pages to trigger the FIRST compaction, moving
 	// inherited data (including page 5) from L0 to L1.
@@ -391,8 +389,7 @@ func TestCompactOverwritesClonedL1Block(t *testing.T) {
 	assert.Equal(t, byte(5), buf[1])
 
 	// Clone from parent → child inherits L1 map entry for block 0.
-	clone, err := parent.Clone("child")
-	require.NoError(t, err)
+	clone := cloneOpen(t, parent, "child")
 	// Do NOT read page 5 from clone yet — we want to test the case where
 	// the child has no cached data and must read from the L1 block.
 
@@ -660,8 +657,7 @@ func TestSnapshotS3OpCount(t *testing.T) {
 
 	// Now measure Clone (same as Snapshot + creates a volume ref).
 	store.ResetCounts()
-	clone, err := v.Clone("clone-1")
-	require.NoError(t, err)
+	clone := cloneOpen(t, v, "clone-1")
 
 	t.Logf("Clone S3 ops: Get=%d PutBytes=%d PutBytesCAS=%d PutReader=%d PutIfNotExists=%d List=%d Delete=%d",
 		store.Count(loophole.OpGet),

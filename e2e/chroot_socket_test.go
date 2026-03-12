@@ -83,8 +83,9 @@ func TestE2E_ChrootSocketClone(t *testing.T) {
 	}
 
 	ctx := t.Context()
-	cloneMP, err := c.ChrootClone(ctx, "csock-clone-v1")
-	require.NoError(t, err)
+	require.NoError(t, c.ChrootClone(ctx, "csock-clone-v1"))
+	cloneMP := mountpoint(t, "csock-clone-v1")
+	require.NoError(t, testClient.Mount(ctx, "csock-clone-v1", cloneMP))
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

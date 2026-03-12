@@ -92,7 +92,8 @@ func TestE2E_PunchHoleTombstone(t *testing.T) {
 	f.Close()
 	syncFS(t, parentDev)
 
-	childDev, err := b.DeviceClone(t.Context(), "tomb-parent", "tomb-child")
+	require.NoError(t, b.DeviceClone(t.Context(), "tomb-parent", "tomb-child"))
+	childDev, err := b.DeviceAttach(t.Context(), "tomb-child")
 	require.NoError(t, err)
 
 	fd, err := unix.Open(childDev, unix.O_RDWR, 0)

@@ -63,7 +63,7 @@ type VolumeManager interface {
 	// Returns true if the holder responded gracefully.
 	BreakLease(ctx context.Context, name string, force bool) (graceful bool, err error)
 	ListCheckpoints(ctx context.Context, volumeName string) ([]CheckpointInfo, error)
-	CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) (Volume, error)
+	CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) error
 	PageSize() int
 	Close(ctx context.Context) error
 }
@@ -94,7 +94,7 @@ type Volume interface {
 	// no background loop is running.
 	FlushLocal() error
 	Checkpoint() (string, error)
-	Clone(cloneName string) (Volume, error)
+	Clone(cloneName string) error
 	CopyFrom(src Volume, srcOff, dstOff, length uint64) (uint64, error)
 	Freeze() error
 	Refresh(ctx context.Context) error

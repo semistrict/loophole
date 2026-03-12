@@ -670,25 +670,25 @@ func (m *Manager) ListCheckpoints(ctx context.Context, volumeName string) ([]loo
 }
 
 // CloneFromCheckpoint creates a new volume by cloning from a checkpoint's frozen layer.
-func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) (loophole.Volume, error) {
+func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) error {
 	// Read checkpoint ref.
 	cpKey := volumeName + "/checkpoints/" + checkpointID + "/index.json"
 	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, m.volRefs, cpKey)
 	if err != nil {
-		return nil, fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)
+		return fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)
 	}
 
 	// Open the checkpoint's frozen layer.
 	ly, err := openFrozenLayer(ctx, m.store, cpRef.LayerID, m.config, m.diskCache)
 	if err != nil {
-		return nil, fmt.Errorf("open checkpoint layer %q: %w", cpRef.LayerID, err)
+		return fmt.Errorf("open checkpoint layer %q: %w", cpRef.LayerID, err)
 	}
 
 	// Create a frozen volume temporarily to use its Clone method.
 	volRef, err := m.getVolumeRef(ctx, volumeName)
 	if err != nil {
 		ly.Close()
-		return nil, fmt.Errorf("read volume ref %q: %w", volumeName, err)
+		return fmt.Errorf("read volume ref %q: %w", volumeName, err)
 	}
 
 	fv := newFrozenVolume("__cp_clone_tmp__", volRef.Size, volRef.Type, ly, m)

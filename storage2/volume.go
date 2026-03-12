@@ -256,7 +256,7 @@ func (v *volume) Checkpoint() (string, error) {
 	return ts, nil
 }
 
-func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
+func (v *volume) Clone(cloneName string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
@@ -265,17 +265,17 @@ func (v *volume) Clone(cloneName string) (loophole.Volume, error) {
 	childID, err := v.branch()
 	if err != nil {
 		slog.Error("volume: clone branch failed", "src", v.name, "dst", cloneName, "error", err)
-		return nil, err
+		return err
 	}
 
 	ctx := context.Background()
 	ref := volumeRef{LayerID: childID, Size: v.size, Type: v.volType}
 	if err := v.manager.putVolumeRef(ctx, cloneName, ref); err != nil {
-		return nil, fmt.Errorf("create clone ref: %w", err)
+		return fmt.Errorf("create clone ref: %w", err)
 	}
 
 	slog.Info("volume: clone completed", "src", v.name, "dst", cloneName, "childID", childID)
-	return v.manager.OpenVolume(cloneName)
+	return nil
 }
 
 func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (uint64, error) {

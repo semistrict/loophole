@@ -104,11 +104,10 @@ func chrootCloneCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := chrootClient()
-			mp, err := c.ChrootClone(cmd.Context(), args[0])
-			if err != nil {
+			if err := c.ChrootClone(cmd.Context(), args[0]); err != nil {
 				return err
 			}
-			fmt.Printf("cloned to %s (mountpoint %s)\n", args[0], mp)
+			fmt.Printf("created clone %s\n", args[0])
 			return nil
 		},
 	}

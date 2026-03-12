@@ -142,17 +142,13 @@ func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, er
 	return cpID, cpErr
 }
 
-// CloneFromCheckpoint creates a clone from a volume checkpoint and mounts it.
-func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName, cloneMountpoint string) error {
-	cloneVol, err := b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName)
-	if err != nil {
-		return err
-	}
-	return b.mountVolume(ctx, cloneVol, cloneMountpoint)
+// CloneFromCheckpoint creates an unmounted clone from a volume checkpoint.
+func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
+	return b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName)
 }
 
-// Clone freezes the filesystem, clones the volume, thaws, and mounts the clone.
-func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string, cloneMountpoint string) error {
+// Clone freezes the filesystem, creates the clone, and thaws without mounting it.
+func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string) error {
 	slog.Info("backend: cloning", "mountpoint", mountpoint, "clone", cloneName)
 	entry, err := b.entry(mountpoint)
 	if err != nil {
@@ -164,7 +160,7 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 		return fmt.Errorf("freeze: %w", err)
 	}
 	slog.Debug("backend: frozen, cloning volume", "clone", cloneName)
-	cloneVol, err := entry.vol.Clone(cloneName)
+	err = entry.vol.Clone(cloneName)
 	slog.Debug("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
 	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
@@ -177,8 +173,7 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 		return err
 	}
 
-	slog.Debug("backend: mounting clone", "clone", cloneName, "mountpoint", cloneMountpoint)
-	return b.mountVolume(ctx, cloneVol, cloneMountpoint)
+	return nil
 }
 
 // FreezeVolume permanently freezes a volume, making it immutable.
@@ -355,22 +350,16 @@ func (b *Backend) DeviceCheckpoint(ctx context.Context, volume string) (string, 
 	return vol.Checkpoint()
 }
 
-// DeviceClone clones a volume and returns the clone's device path.
-func (b *Backend) DeviceClone(ctx context.Context, volume string, clone string) (string, error) {
+// DeviceClone creates an unattached clone.
+func (b *Backend) DeviceClone(ctx context.Context, volume, checkpointID, clone string) error {
+	if checkpointID != "" {
+		return b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, clone)
+	}
 	vol := b.vm.GetVolume(volume)
 	if vol == nil {
-		return "", fmt.Errorf("volume %q not open", volume)
+		return fmt.Errorf("volume %q not open", volume)
 	}
-	driver, err := b.driverFor()
-	if err != nil {
-		return "", err
-	}
-	cloneVol, err := vol.Clone(clone)
-	if err != nil {
-		return "", err
-	}
-	driver.RegisterVolume(clone, cloneVol)
-	return b.DevicePath(clone)
+	return vol.Clone(clone)
 }
 
 // DevicePath returns the block device path for a volume.
