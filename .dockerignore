@@ -14,3 +14,5 @@ cf-demo/dist/
 vmlinuz
 boot/
 docker-config/
+.gocache/
+.gomodcache/

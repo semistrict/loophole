@@ -9,7 +9,10 @@ services:
       - s3-logs:/logs
 
   go:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    init: true
     privileged: true
     environment:
       GOMEMLIMIT: 512MiB

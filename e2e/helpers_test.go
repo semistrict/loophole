@@ -191,21 +191,29 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 }
 
 func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
-	owner, err := b.ensureOwnerForVolume(ctx, volume)
-	if err != nil {
-		return err
+	owner := b.ownerByVolume(volume)
+	if owner == nil {
+		var err error
+		owner, err = startAttachedOwner(ctx, volume)
+		if err != nil {
+			return err
+		}
+	}
+	if compact {
+		return fmt.Errorf("test backend FreezeVolume does not support compact=true yet")
 	}
 	if err := owner.client.Freeze(ctx, volume); err != nil {
 		return err
 	}
-	filtered := b.mountedMPs[:0]
-	for _, mp := range b.mountedMPs {
-		if b.VolumeAt(mp) == volume || !b.IsMounted(mp) {
-			continue
-		}
-		filtered = append(filtered, mp)
+	if err := shutdownOwner(ctx, owner); err != nil {
+		return err
 	}
-	b.mountedMPs = filtered
+
+	b.mu.Lock()
+	delete(b.owners, volume)
+	b.mountedMPs = removeTracked(b.mountedMPs, owner.mountpoint)
+	b.deviceVols = removeTracked(b.deviceVols, volume)
+	b.mu.Unlock()
 	return nil
 }
 
@@ -535,13 +543,6 @@ func (b *testBackend) trackCreated(volume string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.createdVols = appendTracked(b.createdVols, volume)
-}
-
-func (b *testBackend) ensureOwnerForVolume(ctx context.Context, volume string) (*testOwner, error) {
-	if owner := b.ownerByVolume(volume); owner != nil {
-		return owner, nil
-	}
-	return startAttachedOwner(ctx, volume)
 }
 
 func (b *testBackend) ensureDeviceOwner(ctx context.Context, volume string) (*testOwner, error) {

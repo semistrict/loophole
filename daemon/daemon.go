@@ -28,6 +28,28 @@ import (
 	"github.com/semistrict/loophole/storage2"
 )
 
+func storage2ConfigFromEnv() storage2.Config {
+	cfg := storage2.Config{}
+
+	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			cfg.FlushThreshold = n
+		}
+	}
+	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_MAX_FROZEN_TABLES"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxFrozenTables = n
+		}
+	}
+	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_L0_PAGES_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.L0PagesMax = n
+		}
+	}
+
+	return cfg
+}
+
 // Daemon serves the loophole HTTP API over a Unix socket.
 type Daemon struct {
 	inst      loophole.Instance
@@ -147,7 +169,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if err != nil {
 			return nil, fmt.Errorf("create page cache: %w", err)
 		}
-		vm := storage2.NewVolumeManager(store, cacheDir, storage2.Config{}, nil, diskCache)
+		vm := storage2.NewVolumeManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
 
 		backend, err = createBackend(vm, inst, dir)
 		if err != nil {

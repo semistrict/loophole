@@ -119,7 +119,7 @@ func (m *Manager) NewVolume(p loophole.CreateParams) (loophole.Volume, error) {
 	layerID := m.idGen()
 
 	// Write initial index.json with created_at in object metadata.
-	idx := layerIndex{NextSeq: 1}
+	idx := layerIndex{NextSeq: 1, LayoutGen: 1}
 	idxData, err := json.Marshal(idx)
 	if err != nil {
 		return nil, err
@@ -441,6 +441,7 @@ func (m *Manager) openVolume(name string, ref volumeRef) (managedVolume, error) 
 		return nil, fmt.Errorf("open layer %q: %w", ref.LayerID, err)
 	}
 	ly.writeLeaseSeq = writeLeaseSeq
+	ly.lease = m.lease
 
 	if m.config.FlushInterval > 0 {
 		// Use a background context — ctx may be a short-lived HTTP request
@@ -475,6 +476,7 @@ func (m *Manager) openFrozenVolume(ctx context.Context, name string, ref volumeR
 	}
 
 	v := newFrozenVolume(name, ref.Size, ref.Type, ly, m)
+	ly.lease = m.lease
 
 	m.mu.Lock()
 	if existing, ok := m.volumes[name]; ok {
@@ -564,6 +566,9 @@ func (m *Manager) releaseVolumeLease(ctx context.Context, name string) {
 		}
 		return nil
 	}); err != nil {
+		if errors.Is(err, loophole.ErrNotFound) {
+			return
+		}
 		slog.Warn("release volume lease", "volume", name, "error", err)
 	}
 }

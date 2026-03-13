@@ -2,6 +2,7 @@ package storage2
 
 import (
 	"database/sql"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -20,12 +21,18 @@ type sqliteStore struct {
 	arenaFile *os.File
 	arenaMmap []byte
 	slots     int
+	lockFile  *os.File
 
 	stmtLookup *sql.Stmt
 	stmtInsert *sql.Stmt
 	stmtDelete *sql.Stmt
 	stmtBump   *sql.Stmt
 }
+
+const (
+	cacheSlotHeaderSize = 8
+	cacheSchemaVersion  = 2
+)
 
 func newSQLiteStore(dir string) (*sqliteStore, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -43,18 +50,26 @@ func newSQLiteStore(dir string) (*sqliteStore, error) {
 	db.SetMaxOpenConns(1)
 
 	s := &sqliteStore{dir: dir, db: db}
+	lockFile, err := os.OpenFile(filepath.Join(dir, "arena.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		util.SafeClose(s, "close store after lock open failure")
+		return nil, err
+	}
+	s.lockFile = lockFile
 
-	s.stmtLookup, err = db.Prepare(`SELECT slot FROM pages WHERE layer_id=? AND page_idx=?`)
+	s.stmtLookup, err = db.Prepare(`SELECT slot, generation FROM pages WHERE layer_id=? AND page_idx=?`)
 	if err != nil {
 		util.SafeClose(s, "close store after prepare failure")
 		return nil, err
 	}
-	s.stmtInsert, err = db.Prepare(`INSERT INTO pages (layer_id, page_idx, slot, credits) VALUES (?,?,?,1)`)
+	s.stmtInsert, err = db.Prepare(`INSERT INTO pages (layer_id, page_idx, slot, generation, credits)
+		VALUES (?,?,?,?,1)
+		ON CONFLICT(layer_id, page_idx) DO UPDATE SET slot=excluded.slot, generation=excluded.generation`)
 	if err != nil {
 		util.SafeClose(s, "close store after prepare failure")
 		return nil, err
 	}
-	s.stmtDelete, err = db.Prepare(`DELETE FROM pages WHERE layer_id=? AND page_idx=? RETURNING slot`)
+	s.stmtDelete, err = db.Prepare(`DELETE FROM pages WHERE layer_id=? AND page_idx=? RETURNING slot, generation`)
 	if err != nil {
 		util.SafeClose(s, "close store after prepare failure")
 		return nil, err
@@ -110,10 +125,48 @@ func initializeSQLiteStore(dir string) error {
 		}
 	}
 
+	var hasPages int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='pages'`).Scan(&hasPages); err != nil {
+		return fmt.Errorf("check pages table: %w", err)
+	}
+	resetArena := false
+	if hasPages > 0 {
+		rows, err := db.Query(`PRAGMA table_info(pages)`)
+		if err != nil {
+			return fmt.Errorf("PRAGMA table_info(pages): %w", err)
+		}
+		defer util.SafeClose(rows, "close pages table info")
+		hasGeneration := false
+		for rows.Next() {
+			var cid int
+			var name string
+			var typ string
+			var notNull int
+			var dflt sql.NullString
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+				return fmt.Errorf("scan pages column info: %w", err)
+			}
+			if name == "generation" {
+				hasGeneration = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate pages column info: %w", err)
+		}
+		if !hasGeneration {
+			if _, err := db.Exec(`DROP TABLE IF EXISTS pages`); err != nil {
+				return fmt.Errorf("drop old pages table: %w", err)
+			}
+			resetArena = true
+		}
+	}
+
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS pages (
 		layer_id TEXT    NOT NULL,
 		page_idx INTEGER NOT NULL,
 		slot     INTEGER NOT NULL UNIQUE,
+		generation INTEGER NOT NULL,
 		credits  INTEGER NOT NULL DEFAULT 1,
 		PRIMARY KEY (layer_id, page_idx)
 	) WITHOUT ROWID`); err != nil {
@@ -121,6 +174,11 @@ func initializeSQLiteStore(dir string) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_pages_credits ON pages (credits)`); err != nil {
 		return err
+	}
+	if resetArena {
+		if err := os.Remove(filepath.Join(dir, "arena")); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove old arena: %w", err)
+		}
 	}
 	return nil
 }
@@ -138,7 +196,7 @@ func (s *sqliteStore) AllocArena(maxSlots int) error {
 		return err
 	}
 
-	size := int64(maxSlots) * PageSize
+	size := int64(maxSlots) * cacheSlotSize()
 	fi, err := f.Stat()
 	if err != nil {
 		util.SafeClose(f, "close arena file after stat failure")
@@ -153,7 +211,7 @@ func (s *sqliteStore) AllocArena(maxSlots int) error {
 		currentSize = size
 	}
 
-	actualSlots := int(currentSize / PageSize)
+	actualSlots := int(currentSize / cacheSlotSize())
 	mapped, err := unix.Mmap(int(f.Fd()), 0, int(currentSize), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
 	if err != nil {
 		util.SafeClose(f, "close arena file after mmap failure")
@@ -170,57 +228,106 @@ func (s *sqliteStore) ArenaSlots() int {
 	return s.slots
 }
 
-func (s *sqliteStore) ReadSlot(slot int) ([]byte, error) {
-	if s.arenaMmap == nil {
-		return nil, fmt.Errorf("arena not allocated")
-	}
-	if slot < 0 || slot >= s.slots {
-		return nil, fmt.Errorf("slot %d out of range [0, %d)", slot, s.slots)
-	}
-	off := slot * PageSize
-	buf := make([]byte, PageSize)
-	copy(buf, s.arenaMmap[off:off+PageSize])
-	return buf, nil
+func cacheSlotSize() int64 {
+	return PageSize + cacheSlotHeaderSize
 }
 
-func (s *sqliteStore) WriteSlot(slot int, data []byte) error {
+func (s *sqliteStore) slotOffset(slot int) int {
+	return slot * int(cacheSlotSize())
+}
+
+func (s *sqliteStore) readGeneration(slot int) (uint64, error) {
+	if s.arenaMmap == nil {
+		return 0, fmt.Errorf("arena not allocated")
+	}
+	if slot < 0 || slot >= s.slots {
+		return 0, fmt.Errorf("slot %d out of range [0, %d)", slot, s.slots)
+	}
+	off := s.slotOffset(slot)
+	return binary.LittleEndian.Uint64(s.arenaMmap[off : off+cacheSlotHeaderSize]), nil
+}
+
+func (s *sqliteStore) writeGeneration(slot int, generation uint64) error {
 	if s.arenaMmap == nil {
 		return fmt.Errorf("arena not allocated")
 	}
 	if slot < 0 || slot >= s.slots {
 		return fmt.Errorf("slot %d out of range [0, %d)", slot, s.slots)
 	}
-	off := slot * PageSize
-	copy(s.arenaMmap[off:off+PageSize], data)
+	off := s.slotOffset(slot)
+	binary.LittleEndian.PutUint64(s.arenaMmap[off:off+cacheSlotHeaderSize], generation)
 	return nil
+}
+
+func (s *sqliteStore) ReadSlot(ref cacheSlotRef) ([]byte, error) {
+	if s.arenaMmap == nil {
+		return nil, fmt.Errorf("arena not allocated")
+	}
+	if ref.Slot < 0 || ref.Slot >= s.slots {
+		return nil, fmt.Errorf("slot %d out of range [0, %d)", ref.Slot, s.slots)
+	}
+	gen, err := s.readGeneration(ref.Slot)
+	if err != nil {
+		return nil, err
+	}
+	if gen != ref.Generation {
+		return nil, fmt.Errorf("stale slot generation: slot=%d have=%d want=%d", ref.Slot, gen, ref.Generation)
+	}
+	off := s.slotOffset(ref.Slot) + cacheSlotHeaderSize
+	buf := make([]byte, PageSize)
+	copy(buf, s.arenaMmap[off:off+PageSize])
+	return buf, nil
+}
+
+func (s *sqliteStore) PrepareSlot(slot int, data []byte) (cacheSlotRef, error) {
+	if s.arenaMmap == nil {
+		return cacheSlotRef{}, fmt.Errorf("arena not allocated")
+	}
+	if slot < 0 || slot >= s.slots {
+		return cacheSlotRef{}, fmt.Errorf("slot %d out of range [0, %d)", slot, s.slots)
+	}
+	gen, err := s.readGeneration(slot)
+	if err != nil {
+		return cacheSlotRef{}, err
+	}
+	gen++
+	if gen == 0 {
+		gen = 1
+	}
+	if err := s.writeGeneration(slot, gen); err != nil {
+		return cacheSlotRef{}, err
+	}
+	off := s.slotOffset(slot) + cacheSlotHeaderSize
+	copy(s.arenaMmap[off:off+PageSize], data)
+	return cacheSlotRef{Slot: slot, Generation: gen}, nil
 }
 
 // --- Index ---
 
-func (s *sqliteStore) LookupPage(key cacheKey) (int, bool, error) {
-	var slot int
-	err := s.stmtLookup.QueryRow(key.BlobKey, int64(key.PageIdx)).Scan(&slot)
+func (s *sqliteStore) LookupPage(key cacheKey) (cacheSlotRef, bool, error) {
+	var ref cacheSlotRef
+	err := s.stmtLookup.QueryRow(key.LayerID, int64(key.PageIdx)).Scan(&ref.Slot, &ref.Generation)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
+		return cacheSlotRef{}, false, nil
 	}
 	if err != nil {
-		return 0, false, err
+		return cacheSlotRef{}, false, err
 	}
-	return slot, true, nil
+	return ref, true, nil
 }
 
-func (s *sqliteStore) InsertPage(key cacheKey, slot int) error {
-	_, err := s.stmtInsert.Exec(key.BlobKey, int64(key.PageIdx), slot)
+func (s *sqliteStore) SetPage(key cacheKey, ref cacheSlotRef) error {
+	_, err := s.stmtInsert.Exec(key.LayerID, int64(key.PageIdx), ref.Slot, ref.Generation)
 	return err
 }
 
-func (s *sqliteStore) DeletePage(key cacheKey) (int, error) {
-	var slot int
-	err := s.stmtDelete.QueryRow(key.BlobKey, int64(key.PageIdx)).Scan(&slot)
+func (s *sqliteStore) DeletePage(key cacheKey) (cacheSlotRef, error) {
+	var ref cacheSlotRef
+	err := s.stmtDelete.QueryRow(key.LayerID, int64(key.PageIdx)).Scan(&ref.Slot, &ref.Generation)
 	if err != nil {
-		return -1, err
+		return cacheSlotRef{}, err
 	}
-	return slot, nil
+	return ref, nil
 }
 
 func (s *sqliteStore) BumpCredits(keys []cacheKey) error {
@@ -236,7 +343,7 @@ func (s *sqliteStore) BumpCredits(keys []cacheKey) error {
 	stmt := tx.Stmt(s.stmtBump)
 	defer util.SafeClose(stmt, "close bump credits stmt")
 	for k, n := range counts {
-		if _, err := stmt.Exec(int64(n), k.BlobKey, int64(k.PageIdx)); err != nil {
+		if _, err := stmt.Exec(int64(n), k.LayerID, int64(k.PageIdx)); err != nil {
 			return err
 		}
 	}
@@ -290,6 +397,20 @@ func (s *sqliteStore) UsedSlots() ([]int, error) {
 	return slots, rows.Err()
 }
 
+func (s *sqliteStore) LockMutation() error {
+	if s.lockFile == nil {
+		return fmt.Errorf("cache mutation lock file not open")
+	}
+	return syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_EX)
+}
+
+func (s *sqliteStore) UnlockMutation() error {
+	if s.lockFile == nil {
+		return fmt.Errorf("cache mutation lock file not open")
+	}
+	return syscall.Flock(int(s.lockFile.Fd()), syscall.LOCK_UN)
+}
+
 // --- Disk ---
 
 func (s *sqliteStore) FreeSpace() int64 {
@@ -320,6 +441,9 @@ func (s *sqliteStore) Close() error {
 	}
 	if s.arenaFile != nil {
 		errs = append(errs, s.arenaFile.Close())
+	}
+	if s.lockFile != nil {
+		errs = append(errs, s.lockFile.Close())
 	}
 	return errors.Join(errs...)
 }

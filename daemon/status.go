@@ -33,8 +33,8 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if d.managedVolume != "" {
 		status["volume"] = d.managedVolume
 	}
-	if d.mountpoint != "" {
-		status["mountpoint"] = d.mountpoint
+	if mountpoint := d.currentMountpoint(); mountpoint != "" {
+		status["mountpoint"] = mountpoint
 	}
 	if d.devicePath != "" {
 		status["device"] = d.devicePath
@@ -74,6 +74,13 @@ func (d *Daemon) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, info)
+}
+
+func (d *Daemon) currentMountpoint() string {
+	if d.backend != nil && d.managedVolume != "" {
+		return d.backend.MountpointForVolume(d.managedVolume)
+	}
+	return d.mountpoint
 }
 
 func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {

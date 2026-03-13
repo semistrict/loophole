@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole"
+	"github.com/stretchr/testify/require"
 )
 
 // SimConfig controls the simulation parameters.
@@ -228,6 +229,7 @@ func (sim *Simulation) opTable() []opEntry {
 		{2, sim.opCloneFromSnapshot},
 		{5, sim.opCheckpoint},
 		{2, sim.opCloneFromCheckpoint},
+		{2, sim.opCompactShared},
 		{3, sim.opVerify},
 		{2, sim.opSnapshotIsolation},
 		{2, sim.opOpen},
@@ -738,6 +740,63 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
 			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
 			sim.t.Logf("POST-COMPACT MISMATCH vol=%s", volName)
+			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
+		}
+	}
+}
+
+func (sim *Simulation) pickReadOnlyVolume(ctx context.Context) string {
+	volNames := make([]string, 0, len(sim.volumeTimelines))
+	for name := range sim.volumeTimelines {
+		volNames = append(volNames, name)
+	}
+	sort.Strings(volNames)
+	for _, name := range volNames {
+		ref, err := sim.getVolRef(ctx, name)
+		if err != nil {
+			continue
+		}
+		if ref.ReadOnly {
+			return name
+		}
+	}
+	return ""
+}
+
+func (sim *Simulation) opCompactShared(ctx context.Context, node *SimNode) {
+	volName := sim.pickReadOnlyVolume(ctx)
+	if volName == "" {
+		return
+	}
+
+	v := node.manager.GetVolume(volName)
+	if v == nil {
+		var err error
+		v, err = node.manager.OpenVolume(volName)
+		if err != nil {
+			return
+		}
+		defer func() { _ = v.ReleaseRef() }()
+	}
+
+	frozen, ok := v.(*frozenVolume)
+	if !ok {
+		return
+	}
+
+	_ = frozen.layer.tryCompactL0(ctx)
+
+	timelineID := sim.volumeTimelines[volName]
+	maxPage := PageIdx(sim.config.DevicePages)
+	for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
+		buf := make([]byte, PageSize)
+		_, err := v.Read(ctx, buf, pageIdx.ByteOffset())
+		if err != nil {
+			return
+		}
+		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
+			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
+			sim.t.Logf("POST-SHARED-COMPACT MISMATCH vol=%s", volName)
 			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 		}
 	}
@@ -1906,4 +1965,44 @@ func TestSimulationDeterminism(t *testing.T) {
 		}
 	}
 	t.Logf("determinism OK: %d events identical across 2 runs", len(events1))
+}
+
+func TestSimulationSharedLayerCompactionExercise(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, 1, SimConfig{
+			NumNodes:       2,
+			DevicePages:    64,
+			MaxTimelines:   10,
+			OpsPerNode:     1,
+			CrashRate:      0,
+			FlushThreshold: 8 * PageSize,
+			L0PagesMax:     10,
+		})
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close(context.Background())
+			}
+		}()
+
+		ctx := t.Context()
+		sim.createVolume(ctx, sim.nodes[0], "vol-0")
+		v := sim.nodes[0].manager.GetVolume("vol-0")
+		require.NotNil(t, v)
+
+		timelineID := sim.volumeTimelines["vol-0"]
+		for i := 0; i < 20; i++ {
+			page := bytes.Repeat([]byte{0xAA, byte(i)}, PageSize/2)
+			require.NoError(t, v.Write(page, uint64(i)*PageSize))
+			sim.oracle.RecordWrite(sim.nodes[0].id, timelineID, PageIdx(i), page)
+		}
+		require.NoError(t, v.Flush())
+		sim.oracle.RecordFlush(sim.nodes[0].id, timelineID)
+
+		sim.opSnapshot(ctx, sim.nodes[0])
+		snapName := sim.pickReadOnlyVolume(ctx)
+		require.NotEmpty(t, snapName)
+
+		sim.opCompactShared(ctx, sim.nodes[1])
+		sim.FullScan()
+	})
 }

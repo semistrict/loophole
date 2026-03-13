@@ -46,35 +46,16 @@ func (v *frozenVolume) ReadOnly() bool     { return true }
 func (v *frozenVolume) VolumeType() string { return v.volType }
 
 func (v *frozenVolume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
-	snap := v.layer.snapshotLayers()
-	total := 0
-	for total < len(buf) {
-		if err := ctx.Err(); err != nil {
-			return total, err
-		}
-		pageIdx, pageOff := PageIdxOf(offset + uint64(total))
-		data, err := v.layer.readPageWith(ctx, &snap, pageIdx)
-		if err != nil {
-			return total, err
-		}
-		n := copy(buf[total:], data[pageOff:])
-		total += n
-	}
-	return total, nil
+	return v.layer.Read(ctx, buf, offset)
 }
 
-func (v *frozenVolume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, func(), error) {
-	pageIdx, pageOff := PageIdxOf(offset)
-	if pageOff == 0 && n == PageSize {
-		snap := v.layer.snapshotLayers()
-		return v.layer.readPagePinned(ctx, &snap, pageIdx)
-	}
+func (v *frozenVolume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
 	got, err := v.Read(ctx, buf, offset)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return buf[:got], func() {}, nil
+	return buf[:got], nil
 }
 
 func (v *frozenVolume) Write([]byte, uint64) error {

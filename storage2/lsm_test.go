@@ -2899,9 +2899,8 @@ func TestFlushReportsMetrics(t *testing.T) {
 	}
 }
 
-// TestReadAtZeroCopyMemtable verifies that ReadAt returns a pinned
-// zero-copy slice when reading a page-aligned full page from the memtable.
-func TestReadAtZeroCopyMemtable(t *testing.T) {
+// TestReadAtMemtable verifies that ReadAt returns the expected page contents.
+func TestReadAtMemtable(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
 		FlushThreshold:  64 * PageSize,
@@ -2924,12 +2923,10 @@ func TestReadAtZeroCopyMemtable(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ReadAt page-aligned full page — should be zero-copy from memtable.
-	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	data, err := v.ReadAt(ctx, 0, PageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
 
 	if len(data) != PageSize {
 		t.Fatalf("expected %d bytes, got %d", PageSize, len(data))
@@ -2942,9 +2939,8 @@ func TestReadAtZeroCopyMemtable(t *testing.T) {
 	}
 }
 
-// TestReadAtZeroCopyAfterFlush verifies that ReadAt works after data
-// has been flushed to L0 (falls back to allocating path).
-func TestReadAtZeroCopyAfterFlush(t *testing.T) {
+// TestReadAtAfterFlush verifies that ReadAt works after data has been flushed.
+func TestReadAtAfterFlush(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
 		FlushThreshold:  16 * PageSize,
@@ -2968,12 +2964,10 @@ func TestReadAtZeroCopyAfterFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// ReadAt after flush — data comes from L0/cache.
-	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	data, err := v.ReadAt(ctx, 0, PageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
 
 	if data[0] != 0xCC {
 		t.Fatalf("expected 0xCC, got 0x%02X", data[0])
@@ -3006,11 +3000,10 @@ func TestReadAtSubPageFallback(t *testing.T) {
 	}
 
 	// Sub-page read at offset 100, length 200.
-	data, release, err := v.ReadAt(ctx, 100, 200)
+	data, err := v.ReadAt(ctx, 100, 200)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer release()
 
 	if len(data) != 200 {
 		t.Fatalf("expected 200 bytes, got %d", len(data))
@@ -3024,13 +3017,12 @@ func TestReadAtSubPageFallback(t *testing.T) {
 	}
 }
 
-// TestReadAtPinPreventsCleanup verifies that a pinned read prevents
-// memtable cleanup until released.
-func TestReadAtPinPreventsCleanup(t *testing.T) {
+// TestReadAtReturnsCopy verifies that ReadAt returns a detached copy.
+func TestReadAtReturnsCopy(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  PageSize, // freeze after 1 page
-		MaxFrozenTables: 10,
+		FlushThreshold:  64 * PageSize,
+		MaxFrozenTables: 2,
 		FlushInterval:   -1,
 	}
 	m := newTestManager(t, store, cfg)
@@ -3047,24 +3039,18 @@ func TestReadAtPinPreventsCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Pin the page via ReadAt before flushing.
-	data, release, err := v.ReadAt(ctx, 0, PageSize)
+	data, err := v.ReadAt(ctx, 0, PageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Flush — this freezes and flushes the memtable.
-	if err := v.Flush(); err != nil {
+	data[0] = 0xAA
+	again, err := v.ReadAt(ctx, 0, PageSize)
+	if err != nil {
 		t.Fatal(err)
 	}
-
-	// Data should still be valid while pinned.
-	if data[0] != 0xDD {
-		t.Fatalf("expected 0xDD while pinned, got 0x%02X", data[0])
+	if again[0] != 0xDD {
+		t.Fatalf("expected stored data to be unchanged, got 0x%02X", again[0])
 	}
-
-	// Release the pin.
-	release()
 }
 
 // TestDirectWritebackClone verifies that WritePagesDirect + Clone works

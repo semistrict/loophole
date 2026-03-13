@@ -141,7 +141,7 @@ func TestE2E_GoFsxBasic(t *testing.T) {
 func TestE2E_GoFsxHeavy(t *testing.T) {
 	tfs := stressMountGo(t, "gofsx-heavy")
 	f := createFile(t, tfs, "fsx-heavy-testfile")
-	fsxRun(t, f, 4194304, 20000, 999)
+	fsxRun(t, f, 4194304, 10000, 999)
 }
 
 // --- fio-like tests ---

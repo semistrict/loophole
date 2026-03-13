@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type layer struct {
 	config    Config
 	diskCache *PageCache
 	cacheDir  string
+	lease     *loophole.LeaseManager
 
 	// writeLeaseSeq is the monotonically increasing sequence number
 	// assigned when the write lease was acquired. All files written
@@ -44,6 +46,7 @@ type layer struct {
 	frozenTables []*memtable
 	flushMu      sync.Mutex // serializes flushFrozenTables
 	compactMu    sync.Mutex // serializes compaction
+	indexMu      sync.Mutex // serializes index.json publication within one process
 
 	// L0 cache: parsed L0 files keyed by S3 key (bounded).
 	l0Cache  boundedCache[*parsedL0]
@@ -78,16 +81,21 @@ func (ly *layer) pageLock(idx PageIdx) *sync.Mutex {
 
 // layerSnapshot captures the layer state for a consistent read.
 type layerSnapshot struct {
-	memtable *memtable
-	frozen   []*memtable
-	l0       []l0Entry
-	l1       *blockRangeMap
-	l2       *blockRangeMap
+	layoutGen uint64
+	memtable  *memtable
+	frozen    []*memtable
+	l0        []l0Entry
+	l1        *blockRangeMap
+	l2        *blockRangeMap
 }
 
 type cachedL0Page struct {
 	pageIdx PageIdx
 	data    []byte
+}
+
+type compactionLockFile struct {
+	Token string `json:"token"`
 }
 
 // openLayer loads a layer from S3 and initializes its local state.
@@ -194,7 +202,7 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 	idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		// No index.json yet — start fresh.
-		ly.index = layerIndex{NextSeq: 1}
+		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1}
 		ly.nextSeq.Store(1)
 		ly.l1Map = newBlockRangeMap(nil)
 		ly.l2Map = newBlockRangeMap(nil)
@@ -236,6 +244,9 @@ func (ly *layer) refresh(ctx context.Context) error {
 }
 
 func (ly *layer) saveIndex(ctx context.Context) error {
+	ly.indexMu.Lock()
+	defer ly.indexMu.Unlock()
+
 	ly.mu.RLock()
 	idx := ly.index
 	idx.NextSeq = ly.nextSeq.Load()
@@ -255,10 +266,11 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 func (ly *layer) snapshotLayers() layerSnapshot {
 	ly.mu.RLock()
 	snap := layerSnapshot{
-		memtable: ly.memtable,
-		l0:       ly.index.L0,
-		l1:       ly.l1Map,
-		l2:       ly.l2Map,
+		layoutGen: ly.index.LayoutGen,
+		memtable:  ly.memtable,
+		l0:        ly.index.L0,
+		l1:        ly.l1Map,
+		l2:        ly.l2Map,
 	}
 	ly.mu.RUnlock()
 
@@ -272,7 +284,21 @@ func (ly *layer) snapshotLayers() layerSnapshot {
 // Read reads data from the layer into buf at the given byte offset.
 func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
 	snap := ly.snapshotLayers()
+	total, err := ly.readWithSnapshot(ctx, buf, offset, &snap)
+	if err == nil {
+		return total, nil
+	}
+	if !ly.shouldRetryAfterLayoutError(err) {
+		return total, err
+	}
+	refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+	if refreshErr != nil || !refreshed {
+		return total, err
+	}
+	return ly.Read(ctx, buf, offset)
+}
 
+func (ly *layer) readWithSnapshot(ctx context.Context, buf []byte, offset uint64, snap *layerSnapshot) (int, error) {
 	total := 0
 	for total < len(buf) {
 		if err := ctx.Err(); err != nil {
@@ -280,7 +306,7 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 		}
 		pageIdx, pageOff := PageIdxOf(offset + uint64(total))
 
-		data, err := ly.readPageWith(ctx, &snap, pageIdx)
+		data, err := ly.readPageWith(ctx, snap, pageIdx)
 		if err != nil {
 			return total, err
 		}
@@ -289,43 +315,6 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 		total += n
 	}
 	return total, nil
-}
-
-// readPagePinned returns a pinned slice for a single page-aligned read.
-// The returned release function must be called when the caller is done.
-// Memtable hits are zero-copy; page cache and S3 paths allocate.
-func (ly *layer) readPagePinned(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, func(), error) {
-	// 1. Active memtable — zero-copy (nil for frozen layers).
-	staleSnapshot := false
-	if snap.memtable != nil {
-		if slot, ok := snap.memtable.get(pageIdx); ok {
-			data, release, err := snap.memtable.readDataPinned(slot)
-			if err == nil {
-				return data, release, nil
-			}
-			staleSnapshot = true
-		}
-	}
-
-	// 2. Frozen memtables — zero-copy.
-	for i := len(snap.frozen) - 1; i >= 0; i-- {
-		if slot, ok := snap.frozen[i].get(pageIdx); ok {
-			data, release, err := snap.frozen[i].readDataPinned(slot)
-			if err == nil {
-				return data, release, nil
-			}
-			staleSnapshot = true
-			break
-		}
-	}
-
-	// 3+. L0/L1/L2/zeros — allocating path (page cache checked per-blob inside readPageWith).
-	_ = staleSnapshot // readPageWith handles stale snapshot refresh internally
-	data, err := ly.readPageWith(ctx, snap, pageIdx)
-	if err != nil {
-		return nil, nil, err
-	}
-	return data, func() {}, nil
 }
 
 // readPageWith reads a single page using a pre-captured layer snapshot.
@@ -374,22 +363,22 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 		if !l0HasPage(l0e, pageIdx) {
 			continue
 		}
-		if data := ly.cachedPage(l0e.Key, pageIdx); data != nil {
+		sourceLayerID := layerIDFromBlobKey(l0e.Key)
+		if data := ly.cachedPage(sourceLayerID, pageIdx); data != nil {
 			return data, nil
 		}
 		data, err := ly.readFromL0(ctx, l0e, pageIdx)
 		if err != nil {
 			return nil, err
 		}
-		ly.cachePage(l0e.Key, pageIdx, data)
+		ly.cachePage(sourceLayerID, pageIdx, data)
 		metrics.PageReadSource.WithLabelValues("l0").Inc()
 		return data, nil
 	}
 
 	// 5. L1 (sparse blocks).
 	if layer, seq := snap.l1.Find(pageIdx.Block()); layer != "" {
-		blobKey := blockKey(layer, "l1", seq, pageIdx.Block())
-		if data := ly.cachedPage(blobKey, pageIdx); data != nil {
+		if data := ly.cachedPage(layer, pageIdx); data != nil {
 			return data, nil
 		}
 		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
@@ -397,7 +386,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 			return nil, err
 		}
 		if found {
-			ly.cachePage(blobKey, pageIdx, data)
+			ly.cachePage(layer, pageIdx, data)
 			metrics.PageReadSource.WithLabelValues("l1").Inc()
 			return data, nil
 		}
@@ -406,8 +395,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 
 	// 6. L2 (dense blocks).
 	if layer, seq := snap.l2.Find(pageIdx.Block()); layer != "" {
-		blobKey := blockKey(layer, "l2", seq, pageIdx.Block())
-		if data := ly.cachedPage(blobKey, pageIdx); data != nil {
+		if data := ly.cachedPage(layer, pageIdx); data != nil {
 			return data, nil
 		}
 		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
@@ -415,7 +403,7 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 			return nil, err
 		}
 		if found {
-			ly.cachePage(blobKey, pageIdx, data)
+			ly.cachePage(layer, pageIdx, data)
 			metrics.PageReadSource.WithLabelValues("l2").Inc()
 			return data, nil
 		}
@@ -426,11 +414,18 @@ func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx 
 	return zeroPage[:], nil
 }
 
-func (ly *layer) cachedPage(blobKey string, pageIdx PageIdx) []byte {
+func (ly *layer) shouldUsePersistentPageCache(sourceLayerID string) bool {
 	if ly.diskCache == nil {
+		return false
+	}
+	return ly.memtable == nil || sourceLayerID != ly.id
+}
+
+func (ly *layer) cachedPage(sourceLayerID string, pageIdx PageIdx) []byte {
+	if !ly.shouldUsePersistentPageCache(sourceLayerID) {
 		return nil
 	}
-	key := cacheKey{BlobKey: blobKey, PageIdx: pageIdx}
+	key := cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}
 	if data := ly.diskCache.GetPage(key); data != nil {
 		metrics.CacheHits.Inc()
 		metrics.PageReadSource.WithLabelValues("cache").Inc()
@@ -440,9 +435,9 @@ func (ly *layer) cachedPage(blobKey string, pageIdx PageIdx) []byte {
 	return nil
 }
 
-func (ly *layer) cachePage(blobKey string, pageIdx PageIdx, data []byte) {
-	if ly.diskCache != nil {
-		ly.diskCache.PutPage(cacheKey{BlobKey: blobKey, PageIdx: pageIdx}, data)
+func (ly *layer) cachePage(sourceLayerID string, pageIdx PageIdx, data []byte) {
+	if ly.shouldUsePersistentPageCache(sourceLayerID) {
+		ly.diskCache.PutPage(cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}, data)
 	}
 }
 
@@ -952,7 +947,7 @@ func (ly *layer) commitL0Blob(data []byte, l0entry l0Entry, cached []cachedL0Pag
 	}
 
 	for _, page := range cached {
-		ly.cachePage(l0entry.Key, page.pageIdx, page.data)
+		ly.cachePage(layerIDFromBlobKey(l0entry.Key), page.pageIdx, page.data)
 	}
 
 	ly.mu.Lock()
@@ -1240,6 +1235,100 @@ func blockKey(layerID, level string, writeLeaseSeq uint64, blockAddr BlockIdx) s
 	return fmt.Sprintf("layers/%s/%s/%016x-%016x", layerID, level, writeLeaseSeq, blockAddr)
 }
 
+func layerIDFromBlobKey(key string) string {
+	parts := strings.Split(key, "/")
+	if len(parts) >= 2 && parts[0] == "layers" {
+		return parts[1]
+	}
+	return ""
+}
+
+func (ly *layer) shouldRetryAfterLayoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, loophole.ErrNotFound) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "bad message") ||
+		strings.Contains(msg, "bad magic") ||
+		strings.Contains(msg, "parse block") ||
+		strings.Contains(msg, "parse l0") ||
+		strings.Contains(msg, "read block") ||
+		strings.Contains(msg, "read l0") ||
+		strings.Contains(msg, "extends beyond") ||
+		strings.Contains(msg, "crc")
+}
+
+func (ly *layer) waitRefreshForLayoutChange(ctx context.Context, prevGen uint64) (bool, error) {
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for {
+		idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+		if err == nil && idx.LayoutGen != prevGen {
+			if err := ly.refresh(ctx); err != nil {
+				return false, err
+			}
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			return false, nil
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
+func (ly *layer) acquireCompactionLease(ctx context.Context) (func(), error) {
+	if ly.lease == nil {
+		return func() {}, nil
+	}
+	key := "compaction-lock.json"
+	token := ly.lease.Token()
+	data, err := json.Marshal(compactionLockFile{Token: token})
+	if err != nil {
+		return nil, fmt.Errorf("marshal compaction lock: %w", err)
+	}
+	for attempts := 0; attempts < 3; attempts++ {
+		err := ly.layerStore.PutIfNotExists(ctx, key, data)
+		if err == nil {
+			return func() {
+				_ = ly.layerStore.DeleteObject(context.Background(), key)
+			}, nil
+		}
+		if !errors.Is(err, loophole.ErrExists) {
+			return nil, fmt.Errorf("create compaction lock: %w", err)
+		}
+		lock, _, err := loophole.ReadJSON[compactionLockFile](ctx, ly.layerStore, key)
+		if err != nil {
+			if errors.Is(err, loophole.ErrNotFound) {
+				continue
+			}
+			return nil, fmt.Errorf("read compaction lock: %w", err)
+		}
+		if lock.Token == token {
+			return func() {}, nil
+		}
+		if err := ly.lease.CheckAvailable(ctx, lock.Token); err != nil {
+			return nil, err
+		}
+		if err := ly.layerStore.DeleteObject(ctx, key); err != nil && !errors.Is(err, loophole.ErrNotFound) {
+			return nil, fmt.Errorf("delete stale compaction lock: %w", err)
+		}
+	}
+	return nil, fmt.Errorf("acquire compaction lock for layer %s", ly.id)
+}
+
+func (ly *layer) outputSeq(existingLayer string, existingSeq, fallback uint64) uint64 {
+	if existingLayer == ly.id && existingSeq != 0 {
+		return existingSeq
+	}
+	return fallback
+}
+
 func (ly *layer) log(format string, args ...any) {
 	if ly.debugLog != nil {
 		ly.debugLog(fmt.Sprintf(format, args...))
@@ -1293,6 +1382,7 @@ func (ly *layer) ForceCompactL0() error {
 
 func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	ly.mu.RLock()
+	startLayoutGen := ly.index.LayoutGen
 	l0entries := make([]l0Entry, len(ly.index.L0))
 	copy(l0entries, ly.index.L0)
 	ly.mu.RUnlock()
@@ -1306,6 +1396,15 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	if total == 0 {
 		return nil
 	}
+
+	releaseLock, err := ly.acquireCompactionLease(ctx)
+	if err != nil {
+		if refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, startLayoutGen); refreshErr == nil && refreshed {
+			return nil
+		}
+		return fmt.Errorf("acquire compaction lease: %w", err)
+	}
+	defer releaseLock()
 
 	slog.Info("compactL0: starting", "layer", ly.id,
 		"l0Files", len(l0entries), "l0Pages", total, "threshold", ly.config.L0PagesMax)
@@ -1345,6 +1444,7 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 		key       string
 		pb        *parsedBlock
 		promote   bool // true = L2 promotion, false = L1
+		seq       uint64
 	}
 
 	// Process blocks in parallel with bounded concurrency.
@@ -1400,9 +1500,10 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 
 			// Count merged pages to decide on L2 promotion.
 			var existingL1 *parsedBlock
+			existingL1Layer, existingL1Seq := snapL1Map.Find(blockAddr)
 			mergedCount := len(l0Offsets)
-			if layer, seq := snapL1Map.Find(blockAddr); layer != "" {
-				key := blockKey(layer, "l1", seq, blockAddr)
+			if existingL1Layer != "" {
+				key := blockKey(existingL1Layer, "l1", existingL1Seq, blockAddr)
 				pb, err := ly.getParsedBlock(gctx, key)
 				if err != nil {
 					return fmt.Errorf("read existing L1 block %d: %w", blockAddr, err)
@@ -1417,9 +1518,10 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 
 			promote := mergedCount >= L1PromoteThreshold
 			var existingL2 *parsedBlock
+			existingL2Layer, existingL2Seq := snapL2Map.Find(blockAddr)
 			if promote {
-				if layer, seq := snapL2Map.Find(blockAddr); layer != "" {
-					l2Key := blockKey(layer, "l2", seq, blockAddr)
+				if existingL2Layer != "" {
+					l2Key := blockKey(existingL2Layer, "l2", existingL2Seq, blockAddr)
 					pb, err := ly.getParsedBlock(gctx, l2Key)
 					if err != nil {
 						return fmt.Errorf("read existing L2 block %d: %w", blockAddr, err)
@@ -1473,10 +1575,13 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 
 			// Upload.
 			var key string
+			var outputSeq uint64
 			if promote {
-				key = blockKey(ly.id, "l2", ly.writeLeaseSeq, blockAddr)
+				outputSeq = ly.outputSeq(existingL2Layer, existingL2Seq, ly.writeLeaseSeq)
+				key = blockKey(ly.id, "l2", outputSeq, blockAddr)
 			} else {
-				key = blockKey(ly.id, "l1", ly.writeLeaseSeq, blockAddr)
+				outputSeq = ly.outputSeq(existingL1Layer, existingL1Seq, ly.writeLeaseSeq)
+				key = blockKey(ly.id, "l1", outputSeq, blockAddr)
 			}
 			if err := ly.store.PutReader(gctx, key, bytes.NewReader(blockData)); err != nil {
 				return fmt.Errorf("upload block %d: %w", blockAddr, err)
@@ -1501,6 +1606,7 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 				key:       key,
 				pb:        pb,
 				promote:   promote,
+				seq:       outputSeq,
 			})
 			resultsMu.Unlock()
 
@@ -1517,10 +1623,10 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	newL2Map := snapL2Map
 	for _, r := range results {
 		if r.promote {
-			newL2Map = newL2Map.Set(r.blockAddr, ly.id, ly.writeLeaseSeq)
+			newL2Map = newL2Map.Set(r.blockAddr, ly.id, r.seq)
 			newL1Map = newL1Map.Remove(r.blockAddr)
 		} else {
-			newL1Map = newL1Map.Set(r.blockAddr, ly.id, ly.writeLeaseSeq)
+			newL1Map = newL1Map.Set(r.blockAddr, ly.id, r.seq)
 		}
 		if r.pb != nil {
 			ly.blockCache.put(r.key, r.pb)
@@ -1531,7 +1637,7 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 				for _, ie := range r.pb.index {
 					pageIdx := PageIdx(uint64(r.blockAddr)*BlockPages + uint64(ie.PageOffset))
 					if data, _, err := r.pb.findPage(context.Background(), pageIdx); err == nil && data != nil {
-						ly.cachePage(r.key, pageIdx, data)
+						ly.cachePage(ly.id, pageIdx, data)
 					}
 				}
 			}
@@ -1541,6 +1647,7 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	// All blocks processed successfully. Atomically swap maps and remove
 	// only the L0 entries we processed. Entries added by concurrent flushes
 	// during compaction are preserved.
+	var committed layerIndex
 	ly.mu.Lock()
 	ly.l1Map = newL1Map
 	ly.l2Map = newL2Map
@@ -1548,6 +1655,11 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 	remaining := ly.index.L0[nProcessed:]
 	ly.index.L0 = make([]l0Entry, len(remaining))
 	copy(ly.index.L0, remaining)
+	ly.index.LayoutGen++
+	committed = ly.index
+	committed.NextSeq = ly.nextSeq.Load()
+	committed.L1 = ly.l1Map.Ranges()
+	committed.L2 = ly.l2Map.Ranges()
 	ly.mu.Unlock()
 
 	metrics.L0Compactions.Inc()
@@ -1556,6 +1668,33 @@ func (ly *layer) compactL0Locked(ctx context.Context, force bool) error {
 		"processed", nProcessed, "remaining", len(remaining),
 		"l1Blocks", len(blockGroups))
 
-	// Save updated index.
-	return ly.saveIndex(ctx)
+	// CAS-save the updated index so readers only observe the new layout after
+	// commit, and other compactors converge if the layer changed underneath us.
+	ly.indexMu.Lock()
+	current, etag, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	if err != nil {
+		ly.indexMu.Unlock()
+		return fmt.Errorf("read current index for compact commit: %w", err)
+	}
+	if current.LayoutGen > startLayoutGen {
+		ly.indexMu.Unlock()
+		if err := ly.refresh(ctx); err != nil {
+			return err
+		}
+		return nil
+	}
+	data, err := json.Marshal(committed)
+	if err != nil {
+		ly.indexMu.Unlock()
+		return fmt.Errorf("marshal compacted index: %w", err)
+	}
+	if _, err := ly.layerStore.PutBytesCAS(ctx, "index.json", data, etag); err != nil {
+		ly.indexMu.Unlock()
+		if refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, startLayoutGen); refreshErr == nil && refreshed {
+			return nil
+		}
+		return fmt.Errorf("commit compacted index: %w", err)
+	}
+	ly.indexMu.Unlock()
+	return nil
 }

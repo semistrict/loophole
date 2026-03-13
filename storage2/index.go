@@ -7,10 +7,11 @@ import (
 // layerIndex is the on-disk and in-memory representation of a layer's state.
 // Stored as index.json per layer.
 type layerIndex struct {
-	NextSeq uint64       `json:"next_seq"`
-	L0      []l0Entry    `json:"l0,omitempty"`
-	L1      []blockRange `json:"l1,omitempty"`
-	L2      []blockRange `json:"l2,omitempty"`
+	NextSeq   uint64       `json:"next_seq"`
+	LayoutGen uint64       `json:"layout_gen,omitempty"`
+	L0        []l0Entry    `json:"l0,omitempty"`
+	L1        []blockRange `json:"l1,omitempty"`
+	L2        []blockRange `json:"l2,omitempty"`
 }
 
 // l0Entry describes a single L0 flush file and the pages it contains.

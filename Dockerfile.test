@@ -12,29 +12,25 @@ RUN apt-get update \
     && cp ltp/fsx /usr/local/bin/fsx \
     && rm -rf /tmp/xfstests
 
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.25-bookworm
 
-RUN apt-get update && apt-get install -y cmake && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY . .
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    make loophole e2e.test
-
-FROM debian:bookworm-slim
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
     fuse \
     e2fsprogs \
     util-linux \
     strace \
     fio \
     busybox-static \
+    cmake \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
-COPY --from=builder /app/loophole /usr/local/bin/loophole
-COPY --from=builder /app/e2e.test /usr/local/bin/e2e.test
+
+WORKDIR /app
 
 CMD ["sleep", "infinity"]

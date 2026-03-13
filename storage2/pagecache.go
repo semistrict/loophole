@@ -12,32 +12,37 @@ const (
 	budgetInterval = 30 * time.Second
 )
 
-// cacheKey identifies a cached page by the S3 blob key that contains it
-// and the absolute page index. Using the blob key (not the reading layer's
-// ID) ensures that clones, relayered volumes, and frozen layers sharing the
-// same underlying S3 objects all hit the same cache entries.
+// cacheKey identifies a cached logical page for an immutable source layer.
+// Writable layers do not use the persistent page cache.
 type cacheKey struct {
-	BlobKey string
+	LayerID string
 	PageIdx PageIdx
+}
+
+type cacheSlotRef struct {
+	Slot       int
+	Generation uint64
 }
 
 // cacheStore is the storage backend for PageCache.
 type cacheStore interface {
 	// Arena
-	ReadSlot(slot int) ([]byte, error)
-	WriteSlot(slot int, data []byte) error
+	ReadSlot(ref cacheSlotRef) ([]byte, error)
+	PrepareSlot(slot int, data []byte) (cacheSlotRef, error)
 	AllocArena(maxSlots int) error
 	ArenaSlots() int
 
 	// Index
-	LookupPage(key cacheKey) (slot int, ok bool, err error)
-	InsertPage(key cacheKey, slot int) error
-	DeletePage(key cacheKey) (slot int, err error)
+	LookupPage(key cacheKey) (ref cacheSlotRef, ok bool, err error)
+	SetPage(key cacheKey, ref cacheSlotRef) error
+	DeletePage(key cacheKey) (ref cacheSlotRef, err error)
 	BumpCredits(keys []cacheKey) error
 	AgeCredits() error
 	EvictLow(count int) (freedSlots []int, err error)
 	CountPages() (int, error)
 	UsedSlots() ([]int, error)
+	LockMutation() error
+	UnlockMutation() error
 
 	// Disk
 	FreeSpace() int64
@@ -124,27 +129,16 @@ func (c *PageCache) GetPage(key cacheKey) []byte {
 		return nil
 	}
 
-	slot, ok, err := c.store.LookupPage(key)
+	ref, ok, err := c.store.LookupPage(key)
 	if !ok || err != nil {
 		return nil
 	}
 	c.accessBuf = append(c.accessBuf, key)
-	data, err := c.store.ReadSlot(slot)
+	data, err := c.store.ReadSlot(ref)
 	if err != nil || len(data) != PageSize {
 		return nil
 	}
 	return data
-}
-
-// GetPagePinned returns a copy of the cached page data.
-// The returned release function is a no-op (kept for API compatibility).
-// Returns (nil, nil) on cache miss.
-func (c *PageCache) GetPagePinned(key cacheKey) ([]byte, func()) {
-	data := c.GetPage(key)
-	if data == nil {
-		return nil, nil
-	}
-	return data, func() {}
 }
 
 func (c *PageCache) PutPage(key cacheKey, data []byte) {
@@ -158,14 +152,28 @@ func (c *PageCache) PutPage(key cacheKey, data []byte) {
 		return
 	}
 
-	if slot, ok, _ := c.store.LookupPage(key); ok {
-		if err := c.store.WriteSlot(slot, data); err != nil {
+	if err := c.store.LockMutation(); err != nil {
+		return
+	}
+	defer func() {
+		_ = c.store.UnlockMutation()
+	}()
+
+	// Another process may have populated this key while we were waiting.
+	if existing, ok, _ := c.store.LookupPage(key); ok {
+		ref, err := c.store.PrepareSlot(existing.Slot, data)
+		if err != nil {
+			return
+		}
+		if err := c.store.SetPage(key, ref); err != nil {
 			return
 		}
 		c.accessBuf = append(c.accessBuf, key)
 		return
 	}
-
+	if err := c.rebuildFreeSlotsLocked(); err != nil {
+		return
+	}
 	if !c.ensureCapacityLocked(PageSize) {
 		return
 	}
@@ -173,13 +181,14 @@ func (c *PageCache) PutPage(key cacheKey, data []byte) {
 	if !ok {
 		return
 	}
-	if err := c.store.WriteSlot(slot, data); err != nil {
+	ref, err := c.store.PrepareSlot(slot, data)
+	if err != nil {
 		c.freeSlots = append(c.freeSlots, slot)
 		return
 	}
-	if err := c.store.InsertPage(key, slot); err != nil {
+	if err := c.store.SetPage(key, ref); err != nil {
 		// UNIQUE violation (another process) or other error — give back the slot.
-		c.freeSlots = append(c.freeSlots, slot)
+		c.freeSlots = append(c.freeSlots, ref.Slot)
 		return
 	}
 	c.usedBytes += PageSize
@@ -188,13 +197,19 @@ func (c *PageCache) PutPage(key cacheKey, data []byte) {
 func (c *PageCache) DeletePage(key cacheKey) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.store.LockMutation(); err != nil {
+		return
+	}
+	defer func() {
+		_ = c.store.UnlockMutation()
+	}()
 
-	slot, err := c.store.DeletePage(key)
+	ref, err := c.store.DeletePage(key)
 	if err != nil {
 		return
 	}
 	c.usedBytes -= PageSize
-	c.freeSlots = append(c.freeSlots, slot)
+	c.freeSlots = append(c.freeSlots, ref.Slot)
 }
 
 func (c *PageCache) Close() error {
@@ -239,7 +254,10 @@ func (c *PageCache) runBudgetLoop() {
 			oldCount, _ := c.store.CountPages()
 			c.budget = c.computeBudgetLocked()
 			c.budgetAt = time.Now()
-			c.evictUntilWithinBudgetLocked()
+			if err := c.store.LockMutation(); err == nil {
+				c.evictUntilWithinBudgetLocked()
+				_ = c.store.UnlockMutation()
+			}
 			newCount, _ := c.store.CountPages()
 			var m runtime.MemStats
 			runtime.ReadMemStats(&m)

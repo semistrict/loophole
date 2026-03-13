@@ -18,3 +18,4 @@ cmd/wasm/web/public/loophole.wasm
 /loophole
 /container-control
 /loophole-guest-agent
+.gocache/

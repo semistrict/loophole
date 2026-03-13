@@ -5,10 +5,11 @@
 //   - L1: sparse 4MB blocks (only changed pages within a 4MB region)
 //   - L2: dense 4MB blocks (full snapshot of a 4MB region)
 //
-// Layers are immutable once frozen. Snapshots freeze the current layer
-// and move the volume to a new child. Each layer's index.json is
-// self-contained — it references all data files it needs, including
-// inherited ones from ancestors.
+// Frozen layers are logically immutable: compaction may rewrite their
+// physical layout, but it must not change logical page contents.
+// Snapshots freeze the current layer and move the volume to a new child.
+// Each layer's index.json is self-contained — it references all data files
+// it needs, including inherited ones from ancestors.
 //
 // See storage2.md for the full design.
 package storage2

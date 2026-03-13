@@ -9,26 +9,32 @@ import (
 )
 
 func pk(tl string, idx PageIdx) cacheKey {
-	return cacheKey{BlobKey: tl, PageIdx: idx}
+	return cacheKey{LayerID: tl, PageIdx: idx}
 }
 
 type mockPage struct {
-	slot    int
+	ref     cacheSlotRef
 	credits int
 }
 
+type mockSlot struct {
+	generation uint64
+	data       []byte
+}
+
 type mockStore struct {
-	slots     map[int][]byte
+	slots     map[int]*mockSlot
 	pages     map[cacheKey]*mockPage
 	maxSlots  int
 	freeSpace int64
 	reserve   int64
 	freeFn    func() int64
+	mu        sync.Mutex
 }
 
 func newMockStore(freeSpace, reserve int64) *mockStore {
 	return &mockStore{
-		slots:     make(map[int][]byte),
+		slots:     make(map[int]*mockSlot),
 		pages:     make(map[cacheKey]*mockPage),
 		freeSpace: freeSpace,
 		reserve:   reserve,
@@ -42,39 +48,51 @@ func (s *mockStore) AllocArena(maxSlots int) error {
 
 func (s *mockStore) ArenaSlots() int { return s.maxSlots }
 
-func (s *mockStore) ReadSlot(slot int) ([]byte, error) {
-	data, ok := s.slots[slot]
+func (s *mockStore) ReadSlot(ref cacheSlotRef) ([]byte, error) {
+	slot, ok := s.slots[ref.Slot]
 	if !ok {
-		return nil, fmt.Errorf("slot %d not found", slot)
+		return nil, fmt.Errorf("slot %d not found", ref.Slot)
 	}
-	return bytes.Clone(data), nil
+	if slot.generation != ref.Generation {
+		return nil, fmt.Errorf("stale slot generation: have=%d want=%d", slot.generation, ref.Generation)
+	}
+	return bytes.Clone(slot.data), nil
 }
 
-func (s *mockStore) WriteSlot(slot int, data []byte) error {
-	s.slots[slot] = bytes.Clone(data)
+func (s *mockStore) PrepareSlot(slot int, data []byte) (cacheSlotRef, error) {
+	ms := s.slots[slot]
+	if ms == nil {
+		ms = &mockSlot{}
+		s.slots[slot] = ms
+	}
+	ms.generation++
+	if ms.generation == 0 {
+		ms.generation = 1
+	}
+	ms.data = bytes.Clone(data)
+	return cacheSlotRef{Slot: slot, Generation: ms.generation}, nil
+}
+
+func (s *mockStore) LookupPage(key cacheKey) (cacheSlotRef, bool, error) {
+	p, ok := s.pages[key]
+	if !ok {
+		return cacheSlotRef{}, false, nil
+	}
+	return p.ref, true, nil
+}
+
+func (s *mockStore) SetPage(key cacheKey, ref cacheSlotRef) error {
+	s.pages[key] = &mockPage{ref: ref, credits: 1}
 	return nil
 }
 
-func (s *mockStore) LookupPage(key cacheKey) (int, bool, error) {
+func (s *mockStore) DeletePage(key cacheKey) (cacheSlotRef, error) {
 	p, ok := s.pages[key]
 	if !ok {
-		return 0, false, nil
-	}
-	return p.slot, true, nil
-}
-
-func (s *mockStore) InsertPage(key cacheKey, slot int) error {
-	s.pages[key] = &mockPage{slot: slot, credits: 1}
-	return nil
-}
-
-func (s *mockStore) DeletePage(key cacheKey) (int, error) {
-	p, ok := s.pages[key]
-	if !ok {
-		return -1, fmt.Errorf("page not found")
+		return cacheSlotRef{}, fmt.Errorf("page not found")
 	}
 	delete(s.pages, key)
-	return p.slot, nil
+	return p.ref, nil
 }
 
 func (s *mockStore) BumpCredits(keys []cacheKey) error {
@@ -107,14 +125,14 @@ func (s *mockStore) EvictLow(count int) ([]int, error) {
 	}
 	var items []kv
 	for k, p := range s.pages {
-		items = append(items, kv{key: k, credits: p.credits, slot: p.slot})
+		items = append(items, kv{key: k, credits: p.credits, slot: p.ref.Slot})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].credits != items[j].credits {
 			return items[i].credits < items[j].credits
 		}
-		if items[i].key.BlobKey != items[j].key.BlobKey {
-			return items[i].key.BlobKey < items[j].key.BlobKey
+		if items[i].key.LayerID != items[j].key.LayerID {
+			return items[i].key.LayerID < items[j].key.LayerID
 		}
 		return items[i].key.PageIdx < items[j].key.PageIdx
 	})
@@ -136,9 +154,19 @@ func (s *mockStore) CountPages() (int, error) {
 func (s *mockStore) UsedSlots() ([]int, error) {
 	var slots []int
 	for _, p := range s.pages {
-		slots = append(slots, p.slot)
+		slots = append(slots, p.ref.Slot)
 	}
 	return slots, nil
+}
+
+func (s *mockStore) LockMutation() error {
+	s.mu.Lock()
+	return nil
+}
+
+func (s *mockStore) UnlockMutation() error {
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *mockStore) FreeSpace() int64 {
@@ -285,7 +313,7 @@ func TestPageCacheCloseStopsBudgetLoop(t *testing.T) {
 	}
 }
 
-func TestGetPagePinnedRoundTrip(t *testing.T) {
+func TestGetPageRoundTrip(t *testing.T) {
 	cache, err := newPageCacheWithStore(newMockStore(8*PageSize, 0))
 	if err != nil {
 		t.Fatal(err)
@@ -295,23 +323,20 @@ func TestGetPagePinnedRoundTrip(t *testing.T) {
 	page := bytes.Repeat([]byte{0xCD}, PageSize)
 	cache.PutPage(pk("p", 1), page)
 
-	data, release := cache.GetPagePinned(pk("p", 1))
+	data := cache.GetPage(pk("p", 1))
 	if data == nil {
-		t.Fatal("expected pinned hit")
+		t.Fatal("expected cache hit")
 	}
 	if !bytes.Equal(data, page) {
-		t.Fatal("pinned data mismatch")
+		t.Fatal("cached data mismatch")
 	}
-	release()
 
-	// Miss returns nil, nil.
-	data, release = cache.GetPagePinned(pk("missing", 0))
-	if data != nil || release != nil {
+	if got := cache.GetPage(pk("missing", 0)); got != nil {
 		t.Fatal("expected nil for cache miss")
 	}
 }
 
-func TestGetPagePinnedReturnsCopy(t *testing.T) {
+func TestGetPageReturnsCopy(t *testing.T) {
 	store := newMockStore(8*PageSize, 0)
 	cache, err := newPageCacheWithStore(store)
 	if err != nil {
@@ -322,12 +347,10 @@ func TestGetPagePinnedReturnsCopy(t *testing.T) {
 	page := bytes.Repeat([]byte{0x11}, PageSize)
 	cache.PutPage(pk("t", 1), page)
 
-	// Get a "pinned" copy.
-	data, release := cache.GetPagePinned(pk("t", 1))
+	data := cache.GetPage(pk("t", 1))
 	if data == nil {
 		t.Fatal("expected hit")
 	}
-	release()
 
 	// Evict the original page from cache.
 	cache.mu.Lock()
@@ -415,5 +438,116 @@ func TestPageCacheMultiInstance(t *testing.T) {
 	got := cache2.GetPage(pk("shared", 1))
 	if !bytes.Equal(got, page) {
 		t.Fatalf("second instance should see first instance's page")
+	}
+}
+
+func TestRepro_SharedPageCacheSlotCollisionCorruptsExistingEntry(t *testing.T) {
+	dir := t.TempDir()
+
+	cache1, err := NewPageCache(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache1.Close() })
+
+	cache2, err := NewPageCache(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache2.Close() })
+
+	key1 := pk("layer-a", 1)
+	key2 := pk("layer-b", 2)
+	page1 := bytes.Repeat([]byte{0xAA}, PageSize)
+	page2 := bytes.Repeat([]byte{0xBB}, PageSize)
+
+	cache1.PutPage(key1, page1)
+	cache2.PutPage(key2, page2)
+
+	got := cache1.GetPage(key1)
+	if got == nil {
+		t.Fatal("expected key1 to remain present")
+	}
+	if !bytes.Equal(got, page1) {
+		t.Fatalf("shared page cache should preserve the original entry, got prefix %x", got[:8])
+	}
+}
+
+type getRaceStore struct {
+	cacheStore
+	key       cacheKey
+	lookupHit chan struct{}
+	proceed   chan struct{}
+	once      sync.Once
+}
+
+func (s *getRaceStore) LookupPage(key cacheKey) (cacheSlotRef, bool, error) {
+	ref, ok, err := s.cacheStore.LookupPage(key)
+	if err != nil || !ok || key != s.key {
+		return ref, ok, err
+	}
+	s.once.Do(func() {
+		close(s.lookupHit)
+	})
+	return ref, ok, nil
+}
+
+func (s *getRaceStore) ReadSlot(ref cacheSlotRef) ([]byte, error) {
+	<-s.proceed
+	return s.cacheStore.ReadSlot(ref)
+}
+
+func TestRepro_GetPageCanReadReusedSlotAfterLookup(t *testing.T) {
+	base := newMockStore(8*PageSize, 0)
+	store := &getRaceStore{
+		cacheStore: base,
+		key:        pk("layer-a", 1),
+		lookupHit:  make(chan struct{}),
+		proceed:    make(chan struct{}),
+	}
+	cache, err := newPageCacheWithStore(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+
+	keyA := pk("layer-a", 1)
+	keyB := pk("layer-b", 2)
+	pageA := bytes.Repeat([]byte{0xAA}, PageSize)
+	pageB := bytes.Repeat([]byte{0xBB}, PageSize)
+	cache.PutPage(keyA, pageA)
+
+	readDone := make(chan []byte, 1)
+	go func() {
+		readDone <- cache.GetPage(keyA)
+	}()
+
+	<-store.lookupHit
+
+	base.mu.Lock()
+	page, ok := base.pages[keyA]
+	if !ok {
+		base.mu.Unlock()
+		t.Fatal("expected keyA mapping")
+	}
+	delete(base.pages, keyA)
+	base.pages[keyB] = &mockPage{ref: page.ref, credits: 1}
+	base.slots[page.ref.Slot] = &mockSlot{generation: page.ref.Generation, data: bytes.Clone(pageB)}
+	base.mu.Unlock()
+
+	close(store.proceed)
+	got := <-readDone
+	if got == nil {
+		t.Fatal("expected a page read")
+	}
+	if !bytes.Equal(got, pageB) {
+		prefix := got
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		t.Fatalf("expected reused-slot data, got prefix %x", prefix)
+	}
+	if bytes.Equal(got, pageA) {
+		t.Fatal("expected stale lookup to miss original page contents")
 	}
 }

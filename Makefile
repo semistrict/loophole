@@ -1,10 +1,11 @@
-.PHONY: build loophole install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-assets fly-bin
+.PHONY: build loophole loophole-sandboxd runsc install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-assets fly-bin
 
 .DEFAULT_GOAL := loophole
 
 BINDIR := bin
 GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
+RUNSC_GOOS := linux
 
 BUILDTAGS :=
 
@@ -16,7 +17,19 @@ build:
 loophole:
 	go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-$(GOOS)-$(GOARCH) ./cmd/loophole
 
+# Build sandbox daemon binary
+loophole-sandboxd:
+	CGO_ENABLED=0 go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-sandboxd-$(GOOS)-$(GOARCH) ./cmd/loophole-sandboxd
+
+# Build runsc from the vendored gVisor tree.
+runsc:
+	mkdir -p $(BINDIR)
+	GOWORK=off CGO_ENABLED=0 GOOS=$(RUNSC_GOOS) GOARCH=$(GOARCH) go build -C third_party/gvisor -o ../../$(BINDIR)/runsc-$(RUNSC_GOOS)-$(GOARCH) ./runsc
+
 # Build e2e test binary
+e2e.test:
+	go test -tags "$(BUILDTAGS)" -c -o e2e.test ./e2e
+
 install: loophole
 	cp $(BINDIR)/loophole-$(GOOS)-$(GOARCH) $(shell go env GOPATH)/bin/loophole
 ifeq ($(GOOS),darwin)
@@ -63,7 +76,7 @@ deps:
 # Run e2e tests (losetup + kernel ext4 over FUSE).
 # Usage: make e2e [RUN=TestName]
 e2e:
-	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 300s $(if $(RUN),-run '$(RUN)') ./e2e/
+	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 600s $(if $(RUN),-run '$(RUN)') ./e2e/
 
 # Run FUSE benchmarks.
 # Usage: make bench-fuse

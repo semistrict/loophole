@@ -12,11 +12,24 @@ RUN apt-get update \
     && cp ltp/fsx /usr/local/bin/fsx \
     && rm -rf /tmp/xfstests
 
+FROM golang:1.25-bookworm AS runsc-builder
+
+RUN apt-get update && apt-get install -y cmake && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    make runsc \
+    && arch="$(go env GOARCH)" \
+    && cp "bin/runsc-linux-${arch}" /tmp/runsc
+
 FROM golang:1.25-bookworm
 
 ENV PATH="/usr/local/go/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y \
+    ca-certificates \
     fuse3 \
     libfuse3-dev \
     e2fsprogs \
@@ -31,7 +44,6 @@ RUN apt-get update && apt-get install -y \
     sysstat \
     procps \
     iproute2 \
-    curl \
     busybox-static \
     libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/* \
@@ -42,6 +54,7 @@ RUN apt-get update && apt-get install -y \
        'esac' > /etc/profile.d/go-path.sh
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
+COPY --from=runsc-builder /tmp/runsc /usr/local/bin/runsc
 
 # Install crun from GitHub (bookworm's version is too old for podman v6)
 RUN GOARCH=$(go env GOARCH) && \

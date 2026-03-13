@@ -50,6 +50,21 @@ func (d Dir) Cache(profile string) string {
 	return filepath.Join(string(d), "cache", profile)
 }
 
+// SandboxdSocket returns the Unix socket path for the sandbox daemon.
+func (d Dir) SandboxdSocket() string {
+	return filepath.Join(string(d), "sandboxd.sock")
+}
+
+// SandboxdLog returns the sandbox daemon log file path.
+func (d Dir) SandboxdLog() string {
+	return filepath.Join(string(d), "sandboxd.log")
+}
+
+// SandboxdState returns the sandbox daemon state directory.
+func (d Dir) SandboxdState() string {
+	return filepath.Join(string(d), "sandboxd")
+}
+
 // MountSymlink returns the symlink path that maps a user mountpoint back to
 // the daemon socket. This allows post-mount commands to find the daemon.
 func (d Dir) MountSymlink(mountpoint string) string {

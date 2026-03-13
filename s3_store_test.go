@@ -1,10 +1,13 @@
 package loophole
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -157,4 +160,88 @@ func TestS3PutReader(t *testing.T) {
 	defer body.Close()
 	got, _ := io.ReadAll(body)
 	assert.Equal(t, []byte("reader content"), got)
+}
+
+type slowChunkReader struct {
+	r     *bytes.Reader
+	chunk int
+	delay time.Duration
+}
+
+func (r *slowChunkReader) Read(p []byte) (int, error) {
+	if r.delay > 0 {
+		time.Sleep(r.delay)
+	}
+	n := min(len(p), r.chunk)
+	return r.r.Read(p[:n])
+}
+
+func (r *slowChunkReader) Seek(offset int64, whence int) (int64, error) {
+	return r.r.Seek(offset, whence)
+}
+
+func TestS3OverwriteIsAtomicForConcurrentReaders(t *testing.T) {
+	store := newS3TestStore(t)
+
+	const size = 4 << 20
+	original := bytes.Repeat([]byte{'A'}, size)
+	replacement := bytes.Repeat([]byte{'B'}, size)
+
+	require.NoError(t, store.PutBytes(t.Context(), "atomic-overwrite", original))
+
+	var sawRead atomic.Bool
+	readErrCh := make(chan error, 1)
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				readErrCh <- nil
+				return
+			default:
+			}
+
+			body, _, err := store.Get(t.Context(), "atomic-overwrite")
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			data, err := io.ReadAll(body)
+			body.Close()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			sawRead.Store(true)
+			if len(data) != size {
+				readErrCh <- assert.AnError
+				return
+			}
+			if bytes.Equal(data, original) || bytes.Equal(data, replacement) {
+				continue
+			}
+			readErrCh <- io.ErrUnexpectedEOF
+			return
+		}
+	}()
+
+	// Keep the upload open long enough that concurrent readers exercise the
+	// overwrite window instead of only pre/post states.
+	err := store.PutReader(t.Context(), "atomic-overwrite", &slowChunkReader{
+		r:     bytes.NewReader(replacement),
+		chunk: 32 << 10,
+		delay: 2 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.Eventually(t, sawRead.Load, 2*time.Second, 10*time.Millisecond)
+
+	close(stop)
+	require.NoError(t, <-readErrCh)
+
+	body, _, err := store.Get(t.Context(), "atomic-overwrite")
+	require.NoError(t, err)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, replacement, got)
 }

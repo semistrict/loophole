@@ -8,3 +8,7 @@
 	path = third_party/firecracker
 	url = git@github.com:semistrict/firecracker.git
 	branch = codex/loophole-memory-snapshots
+[submodule "third_party/gvisor"]
+	path = third_party/gvisor
+	url = https://github.com/google/gvisor.git
+	branch = go

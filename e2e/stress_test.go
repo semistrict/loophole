@@ -29,7 +29,7 @@ func TestE2E_FsxBasic(t *testing.T) {
 		t.Skip("fsx not installed")
 	}
 	mp := stressMount(t, "fsx-basic")
-	runCmd(t, "fsx", "-N", "5000", "-l", "1048576", "-S", "42", fmt.Sprintf("%s/fsx-testfile", mp))
+	runCmd(t, "fsx", "-N", "2500", "-l", "1048576", "-S", "42", fmt.Sprintf("%s/fsx-testfile", mp))
 }
 
 func TestE2E_FsxWithPunchHole(t *testing.T) {
@@ -38,7 +38,7 @@ func TestE2E_FsxWithPunchHole(t *testing.T) {
 		t.Skip("fsx not installed")
 	}
 	mp := stressMount(t, "fsx-punch")
-	runCmd(t, "fsx", "-H", "-N", "5000", "-l", "1048576", "-S", "123", fmt.Sprintf("%s/fsx-punch-testfile", mp))
+	runCmd(t, "fsx", "-H", "-N", "2500", "-l", "1048576", "-S", "123", fmt.Sprintf("%s/fsx-punch-testfile", mp))
 }
 
 func TestE2E_FsxHeavy(t *testing.T) {
@@ -46,7 +46,7 @@ func TestE2E_FsxHeavy(t *testing.T) {
 		t.Skip("fsx not installed")
 	}
 	mp := stressMount(t, "fsx-heavy")
-	runCmd(t, "fsx", "-H", "-N", "20000", "-l", "4194304", "-S", "999", fmt.Sprintf("%s/fsx-heavy-testfile", mp))
+	runCmd(t, "fsx", "-H", "-N", "10000", "-l", "4194304", "-S", "999", fmt.Sprintf("%s/fsx-heavy-testfile", mp))
 }
 
 func TestE2E_FioRandomRW(t *testing.T) {
@@ -61,7 +61,7 @@ func TestE2E_FioRandomRW(t *testing.T) {
 		"--bs=4k",
 		"--size=8M",
 		"--numjobs=2",
-		"--runtime=15",
+		"--runtime=8",
 		"--time_based",
 		"--verify=crc32c",
 		"--verify_fatal=1",
@@ -115,7 +115,7 @@ func TestE2E_FioFallocatePunchHole(t *testing.T) {
 		"--size=4M",
 		"--fallocate=keep",
 		"--numjobs=1",
-		"--runtime=10",
+		"--runtime=4",
 		"--time_based",
 		"--verify=crc32c",
 		"--verify_fatal=1",

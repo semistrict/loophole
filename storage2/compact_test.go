@@ -3,6 +3,7 @@ package storage2
 import (
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,89 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type casConflictStoreShared struct {
+	base      *loophole.MemStore
+	target    string
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+	conflicts atomic.Int64
+}
+
+type casConflictStore struct {
+	shared *casConflictStoreShared
+	prefix string
+}
+
+func newCASConflictStore(base *loophole.MemStore) *casConflictStore {
+	return &casConflictStore{
+		shared: &casConflictStoreShared{base: base},
+	}
+}
+
+func (s *casConflictStore) fullKey(key string) string {
+	if s.prefix == "" {
+		return key
+	}
+	return s.prefix + "/" + key
+}
+
+func (s *casConflictStore) At(path string) loophole.ObjectStore {
+	prefix := path
+	if s.prefix != "" {
+		prefix = s.prefix + "/" + path
+	}
+	return &casConflictStore{
+		shared: s.shared,
+		prefix: prefix,
+	}
+}
+
+func (s *casConflictStore) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	return s.shared.base.Get(ctx, s.fullKey(key))
+}
+
+func (s *casConflictStore) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
+	return s.shared.base.GetRange(ctx, s.fullKey(key), offset, length)
+}
+
+func (s *casConflictStore) PutBytesCAS(ctx context.Context, key string, data []byte, etag string) (string, error) {
+	fullKey := s.fullKey(key)
+	if s.shared.target != "" && fullKey == s.shared.target {
+		s.shared.startOnce.Do(func() { close(s.shared.started) })
+		<-s.shared.release
+	}
+	newEtag, err := s.shared.base.PutBytesCAS(ctx, fullKey, data, etag)
+	if err != nil && strings.Contains(err.Error(), "CAS conflict") {
+		s.shared.conflicts.Add(1)
+	}
+	return newEtag, err
+}
+
+func (s *casConflictStore) PutReader(ctx context.Context, key string, r io.Reader) error {
+	return s.shared.base.PutReader(ctx, s.fullKey(key), r)
+}
+
+func (s *casConflictStore) PutIfNotExists(ctx context.Context, key string, data []byte, meta ...map[string]string) error {
+	return s.shared.base.PutIfNotExists(ctx, s.fullKey(key), data, meta...)
+}
+
+func (s *casConflictStore) DeleteObject(ctx context.Context, key string) error {
+	return s.shared.base.DeleteObject(ctx, s.fullKey(key))
+}
+
+func (s *casConflictStore) ListKeys(ctx context.Context, prefix string) ([]loophole.ObjectInfo, error) {
+	return s.shared.base.ListKeys(ctx, s.fullKey(prefix))
+}
+
+func (s *casConflictStore) HeadMeta(ctx context.Context, key string) (map[string]string, error) {
+	return s.shared.base.HeadMeta(ctx, s.fullKey(key))
+}
+
+func (s *casConflictStore) SetMeta(ctx context.Context, key string, meta map[string]string) error {
+	return s.shared.base.SetMeta(ctx, s.fullKey(key), meta)
+}
 
 func TestPeriodicFlushTriggersCompaction(t *testing.T) {
 	ctx := t.Context()
@@ -155,6 +239,78 @@ func TestCompactL0PartialFailure(t *testing.T) {
 	l0After := len(ly.index.L0)
 	ly.mu.RUnlock()
 	assert.Greater(t, l0After, 0, "L0 entries should still exist after failed compaction")
+}
+
+func TestCompactL0CASConflictWithConcurrentFlush(t *testing.T) {
+	ctx := t.Context()
+	store := newCASConflictStore(loophole.NewMemStore())
+
+	cfg := Config{
+		FlushThreshold:  16 * PageSize,
+		MaxFrozenTables: 2,
+		FlushInterval:   -1,
+		L0PagesMax:      1000, // prevent the concurrent flush path from auto-compacting
+	}
+	m := newTestManager(t, store, cfg)
+
+	v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: uint64(BlockPages) * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	for i := 0; i < 20; i++ {
+		page := make([]byte, PageSize)
+		page[0] = 0xAA
+		page[1] = byte(i)
+		require.NoError(t, v.Write(page, uint64(i)*PageSize))
+	}
+	require.NoError(t, v.Flush())
+
+	vol := v.(*volume)
+	store.shared.target = "layers/" + vol.layer.id + "/index.json"
+	store.shared.started = make(chan struct{})
+	store.shared.release = make(chan struct{})
+	store.shared.startOnce = sync.Once{}
+	t.Cleanup(func() {
+		select {
+		case <-store.shared.release:
+		default:
+			close(store.shared.release)
+		}
+	})
+
+	compactDone := make(chan error, 1)
+	go func() {
+		compactDone <- vol.layer.ForceCompactL0()
+	}()
+
+	<-store.shared.started
+
+	page := make([]byte, PageSize)
+	page[0] = 0xEE
+	page[1] = 0x63
+	require.NoError(t, v.Write(page, 99*PageSize))
+
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- v.Flush()
+	}()
+	select {
+	case err := <-flushDone:
+		t.Fatalf("flush should be blocked behind compaction index commit, got %v", err)
+	default:
+	}
+
+	close(store.shared.release)
+
+	err = <-compactDone
+	require.NoError(t, err)
+	require.NoError(t, <-flushDone)
+	require.Equal(t, int64(0), store.shared.conflicts.Load(), "same-process index publication should be serialized without CAS conflicts")
+
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, 99*PageSize)
+	require.NoError(t, err)
+	assert.Equal(t, byte(0xEE), buf[0])
+	assert.Equal(t, byte(0x63), buf[1])
 }
 
 // TestCompactAfterClonePunchHole reproduces a sim-found bug where:
