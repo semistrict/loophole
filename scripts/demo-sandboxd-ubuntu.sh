@@ -28,6 +28,7 @@ ROOTFS_VOLUME="${ROOTFS_VOLUME:-ubuntu-rootfs-$DEMO_SUFFIX}"
 ZYGOTE_NAME="${ZYGOTE_NAME:-ubuntu-2404-$DEMO_SUFFIX}"
 SANDBOX_NAME="${SANDBOX_NAME:-demo-$DEMO_SUFFIX}"
 DEMO_ATTACH="${DEMO_ATTACH:-1}"
+DEMO_RUNSC_DEBUG="${DEMO_RUNSC_DEBUG:-1}"
 
 if [[ ! -f "$ROOTFS_TAR" ]]; then
   echo "exporting $UBUNTU_IMAGE to $ROOTFS_TAR"
@@ -47,12 +48,15 @@ docker compose run --rm --service-ports \
   -e DEMO_ZYGOTE_NAME="$ZYGOTE_NAME" \
   -e DEMO_SANDBOX_NAME="$SANDBOX_NAME" \
   -e DEMO_ATTACH="$DEMO_ATTACH" \
+  -e DEMO_RUNSC_DEBUG="$DEMO_RUNSC_DEBUG" \
   go bash -lc '
 set -euo pipefail
 
 export PATH="/usr/local/go/bin:$PATH"
-mkdir -p /tmp/demo
-export LOOPHOLE_HOME=/tmp/demo/home
+DEMO_DIR="/tmp/demo-${DEMO_SANDBOX_NAME}"
+mkdir -p "${DEMO_DIR}"
+export LOOPHOLE_HOME="${DEMO_DIR}/home"
+export LOOPHOLE_SANDBOXD_RUNSC_DEBUG="${DEMO_RUNSC_DEBUG}"
 SANDBOXD_SOCKET="$LOOPHOLE_HOME/sandboxd.sock"
 mkdir -p "$LOOPHOLE_HOME"
 cp /root/.loophole/config.toml "$LOOPHOLE_HOME/config.toml"
@@ -63,7 +67,7 @@ LOOPHOLE_BIN="/app/bin/loophole-linux-${GOARCH}"
 SANDBOXD_BIN="/app/bin/loophole-sandboxd-linux-${GOARCH}"
 
 ROOTFS_TAR_IN_CONTAINER="/app/${DEMO_ROOTFS_TAR}"
-ROOTFS_MOUNT="/tmp/demo/rootfs"
+ROOTFS_MOUNT="${DEMO_DIR}/rootfs"
 mkdir -p "${ROOTFS_MOUNT}"
 
 echo "creating and mounting ${DEMO_ROOTFS_VOLUME}"
@@ -89,7 +93,9 @@ tar xf "${ROOTFS_TAR_IN_CONTAINER}" -C "${ROOTFS_MOUNT}"
 echo "freezing ${DEMO_ROOTFS_VOLUME}"
 "${LOOPHOLE_BIN}" -p default freeze "${DEMO_ROOTFS_VOLUME}"
 echo "shutting down owner for ${DEMO_ROOTFS_VOLUME}"
-"${LOOPHOLE_BIN}" -p default shutdown "${DEMO_ROOTFS_VOLUME}"
+if ! "${LOOPHOLE_BIN}" -p default shutdown "${DEMO_ROOTFS_VOLUME}"; then
+  echo "owner already stopped after freeze; continuing"
+fi
 wait "${OWNER_PID}" || true
 
 echo "starting sandboxd"
@@ -178,6 +184,8 @@ Try:
 Logs:
   tail -f ${LOOPHOLE_HOME}/sandboxd.log
   tail -f /tmp/demo-rootfs.log
+  ls -1 ${LOOPHOLE_HOME}/sandboxd/sandboxes/${SBX_ID}/runsc-debug
+  tail -f ${LOOPHOLE_HOME}/sandboxd/sandboxes/${SBX_ID}/runsc-debug/*.txt
 
 Cleanup:
   cleanup_demo
