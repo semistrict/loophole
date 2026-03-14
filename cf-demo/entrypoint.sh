@@ -70,19 +70,16 @@ if [ "$SANDBOX_MODE" = "firecracker" ]; then
   fi
 fi
 
-if [ -z "${CONTROL_SECRET:-}" ]; then
-  log "CONTROL_SECRET is required"
-  exit 1
-fi
+PROFILE=$(awk -F'"' '/default_profile/{print $2}' /root/.loophole/config.toml)
+DAEMON_SOCK="/root/.loophole/${PROFILE}.sock"
+SANDBOXD_SOCK="/root/.loophole/sandboxd.sock"
 
 log "starting loophole daemon"
-loophole start -f &
+loophole -p "${PROFILE}" serve --socket-path "${DAEMON_SOCK}" &
 LOOPHOLE_PID=$!
 log "loophole pid=${LOOPHOLE_PID}"
 
 # Wait for daemon socket
-PROFILE=$(awk -F'"' '/default_profile/{print $2}' /root/.loophole/config.toml)
-DAEMON_SOCK="/root/.loophole/${PROFILE}.sock"
 log "waiting for daemon socket ${DAEMON_SOCK}"
 for i in $(seq 1 30); do
   [ -S "$DAEMON_SOCK" ] && break
@@ -90,8 +87,24 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+log "starting sandboxd"
+export LOOPHOLE_SANDBOXD_RUNSC_DEBUG="${LOOPHOLE_SANDBOXD_RUNSC_DEBUG:-true}"
+export LOOPHOLE_SANDBOXD_RUNSC_PLATFORM="${LOOPHOLE_SANDBOXD_RUNSC_PLATFORM:-systrap}"
+loophole-sandboxd -p "${PROFILE}" --socket-path "${SANDBOXD_SOCK}" --loophole-bin /usr/local/bin/loophole --runsc-bin /usr/local/bin/runsc &
+SANDBOXD_PID=$!
+log "sandboxd pid=${SANDBOXD_PID}"
+
+log "waiting for sandboxd socket ${SANDBOXD_SOCK}"
+for i in $(seq 1 30); do
+  [ -S "$SANDBOXD_SOCK" ] && break
+  [ "$i" = "30" ] && { log "ERROR: sandboxd socket not found"; exit 1; }
+  sleep 1
+done
+
 export CONTROL_LISTEN_ADDR=:8080
 export CONTROL_PROXY_TARGET=unix://${DAEMON_SOCK}
+export CONTROL_SANDBOXD_TARGET=unix://${SANDBOXD_SOCK}
 export CONTROL_CONTAINER_ID="${CONTAINER_DO_ID:-unknown}"
+export LOOPHOLE_DEFAULT_ZYGOTE="${LOOPHOLE_DEFAULT_ZYGOTE:-ubuntu-2404-v4}"
 
 exec /usr/local/bin/container-control

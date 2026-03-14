@@ -16,7 +16,6 @@ export class SandboxContainer extends Container<Env> {
       AXIOM_TOKEN: env.AXIOM_TOKEN,
       AXIOM_DATASET: env.AXIOM_DATASET,
       CONTAINER_DO_ID: ctx.id.toString(),
-      CONTROL_SECRET: env.CONTROL_SECRET,
       SANDBOX_MODE: env.SANDBOX_MODE,
     }
   }
@@ -25,24 +24,32 @@ export class SandboxContainer extends Container<Env> {
     return this.ctx.id.toString()
   }
 
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url)
+    if (url.pathname === '/stop') {
+      await this.destroy()
+      return new Response('stopped')
+    }
+    return this.containerFetch(request, this.defaultPort)
+  }
+
   override onStart() {
     console.log('[container]', { event: 'start', id: this.id })
   }
 
   override async onStop(params: StopParams) {
     console.log('[container]', { event: 'stop', id: this.id, ...params })
-    // Notify Scheduler so it can clear assignments and notify VolumeActors.
     try {
       const scheduler = this.env.SCHEDULER.get(this.env.SCHEDULER.idFromName('scheduler'))
       await scheduler.fetch(
         new Request('http://scheduler/_internal/container-died', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ container: this.id }),
+          body: JSON.stringify({ containerId: this.id }),
         }),
       )
-    } catch (e) {
-      console.error('[container] failed to notify scheduler on stop', e)
+    } catch (error) {
+      console.error('[container]', { event: 'stop_notify_failed', id: this.id, error })
     }
   }
 

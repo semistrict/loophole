@@ -65,9 +65,14 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 	p.Type = volType
 
 	if p.NoFormat {
-		// Block-level import (e.g. device dd): just allocate storage, no driver needed.
-		if _, err := b.vm.NewVolume(p); err != nil {
+		// Block-level import (e.g. device dd): just allocate storage, then
+		// release the creator's ref so a later owner can attach it.
+		vol, err := b.vm.NewVolume(p)
+		if err != nil {
 			return err
+		}
+		if err := vol.ReleaseRef(); err != nil {
+			return fmt.Errorf("release create ref: %w", err)
 		}
 		slog.Debug("backend: create done (no format)", "volume", p.Volume)
 		return nil
@@ -86,10 +91,21 @@ func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
 	slog.Debug("backend: formatting volume", "volume", p.Volume)
 	if err := driver.Format(ctx, vol); err != nil {
 		driver.UnregisterVolume(p.Volume)
+		if releaseErr := vol.ReleaseRef(); releaseErr != nil {
+			slog.Warn("release create ref after format failure", "volume", p.Volume, "error", releaseErr)
+		}
 		return fmt.Errorf("format: %w", err)
 	}
 	if err := vol.Flush(); err != nil {
+		driver.UnregisterVolume(p.Volume)
+		if releaseErr := vol.ReleaseRef(); releaseErr != nil {
+			slog.Warn("release create ref after flush failure", "volume", p.Volume, "error", releaseErr)
+		}
 		return fmt.Errorf("flush after format: %w", err)
+	}
+	driver.UnregisterVolume(p.Volume)
+	if err := vol.ReleaseRef(); err != nil {
+		return fmt.Errorf("release create ref: %w", err)
 	}
 	slog.Debug("backend: create done", "volume", p.Volume)
 	return nil

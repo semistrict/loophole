@@ -1,6 +1,5 @@
-import { useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useServerFn } from '@tanstack/react-start'
 import {
   HardDrive,
   Plus,
@@ -11,11 +10,11 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
-  listVolumes as listVolumesFn,
-  createVolume as createVolumeFn,
-  checkpointVolume as checkpointVolumeFn,
-  cloneVolume as cloneVolumeFn,
-  deleteVolume as deleteVolumeFn,
+  listVolumes,
+  createVolume,
+  checkpointVolume,
+  cloneVolume,
+  deleteVolume,
 } from '@/lib/api'
 import {
   Dialog,
@@ -32,7 +31,7 @@ import FileTree from './FileTree'
 
 interface SidebarProps {
   selectedVolume: string | null
-  onSelectVolume: (volume: string) => void
+  onSelectVolume: (volume: string | null) => void
   bellFlash: boolean
 }
 
@@ -53,12 +52,6 @@ export default function Sidebar({
   const inputRef = useRef<HTMLInputElement>(null)
   const queryClient = useQueryClient()
 
-  const listVolumes = useServerFn(listVolumesFn)
-  const createVolume = useServerFn(createVolumeFn)
-  const checkpointVolume = useServerFn(checkpointVolumeFn)
-  const cloneVolume = useServerFn(cloneVolumeFn)
-  const deleteVolume = useServerFn(deleteVolumeFn)
-
   const volumesQuery = useQuery({
     queryKey: ['volumes'],
     queryFn: () => listVolumes(),
@@ -67,30 +60,40 @@ export default function Sidebar({
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ['volumes'] })
 
   const createMutation = useMutation({
-    mutationFn: (input: { volume: string }) =>
-      createVolume({ data: input }),
-    onSuccess: () => { setModal(null); invalidate() },
+    mutationFn: (input: { volume: string }) => createVolume(input),
+    onSuccess: (_result, variables) => {
+      setModal(null)
+      onSelectVolume(variables.volume)
+      invalidate()
+    },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const checkpointMutation = useMutation({
-    mutationFn: (input: { mountpoint: string }) =>
-      checkpointVolume({ data: input }),
+    mutationFn: (input: { volume: string }) => checkpointVolume(input),
     onSuccess: () => { setModal(null); invalidate() },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const cloneMutation = useMutation({
-    mutationFn: (input: { mountpoint: string; clone: string; cloneMountpoint: string }) =>
-      cloneVolume({ data: input }),
-    onSuccess: () => { setModal(null); invalidate() },
+    mutationFn: (input: { volume: string; clone: string }) => cloneVolume(input),
+    onSuccess: (_result, variables) => {
+      setModal(null)
+      onSelectVolume(variables.clone)
+      invalidate()
+    },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (input: { volume: string }) =>
-      deleteVolume({ data: input }),
-    onSuccess: () => { setModal(null); invalidate() },
+    mutationFn: (input: { volume: string }) => deleteVolume(input),
+    onSuccess: (_result, variables) => {
+      setModal(null)
+      if (selectedVolume === variables.volume) {
+        onSelectVolume(null)
+      }
+      invalidate()
+    },
     onError: (err) => setModalError(err instanceof Error ? err.message : JSON.stringify(err)),
   })
 
@@ -115,13 +118,13 @@ export default function Sidebar({
         break
       }
       case 'checkpoint': {
-        checkpointMutation.mutate({ mountpoint: modal.volume })
+        checkpointMutation.mutate({ volume: modal.volume })
         break
       }
       case 'clone': {
         const name = (form.get('name') as string).trim()
         if (!name) { setModalError('Name is required'); return }
-        cloneMutation.mutate({ mountpoint: modal.volume, clone: name, cloneMountpoint: name })
+        cloneMutation.mutate({ volume: modal.volume, clone: name })
         break
       }
       case 'delete':
@@ -132,6 +135,15 @@ export default function Sidebar({
 
   const rawData = volumesQuery.data
   const volumes: string[] = Array.isArray(rawData) ? rawData : []
+
+  useEffect(() => {
+    if (!selectedVolume || volumesQuery.isLoading) {
+      return
+    }
+    if (!volumes.includes(selectedVolume)) {
+      onSelectVolume(null)
+    }
+  }, [onSelectVolume, selectedVolume, volumes, volumesQuery.isLoading])
 
   return (
     <aside

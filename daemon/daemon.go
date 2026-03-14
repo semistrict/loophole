@@ -24,6 +24,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/storage2"
 )
@@ -173,7 +174,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 
 		backend, err = createBackend(vm, inst, dir)
 		if err != nil {
-			_ = diskCache.Close()
+			util.SafeClose(diskCache, "close disk cache after backend init failure")
 			return nil, err
 		}
 
@@ -364,6 +365,10 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("GET /device/dd/read", d.handleDeviceDDRead)
 	mux.HandleFunc("POST /device/dd/finalize", d.handleDeviceDDFinalize)
 
+	mux.HandleFunc("POST /create", d.handleCreate)
+	mux.HandleFunc("POST /mount", d.handleMount)
+	mux.HandleFunc("POST /unmount", d.handleUnmount)
+	mux.HandleFunc("POST /delete", d.handleDelete)
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)

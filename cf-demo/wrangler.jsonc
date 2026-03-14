@@ -10,7 +10,7 @@
 		"enabled": true
 	},
 	"vars": {
-		"SANDBOX_MODE": "firecracker"
+		"SANDBOX_MODE": "gvisor"
 	},
 	"containers": [
 		{
@@ -27,10 +27,6 @@
 				"class_name": "SandboxContainer"
 			},
 			{
-				"name": "VOLUMES",
-				"class_name": "VolumeActor"
-			},
-			{
 				"name": "SCHEDULER",
 				"class_name": "Scheduler"
 			}
@@ -44,6 +40,10 @@
 		{
 			"tag": "v2",
 			"new_sqlite_classes": ["Scheduler", "VolumeActor"]
+		},
+		{
+			"tag": "v3",
+			"deleted_classes": ["VolumeActor"]
 		}
 	]
 }

@@ -3,122 +3,114 @@ import tanstackHandler from '@tanstack/react-start/server-entry'
 
 export { SandboxContainer } from './container'
 export { Scheduler } from './scheduler'
-export { VolumeActor } from './volume-actor'
 
-const VOLUME_PREFIX = /^\/v\/([^/]+)\/(.*)/  // /v/{volume}/{rest}
-const API_PREFIX = /^\/api\//                 // /api/*
-const DEBUG_PREFIX = /^\/debug\//             // /debug/*
-const CONTROL_PREFIX = /^\/debug\/control\/([^/]+)(?:\/(.*))?$/ // /debug/control/{id}/{rest}
+const AUTH_COOKIE = 'loophole_control_secret'
+const API_PREFIX = /^\/api\//
+const VOLUME_PREFIX = /^\/v\//
+const DEBUG_PREFIX = /^\/debug\//
+const SANDBOX_PREFIX = /^\/sandbox(?:\/|$)/
+const TOOLBOX_PREFIX = /^\/toolbox(?:\/|$)/
+const CONTROL_PREFIX = /^\/debug\/control\/([^/]+)(?:\/(.*))?$/
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function proxyControlWebSocket(container: any, containerUrl: string, headers: Headers): Promise<Response> {
-  const upstreamResp = await container.fetch(
-    new Request(containerUrl, {
-      headers,
-    }),
-  )
-  const upstream = upstreamResp.webSocket
-  if (!upstream) {
-    return new Response('container did not return websocket', { status: 502 })
+function schedulerStub(env: Env) {
+  return env.SCHEDULER.get(env.SCHEDULER.idFromName('scheduler'))
+}
+
+function getCookie(request: Request, name: string): string | null {
+  const cookieHeader = request.headers.get('Cookie')
+  if (!cookieHeader) {
+    return null
   }
-  upstream.accept()
 
-  const pair = new WebSocketPair()
-  const [client, server] = Object.values(pair)
-  server.accept()
-
-  server.addEventListener('message', (ev) => {
-    try {
-      upstream.send(ev.data)
-    } catch {
-      server.close()
+  for (const cookie of cookieHeader.split(';')) {
+    const [rawName, ...rest] = cookie.trim().split('=')
+    if (rawName === name) {
+      return decodeURIComponent(rest.join('='))
     }
-  })
-  upstream.addEventListener('message', (ev: MessageEvent) => {
-    try {
-      server.send(ev.data)
-    } catch {
-      upstream.close()
-    }
-  })
-  server.addEventListener('close', (ev: CloseEvent) => {
-    upstream.close(ev.code, ev.reason)
-  })
-  upstream.addEventListener('close', (ev: CloseEvent) => {
-    server.close(ev.code, ev.reason)
-  })
-  server.addEventListener('error', () => upstream.close())
-  upstream.addEventListener('error', () => server.close())
+  }
 
-  return new Response(null, { status: 101, webSocket: client })
+  return null
+}
+
+function hasValidSecret(request: Request, env: Env): boolean {
+  const headerSecret = request.headers.get('X-Control-Secret')
+  if (headerSecret === env.CONTROL_SECRET) {
+    return true
+  }
+  return getCookie(request, AUTH_COOKIE) === env.CONTROL_SECRET
+}
+
+function isRuntimePath(pathname: string): boolean {
+  return API_PREFIX.test(pathname)
+    || VOLUME_PREFIX.test(pathname)
+    || DEBUG_PREFIX.test(pathname)
+    || SANDBOX_PREFIX.test(pathname)
+    || TOOLBOX_PREFIX.test(pathname)
+}
+
+function unauthorized(): Response {
+  return new Response('unauthorized', { status: 401 })
+}
+
+function authRedirect(url: URL, secret: string): Response {
+  const redirectURL = new URL(url.toString())
+  redirectURL.searchParams.delete('secret')
+  const secure = url.protocol === 'https:' ? '; Secure' : ''
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: redirectURL.toString(),
+      'Set-Cookie': `${AUTH_COOKIE}=${encodeURIComponent(secret)}; HttpOnly${secure}; SameSite=Strict; Path=/`,
+    },
+  })
 }
 
 export default {
-  async fetch(request: Request, ...args: unknown[]) {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
-    const env = args[0] as Env
 
-    // Per-volume routes → VolumeActor DO
-    const volMatch = url.pathname.match(VOLUME_PREFIX)
-    if (volMatch) {
-      const volume = decodeURIComponent(volMatch[1])
-      const rest = volMatch[2]
-      const actor = env.VOLUMES.get(env.VOLUMES.idFromName(volume))
-      const headers = new Headers(request.headers)
-      headers.set('X-Volume', volume)
-      return actor.fetch(
-        new Request(`http://volume/${rest}${url.search}`, {
-          method: request.method,
-          headers,
-          body: request.method !== 'GET' ? request.body : undefined,
-        }),
-      )
+    if (url.pathname === '/health') {
+      return new Response('ok', { status: 200 })
+    }
+
+    const providedSecret = url.searchParams.get('secret')
+    if (providedSecret !== null) {
+      if (providedSecret !== env.CONTROL_SECRET) {
+        return unauthorized()
+      }
+      return authRedirect(url, providedSecret)
+    }
+
+    if (!hasValidSecret(request, env)) {
+      return unauthorized()
     }
 
     const controlMatch = url.pathname.match(CONTROL_PREFIX)
     if (controlMatch) {
       const containerName = decodeURIComponent(controlMatch[1])
       const rest = controlMatch[2] || 'status'
-      const container = getContainer(env.SANDBOX, containerName)
+      const container = getContainer(env.SANDBOX as any, containerName)
       const state = await container.getState()
       if (state.status !== 'running') {
         await container.startAndWaitForPorts()
       }
-
-      const headers = new Headers(request.headers)
-      headers.set('X-Control-Secret', env.CONTROL_SECRET)
-      const isWebSocket = request.headers.get('Upgrade')?.toLowerCase() === 'websocket'
-      if (isWebSocket) {
-        headers.set('Connection', 'Upgrade')
-        headers.set('Upgrade', 'websocket')
-        return proxyControlWebSocket(
-          container,
-          `http://container/control/${rest}${url.search}`,
-          headers,
-        )
-      }
-
-      const bodyBytes =
+      const body =
         request.method !== 'GET' && request.method !== 'HEAD'
           ? await request.arrayBuffer()
           : null
-
       return container.fetch(
         new Request(`http://container/control/${rest}${url.search}`, {
           method: request.method,
-          headers,
-          body: bodyBytes,
+          headers: request.headers,
+          body,
         }),
       )
     }
 
-    // Global API + debug routes → Scheduler DO
-    if (API_PREFIX.test(url.pathname) || DEBUG_PREFIX.test(url.pathname)) {
-      const scheduler = env.SCHEDULER.get(env.SCHEDULER.idFromName('scheduler'))
-      return scheduler.fetch(request)
+    if (isRuntimePath(url.pathname)) {
+      return schedulerStub(env).fetch(request)
     }
 
-    // React app (TanStack Start)
-    return (tanstackHandler as any).fetch(request, ...args)
+    return (tanstackHandler as any).fetch(request, env, ctx)
   },
 }

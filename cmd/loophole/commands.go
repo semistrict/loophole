@@ -24,6 +24,7 @@ import (
 
 func addCommands(root *cobra.Command) {
 	root.AddCommand(
+		serveCmd(),
 		shutdownCmd(),
 		createCmd(),
 		deleteCmd(),
@@ -36,9 +37,40 @@ func addCommands(root *cobra.Command) {
 		statusCmd(),
 		statsCmd(),
 		deviceCmd(),
+		sshCmd(),
 		breakLeaseCmd(),
 		migrateCmd(),
 	)
+}
+
+func serveCmd() *cobra.Command {
+	var listenAddr string
+	var socketPath string
+	cmd := &cobra.Command{
+		Use:    "serve",
+		Short:  "Run the loophole daemon",
+		Hidden: true,
+		Args:   cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := loophole.DefaultDir()
+			inst, err := resolveProfile(dir)
+			if err != nil {
+				return err
+			}
+			d, err := daemon.Start(cmd.Context(), inst, dir, daemon.Options{
+				Foreground: true,
+				ListenAddr: listenAddr,
+				SocketPath: socketPath,
+			})
+			if err != nil {
+				return err
+			}
+			return d.Serve(cmd.Context())
+		},
+	}
+	cmd.Flags().StringVar(&listenAddr, "listen-addr", "", "listen address (for example tcp://0.0.0.0:8080)")
+	cmd.Flags().StringVar(&socketPath, "socket-path", "", "unix socket path override")
+	return cmd
 }
 
 func shutdownCmd() *cobra.Command {

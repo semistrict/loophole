@@ -74,9 +74,7 @@ export default function FileTree({ volume }: FileTreeProps) {
 
   const loadDir = useCallback(
     async (dirPath: string): Promise<TreeNode[]> => {
-      const raw = await readDir({ data: { volume, path: dirPath } })
-      // Server functions may wrap the response; extract the array.
-      const entries: DirEntry[] = Array.isArray(raw) ? raw : (raw as any).result ?? (raw as any).data ?? []
+      const entries = await readDir({ volume, path: dirPath })
       entries.sort((a: DirEntry, b: DirEntry) => {
         if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
         return a.name.localeCompare(b.name)

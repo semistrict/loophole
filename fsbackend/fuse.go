@@ -122,9 +122,21 @@ func (f *FUSEDriver) RegisterVolume(name string, vol loophole.Volume) {
 
 func (f *FUSEDriver) UnregisterVolume(name string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.fuse != nil {
-		f.fuse.Remove("file")
+	if f.fuse == nil || f.managedVolume != name {
+		f.mu.Unlock()
+		return
+	}
+	srv := f.fuse
+	mountDir := f.mountDir
+	f.fuse = nil
+	f.managedVolume = ""
+	f.mountDir = ""
+	f.mu.Unlock()
+
+	srv.Remove("file")
+	if err := srv.Unmount(); err != nil {
+		slog.Warn("fuse unmount failed during unregister, trying lazy unmount", "dir", mountDir, "error", err)
+		fuseblockdev.UnmountStale(mountDir)
 	}
 }
 

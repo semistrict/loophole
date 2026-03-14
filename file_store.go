@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/semistrict/loophole/internal/util"
 )
 
 // FileStore implements ObjectStore backed by a local directory.
@@ -22,18 +24,33 @@ type FileStore struct {
 
 // NewFileStore creates a FileStore rooted at the given directory.
 func NewFileStore(root string) (*FileStore, error) {
-	if err := os.MkdirAll(root, 0755); err != nil {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve store dir: %w", err)
+	}
+	if err := os.MkdirAll(absRoot, 0755); err != nil {
 		return nil, fmt.Errorf("create store dir: %w", err)
 	}
-	return &FileStore{root: root}, nil
+	return &FileStore{root: absRoot}, nil
 }
 
-func (f *FileStore) path(key string) string {
+func (f *FileStore) path(key string) (string, error) {
 	full := key
 	if f.prefix != "" {
 		full = f.prefix + full
 	}
-	return filepath.Join(f.root, full)
+	if filepath.IsAbs(full) {
+		return "", fmt.Errorf("object key %q is absolute", key)
+	}
+	path := filepath.Join(f.root, full)
+	rel, err := filepath.Rel(f.root, path)
+	if err != nil {
+		return "", fmt.Errorf("resolve object key %q: %w", key, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("object key %q escapes store root", key)
+	}
+	return path, nil
 }
 
 func (f *FileStore) At(path string) ObjectStore {
@@ -45,7 +62,10 @@ func (f *FileStore) At(path string) ObjectStore {
 }
 
 func (f *FileStore) Get(_ context.Context, key string) (io.ReadCloser, string, error) {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return nil, "", err
+	}
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -58,7 +78,10 @@ func (f *FileStore) Get(_ context.Context, key string) (io.ReadCloser, string, e
 }
 
 func (f *FileStore) GetRange(_ context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return nil, "", err
+	}
 	data, err := os.ReadFile(p)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -78,7 +101,10 @@ func (f *FileStore) GetRange(_ context.Context, key string, offset, length int64
 }
 
 func (f *FileStore) PutBytesCAS(_ context.Context, key string, data []byte, etag string) (string, error) {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return "", err
+	}
 	existing, err := os.ReadFile(p)
 	if err != nil && !os.IsNotExist(err) {
 		return "", fmt.Errorf("read for CAS %s: %w", key, err)
@@ -101,7 +127,10 @@ func (f *FileStore) PutBytesCAS(_ context.Context, key string, data []byte, etag
 }
 
 func (f *FileStore) PutReader(_ context.Context, key string, r io.Reader) error {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
 	}
@@ -113,7 +142,10 @@ func (f *FileStore) PutReader(_ context.Context, key string, r io.Reader) error 
 }
 
 func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, meta ...map[string]string) error {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 		return err
 	}
@@ -140,32 +172,49 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, m
 	}
 	if len(meta) > 0 && meta[0] != nil {
 		metaData, _ := json.Marshal(meta[0])
-		if werr := atomicWriteFile(f.metaPath(key), metaData); werr != nil {
-			slog.Warn("write metadata sidecar failed", "path", f.metaPath(key), "error", werr)
+		metaPath, pathErr := f.metaPath(key)
+		if pathErr != nil {
+			return pathErr
+		}
+		if werr := atomicWriteFile(metaPath, metaData); werr != nil {
+			slog.Warn("write metadata sidecar failed", "path", metaPath, "error", werr)
 		}
 	}
 	return nil
 }
 
 func (f *FileStore) DeleteObject(_ context.Context, key string) error {
-	p := f.path(key)
-	err := os.Remove(p)
+	p, err := f.path(key)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(p)
 	if os.IsNotExist(err) {
 		return nil
 	}
 	return err
 }
 
-func (f *FileStore) metaPath(key string) string {
-	return f.path(key) + ".meta.json"
+func (f *FileStore) metaPath(key string) (string, error) {
+	path, err := f.path(key)
+	if err != nil {
+		return "", err
+	}
+	return path + ".meta.json", nil
 }
 
 func (f *FileStore) HeadMeta(_ context.Context, key string) (map[string]string, error) {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := os.Stat(p); os.IsNotExist(err) {
 		return nil, fmt.Errorf("head %s: %w", key, ErrNotFound)
 	}
-	mp := f.metaPath(key)
+	mp, err := f.metaPath(key)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(mp)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -181,7 +230,10 @@ func (f *FileStore) HeadMeta(_ context.Context, key string) (map[string]string, 
 }
 
 func (f *FileStore) SetMeta(_ context.Context, key string, meta map[string]string) error {
-	p := f.path(key)
+	p, err := f.path(key)
+	if err != nil {
+		return err
+	}
 	if _, err := os.Stat(p); os.IsNotExist(err) {
 		return fmt.Errorf("set meta %s: %w", key, ErrNotFound)
 	}
@@ -189,7 +241,11 @@ func (f *FileStore) SetMeta(_ context.Context, key string, meta map[string]strin
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(f.metaPath(key), data)
+	mp, err := f.metaPath(key)
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(mp, data)
 }
 
 // atomicWriteFile writes data to path atomically by writing to a temp file
@@ -203,7 +259,7 @@ func atomicWriteFile(path string, data []byte) error {
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
+		util.SafeClose(tmp, "close temp file after write failure")
 		_ = os.Remove(tmpName)
 		return err
 	}
@@ -215,14 +271,13 @@ func atomicWriteFile(path string, data []byte) error {
 }
 
 func (f *FileStore) ListKeys(_ context.Context, prefix string) ([]ObjectInfo, error) {
-	fullPrefix := prefix
-	if f.prefix != "" {
-		fullPrefix = f.prefix + prefix
+	searchDir, err := f.path(prefix)
+	if err != nil {
+		return nil, err
 	}
-	searchDir := filepath.Join(f.root, fullPrefix)
 
 	var result []ObjectInfo
-	err := filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(searchDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil

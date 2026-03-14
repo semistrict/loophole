@@ -34,9 +34,26 @@ const server = http.createServer(async (req, res) => {
     try {
       const config = JSON.parse(body);
 
-      // Inject privileged mode and /dev/fuse
+      // Inject the permissions gVisor needs in local Docker.
       config.HostConfig = config.HostConfig || {};
       config.HostConfig.Privileged = true;
+      config.HostConfig.CapAdd = ["ALL"];
+      config.HostConfig.SecurityOpt = [
+        "seccomp=unconfined",
+        "apparmor=unconfined",
+        "label=disable",
+      ];
+      config.Env = config.Env || [];
+      const envMap = new Map(
+        config.Env.map((entry) => {
+          const idx = entry.indexOf("=");
+          return idx === -1
+            ? [entry, ""]
+            : [entry.slice(0, idx), entry.slice(idx + 1)];
+        }),
+      );
+      envMap.set("LOOPHOLE_SANDBOXD_RUNSC_UNSAFE_NONROOT", "true");
+      config.Env = [...envMap.entries()].map(([name, value]) => `${name}=${value}`);
       config.HostConfig.Devices = config.HostConfig.Devices || [];
       const hasFuse = config.HostConfig.Devices.some(
         (d) => d.PathOnHost === "/dev/fuse",
@@ -50,7 +67,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       body = JSON.stringify(config);
-      console.log("[docker-fuse] Injected privileged + /dev/fuse into container create");
+      console.log("[docker-fuse] Injected privileged + unconfined seccomp/apparmor + /dev/fuse into container create");
     } catch {
       // If body isn't JSON, pass through unchanged
     }

@@ -89,6 +89,7 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 
 - `make cf-demo-bin` — cross-compile linux/amd64 binary (nosqlite nolwext4) to `cf-demo/bin/loophole`
 - `make cf-demo-dev-lima` — run `cf-demo` locally inside the `fc` Lima VM with `wrangler dev`
+- `make cf-demo-smoke-local` — hit the local Worker at `CF_DEMO_BASE_URL` and verify sandbox create/files/exec/session end to end
 - `make cf-demo-smoke-lima` — hit the local `/debug` endpoints in Lima and verify Firecracker `exec` with `echo hello` and `/etc/os-release`
 - **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
 - Deployed URL: `https://cf-demo.ramon3525.workers.dev`
@@ -114,12 +115,11 @@ Overrides:
 
 ### CF architecture
 
-The app uses three Durable Objects:
-- **Scheduler** (`cf-demo/src/scheduler.ts`) — singleton that bin-packs volumes across containers. Routes `/api/*` and `/debug/*` are forwarded to the container daemon.
-- **SandboxContainer** (`cf-demo/src/container.ts`) — wraps the CF Container runtime. Starts/stops containers, notifies Scheduler on stop.
-- **VolumeActor** (`cf-demo/src/volume-actor.ts`) — per-volume DO that manages volume lifecycle.
+The app uses two Durable Objects:
+- **Scheduler** (`cf-demo/src/scheduler.ts`) — singleton that keeps the sandbox catalog and routes `/api/*`, `/toolbox/*`, and `/debug/*` to the chosen container.
+- **SandboxContainer** (`cf-demo/src/container.ts`) — wraps the CF Container runtime. Starts/stops containers and notifies Scheduler on stop.
 
-API requests go: Worker → Scheduler DO → Container (daemon HTTP API).
+API requests go: Worker → Scheduler DO → Container (`container-control` → `loophole`/`sandboxd`).
 
 ### CF debug endpoints
 

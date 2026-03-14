@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/semistrict/loophole"
@@ -23,6 +24,7 @@ type ownerHandle struct {
 	Socket     string
 	Mountpoint string
 	Spawned    bool
+	PID        int
 }
 
 func (d *Daemon) openManager(ctx context.Context) (*storage2.Manager, func(), error) {
@@ -185,6 +187,7 @@ func (d *Daemon) ensureMountedRootfs(ctx context.Context, volume string, preferr
 				Socket:     socket,
 				Mountpoint: status.Mountpoint,
 				Spawned:    false,
+				PID:        0,
 			}, nil
 		}
 		// A live owner with no tracked mount is stale after freeze/unmount.
@@ -242,6 +245,7 @@ func (d *Daemon) ensureMountedRootfs(ctx context.Context, volume string, preferr
 				Socket:     socket,
 				Mountpoint: status.Mountpoint,
 				Spawned:    true,
+				PID:        cmd.Process.Pid,
 			}, nil
 		}
 		select {
@@ -266,12 +270,57 @@ func (d *Daemon) stopOwner(ctx context.Context, socket string) error {
 		if isNoDaemonError(err) {
 			return nil
 		}
-		return err
+		if !isOwnerShuttingDownError(err) {
+			return err
+		}
 	}
-	if err := c.ShutdownWait(ctx); err != nil && !isNoDaemonError(err) {
+	if err := c.ShutdownWait(ctx); err != nil && !isNoDaemonError(err) && !isOwnerShuttingDownError(err) {
 		return err
 	}
 	return nil
+}
+
+func (d *Daemon) forceStopOwner(ctx context.Context, pid int, socket string, mountpoint string) error {
+	if pid <= 0 {
+		return fmt.Errorf("force stop owner: missing pid")
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find owner process %d: %w", pid, err)
+	}
+	if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("kill owner process %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if _, err := os.Stat(socket); err != nil {
+			if os.IsNotExist(err) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if mountpoint != "" {
+		if err := syscall.Unmount(mountpoint, syscall.MNT_DETACH); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("lazy unmount %s: %w", mountpoint, err)
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) breakLeaseForce(ctx context.Context, volume string) error {
+	vm, cleanup, err := d.openManager(ctx)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	return vm.ForceClearLease(ctx, volume)
 }
 
 func (d *Daemon) lookupSandbox(id string) (SandboxRecord, error) {
@@ -296,4 +345,8 @@ func (d *Daemon) volumeExists(ctx context.Context, volume string) bool {
 
 func isNoDaemonError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no daemon running")
+}
+
+func isOwnerShuttingDownError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "daemon is shutting down")
 }

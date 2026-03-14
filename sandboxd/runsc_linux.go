@@ -5,6 +5,7 @@ package sandboxd
 import (
 	"bytes"
 	"context"
+	"debug/elf"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -27,6 +28,12 @@ import (
 )
 
 const sandboxdGuestBin = "/.loophole/bin/loophole-sandboxd"
+const defaultRunscPlatform = "systrap"
+
+const (
+	amd64BusyboxPath = "/opt/loophole-busybox/amd64/usr/bin/busybox"
+	arm64BusyboxPath = "/opt/loophole-busybox/arm64/usr/bin/busybox"
+)
 
 var defaultSandboxCapabilities = []string{
 	"CAP_AUDIT_WRITE",
@@ -65,6 +72,10 @@ func (d *Daemon) runscPanicLogPath(id string) string {
 	return filepath.Join(d.sandboxDir(id), "runsc-panic.log")
 }
 
+func (d *Daemon) sandboxFailureDir(id string) string {
+	return filepath.Join(d.dir.SandboxdState(), "failures", id)
+}
+
 func (d *Daemon) buildBundle(sb SandboxRecord) error {
 	bundleDir := d.bundleDir(sb.ID)
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
@@ -74,6 +85,18 @@ func (d *Daemon) buildBundle(sb SandboxRecord) error {
 		return err
 	}
 
+	spec, err := d.bundleSpec(sb)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(bundleDir, "config.json"), data, 0o644)
+}
+
+func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -92,6 +115,42 @@ func (d *Daemon) buildBundle(sb SandboxRecord) error {
 				"options":     []string{"rbind", "ro"},
 			})
 		}
+	}
+
+	namespaces := []map[string]any{
+		{"type": "pid"},
+		{"type": "ipc"},
+		{"type": "uts"},
+		{"type": "mount"},
+	}
+	linuxSpec := map[string]any{
+		"namespaces": namespaces,
+		"maskedPaths": []string{
+			"/proc/kcore", "/proc/latency_stats", "/proc/timer_list", "/proc/sched_debug",
+			"/sys/firmware", "/proc/scsi",
+		},
+		"readonlyPaths": []string{
+			"/proc/asound", "/proc/bus", "/proc/fs", "/proc/irq",
+			"/proc/sys", "/proc/sysrq-trigger",
+		},
+	}
+	if !d.runscUnsafeNonroot {
+		namespaces = append(namespaces, map[string]any{"type": "user"})
+		linuxSpec["uidMappings"] = []map[string]any{
+			{
+				"containerID": 0,
+				"hostID":      os.Getuid(),
+				"size":        1,
+			},
+		}
+		linuxSpec["gidMappings"] = []map[string]any{
+			{
+				"containerID": 0,
+				"hostID":      os.Getgid(),
+				"size":        1,
+			},
+		}
+		linuxSpec["gidMappingsEnableSetgroups"] = false
 	}
 
 	spec := map[string]any{
@@ -123,40 +182,109 @@ func (d *Daemon) buildBundle(sb SandboxRecord) error {
 		},
 		"hostname": sb.Name,
 		"mounts":   mounts,
-		"linux": map[string]any{
-			"namespaces": []map[string]any{
-				{"type": "pid"},
-				{"type": "ipc"},
-				{"type": "uts"},
-				{"type": "mount"},
-			},
-			"maskedPaths": []string{
-				"/proc/kcore", "/proc/latency_stats", "/proc/timer_list", "/proc/sched_debug",
-				"/sys/firmware", "/proc/scsi",
-			},
-			"readonlyPaths": []string{
-				"/proc/asound", "/proc/bus", "/proc/fs", "/proc/irq",
-				"/proc/sys", "/proc/sysrq-trigger",
-			},
-		},
+		"linux":    linuxSpec,
 	}
-	data, err := json.MarshalIndent(spec, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(filepath.Join(bundleDir, "config.json"), data, 0o644)
+	return spec, nil
 }
 
 func (d *Daemon) installGuestBinary(rootfs string) error {
-	dst := filepath.Join(rootfs, strings.TrimPrefix(filepath.Clean(sandboxdGuestBin), "/"))
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+	for _, dir := range []string{
+		rootfs,
+		filepath.Join(rootfs, ".loophole", "bin"),
+		filepath.Join(rootfs, "bin"),
+		filepath.Join(rootfs, "dev"),
+		filepath.Join(rootfs, "etc"),
+		filepath.Join(rootfs, "proc"),
+		filepath.Join(rootfs, "sys"),
+		filepath.Join(rootfs, "tmp"),
+	} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	for _, file := range []string{
+		filepath.Join(rootfs, "etc", "hosts"),
+		filepath.Join(rootfs, "etc", "resolv.conf"),
+	} {
+		f, err := os.OpenFile(file, os.O_CREATE, 0o644)
+		if err != nil {
+			return err
+		}
+		util.SafeClose(f, "close prepared guest file")
+	}
+
+	if err := copyExecutableIntoRootfs(d.selfBin, rootfs, sandboxdGuestBin); err != nil {
 		return err
 	}
-	srcFile, err := os.Open(d.selfBin)
+	busyboxPath, err := busyboxForExecutable(d.selfBin)
 	if err != nil {
 		return err
 	}
-	defer util.SafeClose(srcFile, "close sandboxd self binary")
+	if err := copyExecutableIntoRootfs(busyboxPath, rootfs, "/.loophole/bin/busybox"); err != nil {
+		return err
+	}
+	for _, name := range []string{"sh", "ls", "cat", "mkdir", "mv", "rm", "touch", "chmod", "pwd"} {
+		link := filepath.Join(rootfs, "bin", name)
+		if _, err := os.Lstat(link); err == nil {
+			continue
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		target := "/.loophole/bin/busybox"
+		if name == "sh" {
+			if preferred, ok := preferredGuestShell(rootfs); ok {
+				target = preferred
+			}
+		}
+		if err := os.Symlink(target, link); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func preferredGuestShell(rootfs string) (string, bool) {
+	for _, candidate := range []string{"/usr/bin/dash", "/bin/dash", "/usr/bin/bash", "/bin/bash"} {
+		if _, err := os.Stat(filepath.Join(rootfs, strings.TrimPrefix(candidate, "/"))); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func busyboxForExecutable(path string) (string, error) {
+	f, err := elf.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open executable %q: %w", path, err)
+	}
+	defer util.SafeClose(f, "close executable elf")
+
+	var candidate string
+	switch f.FileHeader.Machine {
+	case elf.EM_X86_64:
+		candidate = amd64BusyboxPath
+	case elf.EM_AARCH64:
+		candidate = arm64BusyboxPath
+	default:
+		return "", fmt.Errorf("unsupported executable architecture %v for %q", f.FileHeader.Machine, path)
+	}
+	info, err := os.Stat(candidate)
+	if err != nil {
+		return "", fmt.Errorf("stat busybox %q: %w", candidate, err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("busybox path %q is a directory", candidate)
+	}
+	return candidate, nil
+}
+
+func copyExecutableIntoRootfs(srcPath, rootfs, guestPath string) error {
+	dst := filepath.Join(rootfs, strings.TrimPrefix(filepath.Clean(guestPath), "/"))
+	srcFile, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer util.SafeClose(srcFile, "close source executable")
 
 	tmp := dst + ".tmp"
 	dstFile, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
@@ -164,24 +292,28 @@ func (d *Daemon) installGuestBinary(rootfs string) error {
 		return err
 	}
 	if _, err := io.Copy(dstFile, srcFile); err != nil {
-		util.SafeClose(dstFile, "close staged guest binary after copy failure")
+		util.SafeClose(dstFile, "close staged executable after copy failure")
 		return err
 	}
 	if err := dstFile.Sync(); err != nil {
-		util.SafeClose(dstFile, "close staged guest binary after sync failure")
+		util.SafeClose(dstFile, "close staged executable after sync failure")
 		return err
 	}
-	util.SafeClose(dstFile, "close staged guest binary")
+	util.SafeClose(dstFile, "close staged executable")
 	return os.Rename(tmp, dst)
 }
 
 func (d *Daemon) runscArgs(sandboxID string, args ...string) []string {
 	base := []string{
 		"--root=" + d.runscRoot,
+		"--platform=" + d.runscPlatform,
 		"--network=" + networkModeHost,
 		"--ignore-cgroups=true",
 		"--file-access=shared",
 		"--overlay2=none",
+	}
+	if d.runscUnsafeNonroot {
+		base = append(base, "--TESTONLY-unsafe-nonroot=true")
 	}
 	if d.runscDebug && sandboxID != "" {
 		base = append(base,
@@ -201,6 +333,132 @@ func (d *Daemon) runscCmd(ctx context.Context, sandboxID string, args ...string)
 
 const networkModeHost = "host"
 
+type sandboxDebugError struct {
+	err   error
+	debug SandboxDebugInfo
+}
+
+func (e *sandboxDebugError) Error() string {
+	return e.err.Error()
+}
+
+func (e *sandboxDebugError) Unwrap() error {
+	return e.err
+}
+
+func (d *Daemon) sandboxDebugInfo(id string) SandboxDebugInfo {
+	return SandboxDebugInfo{
+		SandboxID:     id,
+		SandboxDir:    d.sandboxDir(id),
+		FailureDir:    d.sandboxFailureDir(id),
+		RunscRunLog:   filepath.Join(d.sandboxDir(id), "runsc-run.log"),
+		RunscPanicLog: d.runscPanicLogPath(id),
+		RunscDebugDir: d.runscDebugDir(id),
+	}
+}
+
+func (d *Daemon) annotateSandboxError(id string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing *sandboxDebugError
+	if errors.As(err, &existing) {
+		return err
+	}
+	debug := d.snapshotSandboxDebugInfo(id)
+	return &sandboxDebugError{
+		err:   err,
+		debug: debug,
+	}
+}
+
+func (d *Daemon) snapshotSandboxDebugInfo(id string) SandboxDebugInfo {
+	debug := d.sandboxDebugInfo(id)
+	failureDir := d.sandboxFailureDir(id)
+	if err := os.MkdirAll(failureDir, 0o755); err != nil {
+		return debug
+	}
+
+	if copied, err := copyIfExists(debug.RunscRunLog, filepath.Join(failureDir, "runsc-run.log")); err == nil && copied {
+		debug.RunscRunLog = filepath.Join(failureDir, "runsc-run.log")
+	}
+	if copied, err := copyIfExists(debug.RunscPanicLog, filepath.Join(failureDir, "runsc-panic.log")); err == nil && copied {
+		debug.RunscPanicLog = filepath.Join(failureDir, "runsc-panic.log")
+	}
+	debugCopyDir := filepath.Join(failureDir, "runsc-debug")
+	if copied, err := copyDirIfExists(debug.RunscDebugDir, debugCopyDir); err == nil && copied {
+		debug.RunscDebugDir = debugCopyDir
+	}
+	return debug
+}
+
+func copyIfExists(srcPath, dstPath string) (bool, error) {
+	srcFile, err := os.Open(srcPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer util.SafeClose(srcFile, "close sandbox debug source file")
+
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return false, err
+	}
+	dstFile, err := os.OpenFile(dstPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return false, err
+	}
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		util.SafeClose(dstFile, "close sandbox debug destination file after copy failure")
+		return false, err
+	}
+	if err := dstFile.Sync(); err != nil {
+		util.SafeClose(dstFile, "close sandbox debug destination file after sync failure")
+		return false, err
+	}
+	util.SafeClose(dstFile, "close sandbox debug destination file")
+	return true, nil
+}
+
+func copyDirIfExists(srcDir, dstDir string) (bool, error) {
+	info, err := os.Stat(srcDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("%s is not a directory", srcDir)
+	}
+	if err := os.MkdirAll(dstDir, 0o755); err != nil {
+		return false, err
+	}
+	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		rel, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		target := filepath.Join(dstDir, rel)
+		if info.IsDir() {
+			return os.MkdirAll(target, info.Mode().Perm())
+		}
+		_, err = copyIfExists(path, target)
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (d *Daemon) startRunsc(ctx context.Context, sb SandboxRecord) error {
 	if err := d.buildBundle(sb); err != nil {
 		return err
@@ -210,27 +468,24 @@ func (d *Daemon) startRunsc(ctx context.Context, sb SandboxRecord) error {
 			return fmt.Errorf("create runsc debug dir: %w", err)
 		}
 	}
-	logFile, err := os.CreateTemp(d.sandboxDir(sb.ID), "runsc-run-*.log")
+	logPath := filepath.Join(d.sandboxDir(sb.ID), "runsc-run.log")
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	logPath := logFile.Name()
-	defer func() {
-		util.SafeClose(logFile, "close runsc start log")
-		_ = os.Remove(logPath)
-	}()
+	defer util.SafeClose(logFile, "close runsc start log")
 	cmd := d.runscCmd(ctx, sb.ID, "run", "--bundle="+d.bundleDir(sb.ID), "--detach=true", sb.RunscID)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	if err := cmd.Run(); err != nil {
 		out, readErr := os.ReadFile(logPath)
 		if readErr != nil {
-			return fmt.Errorf("runsc run: %w (read log: %v)", err, readErr)
+			return d.annotateSandboxError(sb.ID, fmt.Errorf("runsc run: %w (read log: %v)", err, readErr))
 		}
-		return fmt.Errorf("runsc run: %w: %s", err, strings.TrimSpace(string(out)))
+		return d.annotateSandboxError(sb.ID, fmt.Errorf("runsc run: %w: %s", err, strings.TrimSpace(string(out))))
 	}
 	if err := d.waitRunscReady(ctx, sb); err != nil {
-		return err
+		return d.annotateSandboxError(sb.ID, err)
 	}
 	return nil
 }

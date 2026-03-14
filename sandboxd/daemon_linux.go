@@ -26,24 +26,28 @@ import (
 )
 
 type Options struct {
-	SocketPath  string
-	LoopholeBin string
-	RunscBin    string
-	RunscDebug  bool
-	SelfBin     string
+	SocketPath    string
+	LoopholeBin   string
+	RunscBin      string
+	RunscPlatform string
+	RunscDebug    bool
+	SelfBin       string
 }
 
 type Daemon struct {
-	dir         loophole.Dir
-	inst        loophole.Instance
-	socketPath  string
-	loopholeBin string
-	runscBin    string
-	runscDebug  bool
-	selfBin     string
-	runscRoot   string
-	ln          net.Listener
-	logFile     *os.File
+	dir                 loophole.Dir
+	inst                loophole.Instance
+	socketPath          string
+	loopholeBin         string
+	runscBin            string
+	runscPlatform       string
+	runscPlatformSource string
+	runscDebug          bool
+	runscUnsafeNonroot  bool
+	selfBin             string
+	runscRoot           string
+	ln                  net.Listener
+	logFile             *os.File
 
 	mu        sync.Mutex
 	zygotes   map[string]ZygoteRecord
@@ -163,21 +167,48 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 			runscDebug = parsed
 		}
 	}
+	runscUnsafeNonroot := false
+	if env, ok := os.LookupEnv("LOOPHOLE_SANDBOXD_RUNSC_UNSAFE_NONROOT"); ok {
+		parsed, parseErr := strconv.ParseBool(env)
+		if parseErr != nil {
+			util.SafeClose(ln, "close sandboxd listener after invalid runsc unsafe env")
+			util.SafeClose(logFile, "close sandboxd log after invalid runsc unsafe env")
+			return nil, fmt.Errorf("parse LOOPHOLE_SANDBOXD_RUNSC_UNSAFE_NONROOT: %w", parseErr)
+		}
+		runscUnsafeNonroot = parsed
+	}
+
+	runscPlatform := opts.RunscPlatform
+	runscPlatformSource := ""
+	if runscPlatform == "" {
+		if env := os.Getenv("LOOPHOLE_SANDBOXD_RUNSC_PLATFORM"); env != "" {
+			runscPlatform = env
+			runscPlatformSource = "env"
+		} else {
+			runscPlatform = defaultRunscPlatform
+			runscPlatformSource = "bundled runsc default"
+		}
+	} else {
+		runscPlatformSource = "option"
+	}
 
 	d := &Daemon{
-		dir:         dir,
-		inst:        inst,
-		socketPath:  socketPath,
-		loopholeBin: loopholeBin,
-		runscBin:    runscBin,
-		runscDebug:  runscDebug,
-		selfBin:     selfBin,
-		runscRoot:   filepath.Join(dir.SandboxdState(), "runsc-root"),
-		ln:          ln,
-		logFile:     logFile,
-		zygotes:     state.Zygotes,
-		sandboxes:   state.Sandboxes,
-		sessions:    map[string]*session{},
+		dir:                 dir,
+		inst:                inst,
+		socketPath:          socketPath,
+		loopholeBin:         loopholeBin,
+		runscBin:            runscBin,
+		runscPlatform:       runscPlatform,
+		runscPlatformSource: runscPlatformSource,
+		runscDebug:          runscDebug,
+		runscUnsafeNonroot:  runscUnsafeNonroot,
+		selfBin:             selfBin,
+		runscRoot:           filepath.Join(dir.SandboxdState(), "runsc-root"),
+		ln:                  ln,
+		logFile:             logFile,
+		zygotes:             state.Zygotes,
+		sandboxes:           state.Sandboxes,
+		sessions:            map[string]*session{},
 	}
 	if err := os.MkdirAll(d.runscRoot, 0o755); err != nil {
 		util.SafeClose(ln, "close sandboxd listener after runsc root failure")

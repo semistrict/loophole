@@ -1,9 +1,8 @@
-import { createServerFn } from '@tanstack/react-start'
 import type { DirEntry } from './types'
 
 export type { DirEntry }
 
-async function schedulerJson<T>(res: Response): Promise<T> {
+async function runtimeJson<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = (await res.json().catch(() => ({}))) as { error?: string }
     throw new Error(body.error ?? res.statusText)
@@ -11,83 +10,53 @@ async function schedulerJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T
 }
 
-function schedulerFetch(path: string, init?: RequestInit): Promise<Response> {
-  const { env } = require('cloudflare:workers') as { env: Env }
-  const scheduler = env.SCHEDULER.get(env.SCHEDULER.idFromName('scheduler'))
-  return scheduler.fetch(
-    new Request(`http://scheduler${path}`, init),
-  )
+function runtimeFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(path, {
+    credentials: 'same-origin',
+    ...init,
+  })
 }
 
-function volumeFetch(volume: string, path: string, init?: RequestInit): Promise<Response> {
-  const { env } = require('cloudflare:workers') as { env: Env }
-  const actor = env.VOLUMES.get(env.VOLUMES.idFromName(volume))
-  const headers = new Headers(init?.headers)
-  headers.set('X-Volume', volume)
-  return actor.fetch(
-    new Request(`http://volume/${path}`, { ...init, headers }),
-  )
+export async function listVolumes(): Promise<string[]> {
+  const res = await runtimeFetch('/api/volumes')
+  const result = await runtimeJson<{ volumes?: string[] }>(res)
+  return result.volumes ?? []
 }
 
-export const listVolumes = createServerFn({ method: 'GET' })
-  .handler(async () => {
-    const res = await schedulerFetch('/api/volumes')
-    const result = await schedulerJson<{ volumes?: string[] }>(res)
-    return result.volumes ?? []
+export async function createVolume(data: { volume: string }): Promise<void> {
+  const res = await runtimeFetch('/api/volumes', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ volume: data.volume }),
   })
+  await runtimeJson(res)
+}
 
-export const createVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { volume: string }) => data)
-  .handler(async ({ data }) => {
-    const res = await schedulerFetch('/api/volumes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ volume: data.volume }),
-    })
-    await schedulerJson(res)
+export async function checkpointVolume(data: { volume: string }): Promise<void> {
+  const res = await runtimeFetch(`/api/volumes/${encodeURIComponent(data.volume)}/checkpoint`, {
+    method: 'POST',
   })
+  await runtimeJson(res)
+}
 
-export const checkpointVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { mountpoint: string }) => data)
-  .handler(async ({ data }) => {
-    const res = await schedulerFetch('/debug/checkpoint', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mountpoint: data.mountpoint }),
-    })
-    await schedulerJson(res)
+export async function cloneVolume(data: { volume: string; clone: string }): Promise<void> {
+  const res = await runtimeFetch(`/api/volumes/${encodeURIComponent(data.volume)}/clone`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clone: data.clone }),
   })
+  await runtimeJson(res)
+}
 
-export const cloneVolume = createServerFn({ method: 'POST' })
-  .inputValidator(
-    (data: { mountpoint: string; clone: string; cloneMountpoint: string }) => data,
-  )
-  .handler(async ({ data }) => {
-    const res = await schedulerFetch('/debug/clone', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        mountpoint: data.mountpoint,
-        clone: data.clone,
-        clone_mountpoint: data.cloneMountpoint,
-      }),
-    })
-    await schedulerJson(res)
+export async function deleteVolume(data: { volume: string }): Promise<void> {
+  const res = await runtimeFetch('/api/volumes/' + encodeURIComponent(data.volume), {
+    method: 'DELETE',
   })
+  await runtimeJson(res)
+}
 
-export const deleteVolume = createServerFn({ method: 'POST' })
-  .inputValidator((data: { volume: string }) => data)
-  .handler(async ({ data }) => {
-    const res = await schedulerFetch('/api/volumes/' + encodeURIComponent(data.volume), {
-      method: 'DELETE',
-    })
-    await schedulerJson(res)
-  })
-
-export const readDir = createServerFn({ method: 'GET' })
-  .inputValidator((data: { volume: string; path: string }) => data)
-  .handler(async ({ data }): Promise<DirEntry[]> => {
-    const params = new URLSearchParams({ volume: data.volume, path: data.path })
-    const res = await volumeFetch(data.volume, `sandbox/readdir?${params}`)
-    return schedulerJson<DirEntry[]>(res)
-  })
+export async function readDir(data: { volume: string; path: string }): Promise<DirEntry[]> {
+  const params = new URLSearchParams({ path: data.path })
+  const res = await runtimeFetch(`/v/${encodeURIComponent(data.volume)}/readdir?${params}`)
+  return runtimeJson<DirEntry[]>(res)
+}

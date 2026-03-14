@@ -52,6 +52,7 @@ type SandboxRecord struct {
 	Mountpoint   string            `json:"mountpoint"`
 	OwnerSocket  string            `json:"owner_socket"`
 	OwnerMode    string            `json:"owner_mode"`
+	OwnerPID     int               `json:"owner_pid,omitempty"`
 	RunscID      string            `json:"runsc_id"`
 	Network      string            `json:"network"`
 	Env          map[string]string `json:"env,omitempty"`
@@ -94,6 +95,7 @@ type ProcessCreateRequest struct {
 	TTY        bool              `json:"tty,omitempty"`
 	Rows       int               `json:"rows,omitempty"`
 	Cols       int               `json:"cols,omitempty"`
+	Timeout    int               `json:"timeout,omitempty"`
 }
 
 type ProcessRecord struct {
@@ -115,4 +117,30 @@ type ExecResult struct {
 	ExitCode int    `json:"exit_code"`
 	Stdout   string `json:"stdout"`
 	Stderr   string `json:"stderr"`
+}
+
+type SandboxDebugInfo struct {
+	SandboxID     string `json:"sandbox_id,omitempty"`
+	SandboxDir    string `json:"sandbox_dir,omitempty"`
+	FailureDir    string `json:"failure_dir,omitempty"`
+	RunscRunLog   string `json:"runsc_run_log,omitempty"`
+	RunscPanicLog string `json:"runsc_panic_log,omitempty"`
+	RunscDebugDir string `json:"runsc_debug_dir,omitempty"`
+}
+
+type ErrorResponse struct {
+	Error string            `json:"error"`
+	Debug *SandboxDebugInfo `json:"debug,omitempty"`
+}
+
+type StatusResponse struct {
+	OK                  bool   `json:"ok"`
+	RunscBin            string `json:"runsc_bin"`
+	RunscPlatform       string `json:"runsc_platform"`
+	RunscPlatformSource string `json:"runsc_platform_source"`
+	RunscDebug          bool   `json:"runsc_debug"`
+	RunscUnsafeNonroot  bool   `json:"runsc_unsafe_nonroot"`
+	RunscRoot           string `json:"runsc_root"`
+	SandboxCount        int    `json:"sandbox_count"`
+	ZygoteCount         int    `json:"zygote_count"`
 }

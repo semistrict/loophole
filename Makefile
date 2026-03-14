@@ -1,4 +1,4 @@
-.PHONY: build loophole loophole-sandboxd runsc install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-assets fly-bin
+.PHONY: build loophole loophole-sandboxd runsc install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar cf-demo-assets cf-demo-assets-local cf-demo-smoke-local fly-bin
 
 .DEFAULT_GOAL := loophole
 
@@ -6,6 +6,8 @@ BINDIR := bin
 GOOS   := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 RUNSC_GOOS := linux
+CF_DEMO_GOARCH ?= amd64
+CF_DEMO_BASE_URL ?= http://localhost:7935
 
 BUILDTAGS :=
 
@@ -47,7 +49,7 @@ fmt:
 # Remove generated binaries and test artifacts.
 clean:
 	rm -rf $(BINDIR)
-	rm -f cf-demo/bin/loophole cf-demo/bin/container-control
+	rm -f cf-demo/bin/loophole cf-demo/bin/container-control cf-demo/bin/ubuntu-rootfs.tar
 
 # Run unit tests (excludes e2e/linuxutil which require Linux)
 # Usage: make test [RUN=TestName]
@@ -57,13 +59,38 @@ test:
 
 # Build linux/amd64 binary for cf-demo container.
 cf-demo-bin:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o cf-demo/bin/loophole ./cmd/loophole
+	mkdir -p cf-demo/bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(CF_DEMO_GOARCH) go build -o cf-demo/bin/loophole ./cmd/loophole
 
 # Build linux/amd64 stable control plane for cf-demo container.
 cf-demo-control-bin:
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o cf-demo/bin/container-control ./cmd/container-control
+	mkdir -p cf-demo/bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(CF_DEMO_GOARCH) go build -trimpath -ldflags="-s -w" -o cf-demo/bin/container-control ./cmd/container-control
 
-cf-demo-assets: cf-demo-control-bin
+cf-demo-sandboxd-bin:
+	mkdir -p cf-demo/bin
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(CF_DEMO_GOARCH) go build -o cf-demo/bin/loophole-sandboxd ./cmd/loophole-sandboxd
+
+
+cf-demo-runsc-bin:
+	$(MAKE) runsc GOARCH=$(CF_DEMO_GOARCH)
+	mkdir -p cf-demo/bin
+	cp bin/runsc-linux-$(CF_DEMO_GOARCH) cf-demo/bin/runsc
+
+cf-demo-rootfs-tar:
+	mkdir -p cf-demo/bin
+	CID=$$(docker create --platform linux/$(CF_DEMO_GOARCH) ubuntu:24.04 /bin/true) && \
+	trap 'docker rm -f "$$CID" >/dev/null 2>&1 || true' EXIT INT TERM && \
+	docker export "$$CID" -o cf-demo/bin/ubuntu-rootfs.tar
+
+cf-demo-assets: CF_DEMO_GOARCH=amd64
+cf-demo-assets: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar
+
+cf-demo-assets-local: CF_DEMO_GOARCH=amd64
+cf-demo-assets-local: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar
+
+cf-demo-smoke-local:
+	CF_DEMO_BASE_URL=$(CF_DEMO_BASE_URL) CF_DEMO_SMOKE_VOLUME=$(CF_DEMO_SMOKE_VOLUME) pnpm -C cf-demo run smoke:local
 
 # Build linux/amd64 binary for Fly test machine
 fly-bin:
