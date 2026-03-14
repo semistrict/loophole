@@ -15,9 +15,12 @@ func (d *Daemon) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	volume := r.URL.Query().Get("volume")
+	if volume == "" {
+		volume = d.managedVolume
+	}
 	offsetStr := r.URL.Query().Get("offset")
 	if volume == "" || offsetStr == "" {
-		http.Error(w, "volume and offset query params required", 400)
+		http.Error(w, "volume and offset required", 400)
 		return
 	}
 	offset, err := strconv.ParseUint(offsetStr, 10, 64)
@@ -29,16 +32,11 @@ func (d *Daemon) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 	vm := d.backend.VM()
 	vol := vm.GetVolume(volume)
 	if vol == nil {
-		http.Error(w, "volume not found: "+volume, 404)
+		http.Error(w, "volume not open: "+volume, 404)
 		return
 	}
 
 	buf := make([]byte, storage2.BlockSize)
-
-	// Use ReadFull to guarantee a complete block read even when HTTP
-	// delivers the body in smaller chunks. Each request carries exactly
-	// one block (Content-Length == BlockSize), so this enables the
-	// direct-to-L2 write fast path.
 	n, readErr := io.ReadFull(r.Body, buf)
 	if n > 0 {
 		if err := vol.Write(buf[:n], offset); err != nil {
@@ -62,10 +60,13 @@ func (d *Daemon) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 	}
 
 	volume := r.URL.Query().Get("volume")
+	if volume == "" {
+		volume = d.managedVolume
+	}
 	offsetStr := r.URL.Query().Get("offset")
 	sizeStr := r.URL.Query().Get("size")
 	if volume == "" || offsetStr == "" || sizeStr == "" {
-		http.Error(w, "volume, offset, and size query params required", 400)
+		http.Error(w, "volume, offset, and size required", 400)
 		return
 	}
 	offset, err := strconv.ParseUint(offsetStr, 10, 64)
@@ -107,14 +108,17 @@ func (d *Daemon) handleDeviceDDFinalize(w http.ResponseWriter, r *http.Request) 
 
 	volume := r.URL.Query().Get("volume")
 	if volume == "" {
-		http.Error(w, "volume query param required", 400)
+		volume = d.managedVolume
+	}
+	if volume == "" {
+		http.Error(w, "no volume managed", 400)
 		return
 	}
 
 	vm := d.backend.VM()
 	vol := vm.GetVolume(volume)
 	if vol == nil {
-		http.Error(w, "volume not found: "+volume, 404)
+		http.Error(w, "volume not open: "+volume, 404)
 		return
 	}
 

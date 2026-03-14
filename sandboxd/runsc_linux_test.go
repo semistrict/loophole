@@ -60,10 +60,10 @@ func TestRunscArgsWithDebug(t *testing.T) {
 	)
 }
 
-func TestBundleSpecAddsUserNamespaceMappings(t *testing.T) {
+func TestBundleSpecRootlessAddsUserNamespaceMappings(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{}
+	d := &Daemon{runscRootless: true}
 	spec, err := d.bundleSpec(SandboxRecord{
 		Name:       "sandbox-1",
 		Mountpoint: "/tmp/rootfs",
@@ -96,10 +96,10 @@ func TestBundleSpecAddsUserNamespaceMappings(t *testing.T) {
 	}
 }
 
-func TestBundleSpecUnsafeNonrootOmitsUserNamespaceMappings(t *testing.T) {
+func TestBundleSpecDefaultOmitsUserNamespaceMappings(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{runscUnsafeNonroot: true}
+	d := &Daemon{}
 	spec, err := d.bundleSpec(SandboxRecord{
 		Name:       "sandbox-1",
 		Mountpoint: "/tmp/rootfs",
@@ -111,14 +111,55 @@ func TestBundleSpecUnsafeNonrootOmitsUserNamespaceMappings(t *testing.T) {
 	linuxSpec := specMap(t, spec["linux"])
 	assertNamespaceAbsent(t, linuxSpec, "user")
 	if _, ok := linuxSpec["uidMappings"]; ok {
-		t.Fatalf("uidMappings unexpectedly present: %#v", linuxSpec["uidMappings"])
+		t.Fatalf("uidMappings unexpectedly present")
 	}
 	if _, ok := linuxSpec["gidMappings"]; ok {
-		t.Fatalf("gidMappings unexpectedly present: %#v", linuxSpec["gidMappings"])
+		t.Fatalf("gidMappings unexpectedly present")
 	}
-	if _, ok := linuxSpec["gidMappingsEnableSetgroups"]; ok {
-		t.Fatalf("gidMappingsEnableSetgroups unexpectedly present: %#v", linuxSpec["gidMappingsEnableSetgroups"])
+}
+
+func TestBundleSpecBindMounts(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	sock := filepath.Join(tmpDir, "owner.sock")
+	if err := os.WriteFile(sock, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
+
+	d := &Daemon{
+		dir:           loophole.Dir(tmpDir),
+		runscRootless: true,
+	}
+	spec, err := d.bundleSpec(SandboxRecord{
+		Name:        "sandbox-1",
+		Mountpoint:  "/tmp/rootfs",
+		OwnerSocket: sock,
+	})
+	if err != nil {
+		t.Fatalf("bundleSpec() error = %v", err)
+	}
+
+	mounts, ok := spec["mounts"].([]map[string]any)
+	if !ok {
+		t.Fatalf("mounts type = %T, want []map[string]any", spec["mounts"])
+	}
+
+	assertMountExists(t, mounts, "/.loophole/bin", d.guestBinDir())
+	assertMountExists(t, mounts, "/.loophole/api.sock", sock)
+}
+
+func assertMountExists(t *testing.T, mounts []map[string]any, dest, source string) {
+	t.Helper()
+	for _, m := range mounts {
+		if m["destination"] == dest {
+			if m["source"] != source {
+				t.Fatalf("mount %s source = %v, want %v", dest, m["source"], source)
+			}
+			return
+		}
+	}
+	t.Fatalf("mount %s not found in mounts", dest)
 }
 
 func specMap(t *testing.T, value any) map[string]any {

@@ -28,18 +28,27 @@ func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
 	var err error
 	switch {
 	case req.Checkpoint != "":
-		if req.Volume == "" {
-			writeError(w, 400, fmt.Errorf("volume is required when checkpoint is set"))
+		volume := req.Volume
+		if volume == "" {
+			volume = d.managedVolume
+		}
+		if volume == "" {
+			writeError(w, 400, errNoVolume)
 			return
 		}
-		slog.Info("clone", "volume", req.Volume, "checkpoint", req.Checkpoint, "clone", req.Clone)
-		err = d.backend.CloneFromCheckpoint(r.Context(), req.Volume, req.Checkpoint, req.Clone)
-	case req.Mountpoint != "":
-		slog.Info("clone", "mountpoint", req.Mountpoint, "clone", req.Clone)
-		err = d.backend.Clone(r.Context(), req.Mountpoint, req.Clone)
+		slog.Info("clone", "volume", volume, "checkpoint", req.Checkpoint, "clone", req.Clone)
+		err = d.backend.CloneFromCheckpoint(r.Context(), volume, req.Checkpoint, req.Clone)
 	default:
-		writeError(w, 400, fmt.Errorf("mountpoint or volume+checkpoint is required"))
-		return
+		mountpoint := req.Mountpoint
+		if mountpoint == "" {
+			mountpoint = d.currentMountpoint()
+		}
+		if mountpoint == "" {
+			writeError(w, 400, fmt.Errorf("no volume mounted"))
+			return
+		}
+		slog.Info("clone", "mountpoint", mountpoint, "clone", req.Clone)
+		err = d.backend.Clone(r.Context(), mountpoint, req.Clone)
 	}
 	if err != nil {
 		slog.Error("clone failed", "err", err)

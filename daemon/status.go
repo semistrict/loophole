@@ -63,12 +63,15 @@ func (d *Daemon) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return
 	}
-	name := r.URL.Query().Get("volume")
-	if name == "" {
-		writeError(w, 400, fmt.Errorf("missing volume parameter"))
+	volume := r.URL.Query().Get("volume")
+	if volume == "" {
+		volume = d.managedVolume
+	}
+	if volume == "" {
+		writeError(w, 400, errNoVolume)
 		return
 	}
-	info, err := d.backend.VM().VolumeInfo(r.Context(), name)
+	info, err := d.backend.VM().VolumeInfo(r.Context(), volume)
 	if err != nil {
 		writeError(w, 500, err)
 		return
@@ -88,19 +91,22 @@ func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return
 	}
-	name := r.URL.Query().Get("volume")
-	if name == "" {
-		writeError(w, 400, fmt.Errorf("missing volume parameter"))
+	volume := r.URL.Query().Get("volume")
+	if volume == "" {
+		volume = d.managedVolume
+	}
+	if volume == "" {
+		writeError(w, 400, errNoVolume)
 		return
 	}
-	vol := d.backend.VM().GetVolume(name)
+	vol := d.backend.VM().GetVolume(volume)
 	if vol == nil {
-		writeError(w, 404, fmt.Errorf("volume %q not open", name))
+		writeError(w, 404, fmt.Errorf("volume %q not open", volume))
 		return
 	}
 	info, ok := storage2.DebugInfo(vol)
 	if !ok {
-		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", name))
+		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", volume))
 		return
 	}
 	writeJSON(w, info)

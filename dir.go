@@ -24,11 +24,6 @@ func DefaultDir() Dir {
 	return Dir(filepath.Join(home, ".loophole"))
 }
 
-// Socket returns the Unix socket path for the given profile.
-func (d Dir) Socket(profile string) string {
-	return filepath.Join(string(d), profile+".sock")
-}
-
 // VolumeSocket returns the Unix socket path for a single-volume owner process.
 func (d Dir) VolumeSocket(volume string) string {
 	h := sha256.Sum256([]byte(volume))

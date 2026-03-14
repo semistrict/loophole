@@ -43,7 +43,7 @@ type Daemon struct {
 	runscPlatform       string
 	runscPlatformSource string
 	runscDebug          bool
-	runscUnsafeNonroot  bool
+	runscRootless       bool
 	selfBin             string
 	runscRoot           string
 	ln                  net.Listener
@@ -167,15 +167,15 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 			runscDebug = parsed
 		}
 	}
-	runscUnsafeNonroot := false
-	if env, ok := os.LookupEnv("LOOPHOLE_SANDBOXD_RUNSC_UNSAFE_NONROOT"); ok {
+	runscRootless := false
+	if env, ok := os.LookupEnv("LOOPHOLE_SANDBOXD_RUNSC_ROOTLESS"); ok {
 		parsed, parseErr := strconv.ParseBool(env)
 		if parseErr != nil {
-			util.SafeClose(ln, "close sandboxd listener after invalid runsc unsafe env")
-			util.SafeClose(logFile, "close sandboxd log after invalid runsc unsafe env")
-			return nil, fmt.Errorf("parse LOOPHOLE_SANDBOXD_RUNSC_UNSAFE_NONROOT: %w", parseErr)
+			util.SafeClose(ln, "close sandboxd listener after invalid runsc rootless env")
+			util.SafeClose(logFile, "close sandboxd log after invalid runsc rootless env")
+			return nil, fmt.Errorf("parse LOOPHOLE_SANDBOXD_RUNSC_ROOTLESS: %w", parseErr)
 		}
-		runscUnsafeNonroot = parsed
+		runscRootless = parsed
 	}
 
 	runscPlatform := opts.RunscPlatform
@@ -201,7 +201,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		runscPlatform:       runscPlatform,
 		runscPlatformSource: runscPlatformSource,
 		runscDebug:          runscDebug,
-		runscUnsafeNonroot:  runscUnsafeNonroot,
+		runscRootless:       runscRootless,
 		selfBin:             selfBin,
 		runscRoot:           filepath.Join(dir.SandboxdState(), "runsc-root"),
 		ln:                  ln,

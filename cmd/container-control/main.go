@@ -197,15 +197,6 @@ func clientBGExec(args []string) error {
 
 func run() error {
 	listenAddr := envOr("CONTROL_LISTEN_ADDR", ":8080")
-	proxyTarget := os.Getenv("CONTROL_PROXY_TARGET")
-	proxy, err := buildProxy(proxyTarget)
-	if err != nil {
-		return fmt.Errorf("parse CONTROL_PROXY_TARGET: %w", err)
-	}
-	daemonUpstream, err := buildUpstream(proxyTarget)
-	if err != nil {
-		return fmt.Errorf("build CONTROL_PROXY_TARGET client: %w", err)
-	}
 	sandboxProxyTarget := os.Getenv("CONTROL_SANDBOXD_TARGET")
 	sandboxProxy, err := buildProxy(sandboxProxyTarget)
 	if err != nil {
@@ -215,15 +206,13 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("build CONTROL_SANDBOXD_TARGET client: %w", err)
 	}
-
 	go reapChildren()
 
 	srv := &controlServer{
 		container:       envOrMany([]string{"CONTROL_CONTAINER_ID", "CONTAINER_DO_ID"}, "unknown"),
-		daemonProxy:     proxy,
-		daemonAPI:       daemonUpstream,
 		sandboxProxy:    sandboxProxy,
 		sandboxAPI:      sandboxUpstream,
+		cli:             newLoopholeCLI(),
 		logger:          log.Default(),
 		bgJobs:          make(map[string]*bgJob),
 		toolboxSessions: make(map[string]*toolboxSession),
@@ -235,7 +224,7 @@ func run() error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("container-control listening on %s proxy=%q sandboxProxy=%q container=%s", listenAddr, proxyTarget, sandboxProxyTarget, srv.container)
+	log.Printf("container-control listening on %s sandboxProxy=%q container=%s", listenAddr, sandboxProxyTarget, srv.container)
 	return s.ListenAndServe()
 }
 
@@ -329,10 +318,9 @@ type bgJob struct {
 type controlServer struct {
 	container    string
 	proxyMu      sync.RWMutex
-	daemonProxy  *httputil.ReverseProxy
-	daemonAPI    *upstream
 	sandboxProxy *httputil.ReverseProxy
 	sandboxAPI   *upstream
+	cli          *loopholeCLI
 	logger       *log.Logger
 
 	bgMu            sync.Mutex
@@ -354,7 +342,6 @@ func (s *controlServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.proxyMu.RLock()
-	daemonProxy := s.daemonProxy
 	sandboxProxy := s.sandboxProxy
 	s.proxyMu.RUnlock()
 	if strings.HasPrefix(r.URL.Path, "/sandboxd/") {
@@ -376,11 +363,7 @@ func (s *controlServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sandboxProxy.ServeHTTP(w, req)
 		return
 	}
-	if daemonProxy == nil {
-		http.Error(w, "proxy target not configured", http.StatusBadGateway)
-		return
-	}
-	daemonProxy.ServeHTTP(w, r)
+	http.NotFound(w, r)
 }
 
 func (s *controlServer) handleControl(w http.ResponseWriter, r *http.Request) {
@@ -545,9 +528,8 @@ func (s *controlServer) handleSetProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.proxyMu.Lock()
-	s.daemonProxy = proxy
-	s.proxyMu.Unlock()
+	// Proxy target is no longer used (shared daemon removed).
+	_ = proxy
 
 	s.logger.Printf("proxy target set to %s", target)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proxy": target})

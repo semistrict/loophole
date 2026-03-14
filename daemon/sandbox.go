@@ -3,11 +3,14 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os/exec"
 	"path"
 	"time"
 )
@@ -35,29 +38,36 @@ func (d *Daemon) handleExec(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) {
 		return
 	}
-	volume := r.URL.Query().Get("volume")
 	cmdStr := r.URL.Query().Get("cmd")
 	if cmdStr == "" {
 		writeError(w, 400, fmt.Errorf("missing cmd parameter"))
 		return
 	}
 
-	result, err := execSandboxCommand(r.Context(), d.backend, volume, cmdStr)
-	if err != nil {
-		writeError(w, 500, err)
-		return
+	cmd := exec.CommandContext(r.Context(), "sh", "-c", cmdStr)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	exitCode := 0
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			writeError(w, 500, err)
+			return
+		}
+		exitCode = exitErr.ExitCode()
 	}
-	writeJSON(w, result)
+	writeJSON(w, ExecResult{ExitCode: exitCode, Stdout: stdout.String(), Stderr: stderr.String()})
 }
 
 func (d *Daemon) handleReadDir(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
-	volume := r.URL.Query().Get("volume")
+	volume := d.managedVolume
 	dir := r.URL.Query().Get("path")
 	if volume == "" {
-		writeError(w, 400, fmt.Errorf("missing volume parameter"))
+		writeError(w, 400, fmt.Errorf("no volume managed"))
 		return
 	}
 	if dir == "" {
@@ -96,10 +106,14 @@ func (d *Daemon) handleStat(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
-	volume := r.URL.Query().Get("volume")
+	volume := d.managedVolume
 	p := r.URL.Query().Get("path")
-	if volume == "" || p == "" {
-		writeError(w, 400, fmt.Errorf("missing volume or path parameter"))
+	if volume == "" {
+		writeError(w, 400, fmt.Errorf("no volume managed"))
+		return
+	}
+	if p == "" {
+		writeError(w, 400, fmt.Errorf("missing path parameter"))
 		return
 	}
 

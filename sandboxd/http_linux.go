@@ -51,7 +51,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		RunscPlatform:       platform,
 		RunscPlatformSource: platformSource,
 		RunscDebug:          d.runscDebug,
-		RunscUnsafeNonroot:  d.runscUnsafeNonroot,
+		RunscRootless:       d.runscRootless,
 		RunscRoot:           d.runscRoot,
 		SandboxCount:        len(d.sandboxes),
 		ZygoteCount:         len(d.zygotes),

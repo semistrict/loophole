@@ -81,7 +81,10 @@ func (d *Daemon) buildBundle(sb SandboxRecord) error {
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		return err
 	}
-	if err := d.installGuestBinary(sb.Mountpoint); err != nil {
+	if err := d.prepareGuestBinDir(); err != nil {
+		return err
+	}
+	if err := prepareRootfs(sb.Mountpoint); err != nil {
 		return err
 	}
 
@@ -116,6 +119,26 @@ func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 			})
 		}
 	}
+	// Bind-mount the host-side guest bin directory into the sandbox.
+	// Contains loophole CLI, loophole-sandboxd (init), and busybox.
+	mounts = append(mounts, map[string]any{
+		"destination": "/.loophole/bin",
+		"type":        "bind",
+		"source":      d.guestBinDir(),
+		"options":     []string{"bind", "ro"},
+	})
+	// Bind-mount the loophole owner socket into the sandbox so guest
+	// processes can call flush, checkpoint, clone, etc.
+	if sb.OwnerSocket != "" {
+		if _, err := os.Stat(sb.OwnerSocket); err == nil {
+			mounts = append(mounts, map[string]any{
+				"destination": "/.loophole/api.sock",
+				"type":        "bind",
+				"source":      sb.OwnerSocket,
+				"options":     []string{"bind"},
+			})
+		}
+	}
 
 	namespaces := []map[string]any{
 		{"type": "pid"},
@@ -134,7 +157,7 @@ func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 			"/proc/sys", "/proc/sysrq-trigger",
 		},
 	}
-	if !d.runscUnsafeNonroot {
+	if d.runscRootless {
 		namespaces = append(namespaces, map[string]any{"type": "user"})
 		linuxSpec["uidMappings"] = []map[string]any{
 			{
@@ -187,9 +210,53 @@ func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 	return spec, nil
 }
 
-func (d *Daemon) installGuestBinary(rootfs string) error {
+// guestBinDir returns the host-side directory containing binaries that get
+// bind-mounted into every sandbox at /.loophole/bin.
+func (d *Daemon) guestBinDir() string {
+	return filepath.Join(d.dir.SandboxdState(), "guest-bin")
+}
+
+// prepareGuestBinDir creates the host-side /.loophole/bin staging directory
+// with hard links to sandboxd, loophole, and busybox. This directory is
+// bind-mounted into every sandbox, keeping the ext4 volume clean.
+func (d *Daemon) prepareGuestBinDir() error {
+	dir := d.guestBinDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	bins := map[string]string{
+		"loophole-sandboxd": d.selfBin,
+		"loophole":          d.loopholeBin,
+	}
+	busybox, err := busyboxForExecutable(d.selfBin)
+	if err != nil {
+		slog.Warn("busybox not found, skipping", "error", err)
+	} else {
+		bins["busybox"] = busybox
+	}
+	for name, src := range bins {
+		dst := filepath.Join(dir, name)
+		srcInfo, err := os.Stat(src)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", src, err)
+		}
+		if dstInfo, err := os.Stat(dst); err == nil {
+			if os.SameFile(srcInfo, dstInfo) {
+				continue
+			}
+			_ = os.Remove(dst)
+		}
+		if err := copyExecutable(src, dst); err != nil {
+			return fmt.Errorf("stage %s: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// prepareRootfs ensures the rootfs has the minimum directory structure
+// needed for the OCI spec mounts (proc, sys, dev, etc.).
+func prepareRootfs(rootfs string) error {
 	for _, dir := range []string{
-		rootfs,
 		filepath.Join(rootfs, ".loophole", "bin"),
 		filepath.Join(rootfs, "bin"),
 		filepath.Join(rootfs, "dev"),
@@ -212,44 +279,7 @@ func (d *Daemon) installGuestBinary(rootfs string) error {
 		}
 		util.SafeClose(f, "close prepared guest file")
 	}
-
-	if err := copyExecutableIntoRootfs(d.selfBin, rootfs, sandboxdGuestBin); err != nil {
-		return err
-	}
-	busyboxPath, err := busyboxForExecutable(d.selfBin)
-	if err != nil {
-		return err
-	}
-	if err := copyExecutableIntoRootfs(busyboxPath, rootfs, "/.loophole/bin/busybox"); err != nil {
-		return err
-	}
-	for _, name := range []string{"sh", "ls", "cat", "mkdir", "mv", "rm", "touch", "chmod", "pwd"} {
-		link := filepath.Join(rootfs, "bin", name)
-		if _, err := os.Lstat(link); err == nil {
-			continue
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		target := "/.loophole/bin/busybox"
-		if name == "sh" {
-			if preferred, ok := preferredGuestShell(rootfs); ok {
-				target = preferred
-			}
-		}
-		if err := os.Symlink(target, link); err != nil {
-			return err
-		}
-	}
 	return nil
-}
-
-func preferredGuestShell(rootfs string) (string, bool) {
-	for _, candidate := range []string{"/usr/bin/dash", "/bin/dash", "/usr/bin/bash", "/bin/bash"} {
-		if _, err := os.Stat(filepath.Join(rootfs, strings.TrimPrefix(candidate, "/"))); err == nil {
-			return candidate, true
-		}
-	}
-	return "", false
 }
 
 func busyboxForExecutable(path string) (string, error) {
@@ -259,28 +289,18 @@ func busyboxForExecutable(path string) (string, error) {
 	}
 	defer util.SafeClose(f, "close executable elf")
 
-	var candidate string
 	switch f.FileHeader.Machine {
 	case elf.EM_X86_64:
-		candidate = amd64BusyboxPath
+		return amd64BusyboxPath, nil
 	case elf.EM_AARCH64:
-		candidate = arm64BusyboxPath
+		return arm64BusyboxPath, nil
 	default:
-		return "", fmt.Errorf("unsupported executable architecture %v for %q", f.FileHeader.Machine, path)
+		return "", fmt.Errorf("unsupported architecture %v", f.FileHeader.Machine)
 	}
-	info, err := os.Stat(candidate)
-	if err != nil {
-		return "", fmt.Errorf("stat busybox %q: %w", candidate, err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("busybox path %q is a directory", candidate)
-	}
-	return candidate, nil
 }
 
-func copyExecutableIntoRootfs(srcPath, rootfs, guestPath string) error {
-	dst := filepath.Join(rootfs, strings.TrimPrefix(filepath.Clean(guestPath), "/"))
-	srcFile, err := os.Open(srcPath)
+func copyExecutable(src, dst string) error {
+	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
@@ -306,15 +326,18 @@ func copyExecutableIntoRootfs(srcPath, rootfs, guestPath string) error {
 func (d *Daemon) runscArgs(sandboxID string, args ...string) []string {
 	base := []string{
 		"--root=" + d.runscRoot,
-		"--platform=" + d.runscPlatform,
-		"--network=" + networkModeHost,
+	}
+	if d.runscRootless {
+		base = append(base, "--rootless")
+	}
+	base = append(base,
+		"--platform="+d.runscPlatform,
+		"--network="+networkModeHost,
 		"--ignore-cgroups=true",
 		"--file-access=shared",
 		"--overlay2=none",
-	}
-	if d.runscUnsafeNonroot {
-		base = append(base, "--TESTONLY-unsafe-nonroot=true")
-	}
+		"--host-uds=open",
+	)
 	if d.runscDebug && sandboxID != "" {
 		base = append(base,
 			"--debug",

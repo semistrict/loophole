@@ -210,7 +210,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	} else {
 		sockPath := opts.SocketPath
 		if sockPath == "" {
-			sockPath = dir.Socket(inst.ProfileName)
+			return nil, fmt.Errorf("socket path is required (use --socket-path or SocketPath option)")
 		}
 		if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 			return nil, err
@@ -235,7 +235,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	d := &Daemon{
 		inst:       inst,
 		dir:        dir,
-		socket:     socketPathFromOptions(dir, inst, opts),
+		socket:     socketPathFromOptions(opts),
 		backend:    backend,
 		diskCache:  diskCache,
 		ln:         ln,
@@ -461,6 +461,8 @@ func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
 	return false
 }
 
+var errNoVolume = fmt.Errorf("no volume managed")
+
 // --- helpers ---
 
 func readJSON(r *http.Request, v any) error {
@@ -527,9 +529,6 @@ func (d *Daemon) removeOwnerLinks() {
 	}
 }
 
-func socketPathFromOptions(dir loophole.Dir, inst loophole.Instance, opts Options) string {
-	if opts.SocketPath != "" {
-		return opts.SocketPath
-	}
-	return dir.Socket(inst.ProfileName)
+func socketPathFromOptions(opts Options) string {
+	return opts.SocketPath
 }

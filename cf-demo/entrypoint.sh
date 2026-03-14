@@ -71,25 +71,22 @@ if [ "$SANDBOX_MODE" = "firecracker" ]; then
 fi
 
 PROFILE=$(awk -F'"' '/default_profile/{print $2}' /root/.loophole/config.toml)
-DAEMON_SOCK="/root/.loophole/${PROFILE}.sock"
 SANDBOXD_SOCK="/root/.loophole/sandboxd.sock"
-
-log "starting loophole daemon"
-loophole -p "${PROFILE}" serve --socket-path "${DAEMON_SOCK}" &
-LOOPHOLE_PID=$!
-log "loophole pid=${LOOPHOLE_PID}"
-
-# Wait for daemon socket
-log "waiting for daemon socket ${DAEMON_SOCK}"
-for i in $(seq 1 30); do
-  [ -S "$DAEMON_SOCK" ] && break
-  [ "$i" = "30" ] && { log "ERROR: daemon socket not found"; exit 1; }
-  sleep 1
-done
 
 log "starting sandboxd"
 export LOOPHOLE_SANDBOXD_RUNSC_DEBUG="${LOOPHOLE_SANDBOXD_RUNSC_DEBUG:-true}"
-export LOOPHOLE_SANDBOXD_RUNSC_PLATFORM="${LOOPHOLE_SANDBOXD_RUNSC_PLATFORM:-systrap}"
+if [ -z "$LOOPHOLE_SANDBOXD_RUNSC_PLATFORM" ]; then
+  if [ -e /dev/kvm ]; then
+    export LOOPHOLE_SANDBOXD_RUNSC_PLATFORM="kvm"
+  else
+    export LOOPHOLE_SANDBOXD_RUNSC_PLATFORM="systrap"
+  fi
+fi
+# Enable rootless mode when /dev/kvm is available (Cloudflare containers).
+# Docker dev containers have full root and don't need it.
+if [ -z "$LOOPHOLE_SANDBOXD_RUNSC_ROOTLESS" ] && [ -e /dev/kvm ]; then
+  export LOOPHOLE_SANDBOXD_RUNSC_ROOTLESS="true"
+fi
 loophole-sandboxd -p "${PROFILE}" --socket-path "${SANDBOXD_SOCK}" --loophole-bin /usr/local/bin/loophole --runsc-bin /usr/local/bin/runsc &
 SANDBOXD_PID=$!
 log "sandboxd pid=${SANDBOXD_PID}"
@@ -102,8 +99,8 @@ for i in $(seq 1 30); do
 done
 
 export CONTROL_LISTEN_ADDR=:8080
-export CONTROL_PROXY_TARGET=unix://${DAEMON_SOCK}
 export CONTROL_SANDBOXD_TARGET=unix://${SANDBOXD_SOCK}
+export LOOPHOLE_PROFILE="${PROFILE}"
 export CONTROL_CONTAINER_ID="${CONTAINER_DO_ID:-unknown}"
 export LOOPHOLE_DEFAULT_ZYGOTE="${LOOPHOLE_DEFAULT_ZYGOTE:-ubuntu-2404-v4}"
 

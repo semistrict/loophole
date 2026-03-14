@@ -139,7 +139,7 @@ type StatusResponse struct {
 	RunscPlatform       string `json:"runsc_platform"`
 	RunscPlatformSource string `json:"runsc_platform_source"`
 	RunscDebug          bool   `json:"runsc_debug"`
-	RunscUnsafeNonroot  bool   `json:"runsc_unsafe_nonroot"`
+	RunscRootless       bool   `json:"runsc_rootless"`
 	RunscRoot           string `json:"runsc_root"`
 	SandboxCount        int    `json:"sandbox_count"`
 	ZygoteCount         int    `json:"zygote_count"`

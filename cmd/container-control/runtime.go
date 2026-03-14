@@ -11,8 +11,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
 )
+
+// ownerClient returns a client connected to the per-volume owner process.
+func (s *controlServer) ownerClient(volume string) *client.Client {
+	dir := loophole.DefaultDir()
+	return client.NewFromSocket(dir.VolumeSocket(volume))
+}
 
 type sandboxSource struct {
 	Kind       string `json:"kind"`
@@ -91,28 +99,26 @@ func (s *controlServer) handleRuntime(w http.ResponseWriter, r *http.Request) bo
 }
 
 func (s *controlServer) handleListVolumes(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.daemonAPI.do(r.Context(), http.MethodGet, "/volumes", nil, "")
+	volumes, err := s.cli.listVolumes(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer util.SafeClose(resp.Body, "close daemon list volumes response body")
-	copyResponse(w, resp)
+	writeJSON(w, http.StatusOK, map[string]any{"volumes": volumes})
 }
 
 func (s *controlServer) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
+	var req map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	resp, err := s.daemonAPI.do(r.Context(), http.MethodPost, "/create", body, "application/json")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	if err := s.cli.createVolume(r.Context(), req); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer util.SafeClose(resp.Body, "close daemon create volume response body")
-	copyResponse(w, resp)
+	volume, _ := req["volume"].(string)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "volume": volume})
 }
 
 func (s *controlServer) handleVolumeAPI(w http.ResponseWriter, r *http.Request) {
@@ -153,15 +159,11 @@ func (s *controlServer) handleDeleteVolume(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-
-	body, _ := json.Marshal(map[string]string{"volume": volume})
-	resp, err := s.daemonAPI.do(r.Context(), http.MethodPost, "/delete", body, "application/json")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	if err := s.cli.deleteVolume(r.Context(), volume); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer util.SafeClose(resp.Body, "close daemon delete volume response body")
-	copyResponse(w, resp)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "volume": volume})
 }
 
 func (s *controlServer) handleCheckpointVolume(w http.ResponseWriter, r *http.Request, volume string) {
@@ -170,15 +172,13 @@ func (s *controlServer) handleCheckpointVolume(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-
-	body, _ := json.Marshal(map[string]string{"mountpoint": sb.Mountpoint})
-	resp, err := s.daemonAPI.do(r.Context(), http.MethodPost, "/checkpoint", body, "application/json")
+	c := s.ownerClient(sb.RootfsVolume)
+	cpID, err := c.Checkpoint(r.Context(), "")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer util.SafeClose(resp.Body, "close daemon checkpoint response body")
-	copyResponse(w, resp)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "checkpoint": cpID})
 }
 
 func (s *controlServer) handleCloneVolume(w http.ResponseWriter, r *http.Request, volume string) {
@@ -200,17 +200,12 @@ func (s *controlServer) handleCloneVolume(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"mountpoint": sb.Mountpoint,
-		"clone":      req.Clone,
-	})
-	resp, err := s.daemonAPI.do(r.Context(), http.MethodPost, "/clone", body, "application/json")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+	c := s.ownerClient(sb.RootfsVolume)
+	if err := c.Clone(r.Context(), client.CloneParams{Clone: req.Clone}); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	defer util.SafeClose(resp.Body, "close daemon clone response body")
-	copyResponse(w, resp)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "volume": req.Clone})
 }
 
 func (s *controlServer) handleVolumeRuntime(w http.ResponseWriter, r *http.Request) {

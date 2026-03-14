@@ -92,8 +92,8 @@ A zygote is a frozen volume with a rootfs that other volumes clone from.
 - `make cf-demo-smoke-local` — hit the local Worker at `CF_DEMO_BASE_URL` and verify sandbox create/files/exec/session end to end
 - `make cf-demo-smoke-lima` — hit the local `/debug` endpoints in Lima and verify Firecracker `exec` with `echo hello` and `/etc/os-release`
 - **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
-- Deployed URL: `https://cf-demo.ramon3525.workers.dev`
-- **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. Give it a minute or two after deploy. Verify the new binary by SSH-ing in and running `md5sum /usr/bin/loophole`.
+- Deployed URL: `https://cf-demo-4.ramon3525.workers.dev`
+- **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. Give it a minute or two after deploy. After deploy, use `POST /debug/stop-all` to force new containers.
 
 ### Local CF workflow in Lima
 
@@ -132,10 +132,38 @@ The Scheduler forwards `/debug/*` requests to the container daemon (stripping th
 - `GET /debug/status` — daemon status JSON
 - `GET /debug/volumes` — list loaded volumes
 
+### CF client script
+
+Use `cf-demo/scripts/client.ts` for authenticated requests to the CF worker. It reads `CONTROL_SECRET` from `.dev.vars` automatically:
+
+```bash
+cd cf-demo
+pnpm dlx tsx scripts/client.ts GET /debug/sandboxd/v1/status --url https://cf-demo-4.ramon3525.workers.dev
+pnpm dlx tsx scripts/client.ts POST /debug/control/<ctr>/exec --url https://cf-demo-4.ramon3525.workers.dev --json '{"cmd":"uname -a"}'
+```
+
 ### SSH into CF container
 
 ```
-bin/loophole-darwin-arm64 ssh --url https://cf-demo.ramon3525.workers.dev --volume <volume-name>
+export SECRET="$(cut -d= -f2- < <(rg '^CONTROL_SECRET=' cf-demo/.dev.vars))"
+bin/loophole-darwin-arm64 ssh --url https://cf-demo-4.ramon3525.workers.dev --secret "$SECRET" --volume <volume-name>
+```
+
+### Hot-patching binaries on live CF containers
+
+Upload and replace binaries without redeploying. Useful for iterating on runsc/loophole/sandboxd:
+
+```bash
+export SECRET="$(cut -d= -f2- < <(rg '^CONTROL_SECRET=' cf-demo/.dev.vars))"
+export BASE="https://cf-demo-4.ramon3525.workers.dev"
+export CTR="$(curl -sS -H "X-Control-Secret: $SECRET" "$BASE/debug/container" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
+
+# Upload a binary
+gzip -1c cf-demo/bin/runsc > /tmp/runsc-hotpatch.gz
+curl -sS -X PUT -H "X-Control-Secret: $SECRET" --data-binary @/tmp/runsc-hotpatch.gz "$BASE/debug/control/$CTR/upload?path=/tmp/runsc-hotpatch.gz&mode=0644"
+
+# Execute commands inside the container
+curl -sS -X POST -G -H "X-Control-Secret: $SECRET" --data-urlencode 'cmd=gzip -dc /tmp/runsc-hotpatch.gz > /usr/local/bin/runsc; chmod 0755 /usr/local/bin/runsc' "$BASE/debug/control/$CTR/exec"
 ```
 
 ### CF container logs (Axiom)
@@ -164,10 +192,11 @@ axiom query "['deepagent'] | where _time > now(-1h) | where volume == 'sandbox-1
 - Use `-f json` for machine-readable output.
 - The `dur` field is in nanoseconds (e.g. 1924547003 = ~1.9s).
 
-**Example: clone zygote and run a command via debug endpoints:**
-```
-BASE=https://cf-demo.ramon3525.workers.dev/debug
-curl -X POST "$BASE/mount" -H 'Content-Type: application/json' -d '{"volume":"zygote-ubuntu-2404","mountpoint":"zygote-ubuntu-2404"}'
-curl -X POST "$BASE/clone" -H 'Content-Type: application/json' -d '{"mountpoint":"zygote-ubuntu-2404","clone":"sandbox-1","clone_mountpoint":"sandbox-1"}'
-curl -X POST "$BASE/sandbox/exec?volume=sandbox-1&cmd=cat+/etc/os-release"
-```
+### CF container gVisor/runsc details
+
+- **Platform:** systrap (default) or kvm. Set via `LOOPHOLE_SANDBOXD_RUNSC_PLATFORM` env var in entrypoint.
+- **KVM works** on Cloudflare containers — needs `--rootless` flag. Stock upstream runsc with `--rootless --platform=kvm --network=host --ignore-cgroups` works out of the box.
+- **Network:** currently `--network=host`. Switching to `--network=sandbox` (isolated netstack) requires setting up veth pair + SNAT ourselves since Cloudflare's firecracker kernel lacks `xt_MASQUERADE` and `xt_comment` modules. Use `-j SNAT --to-source <host-ip>` instead of `-j MASQUERADE`.
+- **Rootless mode:** gVisor auto-detects rootless when `euid != 0`. The `--rootless` flag just controls cgroup error tolerance. Our `TestOnlyAllowRunAsCurrentUserWithoutChroot` patches in the gvisor submodule are for running as root without full capabilities (the Cloudflare container case).
+- **Zygote naming:** bump the version in `LOOPHOLE_DEFAULT_ZYGOTE` (entrypoint.sh) to force re-bootstrap from the bundled rootfs tar. Old zygotes persist in R2 and may have wrong-arch binaries.
+- **Owner socket bind-mount:** the per-volume loophole daemon socket (`Dir.VolumeSocket`) is bind-mounted into the sandbox at `/.loophole/api.sock`. Processes inside the sandbox can `curl --unix-socket /.loophole/api.sock http://localhost/status` (or `/flush`, `/checkpoint`, `/clone`, `/compact`).

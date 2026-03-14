@@ -1195,21 +1195,15 @@ func (s *controlServer) daytonaSourceForCreate(ctx context.Context, req sandboxC
 }
 
 func (s *controlServer) ensureVolumeExists(ctx context.Context, volume string) error {
-	body, _ := json.Marshal(map[string]string{"volume": volume})
-	resp, err := s.daemonAPI.do(ctx, http.MethodPost, "/create", body, "application/json")
-	if err != nil {
-		return err
-	}
-	defer util.SafeClose(resp.Body, "close ensure volume response body")
-	if resp.StatusCode < 400 {
+	err := s.cli.createVolume(ctx, map[string]any{"volume": volume})
+	if err == nil {
 		return nil
 	}
-	data, _ := io.ReadAll(resp.Body)
-	message := strings.ToLower(string(data))
+	message := strings.ToLower(err.Error())
 	if strings.Contains(message, "exist") || strings.Contains(message, "already") {
 		return nil
 	}
-	return fmt.Errorf("ensure volume %q: %s", volume, strings.TrimSpace(string(data)))
+	return fmt.Errorf("ensure volume %q: %w", volume, err)
 }
 
 func (s *controlServer) lookupSandboxByIDOrName(ctx context.Context, sandboxIDOrName string) (sandboxRecord, error) {

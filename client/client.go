@@ -33,18 +33,6 @@ type Client struct {
 	http *http.Client
 }
 
-// New creates a client for the given instance.
-func New(dir loophole.Dir, inst loophole.Instance) *Client {
-	sock := dir.Socket(inst.ProfileName)
-	return &Client{
-		Dir:  dir,
-		Inst: inst,
-		Sudo: true,
-		sock: sock,
-		http: httpClient(sock),
-	}
-}
-
 // NewFromSocket creates a client connected to a specific socket path.
 func NewFromSocket(sock string) *Client {
 	return &Client{
@@ -81,91 +69,16 @@ func (c *Client) EnsureDaemon() error {
 	return c.startDaemon()
 }
 
-// --- Chroot socket methods ---
-// These talk to the restricted /.loophole socket inside a chroot.
-
-// Flush flushes the volume to S3.
-func (c *Client) Flush(ctx context.Context) error {
-	_, err := c.post(ctx, "/flush")
-	return err
-}
-
-// FlushVolume flushes a named volume (daemon socket).
+// FlushVolume flushes a named volume.
 func (c *Client) FlushVolume(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/flush", "volume", volume)
 	return err
 }
 
-// Compact triggers L0→L1 compaction on the volume. When called on the chroot
-// socket, the volume is implicit. When called on the daemon socket, pass the
-// volume name via CompactVolume.
-func (c *Client) Compact(ctx context.Context) error {
-	_, err := c.post(ctx, "/compact")
-	return err
-}
-
-// CompactVolume triggers L0→L1 compaction on a named volume (daemon socket).
+// CompactVolume triggers L0→L1 compaction on a named volume.
 func (c *Client) CompactVolume(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/compact", "volume", volume)
 	return err
-}
-
-// ChrootCheckpoint creates a checkpoint (chroot socket: POST /checkpoint).
-func (c *Client) ChrootCheckpoint(ctx context.Context) (string, error) {
-	resp, err := c.post(ctx, "/checkpoint")
-	if err != nil {
-		return "", err
-	}
-	var result struct{ Checkpoint string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", err
-	}
-	return result.Checkpoint, nil
-}
-
-// ChrootClone creates an unmounted clone of the current volume.
-func (c *Client) ChrootClone(ctx context.Context, clone string) error {
-	_, err := c.post(ctx, "/clone", "clone", clone)
-	return err
-}
-
-// ChrootStatusResponse holds the response from the chroot status endpoint.
-type ChrootStatusResponse struct {
-	Name     string              `json:"name"`
-	Size     uint64              `json:"size"`
-	Type     string              `json:"type"`
-	ReadOnly bool                `json:"read_only"`
-	Refs     int32               `json:"refs"`
-	Layer    ChrootLayerResponse `json:"layer"`
-	// Fallback for old-style responses.
-	Volume string `json:"volume,omitempty"`
-}
-
-// ChrootLayerResponse holds layer details from the chroot status endpoint.
-type ChrootLayerResponse struct {
-	LayerID        string `json:"layer_id"`
-	L0Count        int    `json:"l0_count"`
-	L0TotalPages   int    `json:"l0_total_pages"`
-	L1Ranges       int    `json:"l1_ranges"`
-	L2Ranges       int    `json:"l2_ranges"`
-	MemtablePages  int    `json:"memtable_pages"`
-	MemtableMax    int    `json:"memtable_max"`
-	FrozenCount    int    `json:"frozen_memtables"`
-	L0CacheEntries int    `json:"l0_cache_entries"`
-	BlockCacheEnts int    `json:"block_cache_entries"`
-}
-
-// ChrootStatus returns volume status info (chroot socket: GET /status).
-func (c *Client) ChrootStatus(ctx context.Context) (*ChrootStatusResponse, error) {
-	resp, err := c.get(ctx, "/status")
-	if err != nil {
-		return nil, err
-	}
-	var result ChrootStatusResponse
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
 }
 
 // --- RPC methods ---

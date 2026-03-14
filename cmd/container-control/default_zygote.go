@@ -7,20 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/semistrict/loophole/internal/util"
 )
-
-type checkpointListResponse struct {
-	Checkpoints []struct {
-		ID string `json:"id"`
-	} `json:"checkpoints"`
-}
 
 func (s *controlServer) maybeEnsureDefaultZygote(ctx context.Context, source map[string]any) error {
 	if len(source) == 0 {
@@ -89,45 +83,34 @@ func (s *controlServer) hasRegisteredZygote(ctx context.Context, name string) (b
 }
 
 func (s *controlServer) latestCheckpoint(ctx context.Context, volume string) (string, error) {
-	resp, err := s.daemonAPI.do(ctx, http.MethodGet, "/checkpoints?volume="+url.QueryEscape(volume), nil, "")
+	checkpoints, err := s.cli.listCheckpoints(ctx, volume)
 	if err != nil {
 		return "", err
 	}
-	defer util.SafeClose(resp.Body, "close checkpoint list response body")
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("list checkpoints for %q: %s", volume, strings.TrimSpace(string(body)))
-	}
-	var payload checkpointListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
-	}
-	if len(payload.Checkpoints) == 0 {
+	if len(checkpoints) == 0 {
 		return "", nil
 	}
-	return payload.Checkpoints[len(payload.Checkpoints)-1].ID, nil
+	return checkpoints[len(checkpoints)-1].ID, nil
 }
 
 func (s *controlServer) bootstrapDefaultZygote(ctx context.Context, name, volume string) (_ string, err error) {
-	if err := s.ensureVolumeExists(ctx, volume); err != nil {
-		return "", err
-	}
-
 	mountpoint := filepath.Join("/root/.loophole/bootstrap", name)
 	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
 		return "", fmt.Errorf("mkdir %s: %w", mountpoint, err)
 	}
 
-	if err := s.mountVolume(ctx, volume, mountpoint); err != nil {
+	// Spawn a per-volume owner: `loophole create` if new, `loophole mount` if exists.
+	if err := s.spawnOwner(ctx, volume, mountpoint); err != nil {
 		return "", err
 	}
+	ownerC := s.ownerClient(volume)
 	mounted := true
 	defer func() {
 		if !mounted {
 			return
 		}
-		if unmountErr := s.unmountVolume(context.Background(), mountpoint); unmountErr != nil {
-			s.logger.Printf("default zygote cleanup failed mountpoint=%s err=%v", mountpoint, unmountErr)
+		if shutdownErr := ownerC.Shutdown(context.Background()); shutdownErr != nil {
+			s.logger.Printf("default zygote cleanup failed volume=%s err=%v", volume, shutdownErr)
 		}
 	}()
 
@@ -138,15 +121,92 @@ func (s *controlServer) bootstrapDefaultZygote(ctx context.Context, name, volume
 		return "", err
 	}
 
-	checkpoint, err := s.checkpointMount(ctx, mountpoint)
+	cpID, err := ownerC.Checkpoint(ctx, "")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("checkpoint zygote: %w", err)
 	}
-	if err := s.unmountVolume(ctx, mountpoint); err != nil {
-		return "", err
+	if err := ownerC.Shutdown(ctx); err != nil {
+		s.logger.Printf("shutdown zygote owner: %v", err)
 	}
 	mounted = false
-	return checkpoint, nil
+	return cpID, nil
+}
+
+// spawnOwner spawns a loophole owner process for the volume. It tries
+// `loophole mount` first (volume exists) and falls back to `loophole create`
+// (new volume). The process runs in the background with a VolumeSocket.
+func (s *controlServer) spawnOwner(ctx context.Context, volume, mountpoint string) error {
+	// Try mount first — succeeds if the volume already exists.
+	args := s.cli.args("mount", volume, mountpoint)
+	cmd := exec.CommandContext(ctx, s.cli.bin, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start owner for %s: %w", volume, err)
+	}
+
+	ownerDone := make(chan error, 1)
+	go func() { ownerDone <- cmd.Wait() }()
+
+	// Wait for the owner socket to become ready.
+	c := s.ownerClient(volume)
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			return fmt.Errorf("owner for %s did not become ready", volume)
+		case err := <-ownerDone:
+			// Mount failed — volume probably doesn't exist. Try create.
+			if err != nil {
+				return s.spawnCreate(ctx, volume, mountpoint)
+			}
+			return fmt.Errorf("owner for %s exited unexpectedly", volume)
+		default:
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		if status, err := c.Status(waitCtx); err == nil && status.Mountpoint != "" {
+			cancel()
+			return nil
+		}
+		cancel()
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// spawnCreate spawns `loophole create <volume> -m <mountpoint>` which creates
+// and mounts a new volume, staying as a foreground owner process.
+func (s *controlServer) spawnCreate(ctx context.Context, volume, mountpoint string) error {
+	args := s.cli.args("create", volume, "-m", mountpoint)
+	cmd := exec.CommandContext(ctx, s.cli.bin, args...)
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("create owner for %s: %w", volume, err)
+	}
+	go func() { _ = cmd.Wait() }()
+
+	c := s.ownerClient(volume)
+	deadline := time.After(30 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			return fmt.Errorf("create owner for %s did not become ready", volume)
+		default:
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		if status, err := c.Status(waitCtx); err == nil && status.Mountpoint != "" {
+			cancel()
+			return nil
+		}
+		cancel()
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func (s *controlServer) registerZygote(ctx context.Context, name, volume, checkpoint string) error {
@@ -165,57 +225,6 @@ func (s *controlServer) registerZygote(ctx context.Context, name, volume, checkp
 		return fmt.Errorf("register zygote %q: %s", name, strings.TrimSpace(string(data)))
 	}
 	return nil
-}
-
-func (s *controlServer) mountVolume(ctx context.Context, volume, mountpoint string) error {
-	body, _ := json.Marshal(map[string]string{"volume": volume, "mountpoint": mountpoint})
-	resp, err := s.daemonAPI.do(ctx, http.MethodPost, "/mount", body, "application/json")
-	if err != nil {
-		return err
-	}
-	defer util.SafeClose(resp.Body, "close mount response body")
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("mount %q at %q: %s", volume, mountpoint, strings.TrimSpace(string(data)))
-	}
-	return nil
-}
-
-func (s *controlServer) unmountVolume(ctx context.Context, mountpoint string) error {
-	body, _ := json.Marshal(map[string]string{"mountpoint": mountpoint})
-	resp, err := s.daemonAPI.do(ctx, http.MethodPost, "/unmount", body, "application/json")
-	if err != nil {
-		return err
-	}
-	defer util.SafeClose(resp.Body, "close unmount response body")
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unmount %q: %s", mountpoint, strings.TrimSpace(string(data)))
-	}
-	return nil
-}
-
-func (s *controlServer) checkpointMount(ctx context.Context, mountpoint string) (string, error) {
-	body, _ := json.Marshal(map[string]string{"mountpoint": mountpoint})
-	resp, err := s.daemonAPI.do(ctx, http.MethodPost, "/checkpoint", body, "application/json")
-	if err != nil {
-		return "", err
-	}
-	defer util.SafeClose(resp.Body, "close checkpoint response body")
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("checkpoint %q: %s", mountpoint, strings.TrimSpace(string(data)))
-	}
-	var payload struct {
-		Checkpoint string `json:"checkpoint"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return "", err
-	}
-	if payload.Checkpoint == "" {
-		return "", fmt.Errorf("checkpoint %q: empty checkpoint id", mountpoint)
-	}
-	return payload.Checkpoint, nil
 }
 
 func prepareZygoteMount(mountpoint string) error {

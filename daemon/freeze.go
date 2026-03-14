@@ -13,13 +13,18 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		Volume  string `json:"volume"`
 		Compact bool   `json:"compact"`
 	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
+	_ = readJSON(r, &req)
+	volume := req.Volume
+	if volume == "" {
+		volume = d.managedVolume
+	}
+	if volume == "" {
+		writeError(w, 400, errNoVolume)
 		return
 	}
-	slog.Info("freeze", "volume", req.Volume, "compact", req.Compact)
-	if err := d.backend.FreezeVolume(r.Context(), req.Volume, req.Compact); err != nil {
-		slog.Error("freeze failed", "volume", req.Volume, "err", err)
+	slog.Info("freeze", "volume", volume, "compact", req.Compact)
+	if err := d.backend.FreezeVolume(r.Context(), volume, req.Compact); err != nil {
+		slog.Error("freeze failed", "volume", volume, "err", err)
 		writeError(w, 500, err)
 		return
 	}
