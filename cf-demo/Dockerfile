@@ -38,7 +38,6 @@ COPY bin/loophole /usr/local/bin/loophole
 COPY bin/loophole-sandboxd /usr/local/bin/loophole-sandboxd
 COPY bin/runsc /usr/local/bin/runsc
 COPY bin/container-control /usr/local/bin/container-control
-COPY bin/ubuntu-rootfs.tar /opt/loophole-rootfs/ubuntu-rootfs.tar
 COPY entrypoint.sh /usr/local/bin/cf-demo-entrypoint
 
 RUN chmod +x /usr/local/bin/loophole /usr/local/bin/loophole-sandboxd /usr/local/bin/runsc /usr/local/bin/container-control /usr/local/bin/cf-demo-entrypoint

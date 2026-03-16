@@ -89,10 +89,10 @@ cf-demo-rootfs-tar:
 	docker export "$$CID" -o cf-demo/bin/ubuntu-rootfs.tar
 
 cf-demo-assets: CF_DEMO_GOARCH=amd64
-cf-demo-assets: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar
+cf-demo-assets: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin
 
 cf-demo-assets-local: CF_DEMO_GOARCH=amd64
-cf-demo-assets-local: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar
+cf-demo-assets-local: cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin
 
 cf-demo-smoke-local:
 	CF_DEMO_BASE_URL=$(CF_DEMO_BASE_URL) CF_DEMO_SMOKE_VOLUME=$(CF_DEMO_SMOKE_VOLUME) pnpm -C cf-demo run smoke:local
