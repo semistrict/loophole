@@ -1,11 +1,10 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/semistrict/loophole/client"
@@ -28,32 +27,66 @@ func sandboxRootCmd() *cobra.Command {
 	root.AddCommand(
 		sbStatusCmd(c),
 		sbFlushCmd(c),
-		sbCompactCmd(c),
 		sbCheckpointCmd(c),
 		sbCheckpointsCmd(c),
 		sbCloneCmd(c),
 		sbFreezeCmd(c),
-		sbInfoCmd(c),
 	)
 
 	return root
 }
 
+var (
+	sbHeader = color.New(color.Bold, color.Underline)
+	sbLabel  = color.New(color.FgCyan)
+	sbDim    = color.New(color.Faint)
+)
+
 func sbStatusCmd(c *client.Client) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show volume status",
+		Short: "Show volume status and metrics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			status, err := c.Status(cmd.Context())
+			ctx := cmd.Context()
+
+			status, err := c.Status(ctx)
 			if err != nil {
 				return err
 			}
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(status)
+
+			// Volume info
+			_, _ = sbHeader.Println("Volume")
+			printKV("name", status.Volume)
+			printKV("state", status.State)
+			printKV("mountpoint", status.Mountpoint)
+			printKV("s3", status.S3)
+			fmt.Println()
+
+			// Metrics
+			raw, err := c.Metrics(ctx)
+			if err != nil {
+				_, _ = sbDim.Printf("  (metrics unavailable: %v)\n", err)
+				return nil
+			}
+			families, errParse := parseMetrics(raw)
+			if errParse != nil {
+				_, _ = sbDim.Printf("  (metrics parse error: %v)\n", errParse)
+				return nil
+			}
+			printStats(families)
+
+			return nil
 		},
 	}
+}
+
+func printKV(key, value string) {
+	if value == "" {
+		return
+	}
+	_, _ = sbLabel.Printf("  %-12s ", key)
+	fmt.Println(value)
 }
 
 func sbFlushCmd(c *client.Client) *cobra.Command {
@@ -66,21 +99,6 @@ func sbFlushCmd(c *client.Client) *cobra.Command {
 				return err
 			}
 			fmt.Println("flushed")
-			return nil
-		},
-	}
-}
-
-func sbCompactCmd(c *client.Client) *cobra.Command {
-	return &cobra.Command{
-		Use:   "compact",
-		Short: "Compact the volume (L0 → L1)",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := c.CompactVolume(cmd.Context(), ""); err != nil {
-				return err
-			}
-			fmt.Println("compacted")
 			return nil
 		},
 	}
@@ -146,23 +164,6 @@ func sbFreezeCmd(c *client.Client) *cobra.Command {
 			}
 			fmt.Println("frozen")
 			return nil
-		},
-	}
-}
-
-func sbInfoCmd(c *client.Client) *cobra.Command {
-	return &cobra.Command{
-		Use:   "info",
-		Short: "Show volume metadata",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			info, err := c.VolumeInfo(cmd.Context(), "")
-			if err != nil {
-				return err
-			}
-			enc := json.NewEncoder(os.Stdout)
-			enc.SetIndent("", "  ")
-			return enc.Encode(info)
 		},
 	}
 }

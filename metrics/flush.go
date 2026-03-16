@@ -58,7 +58,7 @@ var (
 		Namespace: "loophole",
 		Subsystem: "flush",
 		Name:      "upload_duration_seconds",
-		Help:      "Time to upload a single L0 blob to S3 (excludes index save).",
+		Help:      "Time to upload a single block to S3 (excludes index save).",
 		Buckets:   prometheus.ExponentialBuckets(0.01, 2, 12),
 	}))
 
@@ -83,10 +83,17 @@ var (
 		Help:      "Total pages flushed (data + tombstones).",
 	}))
 
-	L0Compactions = reg(prometheus.NewCounter(prometheus.CounterOpts{
+	FlushDirectBlocksWritten = reg(prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: "loophole",
 		Subsystem: "flush",
-		Name:      "l0_compactions_total",
-		Help:      "L0→L1 compaction cycles completed.",
+		Name:      "direct_blocks_written_total",
+		Help:      "Total L1/L2 blocks written by flush.",
+	}))
+
+	FlushDirectL2Promotions = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "direct_l2_promotions_total",
+		Help:      "L2 promotions during flush.",
 	}))
 )

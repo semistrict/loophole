@@ -37,17 +37,6 @@ func storage2ConfigFromEnv() storage2.Config {
 			cfg.FlushThreshold = n
 		}
 	}
-	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_MAX_FROZEN_TABLES"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.MaxFrozenTables = n
-		}
-	}
-	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_L0_PAGES_MAX"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			cfg.L0PagesMax = n
-		}
-	}
-
 	return cfg
 }
 
@@ -63,6 +52,7 @@ type Daemon struct {
 	managedVolume string
 	mountpoint    string
 	devicePath    string
+	logPath       string
 
 	startupErr string // non-fatal startup error (e.g. bad S3 creds)
 
@@ -82,12 +72,13 @@ type Options struct {
 	SocketMode os.FileMode
 	ListenAddr string // If set (e.g. "tcp://0.0.0.0:8080"), listen on this address instead of Unix socket.
 	SocketPath string
+	Volume     string // Volume name — used for per-volume log file path.
 }
 
 func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
 	foreground := opts.Foreground
 	socketMode := opts.SocketMode
-	logPath := dir.Log(inst.ProfileName)
+	logPath := dir.VolumeLog(opts.Volume)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return nil, err
 	}
@@ -239,13 +230,12 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		backend:    backend,
 		diskCache:  diskCache,
 		ln:         ln,
+		logPath:    logPath,
 		axiomClose: axiomClose,
 		startupErr: startupErr,
 		shutdownCh: make(chan struct{}),
 		doneCh:     make(chan struct{}),
 	}
-	slog.Info("sandbox runtime selected", "type", "chroot", "debug", d.sandboxDebugInfo())
-
 	return d, nil
 }
 
@@ -383,11 +373,6 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 		<-d.doneCh
 		writeJSON(w, map[string]string{"status": "done"})
 	})
-
-	mux.HandleFunc("POST /sandbox/exec", d.handleExec)
-	mux.HandleFunc("GET /sandbox/runtime", d.handleSandboxRuntime)
-	mux.HandleFunc("GET /sandbox/readdir", d.handleReadDir)
-	mux.HandleFunc("GET /sandbox/stat", d.handleStat)
 
 	mux.HandleFunc("GET /status", d.handleStatus)
 	mux.HandleFunc("GET /volumes", d.handleListVolumes)

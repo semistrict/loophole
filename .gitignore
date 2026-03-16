@@ -19,3 +19,4 @@ cmd/wasm/web/public/loophole.wasm
 /container-control
 /loophole-guest-agent
 .gocache/
+.wrangler/

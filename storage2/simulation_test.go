@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -33,7 +32,6 @@ type SimConfig struct {
 	S3Faults       FaultConfig
 	FlushThreshold int64
 	FlushInterval  time.Duration // periodic auto-flush interval; 0 = default (500ms under synctest)
-	L0PagesMax     int           // 0 = default (DefaultL0PagesMax)
 }
 
 // Simulation runs a multi-node deterministic simulation.
@@ -132,10 +130,8 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 		sim.store.Store(),
 		cacheDir,
 		Config{
-			FlushThreshold:  sim.config.FlushThreshold,
-			MaxFrozenTables: 2,
-			FlushInterval:   flushInterval,
-			L0PagesMax:      sim.config.L0PagesMax,
+			FlushThreshold: sim.config.FlushThreshold,
+			FlushInterval:  flushInterval,
 		},
 		fs,
 		dc,
@@ -713,8 +709,7 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	vol, ok := v.(*volume)
-	if !ok {
+	if _, ok := v.(*volume); !ok {
 		return
 	}
 
@@ -725,10 +720,7 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 	timelineID := sim.volumeTimelines[volName]
 	sim.oracle.RecordFlush(node.id, timelineID)
 
-	_ = vol.layer.tryCompactL0(ctx)
-
-	// Post-compaction verification: read all pages and check against oracle.
-	// Compaction rewrites layers; this catches data loss or corruption.
+	// Post-flush verification: read all pages and check against oracle.
 	maxPage := PageIdx(sim.config.DevicePages)
 	for pageIdx := PageIdx(0); pageIdx < maxPage; pageIdx++ {
 		buf := make([]byte, PageSize)
@@ -739,7 +731,7 @@ func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
 		}
 		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
 			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
-			sim.t.Logf("POST-COMPACT MISMATCH vol=%s", volName)
+			sim.t.Logf("POST-FLUSH MISMATCH vol=%s", volName)
 			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 		}
 	}
@@ -779,12 +771,9 @@ func (sim *Simulation) opCompactShared(ctx context.Context, node *SimNode) {
 		defer func() { _ = v.ReleaseRef() }()
 	}
 
-	frozen, ok := v.(*frozenVolume)
-	if !ok {
+	if _, ok := v.(*frozenVolume); !ok {
 		return
 	}
-
-	_ = frozen.layer.tryCompactL0(ctx)
 
 	timelineID := sim.volumeTimelines[volName]
 	maxPage := PageIdx(sim.config.DevicePages)
@@ -796,7 +785,7 @@ func (sim *Simulation) opCompactShared(ctx context.Context, node *SimNode) {
 		}
 		if !sim.oracle.VerifyRead(node.id, timelineID, pageIdx, buf) {
 			expected := sim.oracle.ExpectedRead(node.id, timelineID, pageIdx)
-			sim.t.Logf("POST-SHARED-COMPACT MISMATCH vol=%s", volName)
+			sim.t.Logf("POST-SHARED-READ MISMATCH vol=%s", volName)
 			sim.reportMismatch(ctx, v, volName, node.id, timelineID, pageIdx, buf, expected)
 		}
 	}
@@ -1575,9 +1564,6 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 	if actualTL != oracleTL {
 		sim.t.Fatalf("TIMELINE MISMATCH on open: vol=%s oracle=%s actual=%s", name, oracleTL[:8], actualTL[:8])
 	}
-	vol.layer.debugLog = func(msg string) {
-		sim.t.Logf("[%s/%s] %s", node.id, name, msg)
-	}
 }
 
 func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name string) {
@@ -1709,7 +1695,6 @@ func (sim *Simulation) FullScan() {
 
 // verifyLayerIntegrity checks structural invariants of the S3 state:
 //   - Every volume ref points to a layer that has an index.json.
-//   - Every L0 blob referenced in index.json exists in S3.
 //   - No volume ref points to a nonexistent layer.
 //   - FROZEN LAYER INVARIANT: No two active (non-read-only) volumes share
 //     the same layer ID. After re-layering, each writable volume has its
@@ -1744,7 +1729,7 @@ func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []stri
 				volName, ref.LayerID[:8], err)
 		}
 
-		// Parse the index and verify L0 blob references.
+		// Parse the index to verify it's valid JSON.
 		var idx layerIndex
 		if err := json.NewDecoder(idxRC).Decode(&idx); err != nil {
 			idxRC.Close()
@@ -1752,18 +1737,6 @@ func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []stri
 				volName, ref.LayerID[:8], err)
 		}
 		idxRC.Close()
-
-		for i, l0 := range idx.L0 {
-			_, _, err := store.Get(ctx, l0.Key)
-			if err != nil {
-				if strings.Contains(err.Error(), "not found") {
-					sim.t.Fatalf("layer integrity: vol=%s layer=%s L0[%d] missing blob %q",
-						volName, ref.LayerID[:8], i, l0.Key)
-				}
-				// Other errors (e.g. transient) — skip.
-				continue
-			}
-		}
 	}
 }
 
@@ -1879,7 +1852,6 @@ func TestSimulation(t *testing.T) {
 			OpsPerNode:     ops,
 			CrashRate:      crashRate,
 			FlushThreshold: 8 * PageSize,
-			L0PagesMax:     100,
 			S3Faults: FaultConfig{
 				PutFailRate:              faultRate,
 				GetFailRate:              faultRate,
@@ -1924,7 +1896,6 @@ func TestSimulationDeterminism(t *testing.T) {
 		OpsPerNode:     100,
 		CrashRate:      0.02,
 		FlushThreshold: 8 * PageSize,
-		L0PagesMax:     100,
 		S3Faults: FaultConfig{
 			PutFailRate:    0.02,
 			GetFailRate:    0.02,
@@ -1976,7 +1947,6 @@ func TestSimulationSharedLayerCompactionExercise(t *testing.T) {
 			OpsPerNode:     1,
 			CrashRate:      0,
 			FlushThreshold: 8 * PageSize,
-			L0PagesMax:     10,
 		})
 		defer func() {
 			for _, m := range sim.allManagers {

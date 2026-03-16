@@ -98,7 +98,7 @@ func (v *frozenVolume) Clone(cloneName string) error {
 	m := v.manager
 	ctx := context.Background()
 
-	// Build the child index in memory — inherits all L0/L1/L2 from the zygote.
+	// Build the child index in memory — inherits all L1/L2 from the zygote.
 	childID := m.idGen()
 	idx := v.layer.index
 	idx.NextSeq = v.layer.nextSeq.Load()

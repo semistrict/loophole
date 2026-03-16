@@ -9,16 +9,8 @@ import (
 type layerIndex struct {
 	NextSeq   uint64       `json:"next_seq"`
 	LayoutGen uint64       `json:"layout_gen,omitempty"`
-	L0        []l0Entry    `json:"l0,omitempty"`
 	L1        []blockRange `json:"l1,omitempty"`
 	L2        []blockRange `json:"l2,omitempty"`
-}
-
-// l0Entry describes a single L0 flush file and the pages it contains.
-type l0Entry struct {
-	Key   string    `json:"key"`
-	Pages []PageIdx `json:"pages"`
-	Size  int64     `json:"size"`
 }
 
 // blockRange maps a contiguous range of block indices [Start, End) to
@@ -29,25 +21,6 @@ type blockRange struct {
 	End           BlockIdx `json:"end"`             // exclusive
 	Layer         string   `json:"layer"`           // layer ID that owns the blobs
 	WriteLeaseSeq uint64   `json:"write_lease_seq"` // lease seq embedded in blob keys
-}
-
-// l0HasPage checks if an L0 entry contains the given page.
-func l0HasPage(e *l0Entry, pageIdx PageIdx) bool {
-	for _, p := range e.Pages {
-		if p == pageIdx {
-			return true
-		}
-	}
-	return false
-}
-
-// totalL0Pages returns the total number of page entries across all L0 files.
-func totalL0Pages(entries []l0Entry) int {
-	n := 0
-	for i := range entries {
-		n += len(entries[i].Pages)
-	}
-	return n
 }
 
 // blockRangeMap provides O(log n) lookup of block address → layer ID.

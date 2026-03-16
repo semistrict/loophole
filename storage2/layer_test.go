@@ -11,9 +11,8 @@ import (
 )
 
 var testConfig = Config{
-	FlushThreshold:  16 * PageSize,
-	MaxFrozenTables: 2,
-	FlushInterval:   -1,
+	FlushThreshold: 16 * PageSize,
+	FlushInterval:  -1,
 }
 
 func newTestManager(t *testing.T, store loophole.ObjectStore, config Config) *Manager {
@@ -39,9 +38,8 @@ func TestLayerReadWrite(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
@@ -66,14 +64,13 @@ func TestLayerReadWrite(t *testing.T) {
 	assert.Equal(t, data[100:200], buf2)
 }
 
-func TestLayerFlushAndReadFromL0(t *testing.T) {
+func TestLayerFlushAndRead(t *testing.T) {
 	ctx := t.Context()
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
@@ -88,7 +85,7 @@ func TestLayerFlushAndReadFromL0(t *testing.T) {
 	require.NoError(t, ly.Write(page, 0))
 	require.NoError(t, ly.Flush())
 
-	// Read back — should come from L0 now.
+	// Read back — should come from flushed L1 data.
 	buf := make([]byte, PageSize)
 	n, err := ly.Read(ctx, buf, 0)
 	require.NoError(t, err)
@@ -101,9 +98,8 @@ func TestLayerPunchHole(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
@@ -129,21 +125,20 @@ func TestLayerPunchHole(t *testing.T) {
 	assert.Equal(t, bytes.Repeat([]byte{0xFF}, PageSize), buf)
 }
 
-func TestLayerCompactL0(t *testing.T) {
+func TestLayerFlushAndReadPages(t *testing.T) {
 	ctx := t.Context()
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  4 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 4 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
 	require.NoError(t, err)
 	defer ly.Close()
 
-	// Write pages and flush to L0.
+	// Write pages and flush.
 	pages := 20
 	expected := make(map[uint64][]byte)
 	for i := range pages {
@@ -158,15 +153,7 @@ func TestLayerCompactL0(t *testing.T) {
 
 	require.NoError(t, ly.Flush())
 
-	ly.mu.RLock()
-	l0Count := len(ly.index.L0)
-	ly.mu.RUnlock()
-	assert.Greater(t, l0Count, 0, "expected L0 entries after flush")
-
-	// CompactL0 may skip if below trigger threshold.
-	_ = ly.CompactL0()
-
-	// Verify all pages still readable.
+	// Verify all pages still readable after flush.
 	for pageAddr, exp := range expected {
 		buf := make([]byte, PageSize)
 		n, err := ly.Read(ctx, buf, pageAddr*PageSize)
@@ -181,9 +168,8 @@ func TestLayerSnapshot(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	parent, err := openLayer(ctx, store, "parent", cfg, nil, t.TempDir())
@@ -215,7 +201,7 @@ func TestLayerSnapshot(t *testing.T) {
 	newPage := bytes.Repeat([]byte{0xAB}, PageSize)
 	require.NoError(t, child.Write(newPage, 0))
 
-	// Reopen parent to verify L0 data persisted.
+	// Reopen parent to verify data persisted.
 	parent2, err := openLayer(ctx, store, "parent", cfg, nil, t.TempDir())
 	require.NoError(t, err)
 	defer parent2.Close()
@@ -230,9 +216,8 @@ func TestLayerDirectL2Write(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
@@ -251,13 +236,11 @@ func TestLayerDirectL2Write(t *testing.T) {
 	}
 	require.NoError(t, ly.Write(data, 0))
 
-	// The layer should still have no L0 or L1 entries — everything went
+	// The layer should still have no L1 entries — everything went
 	// straight to L2.
 	ly.mu.RLock()
-	l0Count := len(ly.index.L0)
 	l1Count := ly.l1Map.Len()
 	ly.mu.RUnlock()
-	assert.Equal(t, 0, l0Count, "expected no L0 entries")
 	assert.Equal(t, 0, l1Count, "expected no L1 entries")
 
 	// Verify each block index is present in the L2 map.
@@ -296,9 +279,8 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
@@ -340,9 +322,8 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  64 * 1024,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())

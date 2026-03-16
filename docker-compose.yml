@@ -29,8 +29,14 @@ services:
       - loophole-data:/root/.loophole
       - ./docker-config/config.toml:/root/.loophole/config.toml:ro
       - /tmp/linux-clone-test/linux:/mnt/linux-src:ro
+      - /Users/ramon/src:/mnt/src:ro
+    tmpfs:
+      - /root/.loophole/r2/cache:size=1G
     depends_on:
       - s3
+    ports:
+      - "2049:2049"
+      - "20048:20048"
     devices:
       - /dev/fuse
 

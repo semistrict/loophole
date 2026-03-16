@@ -29,7 +29,6 @@ type volCmd struct {
 // volumeCommands is the registry of per-volume commands.
 var volumeCommands = []volCmd{
 	{method: "POST", path: "/flush", handler: cmdFlush},
-	{method: "POST", path: "/compact", handler: cmdCompact},
 }
 
 func cmdFlush(a volCmdArgs) (any, error) {
@@ -37,22 +36,6 @@ func cmdFlush(a volCmdArgs) (any, error) {
 	if err := a.vol.Flush(); err != nil {
 		return nil, fmt.Errorf("flush: %w", err)
 	}
-	return map[string]string{"status": "ok"}, nil
-}
-
-func cmdCompact(a volCmdArgs) (any, error) {
-	type compactor interface {
-		CompactL0() error
-	}
-	c, ok := a.vol.(compactor)
-	if !ok {
-		return nil, fmt.Errorf("volume %q does not support compaction", a.volName)
-	}
-	slog.Info("compact: starting", "volume", a.volName)
-	if err := c.CompactL0(); err != nil {
-		return nil, fmt.Errorf("compact: %w", err)
-	}
-	slog.Info("compact: done", "volume", a.volName)
 	return map[string]string{"status": "ok"}, nil
 }
 

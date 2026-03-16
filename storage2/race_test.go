@@ -21,9 +21,8 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 
 	// Use a tiny memtable (2 pages) so it fills up quickly.
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 4,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "seq-reuse", cfg, nil, t.TempDir())
@@ -123,9 +122,8 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 4,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "snap-atomic", cfg, nil, t.TempDir())
@@ -178,16 +176,15 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 
 // TestReadDuringFlushReturnsZeros demonstrates issue #11: a read can return
 // zeros for written data when racing with flush. The snapshot captures a stale
-// L0 list, the frozen memtable is being cleaned up, and readData returns
+// layer state, the frozen memtable is being cleaned up, and readData returns
 // errmemtableCleanedUp. The read falls through to zeros.
 func TestReadDuringFlushReturnsZeros(t *testing.T) {
 	ctx := t.Context()
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 4,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "flush-race", cfg, nil, t.TempDir())
@@ -240,15 +237,14 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 
 // TestReadPageWithCleanedUpFrozen demonstrates issue #11 deterministically:
 // construct a snapshot with a frozen memtable, then clean it up. readPageWith
-// should still return the correct data (from L0 or page cache), not zeros.
+// should still return the correct data (from flushed layers or page cache), not zeros.
 func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 	ctx := t.Context()
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  4 * PageSize,
-		MaxFrozenTables: 4,
-		FlushInterval:   -1,
+		FlushThreshold: 4 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	ly, err := openLayer(ctx, store, "cleanup-read", cfg, nil, t.TempDir())
@@ -267,17 +263,17 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, expected, data, "pre-flush read should work")
 
-	// Now flush — this freezes the memtable, uploads L0, then cleans up
+	// Now flush — this freezes the memtable, uploads to L1, then cleans up
 	// the frozen memtable (munmaps it).
 	require.NoError(t, ly.Flush())
 
 	// The snapshot still holds a reference to the old (now cleaned up) memtable.
 	// readPageWith should handle errmemtableCleanedUp gracefully and find the
-	// data in L0 or page cache.
+	// data in flushed layers or page cache.
 	data2, err := ly.readPageWith(ctx, &snap, 0)
 	require.NoError(t, err)
 
 	// After fix: readPageWith detects the stale snapshot and refreshes
-	// the L0 list from the layer, finding the flushed data.
+	// the layer state, finding the flushed data.
 	assert.Equal(t, expected, data2, "data should survive flush even with stale snapshot")
 }

@@ -10,25 +10,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
-	"os/exec"
-
-	godaemon "github.com/sevlyar/go-daemon"
-	"time"
 
 	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage2"
 )
 
 // Client talks to a running loophole daemon over its Unix socket.
 type Client struct {
-	Dir     loophole.Dir
-	Inst    loophole.Instance
-	Bin     string // path to loophole binary; empty = find in PATH
-	Sudo    bool   // wrap daemon start with sudo
-	Profile string // profile name; non-empty = pass -p to spawned daemon
-
 	sock string
 	http *http.Client
 }
@@ -54,30 +42,9 @@ func httpClient(sock string) *http.Client {
 // Socket returns the Unix socket path for this client.
 func (c *Client) Socket() string { return c.sock }
 
-// EnsureDaemon starts the daemon if it isn't already running.
-// If a stale socket exists (file present but no daemon listening), it is
-// removed automatically with a warning.
-func (c *Client) EnsureDaemon() error {
-	if isSocketAlive(c.sock) {
-		return nil
-	}
-	// Socket file exists but nobody is listening — stale socket.
-	if _, err := os.Stat(c.sock); err == nil {
-		fmt.Fprintf(os.Stderr, "warning: removing stale socket %s\n", c.sock)
-		_ = os.Remove(c.sock)
-	}
-	return c.startDaemon()
-}
-
 // FlushVolume flushes a named volume.
 func (c *Client) FlushVolume(ctx context.Context, volume string) error {
 	_, err := c.post(ctx, "/flush", "volume", volume)
-	return err
-}
-
-// CompactVolume triggers L0→L1 compaction on a named volume.
-func (c *Client) CompactVolume(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/compact", "volume", volume)
 	return err
 }
 
@@ -532,126 +499,4 @@ func (c *Client) rpc(ctx context.Context, method, path string, args ...any) (jso
 	}
 
 	return data, nil
-}
-
-func isSocketAlive(path string) bool {
-	conn, err := net.DialTimeout("unix", path, time.Second)
-	if err != nil {
-		return false
-	}
-	if err := conn.Close(); err != nil {
-		slog.Warn("close failed", "error", err)
-	}
-	return true
-}
-
-func (c *Client) startDaemon() error {
-	// Wait for any previous daemon to fully exit so its cleanup doesn't
-	// race with our new socket (the old daemon removes the socket file
-	// on shutdown, which could delete the new daemon's socket).
-	dead := false
-	for range 50 {
-		if !isSocketAlive(c.sock) {
-			dead = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !dead {
-		fmt.Fprintln(os.Stderr, "warning: previous daemon still running after 5s")
-	}
-
-	bin := c.Bin
-	if bin == "" {
-		var err error
-		bin, err = exec.LookPath("loophole")
-		if err != nil {
-			return fmt.Errorf("find loophole binary: %w (is loophole in PATH?)", err)
-		}
-	}
-
-	// Build the daemon start command args. Use the hidden internal.start
-	// entrypoint so auto-start works without exposing a public start command.
-	var args []string
-	if c.Profile != "" {
-		args = append(args, "-p", c.Profile, "internal.start")
-	} else {
-		args = append(args, "internal.start")
-	}
-
-	logPath := c.Dir.Log(c.Inst.ProfileName)
-	waitCh := make(chan error, 1)
-
-	if c.Sudo && os.Getuid() != 0 {
-		sudoArgs := append([]string{"-E", bin}, args...)
-		if c.Profile == "" {
-			sudoArgs = append(sudoArgs, "--socket-mode", fmt.Sprintf("%d", 0o666))
-		}
-		cmd := exec.Command("sudo", sudoArgs...)
-		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-		if err != nil {
-			return fmt.Errorf("open log file: %w", err)
-		}
-		cmd.Stdout = logFile
-		cmd.Stderr = logFile
-		cmd.SysProcAttr = daemonSysProcAttr()
-		if err := cmd.Start(); err != nil {
-			util.SafeClose(logFile, "close daemon log file on start failure")
-			return fmt.Errorf("start daemon: %w", err)
-		}
-		go func() {
-			waitCh <- cmd.Wait()
-			util.SafeClose(logFile, "close daemon log file after process exit")
-		}()
-	} else {
-		cntxt := &godaemon.Context{
-			LogFileName: logPath,
-			Args:        append([]string{bin}, args...),
-		}
-		child, err := cntxt.Reborn()
-		if err != nil {
-			return fmt.Errorf("start daemon: %w", err)
-		}
-		if child != nil {
-			go func() {
-				_, err := child.Wait()
-				waitCh <- err
-			}()
-		}
-	}
-
-	for range 300 {
-		time.Sleep(100 * time.Millisecond)
-		if isSocketAlive(c.sock) {
-			return nil
-		}
-		select {
-		case err := <-waitCh:
-			msg := fmt.Sprintf("daemon exited before socket was ready (log: %s)", logPath)
-			if err != nil {
-				msg = fmt.Sprintf("%s: %v", msg, err)
-			}
-			if tail := tailTextFile(logPath, 40); tail != "" {
-				msg = fmt.Sprintf("%s\n%s", msg, tail)
-			}
-			return fmt.Errorf("%s", msg)
-		default:
-		}
-	}
-	return fmt.Errorf("daemon did not start within 30s (socket: %s, log: %s)", c.sock, c.Dir.Log(c.Inst.ProfileName))
-}
-
-func tailTextFile(path string, maxLines int) string {
-	if maxLines <= 0 {
-		maxLines = 40
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	lines := bytes.Split(data, []byte{'\n'})
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-	}
-	return string(bytes.Join(lines, []byte{'\n'}))
 }

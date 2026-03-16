@@ -1,12 +1,10 @@
 // Package storage2 implements the tiered storage layer for loophole volumes.
 //
-// Data is organized into three levels:
-//   - L0: page-granularity flushes from the memtable (scattered 4KB pages)
+// Data is organized into two levels:
 //   - L1: sparse 4MB blocks (only changed pages within a 4MB region)
 //   - L2: dense 4MB blocks (full snapshot of a 4MB region)
 //
-// Frozen layers are logically immutable: compaction may rewrite their
-// physical layout, but it must not change logical page contents.
+// Frozen memtable pages are flushed directly to L1/L2 blocks.
 // Snapshots freeze the current layer and move the volume to a new child.
 // Each layer's index.json is self-contained — it references all data files
 // it needs, including inherited ones from ancestors.
@@ -31,23 +29,16 @@ const (
 	// BlockSize is the uncompressed size of a full block.
 	BlockSize = BlockPages * PageSize // 4MB
 
-	DefaultFlushThreshold  = 256 * 1024 * 1024 // 256MB
-	DefaultMaxFrozenTables = 2
-	DefaultVolumeSize      = 8 * 1024 * 1024 * 1024 // 8GB
-	DefaultFlushInterval   = 30 * time.Second
-
-	// L0PageLimit is the hard limit on total L0 page entries in index.json.
-	L0PageLimit = 100_000
-
-	// DefaultL0PagesMax is the default L0 page count that triggers L0→L1 compaction.
-	DefaultL0PagesMax = 10_000
+	DefaultFlushThreshold = 512 * 1024 * 1024      // 512MB
+	DefaultVolumeSize     = 8 * 1024 * 1024 * 1024 // 8GB
+	DefaultFlushInterval  = 30 * time.Second
 
 	// L1PromoteThreshold is the fraction of pages in an L1 block that
 	// triggers promotion to L2. 25% = 256 out of 1024 pages.
 	L1PromoteThreshold = BlockPages / 4
 
 	// maxMemtableSlots caps the number of unique page slots in a memtable.
-	maxMemtableSlots = 65536
+	maxMemtableSlots = 131072 // 512MB at 4KB/slot
 )
 
 // PageIdx is a page index into the virtual disk.
@@ -132,20 +123,13 @@ type Config struct {
 	// FlushThreshold is the memtable size in bytes that triggers a freeze+flush.
 	FlushThreshold int64
 
-	// MaxFrozenTables caps the number of frozen memtables awaiting upload.
-	MaxFrozenTables int
-
 	// FlushInterval is how often the background goroutine flushes dirty
 	// memtables to S3. 0 = default (30s). Negative = disabled.
 	FlushInterval time.Duration
 
-	// MaxCacheEntries caps the number of in-memory parsed L0/block entries.
+	// MaxCacheEntries caps the number of in-memory parsed block entries.
 	// 0 = default (256).
 	MaxCacheEntries int
-
-	// L0PagesMax is the total L0 page entry count that triggers L0→L1 compaction.
-	// 0 = default (10,000).
-	L0PagesMax int
 
 	// MaxMemtableSlots caps the number of unique page slots in a memtable.
 	// 0 = default (65536). Only useful for tests.
@@ -156,14 +140,8 @@ func (c *Config) setDefaults() {
 	if c.FlushThreshold == 0 {
 		c.FlushThreshold = DefaultFlushThreshold
 	}
-	if c.MaxFrozenTables == 0 {
-		c.MaxFrozenTables = DefaultMaxFrozenTables
-	}
 	if c.FlushInterval == 0 {
 		c.FlushInterval = DefaultFlushInterval
-	}
-	if c.L0PagesMax == 0 {
-		c.L0PagesMax = DefaultL0PagesMax
 	}
 }
 

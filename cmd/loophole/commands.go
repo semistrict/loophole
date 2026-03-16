@@ -40,12 +40,14 @@ func addCommands(root *cobra.Command) {
 		sshCmd(),
 		breakLeaseCmd(),
 		migrateCmd(),
+		s3testCmd(),
 	)
 }
 
 func serveCmd() *cobra.Command {
 	var listenAddr string
 	var socketPath string
+	var volume string
 	cmd := &cobra.Command{
 		Use:    "serve",
 		Short:  "Run the loophole daemon",
@@ -61,6 +63,7 @@ func serveCmd() *cobra.Command {
 				Foreground: true,
 				ListenAddr: listenAddr,
 				SocketPath: socketPath,
+				Volume:     volume,
 			})
 			if err != nil {
 				return err
@@ -70,6 +73,7 @@ func serveCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&listenAddr, "listen-addr", "", "listen address (for example tcp://0.0.0.0:8080)")
 	cmd.Flags().StringVar(&socketPath, "socket-path", "", "unix socket path override")
+	cmd.Flags().StringVar(&volume, "volume", "", "volume name (used for per-volume log file)")
 	return cmd
 }
 
@@ -1048,6 +1052,7 @@ func startOwnerDaemon(ctx context.Context, volume string) (*daemon.Daemon, error
 	return daemon.Start(ctx, inst, dir, daemon.Options{
 		Foreground: true,
 		SocketPath: socketPath,
+		Volume:     volume,
 	})
 }
 

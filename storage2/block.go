@@ -308,6 +308,27 @@ func (pb *parsedBlock) compressedEntriesExcluding(exclude map[uint16]struct{}) [
 	return entries
 }
 
+// compressedEntriesExcluding2 returns compressed entries for pages NOT in
+// either exclude set. Avoids allocating a union map.
+func (pb *parsedBlock) compressedEntriesExcluding2(excludeA, excludeB map[uint16]struct{}) []compressedBlockPage {
+	entries := make([]compressedBlockPage, 0, len(pb.index))
+	for _, ie := range pb.index {
+		if _, skip := excludeA[ie.PageOffset]; skip {
+			continue
+		}
+		if _, skip := excludeB[ie.PageOffset]; skip {
+			continue
+		}
+		end := ie.DataOffset + uint64(ie.DataLen)
+		entries = append(entries, compressedBlockPage{
+			offset:     ie.PageOffset,
+			compressed: pb.data[ie.DataOffset:end],
+			crc32:      ie.CRC32,
+		})
+	}
+	return entries
+}
+
 // patchBlock builds a block from a mix of pre-compressed entries (copied
 // verbatim) and new uncompressed pages (compressed during build). Entries
 // are sorted by page offset for binary search on read.

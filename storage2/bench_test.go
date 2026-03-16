@@ -36,8 +36,7 @@ func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Man
 }
 
 var defaultBenchConfig = Config{
-	FlushThreshold:  64 * PageSize,
-	MaxFrozenTables: 2,
+	FlushThreshold: 64 * PageSize,
 }
 
 // BenchmarkS3Ops measures S3 operation counts for various workloads.
@@ -166,39 +165,6 @@ func BenchmarkS3Ops(b *testing.B) {
 		}
 	})
 
-	b.Run("Compact", func(b *testing.B) {
-		for range b.N {
-			store := loophole.NewMemStore()
-			m := newBenchManager(b, store, Config{
-				FlushThreshold:  4 * PageSize,
-				MaxFrozenTables: 2,
-			})
-
-			v, err := m.NewVolume(loophole.CreateParams{Volume: "vol", Size: 256 * PageSize})
-			if err != nil {
-				b.Fatal(err)
-			}
-			vol := v.(*volume)
-
-			rng := rand.New(rand.NewPCG(1, 0))
-			page := make([]byte, PageSize)
-			for pg := 0; pg < 128; pg++ {
-				randomPage(rng, page)
-				if err := v.Write(page, uint64(pg)*PageSize); err != nil {
-					b.Fatal(err)
-				}
-			}
-			if err := v.Flush(); err != nil {
-				b.Fatal(err)
-			}
-
-			store.ResetCounts()
-			if err := vol.layer.CompactL0(); err != nil {
-				b.Fatal(err)
-			}
-			reportS3Counts(b, store, 1)
-		}
-	})
 }
 
 var s3OpNames = []struct {

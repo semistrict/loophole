@@ -18,8 +18,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	// during the initial writes, matching the e2e behavior where mkfs.ext4
 	// + file writes generate hundreds of pages.
 	cfg := Config{
-		FlushThreshold:  4 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 4 * PageSize,
 	}
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()
@@ -89,8 +88,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 // don't corrupt the ephemeral file state when followed by a clone.
 func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	cfg := Config{
-		FlushThreshold:  4 * PageSize,
-		MaxFrozenTables: 1, // aggressive: flush after every 4 pages
+		FlushThreshold: 4 * PageSize,
 	}
 	m := newTestManager(t, loophole.NewMemStore(), cfg)
 	ctx := t.Context()

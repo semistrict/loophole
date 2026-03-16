@@ -1,4 +1,4 @@
-.PHONY: build loophole loophole-sandboxd runsc install check fmt test clean deps e2e bench-fuse cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar cf-demo-assets cf-demo-assets-local cf-demo-smoke-local fly-bin
+.PHONY: build loophole loophole-sandboxd runsc install check fmt test clean deps e2e bench-fuse create-zygote cf-demo-bin cf-demo-control-bin cf-demo-sandboxd-bin cf-demo-runsc-bin cf-demo-rootfs-tar cf-demo-assets cf-demo-assets-local cf-demo-smoke-local fly-bin
 
 .DEFAULT_GOAL := loophole
 
@@ -76,6 +76,11 @@ cf-demo-runsc-bin:
 	$(MAKE) runsc GOARCH=$(CF_DEMO_GOARCH)
 	mkdir -p cf-demo/bin
 	cp bin/runsc-linux-$(CF_DEMO_GOARCH) cf-demo/bin/runsc
+
+# Create a zygote volume in R2 from Ubuntu 24.04 rootfs.
+# Usage: make create-zygote [ZYGOTE=name] [PROFILE=r2] [PLATFORM=linux/amd64]
+create-zygote:
+	LOOPHOLE_PROFILE=$(or $(PROFILE),r2) PLATFORM=$(or $(PLATFORM),linux/amd64) scripts/create-zygote.sh $(or $(ZYGOTE),ubuntu-2404-v4)
 
 cf-demo-rootfs-tar:
 	mkdir -p cf-demo/bin

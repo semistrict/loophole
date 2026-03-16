@@ -2,7 +2,20 @@ NB: this is a completely new system with no users. Don't worry about backwards c
 
 When choosing between a quick patch and the intended architecture, always do the right architectural fix. Do not preserve or reintroduce obsolete behavior just to get tests passing faster.
 
-**NEVER use `npm` or `npx`. Always use `pnpm` and `pnpm exec` (or `pnpm dlx`) instead.**
+## Package manager -- CRITICAL
+
+**NEVER use `npm`, `npx`, or `node_modules/.bin/*` directly. This project uses pnpm exclusively.**
+
+| Instead of | Use |
+|---|---|
+| `npm install` | `pnpm install` |
+| `npm run <script>` | `pnpm run <script>` |
+| `npx <pkg>` | `pnpm dlx <pkg>` |
+| `npx <local-bin>` | `pnpm exec <local-bin>` |
+
+## Logging
+
+**Always use `log/slog`** for logging. Never use `fmt.Fprintf(os.Stderr, ...)`, `log.Printf`, or `fmt.Println` for diagnostic output. Use structured fields: `slog.Info("msg", "key", value)`.
 
 ## Third-party dependencies
 
@@ -34,7 +47,7 @@ Config lives in `~/.loophole/config.toml`. Each `[profiles.<name>]` section defi
 
 ### Daemon log file
 
-Logs go to `~/.loophole/<profile>.log` for the foreground owner process. C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file.
+Each per-volume owner process logs to `~/.loophole/volumes/<hash>.log` (the hash is derived from the volume name, matching the socket path pattern). C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file. The exact log path is shown in the daemon's `/status` response.
 
 Set `log_level = "debug"` in the profile config for debug output.
 
@@ -66,24 +79,6 @@ Grep for your subsystem (e.g. `WaitClosed`, `checkpoint`, `grpc`) to find the st
 **Watch goroutine count in heartbeat.** The daemon logs `goroutines=N` every 5 seconds. A steadily climbing count indicates a goroutine leak. A stable but unexpectedly high count may indicate a stuck operation.
 
 **Note:** Ubuntu 24.04+ has `fusermount3` not `fusermount`. Stale FUSE mounts from a crashed daemon need `umount -l <mountpoint>` followed by `rm -rf <mountpoint>` before restarting.
-
-## Creating a zygote volume
-
-A zygote is a frozen volume with a rootfs that other volumes clone from.
-
-1. Export an Ubuntu rootfs tarball:
-   ```
-   CID=$(docker create --platform linux/amd64 ubuntu:24.04 /bin/true)
-   docker export "$CID" > /tmp/ubuntu-2404.tar
-   docker rm "$CID"
-   ```
-
-2. Create, populate, and freeze:
-   ```
-   bin/loophole-darwin-arm64 -p r2 create --size 16GB zygote-ubuntu-2404
-   bin/loophole-darwin-arm64 -p r2 file tar -xv -C zygote-ubuntu-2404:/ -f /tmp/ubuntu-2404.tar
-   bin/loophole-darwin-arm64 -p r2 freeze zygote-ubuntu-2404
-   ```
 
 ## Deploying to Cloudflare
 

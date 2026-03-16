@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -53,6 +54,9 @@ func NewS3Store(ctx context.Context, inst Instance) (*S3Store, error) {
 			credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")))
 	}
 
+	cfgOpts = append(cfgOpts, config.WithRetryer(func() aws.Retryer {
+		return retry.AddWithMaxAttempts(retry.NewStandard(), 10)
+	}))
 	cfg, err := config.LoadDefaultConfig(ctx, cfgOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("load AWS config: %w", err)

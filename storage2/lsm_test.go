@@ -180,8 +180,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	store := loophole.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -671,8 +670,7 @@ func TestOverwriteAfterFlush(t *testing.T) {
 func TestSnapshotReadFromDifferentNode(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -717,8 +715,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 func TestSnapshotOfSnapshotRead(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -791,8 +788,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 func TestCompactThenSnapshotRead(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -815,18 +811,12 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 		}
 	}
 
-	// Snapshot before compaction.
+	// Take two snapshots at different points.
 	if err := snapshotVolume(t, v, "snap-pre"); err != nil {
 		t.Fatal(err)
 	}
 
-	// Compact the parent.
-	vol := v.(*volume)
-	if err := vol.layer.CompactL0(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Snapshot after compaction.
+	// Second snapshot.
 	if err := snapshotVolume(t, v, "snap-post"); err != nil {
 		t.Fatal(err)
 	}
@@ -867,8 +857,7 @@ func TestCompactThenSnapshotRead(t *testing.T) {
 func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -1047,8 +1036,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 func TestDeleteVolumeThenList(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -1129,10 +1117,9 @@ func TestCompactNoDeltas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	vol := v.(*volume)
 
-	// No writes, just compact — should be a no-op.
-	if err := vol.layer.CompactL0(); err != nil {
+	// No writes, just flush — should be a no-op.
+	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1142,8 +1129,7 @@ func TestCompactNoDeltas(t *testing.T) {
 func TestFlushPutReaderFail(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -1190,12 +1176,11 @@ func TestFlushPutReaderFail(t *testing.T) {
 func TestLoadLayerMapFromListing(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
-	// Create, write, flush, compact (to create an image layer).
+	// Create, write, flush (flush writes directly to L1/L2).
 	m1 := newTestManager(t, store, cfg)
 	v, err := m1.NewVolume(loophole.CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
@@ -1210,9 +1195,6 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 		t.Fatal(err)
 	}
 	vol := v.(*volume)
-	if err := vol.layer.CompactL0(); err != nil {
-		t.Fatal(err)
-	}
 
 	// Write another page and flush so we have both delta and image layers.
 	page2 := make([]byte, PageSize)
@@ -1634,9 +1616,8 @@ func TestFreezeFlushFail(t *testing.T) {
 func TestWriteBackpressurePreservesData(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  PageSize, // freeze after every write
-		MaxFrozenTables: 1,
-		FlushInterval:   -1, // disable periodic flush
+		FlushThreshold: PageSize, // freeze after every write
+		FlushInterval:  -1,       // disable periodic flush
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -1719,9 +1700,8 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 
 	// Very low flush threshold: 2 pages triggers auto-flush.
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -1820,9 +1800,8 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -1933,9 +1912,8 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	store := loophole.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:  2 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 2 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2104,8 +2082,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	store := loophole.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
@@ -2185,8 +2162,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	store := loophole.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
-		FlushThreshold:  8 * PageSize, // small threshold to force frequent flushes
-		MaxFrozenTables: 2,
+		FlushThreshold: 8 * PageSize, // small threshold to force frequent flushes
 	}
 	ctx := t.Context()
 
@@ -2291,7 +2267,6 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	const testSlotCap = 512
 	config := Config{
 		FlushThreshold:   1 << 62, // effectively infinite — force slot cap to trigger
-		MaxFrozenTables:  2,
 		MaxMemtableSlots: testSlotCap,
 	}
 	ctx := t.Context()
@@ -2422,9 +2397,8 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  PageSize, // freeze after every page
-		MaxFrozenTables: 10,       // allow many frozen layers before backpressure
-		FlushInterval:   50 * time.Millisecond,
+		FlushThreshold: PageSize, // freeze after every page
+		FlushInterval:  50 * time.Millisecond,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2472,8 +2446,11 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	}
 
 	vol := v.(*volume)
-	if len(vol.layer.index.L0) == 0 {
-		t.Fatal("expected delta layers after flush")
+	vol.layer.mu.RLock()
+	l1Count := vol.layer.l1Map.Len()
+	vol.layer.mu.RUnlock()
+	if l1Count == 0 {
+		t.Fatal("expected L1 entries after flush")
 	}
 }
 
@@ -2482,9 +2459,8 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  PageSize,
-		MaxFrozenTables: 10,
-		FlushInterval:   10 * time.Second, // very long timer
+		FlushThreshold: PageSize,
+		FlushInterval:  10 * time.Second, // very long timer
 	}
 	m := newTestManager(t, store, cfg)
 
@@ -2521,19 +2497,21 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 		t.Fatalf("expected 0 frozen layers after notify, got %d", n)
 	}
 
-	if len(vol.layer.index.L0) == 0 {
-		t.Fatal("expected delta layers after async flush")
+	vol.layer.mu.RLock()
+	l1Count := vol.layer.l1Map.Len()
+	vol.layer.mu.RUnlock()
+	if l1Count == 0 {
+		t.Fatal("expected L1 entries after async flush")
 	}
 }
 
-// TestBackpressureStillBlocksInline verifies that when frozen layers hit
-// MaxFrozenTables, writes block on S3 inline (backpressure).
+// TestBackpressureStillBlocksInline verifies that when the memtable fills
+// up and flush fails, the S3 error propagates to the writer.
 func TestBackpressureStillBlocksInline(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   10 * time.Second, // effectively disabled
+		FlushThreshold: PageSize,
+		FlushInterval:  -1, // synchronous flush so errors propagate
 	}
 	m := newTestManager(t, store, cfg)
 
@@ -2547,7 +2525,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 
-	// Write enough pages to fill MaxFrozenTables. The first writes succeed
+	// Write enough pages to fill frozen layers. The first writes succeed
 	// (freeze to frozen layers), but eventually backpressure kicks in and
 	// the write fails because inline flush fails.
 	page := make([]byte, PageSize)
@@ -2579,8 +2557,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 func TestFlushRetryOnTransientError(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
+		FlushThreshold: 16 * PageSize,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2626,9 +2603,8 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := loophole.NewMemStore()
 		cfg := Config{
-			FlushThreshold:  64 * PageSize, // large — memtable never fills
-			MaxFrozenTables: 10,
-			FlushInterval:   1 * time.Hour, // regular timer never fires
+			FlushThreshold: 64 * PageSize, // large — memtable never fills
+			FlushInterval:  1 * time.Hour, // regular timer never fires
 		}
 		m := newTestManager(t, store, cfg)
 		ctx := t.Context()
@@ -2648,10 +2624,10 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 		time.Sleep(1 * time.Second)
 
 		vol.layer.mu.RLock()
-		l0Count := len(vol.layer.index.L0)
+		l1Count := vol.layer.l1Map.Len()
 		vol.layer.mu.RUnlock()
-		if l0Count != 0 {
-			t.Fatalf("expected 0 L0 entries before stale write, got %d", l0Count)
+		if l1Count != 0 {
+			t.Fatalf("expected 0 L1 entries before stale write, got %d", l1Count)
 		}
 
 		// Simulate stale state: set lastFlushAt to 2 hours ago.
@@ -2666,19 +2642,19 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 		// After 1s the flush hasn't happened yet (2s delay).
 		time.Sleep(1 * time.Second)
 		vol.layer.mu.RLock()
-		l0Count = len(vol.layer.index.L0)
+		l1Count = vol.layer.l1Map.Len()
 		vol.layer.mu.RUnlock()
-		if l0Count != 0 {
-			t.Fatalf("expected 0 L0 entries after 1s (flush delay is 2s), got %d", l0Count)
+		if l1Count != 0 {
+			t.Fatalf("expected 0 L1 entries after 1s (flush delay is 2s), got %d", l1Count)
 		}
 
 		// After another 2s the flush should complete.
 		time.Sleep(2 * time.Second)
 		vol.layer.mu.RLock()
-		l0Count = len(vol.layer.index.L0)
+		l1Count = vol.layer.l1Map.Len()
 		vol.layer.mu.RUnlock()
-		if l0Count == 0 {
-			t.Fatal("expected L0 entries after early flush, got 0")
+		if l1Count == 0 {
+			t.Fatal("expected L1 entries after early flush, got 0")
 		}
 
 		// Verify data integrity.
@@ -2698,14 +2674,13 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 	})
 }
 
-// TestSingleflightDeduplicatesL0Downloads verifies that concurrent reads
-// for the same uncached L0 blob only trigger one S3 download.
-func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
+// TestSingleflightDeduplicatesBlockDownloads verifies that concurrent reads
+// for the same uncached block only trigger one S3 download.
+func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2715,7 +2690,7 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Write and flush to create L0.
+	// Write and flush to create L1 blocks.
 	page := make([]byte, PageSize)
 	page[0] = 0xCC
 	if err := v.Write(page, 0); err != nil {
@@ -2725,14 +2700,14 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Clear the in-memory L0 cache to force re-download.
+	// Clear the in-memory block cache to force re-download.
 	vol := v.(*volume)
-	vol.layer.l0Cache.clear()
+	vol.layer.blockCache.clear()
 
 	// Record S3 Get count before concurrent reads.
 	getBefore := store.Count(loophole.OpGet)
 
-	// Launch concurrent reads for the same page (same L0 blob).
+	// Launch concurrent reads for the same page (same block).
 	var wg sync.WaitGroup
 	errs := make([]error, 10)
 	for i := range 10 {
@@ -2752,7 +2727,7 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 	}
 
 	// Without singleflight, we'd see up to 10 Gets. With it, should be ≤2
-	// (1 for the L0 blob + possibly 1 for index.json or other metadata).
+	// (1 for the block blob + possibly 1 for index.json or other metadata).
 	getAfter := store.Count(loophole.OpGet)
 	gets := getAfter - getBefore
 	if gets > 2 {
@@ -2760,7 +2735,7 @@ func TestSingleflightDeduplicatesL0Downloads(t *testing.T) {
 	}
 }
 
-// TestBoundedCacheEviction verifies that the L0/block caches don't
+// TestBoundedCacheEviction verifies that the block caches don't
 // grow beyond MaxCacheEntries.
 func TestBoundedCacheEviction(t *testing.T) {
 	var c boundedCache[int]
@@ -2798,9 +2773,8 @@ func TestRefreshFollowMode(t *testing.T) {
 	store := loophole.NewMemStore()
 	ctx := t.Context()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	// Writer creates a volume and writes data.
@@ -2870,9 +2844,8 @@ func TestRefreshFollowMode(t *testing.T) {
 func TestFlushReportsMetrics(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 
@@ -2903,9 +2876,8 @@ func TestFlushReportsMetrics(t *testing.T) {
 func TestReadAtMemtable(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  64 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2943,9 +2915,8 @@ func TestReadAtMemtable(t *testing.T) {
 func TestReadAtAfterFlush(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2979,9 +2950,8 @@ func TestReadAtAfterFlush(t *testing.T) {
 func TestReadAtSubPageFallback(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  64 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -3021,9 +2991,8 @@ func TestReadAtSubPageFallback(t *testing.T) {
 func TestReadAtReturnsCopy(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  64 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 64 * PageSize,
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -3265,9 +3234,8 @@ func TestDiffSnapshotClone(t *testing.T) {
 func TestDiffSnapshotCloneReopened(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 	ctx := t.Context()
 
@@ -3348,9 +3316,8 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 	ctx := t.Context()
 

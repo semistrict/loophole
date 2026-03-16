@@ -123,7 +123,7 @@ func (v *volume) FlushLocal() error {
 }
 
 func (v *volume) branch() (string, error) {
-	// Flush everything to S3 (includes any pending direct L0 blobs).
+	// Flush everything to S3.
 	if !v.readOnly.Load() {
 		if err := v.layer.Flush(); err != nil {
 			return "", fmt.Errorf("flush for branch: %w", err)
@@ -137,7 +137,7 @@ func (v *volume) branch() (string, error) {
 
 	// Re-layer the parent: create a new layer so the old one is never
 	// written to again. Both child and new parent inherit the same
-	// L0/L1/L2 objects, which are immutable since no one writes to the
+	// L1/L2 objects, which are immutable since no one writes to the
 	// old layer anymore. This preserves the invariant that only frozen
 	// (immutable) layers are ever referenced by other layers.
 	if !v.readOnly.Load() {
@@ -282,29 +282,17 @@ func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (u
 	return copied, nil
 }
 
-// CompactL0 flushes the memtable and compacts all L0 entries into L1/L2
-// blocks regardless of the L0 threshold.
-func (v *volume) CompactL0() error {
-	v.mu.RLock()
-	ly := v.layer
-	v.mu.RUnlock()
-	if err := ly.Flush(); err != nil {
-		return fmt.Errorf("flush before compact: %w", err)
-	}
-	return ly.ForceCompactL0()
-}
-
 func (v *volume) Freeze() error {
-	return v.freeze(false)
+	return v.freeze()
 }
 
-// FreezeWithCompact freezes the volume with L0→L1 compaction before marking
-// it frozen. Order: fire hooks → stop writes → flush → compact → mark frozen.
+// FreezeWithCompact freezes the volume. The compaction step is no longer
+// needed since the direct flush path writes directly to L1/L2.
 func (v *volume) FreezeWithCompact() error {
-	return v.freeze(true)
+	return v.freeze()
 }
 
-func (v *volume) freeze(compact bool) error {
+func (v *volume) freeze() error {
 	if v.readOnly.Load() {
 		return nil
 	}
@@ -322,13 +310,6 @@ func (v *volume) freeze(compact bool) error {
 	slog.Info("freeze: flushing layer", "volume", v.name)
 	if err := v.layer.Flush(); err != nil {
 		return err
-	}
-	if compact {
-		slog.Info("freeze: compacting L0→L1", "volume", v.name)
-		if err := v.layer.ForceCompactL0(); err != nil {
-			return fmt.Errorf("compact before freeze: %w", err)
-		}
-		slog.Info("freeze: compaction complete", "volume", v.name)
 	}
 	slog.Info("freeze: flush complete, checking metadata", "volume", v.name)
 	ctx := context.Background()
@@ -445,7 +426,12 @@ func (v *volume) WritePagesDirect(pages []loophole.DirectPage) error {
 	if v.directRefs == 0 {
 		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
 	}
-	return v.layer.WritePagesDirectL0(pages)
+	for _, p := range pages {
+		if err := v.layer.Write(p.Data, p.Offset); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // VolumeDebugInfo holds volume + layer structure details for the debug endpoint.

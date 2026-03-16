@@ -35,9 +35,11 @@ func (d Dir) Fuse(profile string) string {
 	return filepath.Join(string(d), "fuse", profile)
 }
 
-// Log returns the daemon log file path for the given profile.
-func (d Dir) Log(profile string) string {
-	return filepath.Join(string(d), profile+".log")
+// VolumeLog returns the daemon log file path for a volume, co-located with
+// the volume socket under ~/.loophole/volumes/.
+func (d Dir) VolumeLog(volume string) string {
+	h := sha256.Sum256([]byte(volume))
+	return filepath.Join(string(d), "volumes", fmt.Sprintf("%x.log", h[:6]))
 }
 
 // Cache returns the block cache directory for the given profile.

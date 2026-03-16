@@ -24,10 +24,8 @@ func newTestPersistentPageCache(t *testing.T) (*PageCache, *mockStore) {
 func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 	cache, backing := newTestPersistentPageCache(t)
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
-		L0PagesMax:      10,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	m := NewVolumeManager(loophole.NewMemStore(), t.TempDir(), cfg, nil, cache)
@@ -47,7 +45,6 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 		require.NoError(t, v.Write(page, uint64(i)*PageSize))
 	}
 	require.NoError(t, v.Flush())
-	require.NoError(t, v.(*volume).layer.ForceCompactL0())
 	v.(*volume).layer.blockCache.clear()
 
 	buf := make([]byte, PageSize)
@@ -62,10 +59,8 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	cache, backing := newTestPersistentPageCache(t)
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
-		L0PagesMax:      10,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	cacheDir := t.TempDir()
@@ -80,16 +75,19 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	page := bytes.Repeat([]byte{0xAB}, PageSize)
 	require.NoError(t, v.Write(page, 0))
 	require.NoError(t, v.Flush())
+
+	// Capture the layer ID that owns the L1/L2 blocks before clone
+	// (clone switches the parent to a new layer).
+	parent := v.(*volume)
+	originalLayerID := parent.layer.id
+
 	require.NoError(t, v.Clone("child"))
 
-	parent := v.(*volume)
-	parent.layer.l0Cache.clear()
 	parent.layer.blockCache.clear()
 
 	child, err := m.OpenVolume("child")
 	require.NoError(t, err)
 	childVol := child.(*volume)
-	childVol.layer.l0Cache.clear()
 	childVol.layer.blockCache.clear()
 
 	buf := make([]byte, PageSize)
@@ -106,7 +104,8 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	require.Equal(t, 1, count)
 
 	// Verify the shared logical source key was used.
-	key := cacheKey{LayerID: layerIDFromBlobKey(parent.layer.index.L0[0].Key), PageIdx: 0}
+	// The blocks were written under the original layer ID (before clone).
+	key := cacheKey{LayerID: originalLayerID, PageIdx: 0}
 	ref, ok, err := backing.LookupPage(key)
 	require.NoError(t, err)
 	require.True(t, ok)
@@ -116,10 +115,8 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 func TestFrozenLayerCompactionDoesNotInvalidatePersistentPageCache(t *testing.T) {
 	cache, backing := newTestPersistentPageCache(t)
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
-		L0PagesMax:      10,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	store := loophole.NewMemStore()
@@ -162,8 +159,6 @@ func TestFrozenLayerCompactionDoesNotInvalidatePersistentPageCache(t *testing.T)
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
-	require.NoError(t, frozen.layer.ForceCompactL0())
-	frozen.layer.l0Cache.clear()
 	frozen.layer.blockCache.clear()
 
 	_, err = frozenVol.Read(t.Context(), buf, 5*PageSize)
@@ -182,10 +177,8 @@ func TestFrozenLayerCompactionDoesNotInvalidatePersistentPageCache(t *testing.T)
 func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T) {
 	cache, backing := newTestPersistentPageCache(t)
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
-		L0PagesMax:      10,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	m := NewVolumeManager(loophole.NewMemStore(), t.TempDir(), cfg, nil, cache)
@@ -215,7 +208,6 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	override := bytes.Repeat([]byte{0xBB}, PageSize)
 	require.NoError(t, child.Write(override, 0))
 	require.NoError(t, child.Flush())
-	childVol.layer.l0Cache.clear()
 	childVol.layer.blockCache.clear()
 
 	_, err = child.Read(t.Context(), buf, 0)
@@ -229,10 +221,8 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 
 func TestRepro_SharedPersistentPageCacheCorruptsImmutableReadAcrossManagers(t *testing.T) {
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   -1,
-		L0PagesMax:      10,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
 	}
 
 	store := loophole.NewMemStore()
@@ -275,9 +265,7 @@ func TestRepro_SharedPersistentPageCacheCorruptsImmutableReadAcrossManagers(t *t
 	require.NoError(t, err)
 	require.Equal(t, pageA, bufA)
 
-	ly1.l0Cache.clear()
 	ly1.blockCache.clear()
-	ly2.l0Cache.clear()
 	ly2.blockCache.clear()
 
 	bufB := make([]byte, PageSize)
@@ -285,7 +273,6 @@ func TestRepro_SharedPersistentPageCacheCorruptsImmutableReadAcrossManagers(t *t
 	require.NoError(t, err)
 	require.Equal(t, pageB, bufB)
 
-	ly1.l0Cache.clear()
 	ly1.blockCache.clear()
 
 	bufAgain := make([]byte, PageSize)

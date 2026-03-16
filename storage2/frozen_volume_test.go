@@ -13,9 +13,8 @@ import (
 func TestFrozenZygoteCloneS3Ops(t *testing.T) {
 	store := loophole.NewMemStore()
 	cfg := Config{
-		FlushThreshold:  16 * PageSize,
-		MaxFrozenTables: 2,
-		FlushInterval:   time.Hour,
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  time.Hour,
 	}
 	ctx := t.Context()
 

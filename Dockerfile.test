@@ -27,7 +27,10 @@ RUN apt-get update && apt-get install -y \
     busybox-static \
     cmake \
     make \
-    && rm -rf /var/lib/apt/lists/*
+    nfs-kernel-server \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/loophole-busybox/amd64/usr/bin /opt/loophole-busybox/arm64/usr/bin \
+    && cp /bin/busybox /opt/loophole-busybox/$(dpkg --print-architecture)/usr/bin/busybox
 
 COPY --from=fsx-builder /usr/local/bin/fsx /usr/local/bin/fsx
 

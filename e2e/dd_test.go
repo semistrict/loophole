@@ -13,8 +13,8 @@ import (
 )
 
 // TestE2E_DeviceDD_DirectL2 verifies that DeviceDD writes block-aligned,
-// block-sized chunks that land directly in L2 (bypassing memtable → L0 →
-// compaction). It writes 3 blocks of random data, then reads them back via
+// block-sized chunks that land directly in L2 (bypassing the memtable flush
+// pipeline). It writes 3 blocks of random data, then reads them back via
 // DeviceDDRead and checks the layer debug info.
 func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	b := newBackend(t)
@@ -46,16 +46,15 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 
-	// Check that data went directly to L2, not through memtable/L0/L1.
+	// Check that data went directly to L2, not through memtable/L1.
 	info, err := owner.client.VolumeDebugInfo(ctx, volName)
 	require.NoError(t, err)
 
 	if debugCountersEnabled() {
-		t.Logf("layer debug info: L0=%d L1=%d L2=%d memtable=%d",
-			info.Layer.L0Count, info.Layer.L1Ranges, info.Layer.L2Ranges, info.Layer.MemtablePages)
+		t.Logf("layer debug info: L1=%d L2=%d memtable=%d",
+			info.Layer.L1Ranges, info.Layer.L2Ranges, info.Layer.MemtablePages)
 	}
 
-	assert.Equal(t, 0, info.Layer.L0Count, "L0 should be empty (direct L2 path)")
 	assert.Equal(t, 0, info.Layer.L1Ranges, "L1 should be empty (direct L2 path)")
 	assert.Equal(t, 0, info.Layer.MemtablePages, "memtable should be empty (direct L2 path)")
 	assert.Greater(t, info.Layer.L2Ranges, 0, "L2 should have entries")

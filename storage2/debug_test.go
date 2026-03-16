@@ -32,7 +32,6 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	add("=== DebugPage layer=%s page=%d ===", ly.id[:8], pageIdx)
 
 	ly.mu.RLock()
-	l0entries := ly.index.L0
 	l1map := ly.l1Map
 	l2map := ly.l2Map
 	mt := ly.memtable
@@ -42,8 +41,6 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	frozen := make([]*memtable, len(ly.frozenTables))
 	copy(frozen, ly.frozenTables)
 	ly.frozenMu.RUnlock()
-
-	add("  index: %d L0 entries, nextSeq=%d", len(l0entries), ly.nextSeq.Load())
 
 	// 1. Active memtable.
 	if mt != nil {
@@ -71,50 +68,33 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 		}
 	}
 
-	// 3. Page cache (checked per-blob in L0/L1/L2 sections below).
-
-	// 4. L0 files (newest first).
-	for i := len(l0entries) - 1; i >= 0; i-- {
-		l0e := &l0entries[i]
-		if l0HasPage(l0e, pageIdx) {
-			data, err := ly.readFromL0(ctx, l0e, pageIdx)
-			if err != nil {
-				add("  [4] L0[%d] %s: FOUND err=%v", i, l0e.Key, err)
-			} else {
-				add("  [4] L0[%d] %s: FOUND zero=%v hash=%s", i, l0e.Key, isZero(data), hash(data))
-			}
-		} else {
-			add("  [4] L0[%d] %s: page not present (%d pages)", i, l0e.Key, len(l0e.Pages))
-		}
-	}
-
-	// 5. L1 (sparse blocks).
+	// 3. L1 (sparse blocks).
 	block := pageIdx.Block()
 	if layer, seq := l1map.Find(block); layer != "" {
 		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
 		if err != nil {
-			add("  [5] L1 block=%d layer=%s: err=%v", block, layer[:8], err)
+			add("  [3] L1 block=%d layer=%s: err=%v", block, layer[:8], err)
 		} else if found {
-			add("  [5] L1 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+			add("  [3] L1 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
 		} else {
-			add("  [5] L1 block=%d layer=%s: page not in block", block, layer[:8])
+			add("  [3] L1 block=%d layer=%s: page not in block", block, layer[:8])
 		}
 	} else {
-		add("  [5] L1: no block for addr %d", block)
+		add("  [3] L1: no block for addr %d", block)
 	}
 
-	// 6. L2 (dense blocks).
+	// 4. L2 (dense blocks).
 	if layer, seq := l2map.Find(block); layer != "" {
 		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
 		if err != nil {
-			add("  [6] L2 block=%d layer=%s: err=%v", block, layer[:8], err)
+			add("  [4] L2 block=%d layer=%s: err=%v", block, layer[:8], err)
 		} else if found {
-			add("  [6] L2 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+			add("  [4] L2 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
 		} else {
-			add("  [6] L2 block=%d layer=%s: page not in block", block, layer[:8])
+			add("  [4] L2 block=%d layer=%s: page not in block", block, layer[:8])
 		}
 	} else {
-		add("  [6] L2: no block for addr %d", block)
+		add("  [4] L2: no block for addr %d", block)
 	}
 
 	return strings.Join(lines, "\n")
