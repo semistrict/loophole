@@ -21,7 +21,7 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 )
 
-func TestE2E_MetadataChurnDuringCompaction(t *testing.T) {
+func TestE2E_MetadataChurnDuringFlush(t *testing.T) {
 	skipE2E(t)
 	skipKernelOnly(t)
 
@@ -32,12 +32,10 @@ func TestE2E_MetadataChurnDuringCompaction(t *testing.T) {
 
 	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
 
-	// Keep compaction aggressive without making the one-off create/format owner
+	// Keep flush aggressive without making the one-off create/format owner
 	// path pay the full cost. The mounted owner below is the one this test
 	// actually stresses.
 	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "16384")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_MAX_FROZEN_TABLES", "1")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_L0_PAGES_MAX", "8")
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	owner := b.ownerByMountpoint(mp)

@@ -190,7 +190,7 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 	return nil
 }
 
-func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
+func (b *testBackend) FreezeVolume(ctx context.Context, volume string) error {
 	owner := b.ownerByVolume(volume)
 	if owner == nil {
 		var err error
@@ -198,9 +198,6 @@ func (b *testBackend) FreezeVolume(ctx context.Context, volume string, compact b
 		if err != nil {
 			return err
 		}
-	}
-	if compact {
-		return fmt.Errorf("test backend FreezeVolume does not support compact=true yet")
 	}
 	if err := owner.client.Freeze(ctx, volume); err != nil {
 		return err

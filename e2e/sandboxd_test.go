@@ -190,7 +190,7 @@ type sandboxRecord struct {
 func TestE2E_Sandboxd_CreateFromZygote(t *testing.T) {
 	skipE2E(t)
 	b, _ := setupBusyboxVolume(t, "sandboxd-zygote")
-	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-zygote", false))
+	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-zygote"))
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)
@@ -229,21 +229,19 @@ func TestE2E_Sandboxd_CreateFromZygote(t *testing.T) {
 	require.Equal(t, "hello from sandboxd\n", string(readBack))
 }
 
-func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableAfterCompaction(t *testing.T) {
+func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableDuringFlush(t *testing.T) {
 	skipE2E(t)
-	setupBusyboxVolume(t, "sandboxd-zygote-compact")
+	setupBusyboxVolume(t, "sandboxd-zygote-flush")
 	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "32768")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_MAX_FROZEN_TABLES", "1")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_L0_PAGES_MAX", "16")
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)
 
 	data := client.jsonRequest(t, http.MethodPost, "/v1/sandboxes", map[string]any{
-		"name": "clone-compact-sandbox",
+		"name": "clone-flush-sandbox",
 		"source": map[string]any{
 			"kind":   "volume",
-			"volume": "sandboxd-zygote-compact",
+			"volume": "sandboxd-zygote-flush",
 			"mode":   "clone",
 		},
 	})
@@ -271,7 +269,7 @@ func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableAfterCompaction(
 			}
 			require.NoError(t, json.Unmarshal(execData, &execResp))
 			if execResp.ExitCode != 0 || execResp.Stdout != "chrooted\n" || execResp.Stderr != "" {
-				t.Fatalf("sandbox content corrupted after clone-backed compaction: exit=%d stdout=%q stderr=%q\nowner log:\n%s\nsandboxd log:\n%s",
+				t.Fatalf("sandbox content corrupted after clone-backed flush: exit=%d stdout=%q stderr=%q\nowner log:\n%s\nsandboxd log:\n%s",
 					execResp.ExitCode, execResp.Stdout, execResp.Stderr, tailFile(ownerLog, 200), tailFile(sandboxdLogPath(), 200))
 			}
 			nextRead = time.Now().Add(500 * time.Millisecond)
@@ -283,7 +281,7 @@ func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableAfterCompaction(
 func TestE2E_Sandboxd_TTYShell(t *testing.T) {
 	skipE2E(t)
 	b, _ := setupBusyboxVolume(t, "sandboxd-tty")
-	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-tty", false))
+	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-tty"))
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)

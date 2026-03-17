@@ -30,7 +30,7 @@ func TestE2E_FreezeFlushesFilesystemCache(t *testing.T) {
 
 	// Freeze the volume. This flushes the filesystem cache, unmounts
 	// the filesystem, and persists the storage layer to S3.
-	require.NoError(t, b.FreezeVolume(ctx, volName, false))
+	require.NoError(t, b.FreezeVolume(ctx, volName))
 
 	// Re-mount the frozen volume read-only and verify all files survived.
 	mp2 := mountpoint(t, volName+"-ro")
@@ -57,7 +57,7 @@ func TestE2E_FreezeAndClonePreservesData(t *testing.T) {
 	randomMD5 := writeTestFiles(t, tfs)
 
 	// Freeze — flushes filesystem cache, unmounts, persists to S3.
-	require.NoError(t, b.FreezeVolume(ctx, volName, false))
+	require.NoError(t, b.FreezeVolume(ctx, volName))
 
 	// Mount the frozen volume read-only.
 	frozenMP := mountpoint(t, volName+"-frozen")

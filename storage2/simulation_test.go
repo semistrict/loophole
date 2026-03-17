@@ -217,7 +217,7 @@ func (sim *Simulation) opTable() []opEntry {
 		{8, sim.opSnapshot},
 		{5, sim.opClone},
 		{3, sim.opCloneNoFlush},
-		{5, sim.opCompact},
+		{5, sim.opFlushAndVerify},
 		{3, sim.opCreateVolume},
 		{2, sim.opFreeze},
 		{2, sim.opCopyFrom},
@@ -225,7 +225,7 @@ func (sim *Simulation) opTable() []opEntry {
 		{2, sim.opCloneFromSnapshot},
 		{5, sim.opCheckpoint},
 		{2, sim.opCloneFromCheckpoint},
-		{2, sim.opCompactShared},
+		{2, sim.opVerifySharedVolume},
 		{3, sim.opVerify},
 		{2, sim.opSnapshotIsolation},
 		{2, sim.opOpen},
@@ -509,10 +509,21 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	// The snapshot is a child timeline. We need to figure out its ID.
-	// Read the volume ref from the store.
+	// Mark the clone as frozen directly in the store. This avoids the
+	// expensive open+freeze cycle (which acquires a lease, starts periodic
+	// flush goroutines, etc.) and matches what the old Snapshot() did: just
+	// write a read-only ref.
 	ref, err := sim.getVolRef(ctx, snapName)
 	if err != nil {
+		return
+	}
+
+	// Set frozen_at on the layer's index.json metadata so openVolume
+	// recognizes it as a frozen layer (avoids writable open path).
+	layerStore := sim.store.Store().At("layers/" + ref.LayerID)
+	if err := layerStore.SetMeta(ctx, "index.json", map[string]string{
+		"frozen_at": time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
 		return
 	}
 
@@ -698,7 +709,7 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 	sim.oracle.RecordFlush(node.id, timelineID)
 }
 
-func (sim *Simulation) opCompact(ctx context.Context, node *SimNode) {
+func (sim *Simulation) opFlushAndVerify(ctx context.Context, node *SimNode) {
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -744,18 +755,24 @@ func (sim *Simulation) pickReadOnlyVolume(ctx context.Context) string {
 	}
 	sort.Strings(volNames)
 	for _, name := range volNames {
+		// Check if the volume's layer is frozen via its metadata.
 		ref, err := sim.getVolRef(ctx, name)
 		if err != nil {
 			continue
 		}
-		if ref.ReadOnly {
+		layerStore := sim.store.Store().At("layers/" + ref.LayerID)
+		meta, err := layerStore.HeadMeta(ctx, "index.json")
+		if err != nil {
+			continue
+		}
+		if meta["frozen_at"] != "" {
 			return name
 		}
 	}
 	return ""
 }
 
-func (sim *Simulation) opCompactShared(ctx context.Context, node *SimNode) {
+func (sim *Simulation) opVerifySharedVolume(ctx context.Context, node *SimNode) {
 	volName := sim.pickReadOnlyVolume(ctx)
 	if volName == "" {
 		return
@@ -1131,7 +1148,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
-	// Find a read-only (snapshot) volume that isn't leased.
+	// Find a frozen volume that isn't leased.
 	var snapName string
 	volNames := make([]string, 0, len(sim.volumeTimelines))
 	for name := range sim.volumeTimelines {
@@ -1142,12 +1159,16 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 		if _, held := sim.leases[name]; held {
 			continue
 		}
-		// Check if it's a snapshot by reading the ref.
 		ref, err := sim.getVolRef(ctx, name)
 		if err != nil {
 			continue
 		}
-		if ref.ReadOnly {
+		layerStore := sim.store.Store().At("layers/" + ref.LayerID)
+		meta, err := layerStore.HeadMeta(ctx, "index.json")
+		if err != nil {
+			continue
+		}
+		if meta["frozen_at"] != "" {
 			snapName = name
 			break
 		}
@@ -1713,7 +1734,11 @@ func (sim *Simulation) verifyLayerIntegrity(ctx context.Context, volNames []stri
 		}
 
 		// FROZEN LAYER INVARIANT CHECK: No two writable volumes share a layer.
-		if !ref.ReadOnly {
+		// Check layer metadata — Freeze sets frozen_at on the layer's index.json.
+		ls := store.At("layers/" + ref.LayerID)
+		meta, _ := ls.HeadMeta(ctx, "index.json")
+		isFrozen := meta["frozen_at"] != ""
+		if !isFrozen {
 			if other, exists := activeLayerOwners[ref.LayerID]; exists {
 				sim.t.Fatalf("FROZEN LAYER INVARIANT VIOLATION: writable volumes %q and %q share layer %s",
 					other, volName, ref.LayerID[:8])
@@ -1938,7 +1963,7 @@ func TestSimulationDeterminism(t *testing.T) {
 	t.Logf("determinism OK: %d events identical across 2 runs", len(events1))
 }
 
-func TestSimulationSharedLayerCompactionExercise(t *testing.T) {
+func TestSimulationSharedLayerReadExercise(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		sim := NewSimulation(t, 1, SimConfig{
 			NumNodes:       2,
@@ -1972,7 +1997,7 @@ func TestSimulationSharedLayerCompactionExercise(t *testing.T) {
 		snapName := sim.pickReadOnlyVolume(ctx)
 		require.NotEmpty(t, snapName)
 
-		sim.opCompactShared(ctx, sim.nodes[1])
+		sim.opVerifySharedVolume(ctx, sim.nodes[1])
 		sim.FullScan()
 	})
 }

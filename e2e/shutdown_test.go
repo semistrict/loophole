@@ -50,7 +50,7 @@ func TestE2E_FreezeWithActiveProcess(t *testing.T) {
 	// FreezeVolume calls the same Freeze path as closeMount during shutdown.
 	done := make(chan error, 1)
 	go func() {
-		done <- b.FreezeVolume(ctx, vol, false)
+		done <- b.FreezeVolume(ctx, vol)
 	}()
 
 	select {

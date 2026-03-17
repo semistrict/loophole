@@ -11,13 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestE2E_CloneMountStaysReadableDuringAggressiveCompaction(t *testing.T) {
+func TestE2E_CloneMountStaysReadableDuringAggressiveFlush(t *testing.T) {
 	skipE2E(t)
 
 	b, parentMP := setupBusyboxVolume(t, "cln-stress-parent")
 	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "16384")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_MAX_FROZEN_TABLES", "1")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_L0_PAGES_MAX", "8")
 
 	ctx := t.Context()
 	cloneMP := mountpoint(t, "cln-stress-clone")
