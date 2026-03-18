@@ -1,9 +1,7 @@
 package daemon
 
 import (
-	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 
@@ -22,7 +20,7 @@ type volCmdArgs struct {
 // volCmd defines a per-volume command.
 type volCmd struct {
 	method  string // "POST" or "GET"
-	path    string // e.g. "/flush", "/compact"
+	path    string // e.g. "/flush"
 	handler func(a volCmdArgs) (any, error)
 }
 
@@ -49,12 +47,14 @@ func registerVolumeCmds(mux *http.ServeMux, d *Daemon) {
 			if d.requireBackend(w) {
 				return
 			}
-			body, _ := io.ReadAll(r.Body)
 			var req struct {
 				Volume     string `json:"volume"`
 				Mountpoint string `json:"mountpoint"`
 			}
-			_ = json.Unmarshal(body, &req)
+			if err := readJSON(r, &req); err != nil {
+				writeError(w, 400, err)
+				return
+			}
 
 			volName := req.Volume
 			mp := req.Mountpoint

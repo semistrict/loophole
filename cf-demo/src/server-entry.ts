@@ -32,12 +32,27 @@ function getCookie(request: Request, name: string): string | null {
   return null
 }
 
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  const encoder = new TextEncoder()
+  const aBuf = encoder.encode(a)
+  const bBuf = encoder.encode(b)
+  // crypto.subtle.timingSafeEqual is not available in Workers;
+  // manual constant-time compare.
+  let result = 0
+  for (let i = 0; i < aBuf.length; i++) {
+    result |= aBuf[i] ^ bBuf[i]
+  }
+  return result === 0
+}
+
 function hasValidSecret(request: Request, env: Env): boolean {
   const headerSecret = request.headers.get('X-Control-Secret')
-  if (headerSecret === env.CONTROL_SECRET) {
+  if (headerSecret && constantTimeEqual(headerSecret, env.CONTROL_SECRET)) {
     return true
   }
-  return getCookie(request, AUTH_COOKIE) === env.CONTROL_SECRET
+  const cookieSecret = getCookie(request, AUTH_COOKIE)
+  return cookieSecret !== null && constantTimeEqual(cookieSecret, env.CONTROL_SECRET)
 }
 
 function isRuntimePath(pathname: string): boolean {
@@ -52,19 +67,6 @@ function unauthorized(): Response {
   return new Response('unauthorized', { status: 401 })
 }
 
-function authRedirect(url: URL, secret: string): Response {
-  const redirectURL = new URL(url.toString())
-  redirectURL.searchParams.delete('secret')
-  const secure = url.protocol === 'https:' ? '; Secure' : ''
-  return new Response(null, {
-    status: 302,
-    headers: {
-      Location: redirectURL.toString(),
-      'Set-Cookie': `${AUTH_COOKIE}=${encodeURIComponent(secret)}; HttpOnly${secure}; SameSite=Strict; Path=/`,
-    },
-  })
-}
-
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url)
@@ -73,14 +75,9 @@ export default {
       return new Response('ok', { status: 200 })
     }
 
-    const providedSecret = url.searchParams.get('secret')
-    if (providedSecret !== null) {
-      if (providedSecret !== env.CONTROL_SECRET) {
-        return unauthorized()
-      }
-      return authRedirect(url, providedSecret)
-    }
-
+    // Authenticate via X-Control-Secret header or cookie.
+    // The ?secret= query param flow was removed to avoid leaking
+    // the secret in URLs (server logs, browser history, Referer headers).
     if (!hasValidSecret(request, env)) {
       return unauthorized()
     }

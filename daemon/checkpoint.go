@@ -12,7 +12,10 @@ func (d *Daemon) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Mountpoint string `json:"mountpoint"`
 	}
-	_ = readJSON(r, &req)
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
 	mountpoint := req.Mountpoint
 	if mountpoint == "" {
 		mountpoint = d.currentMountpoint()
@@ -38,7 +41,10 @@ func (d *Daemon) handleDeviceCheckpoint(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Volume string `json:"volume"`
 	}
-	_ = readJSON(r, &req)
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
 	volume := req.Volume
 	if volume == "" {
 		volume = d.managedVolume

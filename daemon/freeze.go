@@ -10,10 +10,12 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Volume  string `json:"volume"`
-		Compact bool   `json:"compact"`
+		Volume string `json:"volume"`
 	}
-	_ = readJSON(r, &req)
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, 400, err)
+		return
+	}
 	volume := req.Volume
 	if volume == "" {
 		volume = d.managedVolume
@@ -22,8 +24,8 @@ func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, errNoVolume)
 		return
 	}
-	slog.Info("freeze", "volume", volume, "compact", req.Compact)
-	if err := d.backend.FreezeVolume(r.Context(), volume, req.Compact); err != nil {
+	slog.Info("freeze", "volume", volume)
+	if err := d.backend.FreezeVolume(r.Context(), volume); err != nil {
 		slog.Error("freeze failed", "volume", volume, "err", err)
 		writeError(w, 500, err)
 		return

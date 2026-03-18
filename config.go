@@ -25,7 +25,7 @@ type Profile struct {
 	Region    string `toml:"region"`
 	LogLevel  string `toml:"log_level"`
 	LocalDir  string `toml:"local_dir"`
-	DaemonURL string `toml:"daemon_url"` // remote daemon base URL (e.g. https://cf-demo.ramon3525.workers.dev)
+	DaemonURL string `toml:"daemon_url"` // remote daemon base URL
 }
 
 // LoadConfig reads ~/.loophole/config.toml. Returns an empty Config (not an

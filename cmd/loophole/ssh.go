@@ -173,7 +173,7 @@ func sshCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&urlFlag, "url", "", "Remote worker base URL (e.g. https://cf-demo-4.ramon3525.workers.dev)")
+	cmd.Flags().StringVar(&urlFlag, "url", "", "Remote worker base URL")
 	cmd.Flags().StringVar(&volumeFlag, "volume", "", "Volume name to connect to")
 	cmd.Flags().StringVar(&secretFlag, "secret", "", "Shared control secret (defaults to CONTROL_SECRET env var)")
 	cmd.Flags().StringVar(&cwdFlag, "cwd", "", "Initial working directory inside the sandbox")

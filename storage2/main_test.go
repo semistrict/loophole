@@ -31,17 +31,17 @@ func debugCountersEnabled() bool {
 	return os.Getenv("LOOPHOLE_DEBUG_COUNTERS") != ""
 }
 
-type snapshotCapableVolume interface {
-	Snapshot(string) error
+type cloneCapableVolume interface {
+	Clone(string) error
 }
 
 func snapshotVolume(t testing.TB, v loophole.Volume, name string) error {
 	t.Helper()
-	sv, ok := v.(snapshotCapableVolume)
+	cv, ok := v.(cloneCapableVolume)
 	if !ok {
-		t.Fatalf("volume %T does not implement Snapshot", v)
+		t.Fatalf("volume %T does not implement Clone", v)
 	}
-	return sv.Snapshot(name)
+	return cv.Clone(name)
 }
 
 func cloneOpen(t testing.TB, v loophole.Volume, name string) loophole.Volume {

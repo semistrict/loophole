@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,174 +25,12 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 )
 
-const controlSecretHeader = "X-Control-Secret"
-
 func main() {
-	if len(os.Args) >= 2 {
-		switch os.Args[1] {
-		case "bg-exec":
-			if err := clientBGExec(os.Args[2:]); err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		case "serve":
-			// Explicit serve mode — fall through to run().
-			os.Args = append(os.Args[:1], os.Args[2:]...)
-		}
+	if len(os.Args) >= 2 && os.Args[1] == "serve" {
+		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
 	if err := run(); err != nil {
 		log.Fatal(err)
-	}
-}
-
-// clientBGExec starts a background command on a remote container-control server,
-// polls for completion, and prints the output. Exits with the remote command's exit code.
-//
-// Usage: container-control bg-exec --url URL [--secret SECRET] [--poll INTERVAL] -- cmd arg1 arg2 ...
-func clientBGExec(args []string) error {
-	var baseURL, secret, pollInterval string
-	var cmdArgv []string
-
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--url":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("--url requires a value")
-			}
-			baseURL = args[i]
-		case "--secret":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("--secret requires a value")
-			}
-			secret = args[i]
-		case "--poll":
-			i++
-			if i >= len(args) {
-				return fmt.Errorf("--poll requires a value")
-			}
-			pollInterval = args[i]
-		case "--":
-			cmdArgv = args[i+1:]
-			i = len(args)
-		default:
-			// First non-flag arg starts the command.
-			cmdArgv = args[i:]
-			i = len(args)
-		}
-	}
-
-	if baseURL == "" {
-		baseURL = os.Getenv("CONTROL_URL")
-	}
-	if secret == "" {
-		secret = os.Getenv("CONTROL_SECRET")
-	}
-	if baseURL == "" {
-		return fmt.Errorf("--url or CONTROL_URL is required")
-	}
-	if len(cmdArgv) == 0 {
-		return fmt.Errorf("no command specified")
-	}
-
-	poll := 2 * time.Second
-	if pollInterval != "" {
-		d, err := time.ParseDuration(pollInterval)
-		if err != nil {
-			return fmt.Errorf("invalid --poll value: %w", err)
-		}
-		poll = d
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-
-	// Start the job.
-	argvJSON, err := json.Marshal(cmdArgv)
-	if err != nil {
-		return fmt.Errorf("marshal argv: %w", err)
-	}
-	// If the base URL already ends with a control path segment (e.g. worker proxy URL
-	// like .../debug/control/{id}), don't add another /control/ prefix.
-	pathPrefix := "/control/bg-exec"
-	if strings.Contains(baseURL, "/control/") {
-		pathPrefix = "/bg-exec"
-	}
-	startURL := fmt.Sprintf("%s%s?argv=%s", baseURL, pathPrefix, url.QueryEscape(string(argvJSON)))
-	req, err := http.NewRequest(http.MethodPost, startURL, nil)
-	if err != nil {
-		return err
-	}
-	if secret != "" {
-		req.Header.Set(controlSecretHeader, secret)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("start bg-exec: %w", err)
-	}
-	defer util.SafeClose(resp.Body, "close bg-exec start response body")
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("start bg-exec: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var startResp struct {
-		ID  string `json:"id"`
-		PID int    `json:"pid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&startResp); err != nil {
-		return fmt.Errorf("decode start response: %w", err)
-	}
-	fmt.Fprintf(os.Stderr, "bg-exec: started job %s (pid %d)\n", startResp.ID, startResp.PID)
-
-	// Poll for completion.
-	pollPrefix := "/control/bg-exec"
-	if strings.Contains(baseURL, "/control/") {
-		pollPrefix = "/bg-exec"
-	}
-	pollURL := fmt.Sprintf("%s%s/%s", baseURL, pollPrefix, startResp.ID)
-	for {
-		time.Sleep(poll)
-
-		req, err := http.NewRequest(http.MethodGet, pollURL, nil)
-		if err != nil {
-			return err
-		}
-		if secret != "" {
-			req.Header.Set(controlSecretHeader, secret)
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "bg-exec: poll error: %v\n", err)
-			continue
-		}
-
-		var pollResp struct {
-			Done     bool   `json:"done"`
-			ExitCode int    `json:"exitCode"`
-			Output   string `json:"output"`
-			Error    string `json:"error"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&pollResp); err != nil {
-			util.SafeClose(resp.Body, "close bg-exec poll response body after decode failure")
-			fmt.Fprintf(os.Stderr, "bg-exec: decode poll error: %v\n", err)
-			continue
-		}
-		util.SafeClose(resp.Body, "close bg-exec poll response body")
-
-		if !pollResp.Done {
-			continue
-		}
-
-		// Done — print output and exit with the remote exit code.
-		fmt.Print(pollResp.Output)
-		if pollResp.Error != "" {
-			fmt.Fprintf(os.Stderr, "bg-exec: error: %s\n", pollResp.Error)
-		}
-		os.Exit(pollResp.ExitCode)
 	}
 }
 
@@ -214,7 +53,6 @@ func run() error {
 		sandboxAPI:      sandboxUpstream,
 		cli:             newLoopholeCLI(),
 		logger:          log.Default(),
-		bgJobs:          make(map[string]*bgJob),
 		toolboxSessions: make(map[string]*toolboxSession),
 	}
 
@@ -306,15 +144,6 @@ func (u *upstream) dialWebsocket(ctx context.Context, path string, headers http.
 	return dialer.DialContext(ctx, u.wsURL+path, headers)
 }
 
-type bgJob struct {
-	id       string
-	cmd      *exec.Cmd
-	outFile  *os.File
-	doneCh   chan struct{}
-	exitCode int
-	execErr  string
-}
-
 type controlServer struct {
 	container    string
 	proxyMu      sync.RWMutex
@@ -323,11 +152,9 @@ type controlServer struct {
 	cli          *loopholeCLI
 	logger       *log.Logger
 
-	bgMu            sync.Mutex
-	bgJobs          map[string]*bgJob
 	zygoteMu        sync.Mutex
-	bgSeq           int
 	toolboxMu       sync.Mutex
+	toolboxSeq      atomic.Int64
 	toolboxSessions map[string]*toolboxSession
 }
 
@@ -374,15 +201,7 @@ func (s *controlServer) handleControl(w http.ResponseWriter, r *http.Request) {
 		s.handleExec(w, r)
 	case "/control/upload":
 		s.handleUpload(w, r)
-	case "/control/bg-exec":
-		s.handleBGExec(w, r)
-	case "/control/set-proxy":
-		s.handleSetProxy(w, r)
 	default:
-		if strings.HasPrefix(r.URL.Path, "/control/bg-exec/") {
-			s.handleBGExecJob(w, r)
-			return
-		}
 		http.NotFound(w, r)
 	}
 }
@@ -508,213 +327,6 @@ func (s *controlServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		"bytes": written,
 		"mode":  fmt.Sprintf("%#o", mode),
 	})
-}
-
-func (s *controlServer) handleSetProxy(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	target := r.URL.Query().Get("target")
-	if target == "" {
-		http.Error(w, "missing target query parameter (e.g. unix:///path/to.sock or http://host:port)", http.StatusBadRequest)
-		return
-	}
-
-	proxy, err := buildProxy(target)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid target URL: %v", err), http.StatusBadRequest)
-		return
-	}
-
-	// Proxy target is no longer used (shared daemon removed).
-	_ = proxy
-
-	s.logger.Printf("proxy target set to %s", target)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "proxy": target})
-}
-
-func (s *controlServer) handleBGExec(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	argv := r.URL.Query()["argv"]
-	if len(argv) == 0 {
-		http.Error(w, "missing argv query parameter (JSON array or repeated argv=...)", http.StatusBadRequest)
-		return
-	}
-	// If a single argv param is provided and looks like a JSON array, parse it.
-	if len(argv) == 1 && strings.HasPrefix(argv[0], "[") {
-		var parsed []string
-		if err := json.Unmarshal([]byte(argv[0]), &parsed); err == nil && len(parsed) > 0 {
-			argv = parsed
-		}
-	}
-	if len(argv) == 0 || argv[0] == "" {
-		http.Error(w, "empty argv", http.StatusBadRequest)
-		return
-	}
-
-	cwd := r.URL.Query().Get("cwd")
-
-	s.bgMu.Lock()
-	s.bgSeq++
-	id := fmt.Sprintf("bg-%d-%d", time.Now().Unix(), s.bgSeq)
-	s.bgMu.Unlock()
-
-	outFile, err := os.CreateTemp("", "bg-exec-*.log")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("create output file: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	cmd := exec.Command(argv[0], argv[1:]...)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-	cmd.Env = os.Environ()
-	cmd.Stdout = outFile
-	cmd.Stderr = outFile
-
-	// Wire request body as stdin if present.
-	if r.Body != nil && r.ContentLength != 0 {
-		cmd.Stdin = r.Body
-	}
-
-	if err := cmd.Start(); err != nil {
-		util.SafeClose(outFile, "close bg-exec output after start failure")
-		_ = os.Remove(outFile.Name())
-		http.Error(w, fmt.Sprintf("start command: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	job := &bgJob{
-		id:      id,
-		cmd:     cmd,
-		outFile: outFile,
-		doneCh:  make(chan struct{}),
-	}
-
-	s.bgMu.Lock()
-	s.bgJobs[id] = job
-	s.bgMu.Unlock()
-
-	go func() {
-		defer close(job.doneCh)
-		waitErr := cmd.Wait()
-		util.SafeClose(outFile, "close bg-exec output file")
-		exitCode, execErr := processExit(waitErr)
-		job.exitCode = exitCode
-		if execErr != nil {
-			job.execErr = execErr.Error()
-		}
-	}()
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":      id,
-		"pid":     cmd.Process.Pid,
-		"logFile": outFile.Name(),
-	})
-}
-
-func (s *controlServer) handleBGExecJob(w http.ResponseWriter, r *http.Request) {
-	// Parse /control/bg-exec/{id}[/kill]
-	rest := strings.TrimPrefix(r.URL.Path, "/control/bg-exec/")
-	parts := strings.SplitN(rest, "/", 2)
-	id := parts[0]
-	action := ""
-	if len(parts) > 1 {
-		action = parts[1]
-	}
-
-	s.bgMu.Lock()
-	job, ok := s.bgJobs[id]
-	s.bgMu.Unlock()
-
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]any{"error": "no such job", "id": id})
-		return
-	}
-
-	switch action {
-	case "kill":
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		if job.cmd.Process != nil {
-			_ = job.cmd.Process.Kill()
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"id": id, "killed": true})
-
-	case "":
-		// GET: check status. If done, return output and reap.
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		select {
-		case <-job.doneCh:
-			// Done — read output, clean up, return everything.
-			output, err := os.ReadFile(job.outFile.Name())
-			if err != nil {
-				output = []byte(fmt.Sprintf("<read error: %v>", err))
-			}
-			_ = os.Remove(job.outFile.Name())
-
-			s.bgMu.Lock()
-			delete(s.bgJobs, id)
-			s.bgMu.Unlock()
-
-			resp := map[string]any{
-				"id":       id,
-				"done":     true,
-				"exitCode": job.exitCode,
-				"output":   string(output),
-			}
-			if job.execErr != "" {
-				resp["error"] = job.execErr
-			}
-			writeJSON(w, http.StatusOK, resp)
-
-		default:
-			// Still running.
-			writeJSON(w, http.StatusOK, map[string]any{
-				"id":   id,
-				"done": false,
-				"pid":  pidOf(job.cmd),
-			})
-		}
-
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func pidOf(cmd *exec.Cmd) int {
-	if cmd == nil || cmd.Process == nil {
-		return 0
-	}
-	return cmd.Process.Pid
-}
-
-func processExit(err error) (int, error) {
-	if err == nil {
-		return 0, nil
-	}
-
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode(), nil
-	}
-	if errors.Is(err, context.Canceled) {
-		return 130, nil
-	}
-	return 0, err
 }
 
 func runCommand(cmd *exec.Cmd) (stdout string, stderr string, exitCode int, err error) {

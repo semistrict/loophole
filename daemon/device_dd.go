@@ -80,10 +80,16 @@ func (d *Daemon) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const maxReadSize = storage2.BlockSize
+	if size > maxReadSize {
+		http.Error(w, "size exceeds maximum ("+strconv.FormatUint(maxReadSize, 10)+")", 400)
+		return
+	}
+
 	vm := d.backend.VM()
-	vol, err := vm.OpenVolume(volume)
-	if err != nil {
-		http.Error(w, "open volume: "+err.Error(), 500)
+	vol := vm.GetVolume(volume)
+	if vol == nil {
+		http.Error(w, "volume not open: "+volume, 404)
 		return
 	}
 

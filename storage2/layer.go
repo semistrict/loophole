@@ -240,21 +240,20 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 	return ly.layerStore.PutReader(ctx, "index.json", bytes.NewReader(data))
 }
 
-// snapshotLayers captures current layer state under a read lock.
+// snapshotLayers captures current layer state under both read locks
+// simultaneously, ensuring an atomic view of memtable + frozen + L1/L2.
 func (ly *layer) snapshotLayers() layerSnapshot {
 	ly.mu.RLock()
+	ly.frozenMu.RLock()
 	snap := layerSnapshot{
 		layoutGen: ly.index.LayoutGen,
 		memtable:  ly.memtable,
+		frozen:    ly.frozenTables,
 		l1:        ly.l1Map,
 		l2:        ly.l2Map,
 	}
-	ly.mu.RUnlock()
-
-	ly.frozenMu.RLock()
-	snap.frozen = ly.frozenTables
 	ly.frozenMu.RUnlock()
-
+	ly.mu.RUnlock()
 	return snap
 }
 
@@ -471,7 +470,7 @@ func (ly *layer) canDirectL2() bool {
 }
 
 // writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,
-// bypassing the memtable/flush/compaction pipeline. The caller must ensure
+// bypassing the memtable/flush pipeline. The caller must ensure
 // offset is block-aligned and len(data) == BlockSize.
 func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	blockIdx := BlockIdx(offset / BlockSize)
@@ -944,7 +943,7 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 // IMPORTANT INVARIANT: After calling Snapshot, the caller MUST ensure this
 // layer is never written to again. The child's L1/L2 block ranges reference
 // objects keyed by this layer's ID and writeLeaseSeq. If this layer continues
-// to compact (rewrite L1 blocks), the child's references become stale.
+// to flush (rewrite L1 blocks), the child's references become stale.
 //
 // The volume layer enforces this by calling relayer() after Snapshot, which
 // creates a new layer for the parent volume. The old layer is effectively

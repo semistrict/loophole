@@ -85,10 +85,6 @@ func (v *frozenVolume) ZeroRange(offset, length uint64) error {
 func (v *frozenVolume) Flush() error      { return nil }
 func (v *frozenVolume) FlushLocal() error { return nil }
 
-func (v *frozenVolume) Snapshot(snapshotName string) error {
-	return fmt.Errorf("cannot snapshot frozen volume %q", v.name)
-}
-
 func (v *frozenVolume) Checkpoint() (string, error) {
 	return "", fmt.Errorf("cannot checkpoint frozen volume %q", v.name)
 }

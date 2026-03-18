@@ -80,6 +80,6 @@ done < .dev.vars
 
 echo ""
 echo "=== Done ==="
-echo "Deployed: https://${NEW_NAME}.ramon3525.workers.dev"
+echo "Deployed: https://${NEW_NAME}.<your-subdomain>.workers.dev"
 echo ""
 echo "Update BASE_URL in boot/stage scripts if needed."

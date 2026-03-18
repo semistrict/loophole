@@ -29,7 +29,7 @@ services:
       - loophole-data:/root/.loophole
       - ./docker-config/config.toml:/root/.loophole/config.toml:ro
       - /tmp/linux-clone-test/linux:/mnt/linux-src:ro
-      - /Users/ramon/src:/mnt/src:ro
+      - ${LOOPHOLE_HOST_SRC:-..}:/mnt/src:ro
     tmpfs:
       - /root/.loophole/r2/cache:size=1G
     depends_on:

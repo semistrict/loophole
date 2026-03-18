@@ -112,7 +112,7 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	require.GreaterOrEqual(t, ref.Slot, 0)
 }
 
-func TestFrozenLayerCompactionDoesNotInvalidatePersistentPageCache(t *testing.T) {
+func TestFrozenLayerPageCacheSurvivesBlockCacheEviction(t *testing.T) {
 	cache, backing := newTestPersistentPageCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,

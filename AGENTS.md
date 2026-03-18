@@ -27,9 +27,9 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 - `make build` — build all packages
 - `make test` — run all unit tests
 - `make test RUN=TestName` — run a specific test across all packages
-- `make e2e` — run the Linux kernel ext4-over-FUSE e2e tests
-- `make e2e RUN=TestName` — run a specific e2e test
-- E2E tests in Docker: `docker compose run --rm go bash -c 'make e2e'`
+- **E2E tests MUST run in Docker** (they need Linux root + FUSE): `docker compose run --rm go bash -c 'make e2e'`
+- Run a specific e2e test: `docker compose run --rm go bash -c 'make e2e RUN=TestName'`
+- Do NOT run `make e2e` directly on macOS — tests will all skip.
 - Set `LOG_LEVEL=debug` to enable slog debug output in e2e tests
 
 ## Utilities
@@ -87,7 +87,7 @@ Grep for your subsystem (e.g. `WaitClosed`, `checkpoint`, `grpc`) to find the st
 - `make cf-demo-smoke-local` — hit the local Worker at `CF_DEMO_BASE_URL` and verify sandbox create/files/exec/session end to end
 - `make cf-demo-smoke-lima` — hit the local `/debug` endpoints in Lima and verify Firecracker `exec` with `echo hello` and `/etc/os-release`
 - **NEVER run `pnpm exec wrangler deploy` directly** — it skips the build and deploys stale artifacts. Always use `cd cf-demo && pnpm run deploy` which runs the full build first.
-- Deployed URL: `https://cf-demo-4.ramon3525.workers.dev`
+- Deployed URL: `$CF_DEMO_URL`
 - **Container rollout is not instant.** After `wrangler deploy`, CF containers use a rolling deploy strategy. Give it a minute or two after deploy. After deploy, use `POST /debug/stop-all` to force new containers.
 
 ### Local CF workflow in Lima
@@ -133,15 +133,15 @@ Use `cf-demo/scripts/client.ts` for authenticated requests to the CF worker. It 
 
 ```bash
 cd cf-demo
-pnpm dlx tsx scripts/client.ts GET /debug/sandboxd/v1/status --url https://cf-demo-4.ramon3525.workers.dev
-pnpm dlx tsx scripts/client.ts POST /debug/control/<ctr>/exec --url https://cf-demo-4.ramon3525.workers.dev --json '{"cmd":"uname -a"}'
+pnpm dlx tsx scripts/client.ts GET /debug/sandboxd/v1/status --url $CF_DEMO_URL
+pnpm dlx tsx scripts/client.ts POST /debug/control/<ctr>/exec --url $CF_DEMO_URL --json '{"cmd":"uname -a"}'
 ```
 
 ### SSH into CF container
 
 ```
 export SECRET="$(cut -d= -f2- < <(rg '^CONTROL_SECRET=' cf-demo/.dev.vars))"
-bin/loophole-darwin-arm64 ssh --url https://cf-demo-4.ramon3525.workers.dev --secret "$SECRET" --volume <volume-name>
+bin/loophole-darwin-arm64 ssh --url $CF_DEMO_URL --secret "$SECRET" --volume <volume-name>
 ```
 
 ### Hot-patching binaries on live CF containers
@@ -150,7 +150,7 @@ Upload and replace binaries without redeploying. Useful for iterating on runsc/l
 
 ```bash
 export SECRET="$(cut -d= -f2- < <(rg '^CONTROL_SECRET=' cf-demo/.dev.vars))"
-export BASE="https://cf-demo-4.ramon3525.workers.dev"
+export BASE="$CF_DEMO_URL"
 export CTR="$(curl -sS -H "X-Control-Secret: $SECRET" "$BASE/debug/container" | sed -n 's/.*"name":"\([^"]*\)".*/\1/p')"
 
 # Upload a binary
@@ -194,4 +194,4 @@ axiom query "['deepagent'] | where _time > now(-1h) | where volume == 'sandbox-1
 - **Network:** currently `--network=host`. Switching to `--network=sandbox` (isolated netstack) requires setting up veth pair + SNAT ourselves since Cloudflare's firecracker kernel lacks `xt_MASQUERADE` and `xt_comment` modules. Use `-j SNAT --to-source <host-ip>` instead of `-j MASQUERADE`.
 - **Rootless mode:** gVisor auto-detects rootless when `euid != 0`. The `--rootless` flag just controls cgroup error tolerance. Our `TestOnlyAllowRunAsCurrentUserWithoutChroot` patches in the gvisor submodule are for running as root without full capabilities (the Cloudflare container case).
 - **Zygote naming:** bump the version in `LOOPHOLE_DEFAULT_ZYGOTE` (entrypoint.sh) to force re-bootstrap from the bundled rootfs tar. Old zygotes persist in R2 and may have wrong-arch binaries.
-- **Owner socket bind-mount:** the per-volume loophole daemon socket (`Dir.VolumeSocket`) is bind-mounted into the sandbox at `/.loophole/api.sock`. Processes inside the sandbox can `curl --unix-socket /.loophole/api.sock http://localhost/status` (or `/flush`, `/checkpoint`, `/clone`, `/compact`).
+- **Owner socket bind-mount:** the per-volume loophole daemon socket (`Dir.VolumeSocket`) is bind-mounted into the sandbox at `/.loophole/api.sock`. Processes inside the sandbox can `curl --unix-socket /.loophole/api.sock http://localhost/status` (or `/flush`, `/checkpoint`, `/clone`).

@@ -13,7 +13,7 @@
 		"preview": "pnpm run build && vite preview",
 		"test": "vitest run --config vitest.config.ts",
 		"deploy": "pnpm run build && wrangler deploy",
-		"ssh": "CONTROL_SECRET=$(grep '^CONTROL_SECRET=' .dev.vars | cut -d= -f2-) exec ../bin/loophole-darwin-arm64 ssh --url https://cf-demo-4.ramon3525.workers.dev --secret \"$CONTROL_SECRET\" --volume",
+		"ssh": "CONTROL_SECRET=$(grep '^CONTROL_SECRET=' .dev.vars | cut -d= -f2-) exec ../bin/loophole-darwin-arm64 ssh --url \"${CF_DEMO_URL:?Set CF_DEMO_URL to your worker URL}\" --secret \"$CONTROL_SECRET\" --volume",
 		"cf-typegen": "wrangler types"
 	},
 	"dependencies": {

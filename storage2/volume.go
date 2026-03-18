@@ -195,29 +195,6 @@ func (v *volume) relayer() error {
 	return nil
 }
 
-func (v *volume) Snapshot(snapshotName string) error {
-	slog.Warn("deprecated: use Checkpoint() instead of Snapshot()")
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	if v.readOnly.Load() {
-		return fmt.Errorf("cannot snapshot read-only volume %q", v.name)
-	}
-
-	childID, err := v.branch()
-	if err != nil {
-		return err
-	}
-
-	if snapshotName != "" {
-		ref := volumeRef{LayerID: childID, Size: v.size, ReadOnly: true, Type: v.volType}
-		if err := v.manager.putVolumeRef(context.Background(), snapshotName, ref); err != nil {
-			return fmt.Errorf("create snapshot ref: %w", err)
-		}
-	}
-	return nil
-}
-
 func (v *volume) Checkpoint() (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -283,12 +260,6 @@ func (v *volume) CopyFrom(src loophole.Volume, srcOff, dstOff, length uint64) (u
 }
 
 func (v *volume) Freeze() error {
-	return v.freeze()
-}
-
-// FreezeWithCompact freezes the volume. The compaction step is no longer
-// needed since the direct flush path writes directly to L1/L2.
-func (v *volume) FreezeWithCompact() error {
 	return v.freeze()
 }
 

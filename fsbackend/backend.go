@@ -196,7 +196,7 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 // vol.Freeze() fires before_freeze hooks (which flush the FS cache),
 // then persists the volume. If mounted, the mount is explicitly torn
 // down afterward (chroot teardown, FS unmount, volume ref release).
-func (b *Backend) FreezeVolume(ctx context.Context, volume string, compact bool) error {
+func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
 	vol, err := b.vm.OpenVolume(volume)
 	if err != nil {
 		return fmt.Errorf("open volume: %w", err)
@@ -205,22 +205,9 @@ func (b *Backend) FreezeVolume(ctx context.Context, volume string, compact bool)
 		return fmt.Errorf("volume %q is already frozen", volume)
 	}
 
-	slog.Info("freeze: persisting volume", "volume", volume, "compact", compact)
-	if compact {
-		type freezeCompactor interface {
-			FreezeWithCompact() error
-		}
-		fc, ok := vol.(freezeCompactor)
-		if !ok {
-			return fmt.Errorf("volume %q does not support compact-freeze", volume)
-		}
-		if err := fc.FreezeWithCompact(); err != nil {
-			return err
-		}
-	} else {
-		if err := vol.Freeze(); err != nil {
-			return err
-		}
+	slog.Info("freeze: persisting volume", "volume", volume)
+	if err := vol.Freeze(); err != nil {
+		return err
 	}
 
 	// Explicitly tear down mount if mounted.

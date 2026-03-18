@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -357,7 +358,6 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /mount", d.handleMount)
-	mux.HandleFunc("POST /unmount", d.handleUnmount)
 	mux.HandleFunc("POST /delete", d.handleDelete)
 	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
@@ -452,6 +452,9 @@ var errNoVolume = fmt.Errorf("no volume managed")
 
 func readJSON(r *http.Request, v any) error {
 	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		if err == io.EOF {
+			return nil // empty body — callers fall back to managed volume
+		}
 		return fmt.Errorf("decode request: %w", err)
 	}
 	return nil

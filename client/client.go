@@ -87,12 +87,6 @@ func (c *Client) Mount(ctx context.Context, volume, mountpoint string) error {
 	return err
 }
 
-// Unmount unmounts the filesystem at mountpoint.
-func (c *Client) Unmount(ctx context.Context, mountpoint string) error {
-	_, err := c.post(ctx, "/unmount", "mountpoint", mountpoint)
-	return err
-}
-
 // Clone creates an unmounted clone of a mounted volume or checkpoint.
 type CloneParams struct {
 	Mountpoint string `json:"mountpoint,omitempty"`
@@ -273,8 +267,10 @@ func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64,
 	if err != nil {
 		return fmt.Errorf("dd write at offset %d: %w", offset, err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)

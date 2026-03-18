@@ -60,7 +60,9 @@ func (m *blockRangeMap) Set(block BlockIdx, layerID string, writeLeaseSeq uint64
 // Remove returns a new blockRangeMap with block removed.
 // The original map is not modified (copy-on-write for snapshot safety).
 func (m *blockRangeMap) Remove(block BlockIdx) *blockRangeMap {
-	return &blockRangeMap{ranges: removeBlockAddr(m.ranges, block)}
+	dup := make([]blockRange, len(m.ranges))
+	copy(dup, m.ranges)
+	return &blockRangeMap{ranges: removeBlockAddr(dup, block)}
 }
 
 // Len returns the number of block ranges.
@@ -80,7 +82,13 @@ func (m *blockRangeMap) Ranges() []blockRange {
 }
 
 // setBlockRange inserts or updates a single block address in sorted ranges.
+// The input slice is copied first to avoid mutating the caller's data.
 func setBlockRange(ranges []blockRange, blockAddr BlockIdx, layerID string, writeLeaseSeq uint64) []blockRange {
+	// Copy to avoid mutating the original (snapshot safety).
+	dup := make([]blockRange, len(ranges))
+	copy(dup, ranges)
+	ranges = dup
+
 	// Remove old mapping first (if any).
 	ranges = removeBlockAddr(ranges, blockAddr)
 

@@ -821,8 +821,9 @@ func (s *controlServer) handleCreateSession(w http.ResponseWriter, r *http.Reque
 	}
 	s.toolboxMu.Lock()
 	s.toolboxSessions[session.ID] = session
+	resp := s.sessionResponse(session)
 	s.toolboxMu.Unlock()
-	writeJSON(w, http.StatusOK, s.sessionResponse(session))
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *controlServer) handleGetSession(w http.ResponseWriter, _ *http.Request, sandboxID, sessionID string) {
@@ -831,7 +832,10 @@ func (s *controlServer) handleGetSession(w http.ResponseWriter, _ *http.Request,
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.sessionResponse(session))
+	s.toolboxMu.Lock()
+	resp := s.sessionResponse(session)
+	s.toolboxMu.Unlock()
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *controlServer) handleDeleteSession(w http.ResponseWriter, r *http.Request, sandboxID, sessionID string) {
@@ -1135,12 +1139,14 @@ func (s *controlServer) getCommand(sandboxID, sessionID, commandID string) (*too
 	return command, nil
 }
 
+// sessionResponse returns a snapshot of the session state.
+// Caller must hold s.toolboxMu.
 func (s *controlServer) sessionResponse(session *toolboxSession) map[string]any {
 	commands := make([]map[string]any, 0, len(session.Order))
 	for _, id := range session.Order {
 		command := session.Commands[id]
 		if command != nil {
-			commands = append(commands, s.commandResponse(command))
+			commands = append(commands, commandResponseLocked(command))
 		}
 	}
 	return map[string]any{
@@ -1153,7 +1159,17 @@ func (s *controlServer) sessionResponse(session *toolboxSession) map[string]any 
 	}
 }
 
+// commandResponse returns a snapshot of the command state.
+// Caller must NOT hold s.toolboxMu — this method acquires it.
 func (s *controlServer) commandResponse(command *toolboxCommand) map[string]any {
+	s.toolboxMu.Lock()
+	defer s.toolboxMu.Unlock()
+	return commandResponseLocked(command)
+}
+
+// commandResponseLocked returns a snapshot of the command state.
+// Caller must hold s.toolboxMu.
+func commandResponseLocked(command *toolboxCommand) map[string]any {
 	return map[string]any{
 		"cmdId":     command.ID,
 		"processId": command.ProcessID,
@@ -1245,7 +1261,8 @@ func (s *controlServer) signalProcess(ctx context.Context, sandboxID, processID,
 }
 
 func (s *controlServer) newToolboxID(prefix string) string {
-	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+	seq := s.toolboxSeq.Add(1)
+	return fmt.Sprintf("%s-%d-%d", prefix, time.Now().Unix(), seq)
 }
 
 func processPayload(req daytonaProcessRequest, background bool) (map[string]any, error) {
