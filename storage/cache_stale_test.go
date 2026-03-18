@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // TestStalePageCacheAfterFlush verifies that flushing a memtable to S3
@@ -23,7 +23,7 @@ func TestStalePageCacheAfterFlush(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize // high so flushes are manual only
 
-	m := newTestManager(t, loophole.NewMemStore(), cfg)
+	m := newTestManager(t, objstore.NewMemStore(), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "stale-flush"})

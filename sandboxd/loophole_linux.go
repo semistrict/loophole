@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -28,12 +28,12 @@ type ownerHandle struct {
 }
 
 func (d *Daemon) openManager(ctx context.Context) (*storage.Manager, func(), error) {
-	var store loophole.ObjectStore
+	var store objstore.ObjectStore
 	var err error
 	if d.inst.LocalDir != "" {
-		store, err = loophole.NewFileStore(d.inst.LocalDir)
+		store, err = objstore.NewFileStore(d.inst.LocalDir)
 	} else {
-		store, err = loophole.NewS3Store(ctx, d.inst)
+		store, err = objstore.NewS3Store(ctx, d.inst)
 	}
 	if err != nil {
 		return nil, nil, err

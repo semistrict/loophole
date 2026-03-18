@@ -18,13 +18,13 @@ import (
 	"github.com/google/uuid"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/metrics"
 )
 
 var (
-	testDir         loophole.Dir
-	testInst        loophole.Instance
+	testDir         env.Dir
+	testInst        env.ResolvedProfile
 	testBin         string
 	testSandboxdBin string
 	testRunscBin    string
@@ -66,8 +66,8 @@ func TestMain(m *testing.M) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	testDir = loophole.Dir(tmpDir)
-	testInst = loophole.Instance{
+	testDir = env.Dir(tmpDir)
+	testInst = env.ResolvedProfile{
 		ProfileName: "test",
 		Bucket:      envOrDefault("BUCKET", "testbucket"),
 		Prefix:      fmt.Sprintf("test-%s", uuid.NewString()[:8]),

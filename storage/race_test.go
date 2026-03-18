@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,7 +17,7 @@ import (
 // overwrites the newer write with stale data.
 func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	// Use a tiny memtable (2 pages) so it fills up quickly.
 	cfg := Config{
@@ -119,7 +119,7 @@ func TestBlockRangeMapConcurrentRace(t *testing.T) {
 // a freeze+flush+cleanup can happen, leaving a dangling memtable pointer.
 func TestSnapshotLayersAtomicity(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -180,7 +180,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 // errmemtableCleanedUp. The read falls through to zeros.
 func TestReadDuringFlushReturnsZeros(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -240,7 +240,7 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 // should still return the correct data (from flushed layers or page cache), not zeros.
 func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,

@@ -13,8 +13,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/objstore"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -22,13 +22,13 @@ import (
 // Data flows: memtable → frozen memtables → L1 → L2 → zeros.
 type layer struct {
 	id         string
-	store      loophole.ObjectStore // global root (for reading blobs by full key)
-	layerStore loophole.ObjectStore // rooted at layers/<id>/ (for index.json)
+	store      objstore.ObjectStore // global root (for reading blobs by full key)
+	layerStore objstore.ObjectStore // rooted at layers/<id>/ (for index.json)
 
 	config    Config
 	diskCache *PageCache
 	cacheDir  string
-	lease     *loophole.LeaseManager
+	lease     *objstore.LeaseManager
 
 	// writeLeaseSeq is the monotonically increasing sequence number
 	// assigned when the write lease was acquired. All files written
@@ -82,7 +82,7 @@ type layerSnapshot struct {
 
 // openLayer loads a layer from S3 and initializes its local state.
 // store is the global root (not scoped to a layer prefix).
-func openLayer(ctx context.Context, store loophole.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string) (*layer, error) {
+func openLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string) (*layer, error) {
 	config.setDefaults()
 
 	layerPrefix := "layers/" + id
@@ -117,8 +117,8 @@ func openLayer(ctx context.Context, store loophole.ObjectStore, id string, confi
 
 // openFrozenLayer loads a frozen (immutable) layer. Reads index.json but
 // creates no memtable.
-func openFrozenLayer(ctx context.Context, store loophole.ObjectStore, id string, config Config, diskCache *PageCache) (*layer, error) {
-	idx, _, err := loophole.ReadJSON[layerIndex](ctx, store.At("layers/"+id), "index.json")
+func openFrozenLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache *PageCache) (*layer, error) {
+	idx, _, err := objstore.ReadJSON[layerIndex](ctx, store.At("layers/"+id), "index.json")
 	if err != nil {
 		return nil, fmt.Errorf("read frozen layer index: %w", err)
 	}
@@ -128,7 +128,7 @@ func openFrozenLayer(ctx context.Context, store loophole.ObjectStore, id string,
 // initLayerFromIndex creates a mutable layer from a pre-loaded index.
 // No S3 reads — the caller already has the index. Used by Clone to avoid
 // re-reading the child index that was just written.
-func initLayerFromIndex(store loophole.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string, idx layerIndex) (*layer, error) {
+func initLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string, idx layerIndex) (*layer, error) {
 	config.setDefaults()
 	ly := &layer{
 		id:         id,
@@ -159,7 +159,7 @@ func initLayerFromIndex(store loophole.ObjectStore, id string, config Config, di
 
 // initFrozenLayerFromIndex creates a frozen (immutable) layer from a pre-loaded
 // index. No S3 reads required — the caller already has the index.
-func initFrozenLayerFromIndex(store loophole.ObjectStore, id string, config Config, diskCache *PageCache, idx layerIndex) *layer {
+func initFrozenLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache *PageCache, idx layerIndex) *layer {
 	config.setDefaults()
 	ly := &layer{
 		id:         id,
@@ -178,7 +178,7 @@ func initFrozenLayerFromIndex(store loophole.ObjectStore, id string, config Conf
 }
 
 func (ly *layer) loadIndex(ctx context.Context) error {
-	idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		// No index.json yet — start fresh.
 		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1}
@@ -198,7 +198,7 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 // refresh re-reads index.json from S3 to pick up changes written by
 // another writer. Used for read-only "follow" mode.
 func (ly *layer) refresh(ctx context.Context) error {
-	idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		return fmt.Errorf("refresh index: %w", err)
 	}
@@ -1178,7 +1178,7 @@ func (ly *layer) shouldRetryAfterLayoutError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, loophole.ErrNotFound) {
+	if errors.Is(err, objstore.ErrNotFound) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -1195,7 +1195,7 @@ func (ly *layer) shouldRetryAfterLayoutError(err error) bool {
 func (ly *layer) waitRefreshForLayoutChange(ctx context.Context, prevGen uint64) (bool, error) {
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for {
-		idx, _, err := loophole.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+		idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 		if err == nil && idx.LayoutGen != prevGen {
 			if err := ly.refresh(ctx); err != nil {
 				return false, err

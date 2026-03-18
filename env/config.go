@@ -1,4 +1,4 @@
-package loophole
+package env
 
 import (
 	"fmt"
@@ -46,12 +46,12 @@ func LoadConfig(dir Dir) (*Config, error) {
 	return &cfg, nil
 }
 
-// Resolve looks up a profile by name and returns the Instance.
+// Resolve looks up a profile by name and returns the ResolvedProfile.
 // If name is empty, it uses DefaultProfile from the config, or falls back
 // to the first profile (sorted alphabetically).
-func (c *Config) Resolve(name string) (Instance, error) {
+func (c *Config) Resolve(name string) (ResolvedProfile, error) {
 	if len(c.Profiles) == 0 {
-		return Instance{}, fmt.Errorf("no profiles defined in config")
+		return ResolvedProfile{}, fmt.Errorf("no profiles defined in config")
 	}
 	if name == "" {
 		name = c.DefaultProfile
@@ -72,12 +72,12 @@ func (c *Config) Resolve(name string) (Instance, error) {
 			names = append(names, k)
 		}
 		sort.Strings(names)
-		return Instance{}, fmt.Errorf("unknown profile %q (available: %v)", name, names)
+		return ResolvedProfile{}, fmt.Errorf("unknown profile %q (available: %v)", name, names)
 	}
 	if p.Bucket == "" && p.LocalDir == "" && p.DaemonURL == "" {
-		return Instance{}, fmt.Errorf("profile %q: bucket, local_dir, or daemon_url is required", name)
+		return ResolvedProfile{}, fmt.Errorf("profile %q: bucket, local_dir, or daemon_url is required", name)
 	}
-	return Instance{
+	return ResolvedProfile{
 		ProfileName: name,
 		Bucket:      p.Bucket,
 		Prefix:      p.Prefix,

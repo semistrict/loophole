@@ -1,4 +1,4 @@
-package loophole_test
+package storage_test
 
 import (
 	"encoding/json"

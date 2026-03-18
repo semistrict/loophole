@@ -17,8 +17,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/objstore"
 )
 
 func promCounterValue(c prometheus.Counter) float64 {
@@ -31,12 +31,12 @@ func promCounterValue(c prometheus.Counter) float64 {
 // The manager is automatically closed when the test finishes.
 func testManager(t *testing.T) *Manager {
 	t.Helper()
-	return newTestManager(t, loophole.NewMemStore(), testConfig)
+	return newTestManager(t, objstore.NewMemStore(), testConfig)
 }
 
-func testStoreManager(t *testing.T) (*loophole.MemStore, *Manager) {
+func testStoreManager(t *testing.T) (*objstore.MemStore, *Manager) {
 	t.Helper()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	return store, newTestManager(t, store, testConfig)
 }
 
@@ -177,7 +177,7 @@ func TestWriteFlushRead(t *testing.T) {
 }
 
 func TestWriteFlushReopenRead(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
 		FlushThreshold: 16 * PageSize,
@@ -668,7 +668,7 @@ func TestOverwriteAfterFlush(t *testing.T) {
 // TestSnapshotReadFromDifferentNode opens the snapshot volume fresh
 // (simulating a different node) and verifies data is readable via ancestor.
 func TestSnapshotReadFromDifferentNode(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -713,7 +713,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 // TestSnapshotOfSnapshotRead creates a snapshot of a snapshot and verifies
 // data is readable through a 2-level ancestor chain.
 func TestSnapshotOfSnapshotRead(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -786,7 +786,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 // TestSnapshotReadAfterMultipleFlushes tests that snapshots created after
 // multiple flush cycles still see all written data.
 func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -855,7 +855,7 @@ func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
 // TestCloneOfSnapshotFromDifferentNode verifies clone of snapshot works
 // when opened on a different node.
 func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -964,7 +964,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 }
 
 func TestDeleteVolumeThenList(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1057,7 +1057,7 @@ func TestFlushNoWrites(t *testing.T) {
 // --- Flush S3 failure tests ---
 
 func TestFlushPutReaderFail(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1077,7 +1077,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	}
 
 	// Arm fault on PutReader.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 PUT failure"),
 	})
 
@@ -1104,7 +1104,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 }
 
 func TestLoadLayerMapFromListing(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1236,7 +1236,7 @@ func TestAcquireRefAndRelease(t *testing.T) {
 func TestNewVolumeMetaFail(t *testing.T) {
 	store, m := testStoreManager(t)
 
-	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 		Err: fmt.Errorf("simulated meta.json failure"),
 	})
 	_, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
@@ -1252,7 +1252,7 @@ func TestNewVolumeRefFail(t *testing.T) {
 
 	// Key-specific fault: only the volume ref write (volumes/vol) fails,
 	// not the timeline meta.json write (timelines/<uuid>/meta.json).
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/vol/index.json", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "volumes/vol/index.json", objstore.Fault{
 		Err: fmt.Errorf("simulated volume ref failure"),
 	})
 
@@ -1277,7 +1277,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.SetFault(loophole.OpDeleteObject, "", loophole.Fault{
+	store.SetFault(objstore.OpDeleteObject, "", objstore.Fault{
 		Err: fmt.Errorf("simulated delete failure"),
 	})
 	err = m.DeleteVolume(ctx, "vol")
@@ -1297,7 +1297,7 @@ func TestListAllVolumesFail(t *testing.T) {
 	store, m := testStoreManager(t)
 	ctx := t.Context()
 
-	store.SetFault(loophole.OpListKeys, "", loophole.Fault{
+	store.SetFault(objstore.OpListKeys, "", objstore.Fault{
 		Err: fmt.Errorf("simulated list failure"),
 	})
 	_, err := m.ListAllVolumes(ctx)
@@ -1322,7 +1322,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 	}
 
 	// Fault on Get — reading the volume ref fails.
-	store.SetFault(loophole.OpGet, "", loophole.Fault{
+	store.SetFault(objstore.OpGet, "", objstore.Fault{
 		Err: fmt.Errorf("simulated get failure"),
 	})
 	_, err = m.OpenVolume("vol")
@@ -1363,7 +1363,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	}
 
 	// Now fault Get — a partial page write needs to read the existing page.
-	store.SetFault(loophole.OpGet, "", loophole.Fault{
+	store.SetFault(objstore.OpGet, "", objstore.Fault{
 		Err: fmt.Errorf("simulated read failure"),
 	})
 
@@ -1400,7 +1400,7 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	}
 
 	// Fault PutIfNotExists — createChild writes child meta.json.
-	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 		Err: fmt.Errorf("simulated createChild failure"),
 	})
 	err = snapshotVolume(t, v, "snap")
@@ -1436,7 +1436,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 
 	// Key-specific fault: only the snapshot volume ref write (volumes/snap) fails,
 	// not the child timeline meta.json write.
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/snap/index.json", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "volumes/snap/index.json", objstore.Fault{
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
@@ -1466,7 +1466,7 @@ func TestCloneCreateChildFail(t *testing.T) {
 	}
 
 	// Fault PutIfNotExists for createChild.
-	store.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 		Err: fmt.Errorf("simulated clone createChild failure"),
 	})
 	err = v.Clone("clone")
@@ -1494,7 +1494,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 	}
 
 	// Key-specific fault: only the clone volume ref write (volumes/clone) fails.
-	store.SetFault(loophole.OpPutIfNotExists, "volumes/clone/index.json", loophole.Fault{
+	store.SetFault(objstore.OpPutIfNotExists, "volumes/clone/index.json", objstore.Fault{
 		Err: fmt.Errorf("simulated clone putVolumeRef failure"),
 	})
 
@@ -1506,7 +1506,7 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 
 // TestOpenAncestorFail tests that an ancestor timeline open failure propagates.
 func TestWriteBackpressurePreservesData(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize, // freeze after every write
 		FlushInterval:  -1,       // disable periodic flush
@@ -1534,7 +1534,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	for i := range page1 {
 		page1[i] = 0xBB
 	}
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 	// Write returns error from auto-flush, but data should be in frozen layer.
@@ -1588,7 +1588,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 // `copied` without counting the last page, so callers (and the simulation
 // oracle) miss it. But the data IS in the memLayer and survives a later Flush.
 func TestCopyFromAutoFlushFault(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	// Very low flush threshold: 2 pages triggers auto-flush.
 	cfg := Config{
@@ -1621,7 +1621,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	}
 
 	// Inject PUT fault so auto-flush during CopyFrom fails.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -1689,7 +1689,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 //  6. On reopen, the page has the CopyFrom'd value (zeros from source)
 //     but an oracle tracking only `copied` pages would expect the branch-inherited value
 func TestCopyFromOracleConsistency(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -1724,7 +1724,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Inject PUT fault.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -1801,7 +1801,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 //  7. Reopen and read page 5: it has non-zero data from the partial write
 //     but an oracle that skipped RecordWrite on error would expect zeros
 func TestPartialWriteAutoFlushFault(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -1830,7 +1830,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	}
 
 	// Inject PUT fault so auto-flush fails.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -1971,7 +1971,7 @@ func TestMemLayerOverwriteReusesSlot(t *testing.T) {
 // TestPunchHoleFlushReopenRead reproduces the e2e "bad message" bug:
 // write data, punch holes over some of it, flush, reopen from S3, read back.
 func TestPunchHoleFlushReopenRead(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
 		FlushThreshold: 16 * PageSize,
@@ -2051,7 +2051,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 // TestConcurrentWriteReadFlushReopen stresses concurrent writes and reads
 // with interleaved flushes, then reopens and verifies data.
 func TestConcurrentWriteReadFlushReopen(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cacheDir := t.TempDir()
 	config := Config{
 		FlushThreshold: 8 * PageSize, // small threshold to force frequent flushes
@@ -2150,7 +2150,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 // TestMemLayerFullBackpressure verifies that the memtable layer handles
 // backpressure when the memtable is full.
 func TestMemLayerFullBackpressure(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cacheDir := t.TempDir()
 
 	// Use a small memtable slot cap so the test fills it quickly and
@@ -2206,7 +2206,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 // TestConcurrentReadsAndFlushes hammers concurrent reads and flushes to
 // catch data races in the lock-free read path.
 func TestConcurrentReadsAndFlushes(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	config := Config{
 		FlushThreshold: 64 * PageSize,
 	}
@@ -2286,7 +2286,7 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 // S3 is failing, as long as frozen layer capacity is not exhausted. The
 // background flush loop handles uploads asynchronously.
 func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize, // freeze after every page
 		FlushInterval:  50 * time.Millisecond,
@@ -2300,7 +2300,7 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 	}
 
 	// Make S3 uploads fail.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
@@ -2348,7 +2348,7 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 // TestAsyncFlushNotifyWakesLoop verifies that the flush loop wakes up
 // promptly when notified, rather than waiting for the timer.
 func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  10 * time.Second, // very long timer
@@ -2399,7 +2399,7 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 // TestBackpressureStillBlocksInline verifies that when the memtable fills
 // up and flush fails, the S3 error propagates to the writer.
 func TestBackpressureStillBlocksInline(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1, // synchronous flush so errors propagate
@@ -2412,7 +2412,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 	}
 
 	// Inject S3 fault so flushes fail.
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 
@@ -2446,7 +2446,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 // TestFlushRetryOnTransientError verifies that flushMemLayer retries
 // on transient S3 errors before giving up.
 func TestFlushRetryOnTransientError(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -2466,7 +2466,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 
 	// Fault that expires after 3 calls.
 	var faultCount atomic.Int32
-	store.SetFault(loophole.OpPutReader, "", loophole.Fault{
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("transient S3 error"),
 		ShouldFault: func(string) bool {
 			return faultCount.Add(1) <= 3
@@ -2492,7 +2492,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 // flush after a 2s delay when the last flush was more than FlushInterval ago.
 func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := loophole.NewMemStore()
+		store := objstore.NewMemStore()
 		cfg := Config{
 			FlushThreshold: 64 * PageSize, // large — memtable never fills
 			FlushInterval:  1 * time.Hour, // regular timer never fires
@@ -2568,7 +2568,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 // TestSingleflightDeduplicatesBlockDownloads verifies that concurrent reads
 // for the same uncached block only trigger one S3 download.
 func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -2596,7 +2596,7 @@ func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
 	vol.layer.blockCache.clear()
 
 	// Record S3 Get count before concurrent reads.
-	getBefore := store.Count(loophole.OpGet)
+	getBefore := store.Count(objstore.OpGet)
 
 	// Launch concurrent reads for the same page (same block).
 	var wg sync.WaitGroup
@@ -2619,7 +2619,7 @@ func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
 
 	// Without singleflight, we'd see up to 10 Gets. With it, should be ≤2
 	// (1 for the block blob + possibly 1 for index.json or other metadata).
-	getAfter := store.Count(loophole.OpGet)
+	getAfter := store.Count(objstore.OpGet)
 	gets := getAfter - getBefore
 	if gets > 2 {
 		t.Fatalf("expected ≤2 S3 Gets with singleflight, got %d", gets)
@@ -2661,7 +2661,7 @@ func TestBoundedCacheEviction(t *testing.T) {
 // TestRefreshFollowMode verifies that a reader can see data written by
 // another writer after calling Refresh().
 func TestRefreshFollowMode(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	ctx := t.Context()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
@@ -2733,7 +2733,7 @@ func TestRefreshFollowMode(t *testing.T) {
 
 // TestFlushReportsMetrics verifies that FlushBytes metric is incremented.
 func TestFlushReportsMetrics(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -2765,7 +2765,7 @@ func TestFlushReportsMetrics(t *testing.T) {
 
 // TestReadAtMemtable verifies that ReadAt returns the expected page contents.
 func TestReadAtMemtable(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -2804,7 +2804,7 @@ func TestReadAtMemtable(t *testing.T) {
 
 // TestReadAtAfterFlush verifies that ReadAt works after data has been flushed.
 func TestReadAtAfterFlush(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -2839,7 +2839,7 @@ func TestReadAtAfterFlush(t *testing.T) {
 // TestReadAtSubPageFallback verifies that sub-page or unaligned ReadAt
 // falls back to the allocating path correctly.
 func TestReadAtSubPageFallback(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -2880,7 +2880,7 @@ func TestReadAtSubPageFallback(t *testing.T) {
 
 // TestReadAtReturnsCopy verifies that ReadAt returns a detached copy.
 func TestReadAtReturnsCopy(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -3123,7 +3123,7 @@ func TestDiffSnapshotClone(t *testing.T) {
 // the case where Firecracker restores from a snapshot and the daemon is a
 // fresh process that reopens the volume.
 func TestDiffSnapshotCloneReopened(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3205,7 +3205,7 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 // create, write, clone-1, write dirty, clone-2, then open clone-2 on a
 // completely fresh manager (simulating the restored VM reading memory).
 func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,

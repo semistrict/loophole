@@ -1,4 +1,4 @@
-package loophole
+package objstore
 
 import (
 	"bytes"
@@ -12,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/semistrict/loophole/env"
 )
 
 func skipWithoutS3(t *testing.T) {
@@ -28,7 +30,7 @@ func newS3TestStore(t *testing.T) *S3Store {
 	if bucket == "" {
 		bucket = "testbucket"
 	}
-	store, err := NewS3Store(t.Context(), Instance{
+	store, err := NewS3Store(t.Context(), env.ResolvedProfile{
 		Bucket:   bucket,
 		Endpoint: os.Getenv("S3_ENDPOINT"),
 	})

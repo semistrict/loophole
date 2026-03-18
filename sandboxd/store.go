@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 )
 
@@ -18,7 +18,7 @@ const (
 	sandboxesFile = "sandboxes.json"
 )
 
-func loadState(dir loophole.Dir) (persistedState, error) {
+func loadState(dir env.Dir) (persistedState, error) {
 	state := persistedState{
 		Zygotes:   map[string]ZygoteRecord{},
 		Sandboxes: map[string]SandboxRecord{},
@@ -36,7 +36,7 @@ func loadState(dir loophole.Dir) (persistedState, error) {
 	return state, nil
 }
 
-func saveState(dir loophole.Dir, state persistedState) error {
+func saveState(dir env.Dir, state persistedState) error {
 	root := dir.SandboxdState()
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err

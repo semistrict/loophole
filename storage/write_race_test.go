@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // TestConcurrentPartialPageWrites verifies that concurrent sub-page writes
@@ -16,7 +16,7 @@ func TestConcurrentPartialPageWrites(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize
 
-	m := newTestManager(t, loophole.NewMemStore(), cfg)
+	m := newTestManager(t, objstore.NewMemStore(), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "race"})
@@ -86,7 +86,7 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 	// from outside bubble" when this non-synctest test uses zstd.
 	cfg.FlushThreshold = 1 << 62
 
-	m := newTestManager(t, loophole.NewMemStore(), cfg)
+	m := newTestManager(t, objstore.NewMemStore(), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "punch-race"})

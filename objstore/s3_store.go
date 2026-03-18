@@ -1,4 +1,4 @@
-package loophole
+package objstore
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/metrics"
 )
 
@@ -38,8 +39,8 @@ func optOrEnv(val, envKey, fallback string) string {
 	return fallback
 }
 
-// NewS3Store creates an S3Store from an Instance.
-func NewS3Store(ctx context.Context, inst Instance) (*S3Store, error) {
+// NewS3Store creates an S3Store from a resolved profile.
+func NewS3Store(ctx context.Context, inst env.ResolvedProfile) (*S3Store, error) {
 	endpoint := optOrEnv(inst.Endpoint, "S3_ENDPOINT", "")
 	accessKey := optOrEnv(inst.AccessKey, "AWS_ACCESS_KEY_ID", "")
 	secretKey := optOrEnv(inst.SecretKey, "AWS_SECRET_ACCESS_KEY", "")

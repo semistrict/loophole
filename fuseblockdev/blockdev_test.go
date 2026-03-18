@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +30,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	t.Helper()
 	skipWithoutFuse(t)
 
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	vm := storage.NewManager(store, t.TempDir(), storage.Config{}, nil, nil)
 	t.Cleanup(func() { vm.Close(t.Context()) })
 

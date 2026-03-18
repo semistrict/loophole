@@ -1,4 +1,4 @@
-package loophole
+package env
 
 import (
 	"crypto/sha256"

@@ -23,10 +23,11 @@ import (
 
 	axiomslog "github.com/axiomhq/axiom-go/adapters/slog"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -43,8 +44,8 @@ func storage2ConfigFromEnv() storage.Config {
 
 // Server serves the loophole HTTP API over a Unix socket.
 type Server struct {
-	inst      loophole.Instance
-	dir       loophole.Dir
+	inst      env.ResolvedProfile
+	dir       env.Dir
 	socket    string
 	backend   *fsbackend.Backend
 	diskCache *storage.PageCache
@@ -76,7 +77,7 @@ type Options struct {
 	Volume     string // Volume name — used for per-volume log file path.
 }
 
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Server, error) {
+func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Options) (*Server, error) {
 	foreground := opts.Foreground
 	socketMode := opts.SocketMode
 	logPath := dir.VolumeLog(opts.Volume)
@@ -129,17 +130,17 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 
 	// Create object store
 	var startupErr string
-	var store loophole.ObjectStore
+	var store objstore.ObjectStore
 	if inst.LocalDir != "" {
 		var err error
-		store, err = loophole.NewFileStore(inst.LocalDir)
+		store, err = objstore.NewFileStore(inst.LocalDir)
 		if err != nil {
 			return nil, fmt.Errorf("create file store: %w", err)
 		}
 		slog.Warn("using local file store — data is NOT replicated to S3")
 	} else {
 		var err error
-		store, err = loophole.NewS3Store(ctx, inst)
+		store, err = objstore.NewS3Store(ctx, inst)
 		if err != nil {
 			storeErr := fmt.Sprintf("create S3 store: %v", err)
 			slog.Error("S3 store init failed, server will start degraded", "error", err)

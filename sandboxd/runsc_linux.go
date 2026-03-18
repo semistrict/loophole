@@ -29,7 +29,6 @@ import (
 const sandboxdGuestBin = "/.loophole/bin/loophole-sandboxd"
 const defaultRunscPlatform = "systrap"
 
-
 var defaultSandboxCapabilities = []string{
 	"CAP_AUDIT_WRITE",
 	"CAP_CHOWN",

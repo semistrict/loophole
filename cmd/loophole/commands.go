@@ -15,10 +15,11 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/apiserver"
 	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -53,7 +54,7 @@ func serveCmd() *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := loophole.DefaultDir()
+			dir := env.DefaultDir()
 			inst, err := resolveProfile(dir)
 			if err != nil {
 				return err
@@ -724,9 +725,9 @@ type migrationRecord struct {
 	CompletedAt string `json:"completed_at,omitempty"`
 }
 
-func loadMigrationState(ctx context.Context, store loophole.ObjectStore) (migrationState, string, error) {
-	state, etag, err := loophole.ReadJSON[migrationState](ctx, store, "migrations.json")
-	if errors.Is(err, loophole.ErrNotFound) {
+func loadMigrationState(ctx context.Context, store objstore.ObjectStore) (migrationState, string, error) {
+	state, etag, err := objstore.ReadJSON[migrationState](ctx, store, "migrations.json")
+	if errors.Is(err, objstore.ErrNotFound) {
 		return migrationState{Migrations: map[string]migrationRecord{}}, "", nil
 	}
 	if err != nil {
@@ -738,25 +739,25 @@ func loadMigrationState(ctx context.Context, store loophole.ObjectStore) (migrat
 	return state, etag, nil
 }
 
-func saveMigrationState(ctx context.Context, store loophole.ObjectStore, state migrationState, etag string) (string, error) {
+func saveMigrationState(ctx context.Context, store objstore.ObjectStore, state migrationState, etag string) (string, error) {
 	data, err := json.Marshal(state)
 	if err != nil {
 		return "", err
 	}
 	if etag == "" {
 		if err := store.PutIfNotExists(ctx, "migrations.json", data); err != nil {
-			if !errors.Is(err, loophole.ErrExists) {
+			if !errors.Is(err, objstore.ErrExists) {
 				return "", err
 			}
 			// Race — someone else created it. Read back etag and CAS.
-			_, freshEtag, rerr := loophole.ReadJSON[migrationState](ctx, store, "migrations.json")
+			_, freshEtag, rerr := objstore.ReadJSON[migrationState](ctx, store, "migrations.json")
 			if rerr != nil {
 				return "", fmt.Errorf("read back migrations.json: %w", rerr)
 			}
 			return store.PutBytesCAS(ctx, "migrations.json", data, freshEtag)
 		}
 		// Read back etag for subsequent CAS writes.
-		_, freshEtag, rerr := loophole.ReadBytes(ctx, store, "migrations.json")
+		_, freshEtag, rerr := objstore.ReadBytes(ctx, store, "migrations.json")
 		if rerr != nil {
 			return "", fmt.Errorf("read back migrations.json etag: %w", rerr)
 		}
@@ -774,12 +775,12 @@ func migrateCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			dir := loophole.DefaultDir()
+			dir := env.DefaultDir()
 			inst, err := resolveProfile(dir)
 			if err != nil {
 				return err
 			}
-			store, err := loophole.NewS3Store(ctx, inst)
+			store, err := objstore.NewS3Store(ctx, inst)
 			if err != nil {
 				return fmt.Errorf("connect to S3: %w", err)
 			}
@@ -821,7 +822,7 @@ func migrateCmd() *cobra.Command {
 				if !strings.HasSuffix(obj.Key, "/index.json") || strings.Contains(obj.Key, "/checkpoints/") {
 					continue
 				}
-				raw, etag, err := loophole.ReadBytes(ctx, volRefs, obj.Key)
+				raw, etag, err := objstore.ReadBytes(ctx, volRefs, obj.Key)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "  skip %s: %v\n", obj.Key, err)
 					continue
@@ -885,7 +886,7 @@ func migrateCmd() *cobra.Command {
 				ls := layersStore.At(layerID)
 
 				// Read meta.json — if it doesn't exist or has no FrozenAt, skip.
-				metaRaw, _, err := loophole.ReadBytes(ctx, ls, "meta.json")
+				metaRaw, _, err := objstore.ReadBytes(ctx, ls, "meta.json")
 				if err != nil {
 					continue // no meta.json — nothing to migrate
 				}
@@ -955,7 +956,7 @@ func migrateCmd() *cobra.Command {
 }
 
 func socketFromMountpoint(mountpoint string) (string, error) {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	symPath := dir.MountSymlink(mountpoint)
 	target, err := os.Readlink(symPath)
 	if err != nil {
@@ -965,7 +966,7 @@ func socketFromMountpoint(mountpoint string) (string, error) {
 }
 
 func socketFromDevice(devicePath string) (string, error) {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	symPath := dir.DeviceSymlink(devicePath)
 	target, err := os.Readlink(symPath)
 	if err != nil {
@@ -975,7 +976,7 @@ func socketFromDevice(devicePath string) (string, error) {
 }
 
 func socketForVolume(volume string) string {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	sock := dir.VolumeSocket(volume)
 	if _, err := os.Stat(sock); err == nil {
 		return sock
@@ -1010,7 +1011,7 @@ func resolveOwnerClient(target string) (*client.Client, error) {
 }
 
 func startOwnerServer(ctx context.Context, volume string) (*apiserver.Server, error) {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
 		return nil, err
@@ -1037,16 +1038,16 @@ func startOwnerServer(ctx context.Context, volume string) (*apiserver.Server, er
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	var store loophole.ObjectStore
+	var store objstore.ObjectStore
 	if inst.LocalDir != "" {
-		store, err = loophole.NewFileStore(inst.LocalDir)
+		store, err = objstore.NewFileStore(inst.LocalDir)
 	} else {
-		store, err = loophole.NewS3Store(ctx, inst)
+		store, err = objstore.NewS3Store(ctx, inst)
 	}
 	if err != nil {
 		return nil, nil, err
@@ -1060,7 +1061,7 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 // detectMountpoint walks up from the current working directory to find
 // a loophole mountpoint (one that has a registered mount symlink).
 func detectMountpoint() (string, error) {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return "", fmt.Errorf("getwd: %w", err)

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -15,7 +15,7 @@ var testConfig = Config{
 	FlushInterval:  -1,
 }
 
-func newTestManager(t *testing.T, store loophole.ObjectStore, config Config) *Manager {
+func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Manager {
 	t.Helper()
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
@@ -35,7 +35,7 @@ func newTestManager(t *testing.T, store loophole.ObjectStore, config Config) *Ma
 
 func TestLayerReadWrite(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -66,7 +66,7 @@ func TestLayerReadWrite(t *testing.T) {
 
 func TestLayerFlushAndRead(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -95,7 +95,7 @@ func TestLayerFlushAndRead(t *testing.T) {
 
 func TestLayerPunchHole(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -127,7 +127,7 @@ func TestLayerPunchHole(t *testing.T) {
 
 func TestLayerFlushAndReadPages(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
@@ -165,7 +165,7 @@ func TestLayerFlushAndReadPages(t *testing.T) {
 
 func TestLayerSnapshot(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -213,7 +213,7 @@ func TestLayerSnapshot(t *testing.T) {
 
 func TestLayerDirectL2Write(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -276,7 +276,7 @@ func TestLayerDirectL2Write(t *testing.T) {
 
 func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -319,7 +319,7 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 
 func TestLayerDirectL2MixedWrite(t *testing.T) {
 	ctx := t.Context()
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,

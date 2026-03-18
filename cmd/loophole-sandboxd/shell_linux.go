@@ -19,7 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/sandboxd"
 )
@@ -66,7 +66,7 @@ func runShell(args []string) error {
 		command = []string{"/bin/sh", "-i"}
 	}
 
-	socketPath = firstNonEmpty(socketPath, loophole.DefaultDir().SandboxdSocket())
+	socketPath = firstNonEmpty(socketPath, env.DefaultDir().SandboxdSocket())
 	rows, cols := termSize()
 
 	req := sandboxd.ProcessCreateRequest{

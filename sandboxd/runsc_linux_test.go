@@ -7,14 +7,14 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 )
 
 func TestRunscArgsDefault(t *testing.T) {
 	t.Parallel()
 
 	d := &Daemon{
-		dir:       loophole.Dir(t.TempDir()),
+		dir:       env.Dir(t.TempDir()),
 		runscRoot: "/tmp/runsc-root",
 	}
 
@@ -36,7 +36,7 @@ func TestRunscArgsDefault(t *testing.T) {
 func TestRunscArgsWithDebug(t *testing.T) {
 	t.Parallel()
 
-	dir := loophole.Dir(t.TempDir())
+	dir := env.Dir(t.TempDir())
 	d := &Daemon{
 		dir:        dir,
 		runscRoot:  "/tmp/runsc-root",
@@ -128,7 +128,7 @@ func TestBundleSpecBindMounts(t *testing.T) {
 	}
 
 	d := &Daemon{
-		dir:           loophole.Dir(tmpDir),
+		dir:           env.Dir(tmpDir),
 		runscRootless: true,
 	}
 	spec, err := d.bundleSpec(SandboxRecord{

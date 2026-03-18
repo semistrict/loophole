@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // TestS3Bench measures raw S3 upload throughput and object creation speed.
@@ -18,7 +18,7 @@ func TestS3Bench(t *testing.T) {
 	ctx := t.Context()
 
 	inst := uniqueInstance(t)
-	store, err := loophole.NewS3Store(ctx, inst)
+	store, err := objstore.NewS3Store(ctx, inst)
 	if err != nil {
 		t.Fatal(err)
 	}

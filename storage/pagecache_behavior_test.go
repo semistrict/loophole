@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -27,7 +27,7 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	m := NewManager(loophole.NewMemStore(), t.TempDir(), cfg, nil, cache)
+	m := NewManager(objstore.NewMemStore(), t.TempDir(), cfg, nil, cache)
 	t.Cleanup(func() {
 		_ = m.Close(t.Context())
 	})
@@ -63,7 +63,7 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	}
 
 	cacheDir := t.TempDir()
-	m := NewManager(loophole.NewMemStore(), cacheDir, cfg, nil, cache)
+	m := NewManager(objstore.NewMemStore(), cacheDir, cfg, nil, cache)
 	t.Cleanup(func() {
 		_ = m.Close(t.Context())
 	})
@@ -118,7 +118,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 		FlushInterval:  -1,
 	}
 
-	m := NewManager(loophole.NewMemStore(), t.TempDir(), cfg, nil, cache)
+	m := NewManager(objstore.NewMemStore(), t.TempDir(), cfg, nil, cache)
 	t.Cleanup(func() {
 		_ = m.Close(t.Context())
 	})

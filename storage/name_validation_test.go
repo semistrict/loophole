@@ -3,13 +3,13 @@ package storage
 import (
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestManagerRejectsInvalidVolumeNames(t *testing.T) {
-	m := newTestManager(t, loophole.NewMemStore(), testConfig)
+	m := newTestManager(t, objstore.NewMemStore(), testConfig)
 
 	_, err := m.NewVolume(CreateParams{Volume: "bad..name"})
 	require.Error(t, err)
@@ -17,9 +17,33 @@ func TestManagerRejectsInvalidVolumeNames(t *testing.T) {
 }
 
 func TestManagerRejectsInvalidCheckpointIDs(t *testing.T) {
-	m := newTestManager(t, loophole.NewMemStore(), testConfig)
+	m := newTestManager(t, objstore.NewMemStore(), testConfig)
 
 	err := m.CloneFromCheckpoint(t.Context(), "sandbox-1", "../evil", "clone-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid checkpoint id")
+}
+
+func TestValidateCheckpointID(t *testing.T) {
+	assert.NoError(t, ValidateCheckpointID("20260313112233"))
+	assert.Error(t, ValidateCheckpointID("../evil"))
+	assert.Error(t, ValidateCheckpointID("20260313"))
+	assert.Error(t, ValidateCheckpointID("2026031311223a"))
+}
+
+func TestValidateVolumeName(t *testing.T) {
+	t.Run("valid", func(t *testing.T) {
+		assert.NoError(t, ValidateVolumeName("sandbox-1"))
+	})
+
+	t.Run("rejects traversal", func(t *testing.T) {
+		err := ValidateVolumeName("sandbox..1")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "must not contain \"..\"")
+	})
+
+	t.Run("rejects separators", func(t *testing.T) {
+		assert.Error(t, ValidateVolumeName("sandbox/1"))
+		assert.Error(t, ValidateVolumeName(`sandbox\1`))
+	})
 }

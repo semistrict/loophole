@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage"
@@ -27,7 +27,7 @@ func EmbedSocketPath(pid int) string {
 //
 // The returned cleanup function stops the server and removes the socket.
 // The server runs in background goroutines; it does not block.
-func StartEmbedded(vm *storage.Manager, diskCache *storage.PageCache, inst loophole.Instance) (func(), error) {
+func StartEmbedded(vm *storage.Manager, diskCache *storage.PageCache, inst env.ResolvedProfile) (func(), error) {
 	pid := os.Getpid()
 	sockPath := EmbedSocketPath(pid)
 

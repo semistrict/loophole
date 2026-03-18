@@ -1,4 +1,4 @@
-package loophole
+package objstore
 
 import (
 	"bytes"

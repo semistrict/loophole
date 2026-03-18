@@ -21,7 +21,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 )
 
@@ -35,8 +35,8 @@ type Options struct {
 }
 
 type Daemon struct {
-	dir                 loophole.Dir
-	inst                loophole.Instance
+	dir                 env.Dir
+	inst                env.ResolvedProfile
 	socketPath          string
 	loopholeBin         string
 	runscBin            string
@@ -78,7 +78,7 @@ type processEvent struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
+func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Options) (*Daemon, error) {
 	socketPath := opts.SocketPath
 	if socketPath == "" {
 		socketPath = dir.SandboxdSocket()

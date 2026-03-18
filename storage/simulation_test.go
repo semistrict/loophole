@@ -18,7 +18,7 @@ import (
 	"testing/synctest"
 	"time"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -1223,7 +1223,7 @@ func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
 	// Read the checkpoint ref to get the child layer ID.
 	cpKey := volName + "/checkpoints/" + ts + "/index.json"
 	volRefs := sim.store.Store().At("volumes")
-	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
+	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
 		return
 	}
@@ -1277,7 +1277,7 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 	// Read the checkpoint ref to get the parent layer ID for oracle tracking.
 	cpKey := srcVolName + "/checkpoints/" + cp.ID + "/index.json"
 	volRefs := sim.store.Store().At("volumes")
-	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
+	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
 		return
 	}
@@ -1747,7 +1747,7 @@ func (sim *Simulation) updateParentAfterRelayer(ctx context.Context, volName str
 
 func (sim *Simulation) getVolRef(ctx context.Context, name string) (volumeRef, error) {
 	volRefs := sim.store.Store().At("volumes")
-	ref, _, err := loophole.ReadJSON[volumeRef](ctx, volRefs, name+"/index.json")
+	ref, _, err := objstore.ReadJSON[volumeRef](ctx, volRefs, name+"/index.json")
 	return ref, err
 }
 

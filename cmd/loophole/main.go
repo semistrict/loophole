@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 )
 
 var globalProfile string
@@ -61,10 +61,10 @@ func rootCmd() *cobra.Command {
 }
 
 // resolveProfile loads the config and resolves the current profile.
-func resolveProfile(dir loophole.Dir) (loophole.Instance, error) {
-	cfg, err := loophole.LoadConfig(dir)
+func resolveProfile(dir env.Dir) (env.ResolvedProfile, error) {
+	cfg, err := env.LoadConfig(dir)
 	if err != nil {
-		return loophole.Instance{}, err
+		return env.ResolvedProfile{}, err
 	}
 	return cfg.Resolve(globalProfile)
 }

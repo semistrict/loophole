@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"time"
 )
 
@@ -41,4 +42,17 @@ type VolumeInfo struct {
 type DirectPage struct {
 	Offset uint64
 	Data   []byte
+}
+
+// ValidateCheckpointID ensures checkpoint IDs remain a single safe path segment.
+func ValidateCheckpointID(id string) error {
+	if len(id) != 14 {
+		return fmt.Errorf("invalid checkpoint id %q", id)
+	}
+	for _, r := range id {
+		if r < '0' || r > '9' {
+			return fmt.Errorf("invalid checkpoint id %q", id)
+		}
+	}
+	return nil
 }

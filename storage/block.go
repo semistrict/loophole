@@ -11,7 +11,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // Block file format (L1 and L2):
@@ -172,7 +172,7 @@ type parsedBlock struct {
 	header    blockHeader
 	dictBytes []byte // shared dictionary; may be nil
 	index     []blockIndexEntry
-	store     loophole.ObjectStore
+	store     objstore.ObjectStore
 	key       string
 }
 

@@ -8,8 +8,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	level := slog.Level(100)
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
-		var level slog.Level
 		switch strings.ToLower(lvl) {
 		case "debug":
 			level = slog.LevelDebug
@@ -20,8 +20,8 @@ func TestMain(m *testing.M) {
 		case "error":
 			level = slog.LevelError
 		}
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	os.Exit(m.Run())
 }
 

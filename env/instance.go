@@ -1,7 +1,7 @@
-package loophole
+package env
 
-// Instance identifies a logical loophole store with all connection parameters.
-type Instance struct {
+// ResolvedProfile identifies a logical loophole store with all connection parameters.
+type ResolvedProfile struct {
 	ProfileName string // profile name from config; used for naming sockets, logs, etc.
 	Bucket      string
 	Prefix      string
@@ -16,7 +16,7 @@ type Instance struct {
 
 // URL returns the canonical URL string for this instance.
 // For local stores it returns "local:/path", for S3 it returns "s3://bucket/prefix".
-func (inst Instance) URL() string {
+func (inst ResolvedProfile) URL() string {
 	if inst.LocalDir != "" {
 		return "local:" + inst.LocalDir
 	}

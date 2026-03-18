@@ -8,11 +8,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 )
 
 func TestSandboxdStateRoundTrip(t *testing.T) {
-	dir := loophole.Dir(t.TempDir())
+	dir := env.Dir(t.TempDir())
 	state := persistedState{
 		Zygotes: map[string]ZygoteRecord{
 			"ubuntu": {

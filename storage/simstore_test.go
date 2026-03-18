@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // FaultConfig controls probabilistic fault injection in SimObjectStore.
@@ -34,7 +34,7 @@ type FaultConfig struct {
 // SimObjectStore wraps a MemStore with deterministic fault injection.
 // All randomness comes from the provided *rand.Rand for reproducibility.
 type SimObjectStore struct {
-	inner  *loophole.MemStore
+	inner  *objstore.MemStore
 	rng    *rand.Rand
 	faults FaultConfig
 }
@@ -42,20 +42,20 @@ type SimObjectStore struct {
 // NewSimObjectStore creates a fault-injecting object store wrapper.
 func NewSimObjectStore(rng *rand.Rand, faults FaultConfig) *SimObjectStore {
 	return &SimObjectStore{
-		inner:  loophole.NewMemStore(),
+		inner:  objstore.NewMemStore(),
 		rng:    rng,
 		faults: faults,
 	}
 }
 
-// Store returns the underlying MemStore (for use as loophole.ObjectStore).
+// Store returns the underlying MemStore (for use as objstore.ObjectStore).
 // Fault injection is applied via MemStore's SetFault mechanism, driven
 // by the simulation's tick cycle rather than per-call randomness, because
 // MemStore.SetFault is the established pattern for this codebase.
 //
 // The simulation calls InjectFaults() before each tick to randomly arm
 // faults based on the FaultConfig probabilities.
-func (s *SimObjectStore) Store() *loophole.MemStore {
+func (s *SimObjectStore) Store() *objstore.MemStore {
 	return s.inner
 }
 
@@ -65,25 +65,25 @@ func (s *SimObjectStore) InjectFaults() {
 	s.inner.ClearAllFaults()
 
 	if s.faults.GetFailRate > 0 && s.rng.Float64() < s.faults.GetFailRate {
-		s.inner.SetFault(loophole.OpGet, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpGet, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 GET failure"),
 		})
 	}
 
 	if s.faults.PutFailRate > 0 && s.rng.Float64() < s.faults.PutFailRate {
-		s.inner.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
-		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
 	}
 
 	if s.faults.PhantomPutRate > 0 && s.rng.Float64() < s.faults.PhantomPutRate {
-		s.inner.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
-		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
 	}
@@ -92,36 +92,36 @@ func (s *SimObjectStore) InjectFaults() {
 		isLayersJSON := func(key string) bool {
 			return strings.HasSuffix(key, "layers.json")
 		}
-		s.inner.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
-		s.inner.SetFault(loophole.OpPutIfNotExists, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
 	}
 
 	if s.faults.ListFailRate > 0 && s.rng.Float64() < s.faults.ListFailRate {
-		s.inner.SetFault(loophole.OpListKeys, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpListKeys, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 LIST failure"),
 		})
 	}
 
 	if s.faults.DeleteFailRate > 0 && s.rng.Float64() < s.faults.DeleteFailRate {
-		s.inner.SetFault(loophole.OpDeleteObject, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpDeleteObject, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 DELETE failure"),
 		})
 	}
 
 	if s.faults.GetLatency > 0 {
-		s.inner.SetFault(loophole.OpGet, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpGet, "", objstore.Fault{
 			Delay: s.faults.GetLatency,
 		})
 	}
 
 	if s.faults.PutLatency > 0 {
-		s.inner.SetFault(loophole.OpPutReader, "", loophole.Fault{
+		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
 			Delay: s.faults.PutLatency,
 		})
 	}

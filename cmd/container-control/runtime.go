@@ -11,14 +11,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 )
 
 // ownerClient returns a client connected to the per-volume owner process.
 func (s *controlServer) ownerClient(volume string) *client.Client {
-	dir := loophole.DefaultDir()
+	dir := env.DefaultDir()
 	return client.NewFromSocket(dir.VolumeSocket(volume))
 }
 

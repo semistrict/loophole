@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 )
 
@@ -46,7 +46,7 @@ func sshCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			baseURL := strings.TrimRight(urlFlag, "/")
 			if baseURL == "" {
-				dir := loophole.DefaultDir()
+				dir := env.DefaultDir()
 				inst, err := resolveProfile(dir)
 				if err != nil {
 					return err

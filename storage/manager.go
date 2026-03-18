@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 // checkpointRef is the S3-persisted metadata for a volume checkpoint.
@@ -37,15 +37,15 @@ type volumeRef struct {
 
 // Manager manages volumes backed by storage layers.
 type Manager struct {
-	store     loophole.ObjectStore
+	store     objstore.ObjectStore
 	cacheDir  string
 	config    Config
 	diskCache *PageCache
-	lease     *loophole.LeaseManager
+	lease     *objstore.LeaseManager
 	fs        localFS
 	idGen     func() string
 
-	volRefs loophole.ObjectStore // store.At("volumes")
+	volRefs objstore.ObjectStore // store.At("volumes")
 
 	mu         sync.Mutex
 	cond       *sync.Cond // broadcast on volume close
@@ -67,13 +67,13 @@ func (osLocalFS) MkdirAll(path string, perm uint32) error {
 }
 
 // NewManager creates a Manager.
-func NewManager(store loophole.ObjectStore, cacheDir string, config Config, fs localFS, diskCache *PageCache) *Manager {
-	store = loophole.NewRetryStore(store)
+func NewManager(store objstore.ObjectStore, cacheDir string, config Config, fs localFS, diskCache *PageCache) *Manager {
+	store = objstore.NewRetryStore(store)
 	config.setDefaults()
 	if fs == nil {
 		fs = osLocalFS{}
 	}
-	lease := loophole.NewLeaseManager(store.At("leases"))
+	lease := objstore.NewLeaseManager(store.At("leases"))
 	m := &Manager{
 		store:     store,
 		cacheDir:  cacheDir,
@@ -101,11 +101,11 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 	name := p.Volume
 	size := p.Size
 	volType := p.Type
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return nil, err
 	}
 	if p.Parent != "" {
-		if err := loophole.ValidateVolumeName(p.Parent); err != nil {
+		if err := ValidateVolumeName(p.Parent); err != nil {
 			return nil, fmt.Errorf("invalid parent volume: %w", err)
 		}
 	}
@@ -139,7 +139,7 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 }
 
 func (m *Manager) OpenVolume(name string) (*Volume, error) {
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
@@ -200,7 +200,7 @@ func (m *Manager) ListAllVolumes(ctx context.Context) ([]string, error) {
 		// Keys are "{name}/index.json" or "{name}/checkpoints/...".
 		// Extract the first path segment as the volume name.
 		name, _, ok := strings.Cut(obj.Key, "/")
-		if ok && name != "" && loophole.ValidateVolumeName(name) == nil {
+		if ok && name != "" && ValidateVolumeName(name) == nil {
 			seen[name] = true
 		}
 	}
@@ -223,7 +223,7 @@ func (m *Manager) ListVolumesByType(ctx context.Context, volType string) ([]stri
 		if err != nil {
 			continue
 		}
-		ref, _, err := loophole.ReadJSON[volumeRef](ctx, m.volRefs, key)
+		ref, _, err := objstore.ReadJSON[volumeRef](ctx, m.volRefs, key)
 		if err != nil {
 			continue
 		}
@@ -235,7 +235,7 @@ func (m *Manager) ListVolumesByType(ctx context.Context, volType string) ([]stri
 }
 
 func (m *Manager) VolumeInfo(ctx context.Context, name string) (VolumeInfo, error) {
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return VolumeInfo{}, err
 	}
 	ref, err := m.getVolumeRef(ctx, name)
@@ -257,7 +257,7 @@ func (m *Manager) UpdateLabels(ctx context.Context, name string, labels map[stri
 	if err != nil {
 		return err
 	}
-	return loophole.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
+	return objstore.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
 		ref.Labels = labels
 		return nil
 	})
@@ -299,7 +299,7 @@ func (m *Manager) WaitClosed(ctx context.Context, name string) error {
 // if no other refs remain (e.g. mounts). Use this after Unmount to fully close
 // a volume that was opened via OpenVolume/NewVolume.
 func (m *Manager) CloseVolume(name string) error {
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -312,7 +312,7 @@ func (m *Manager) CloseVolume(name string) error {
 }
 
 func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -386,7 +386,7 @@ func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool)
 	if err != nil {
 		return false, err
 	}
-	ref, etag, err := loophole.ReadJSON[volumeRef](ctx, m.volRefs, key)
+	ref, etag, err := objstore.ReadJSON[volumeRef](ctx, m.volRefs, key)
 	if err != nil {
 		return false, fmt.Errorf("read volume ref %q: %w", volumeName, err)
 	}
@@ -437,7 +437,7 @@ func (m *Manager) ForceClearLease(ctx context.Context, volumeName string) error 
 	if err != nil {
 		return err
 	}
-	ref, etag, err := loophole.ReadJSON[volumeRef](ctx, m.volRefs, key)
+	ref, etag, err := objstore.ReadJSON[volumeRef](ctx, m.volRefs, key)
 	if err != nil {
 		return fmt.Errorf("read volume ref %q: %w", volumeName, err)
 	}
@@ -462,7 +462,7 @@ func (m *Manager) getVolumeRef(ctx context.Context, name string) (volumeRef, err
 	if err != nil {
 		return volumeRef{}, err
 	}
-	ref, _, err := loophole.ReadJSON[volumeRef](ctx, m.volRefs, key)
+	ref, _, err := objstore.ReadJSON[volumeRef](ctx, m.volRefs, key)
 	if err != nil {
 		return volumeRef{}, err
 	}
@@ -531,7 +531,7 @@ func (m *Manager) putVolumeRefNew(ctx context.Context, name string, ref volumeRe
 		return err
 	}
 	if err := m.volRefs.PutIfNotExists(ctx, key, data); err != nil {
-		if errors.Is(err, loophole.ErrExists) {
+		if errors.Is(err, objstore.ErrExists) {
 			return fmt.Errorf("volume %q already exists", name)
 		}
 		return fmt.Errorf("create volume ref: %w", err)
@@ -549,7 +549,7 @@ func (m *Manager) putVolumeRef(ctx context.Context, name string, ref volumeRef) 
 		return err
 	}
 	if err := m.volRefs.PutIfNotExists(ctx, key, data); err != nil {
-		if errors.Is(err, loophole.ErrExists) {
+		if errors.Is(err, objstore.ErrExists) {
 			return fmt.Errorf("volume %q already exists", name)
 		}
 		return err
@@ -575,7 +575,7 @@ func (m *Manager) acquireVolumeLease(ctx context.Context, name string) (uint64, 
 		return 0, err
 	}
 	var seq uint64
-	err = loophole.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
+	err = objstore.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
 		if err := m.lease.CheckAvailable(ctx, ref.LeaseToken); err != nil {
 			return fmt.Errorf("volume %s: %w", name, err)
 		}
@@ -596,7 +596,7 @@ func (m *Manager) relayerVolume(ctx context.Context, name string, newLayerID str
 		return 0, err
 	}
 	var seq uint64
-	err = loophole.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
+	err = objstore.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
 		ref.LayerID = newLayerID
 		ref.WriteLeaseSeq++
 		seq = ref.WriteLeaseSeq
@@ -612,13 +612,13 @@ func (m *Manager) releaseVolumeLease(ctx context.Context, name string) {
 		slog.Warn("release volume lease", "volume", name, "error", err)
 		return
 	}
-	if err := loophole.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
+	if err := objstore.ModifyJSON[volumeRef](ctx, m.volRefs, key, func(ref *volumeRef) error {
 		if ref.LeaseToken == m.lease.Token() {
 			ref.LeaseToken = ""
 		}
 		return nil
 	}); err != nil {
-		if errors.Is(err, loophole.ErrNotFound) {
+		if errors.Is(err, objstore.ErrNotFound) {
 			return
 		}
 		slog.Warn("release volume lease", "volume", name, "error", err)
@@ -663,7 +663,7 @@ func (m *Manager) handleRelease(ctx context.Context, params json.RawMessage) (an
 // putCheckpoint writes a checkpoint ref under volumes/{name}/checkpoints/{ts}/index.json.
 // It generates a timestamp ID and handles collisions by incrementing the second.
 func (m *Manager) putCheckpoint(ctx context.Context, volumeName string, layerID string) (string, error) {
-	if err := loophole.ValidateVolumeName(volumeName); err != nil {
+	if err := ValidateVolumeName(volumeName); err != nil {
 		return "", err
 	}
 	now := time.Now().UTC()
@@ -687,7 +687,7 @@ func (m *Manager) putCheckpoint(ctx context.Context, volumeName string, layerID 
 		if err == nil {
 			return ts, nil
 		}
-		if !errors.Is(err, loophole.ErrExists) {
+		if !errors.Is(err, objstore.ErrExists) {
 			return "", fmt.Errorf("write checkpoint ref: %w", err)
 		}
 		// Collision — increment second.
@@ -738,7 +738,7 @@ func (m *Manager) ListCheckpoints(ctx context.Context, volumeName string) ([]Che
 
 // CloneFromCheckpoint creates a new volume by cloning from a checkpoint's frozen layer.
 func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) error {
-	if err := loophole.ValidateVolumeName(cloneName); err != nil {
+	if err := ValidateVolumeName(cloneName); err != nil {
 		return err
 	}
 	// Read checkpoint ref.
@@ -746,7 +746,7 @@ func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpoin
 	if err != nil {
 		return err
 	}
-	cpRef, _, err := loophole.ReadJSON[checkpointRef](ctx, m.volRefs, cpKey)
+	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, m.volRefs, cpKey)
 	if err != nil {
 		return fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)
 	}
@@ -808,14 +808,14 @@ func (m *Manager) cloneFrozenLayer(ctx context.Context, ly *layer, cloneName str
 }
 
 func volumeIndexKey(name string) (string, error) {
-	if err := loophole.ValidateVolumeName(name); err != nil {
+	if err := ValidateVolumeName(name); err != nil {
 		return "", err
 	}
 	return name + "/index.json", nil
 }
 
 func checkpointPrefix(volumeName string) (string, error) {
-	if err := loophole.ValidateVolumeName(volumeName); err != nil {
+	if err := ValidateVolumeName(volumeName); err != nil {
 		return "", err
 	}
 	return volumeName + "/checkpoints/", nil
@@ -826,7 +826,7 @@ func checkpointIndexKey(volumeName, checkpointID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := loophole.ValidateCheckpointID(checkpointID); err != nil {
+	if err := ValidateCheckpointID(checkpointID); err != nil {
 		return "", err
 	}
 	return prefix + checkpointID + "/index.json", nil

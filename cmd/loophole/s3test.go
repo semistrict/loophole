@@ -13,7 +13,8 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
+	"github.com/semistrict/loophole/objstore"
 )
 
 func s3testCmd() *cobra.Command {
@@ -24,13 +25,13 @@ func s3testCmd() *cobra.Command {
 		Short: "Benchmark S3 latency and throughput",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := loophole.DefaultDir()
+			dir := env.DefaultDir()
 			inst, err := resolveProfile(dir)
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
-			store, err := loophole.NewS3Store(ctx, inst)
+			store, err := objstore.NewS3Store(ctx, inst)
 			if err != nil {
 				return err
 			}
@@ -76,7 +77,7 @@ func s3testCmd() *cobra.Command {
 	return cmd
 }
 
-func benchSize(ctx context.Context, store loophole.ObjectStore, label string, size, count int) error {
+func benchSize(ctx context.Context, store objstore.ObjectStore, label string, size, count int) error {
 	data := make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
 		return err
@@ -130,7 +131,7 @@ func benchSize(ctx context.Context, store loophole.ObjectStore, label string, si
 	return nil
 }
 
-func benchParallelPut(ctx context.Context, store loophole.ObjectStore, size, workers, totalPuts int) error {
+func benchParallelPut(ctx context.Context, store objstore.ObjectStore, size, workers, totalPuts int) error {
 	data := make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
 		return err

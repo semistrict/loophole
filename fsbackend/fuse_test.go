@@ -15,9 +15,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -52,7 +53,7 @@ func newFUSEBackend(t *testing.T) *fuseBackend {
 		bucket = "testbucket"
 	}
 	prefix := fmt.Sprintf("test-%s", uuid.NewString()[:8])
-	inst := loophole.Instance{
+	inst := env.ResolvedProfile{
 		ProfileName: "test",
 		Bucket:      bucket,
 		Prefix:      prefix,
@@ -63,12 +64,12 @@ func newFUSEBackend(t *testing.T) *fuseBackend {
 	}
 
 	ctx := t.Context()
-	store, err := loophole.NewS3Store(ctx, inst)
+	store, err := objstore.NewS3Store(ctx, inst)
 	require.NoError(t, err)
 
 	vm := storage.NewManager(store, t.TempDir(), storage.Config{}, nil, nil)
 
-	dir := loophole.Dir(t.TempDir())
+	dir := env.Dir(t.TempDir())
 	fuseDir := dir.Fuse(inst.ProfileName)
 	b, err := NewFUSE(fuseDir, vm, &fuseblockdev.Options{})
 	require.NoError(t, err)

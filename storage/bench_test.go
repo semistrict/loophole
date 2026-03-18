@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/objstore"
 )
 
 func randomPage(rng *rand.Rand, buf []byte) {
@@ -20,7 +20,7 @@ func randomPage(rng *rand.Rand, buf []byte) {
 	}
 }
 
-func newBenchManager(b *testing.B, store *loophole.MemStore, config Config) *Manager {
+func newBenchManager(b *testing.B, store *objstore.MemStore, config Config) *Manager {
 	b.Helper()
 	cacheDir := b.TempDir()
 	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
@@ -43,7 +43,7 @@ var defaultBenchConfig = Config{
 // Wall-clock times are meaningless (MemStore); only the s3-*/op metrics matter.
 func BenchmarkS3Ops(b *testing.B) {
 	b.Run("Write64Flush", func(b *testing.B) {
-		store := loophole.NewMemStore()
+		store := objstore.NewMemStore()
 		m := newBenchManager(b, store, defaultBenchConfig)
 
 		v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -70,7 +70,7 @@ func BenchmarkS3Ops(b *testing.B) {
 	})
 
 	b.Run("Read256Pages", func(b *testing.B) {
-		store := loophole.NewMemStore()
+		store := objstore.NewMemStore()
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
@@ -104,7 +104,7 @@ func BenchmarkS3Ops(b *testing.B) {
 	})
 
 	b.Run("Snapshot", func(b *testing.B) {
-		store := loophole.NewMemStore()
+		store := objstore.NewMemStore()
 		m := newBenchManager(b, store, defaultBenchConfig)
 
 		v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -135,7 +135,7 @@ func BenchmarkS3Ops(b *testing.B) {
 
 	b.Run("Snapshot100", func(b *testing.B) {
 		for range b.N {
-			store := loophole.NewMemStore()
+			store := objstore.NewMemStore()
 			m := newBenchManager(b, store, defaultBenchConfig)
 
 			v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -169,17 +169,17 @@ func BenchmarkS3Ops(b *testing.B) {
 
 var s3OpNames = []struct {
 	name string
-	op   loophole.OpType
+	op   objstore.OpType
 }{
-	{"Get", loophole.OpGet},
-	{"Put", loophole.OpPutReader},
-	{"PutIfNX", loophole.OpPutIfNotExists},
-	{"CAS", loophole.OpPutBytesCAS},
-	{"Delete", loophole.OpDeleteObject},
-	{"List", loophole.OpListKeys},
+	{"Get", objstore.OpGet},
+	{"Put", objstore.OpPutReader},
+	{"PutIfNX", objstore.OpPutIfNotExists},
+	{"CAS", objstore.OpPutBytesCAS},
+	{"Delete", objstore.OpDeleteObject},
+	{"List", objstore.OpListKeys},
 }
 
-func reportS3Counts(b *testing.B, store *loophole.MemStore, n int) {
+func reportS3Counts(b *testing.B, store *objstore.MemStore, n int) {
 	b.Helper()
 	for _, o := range s3OpNames {
 		b.ReportMetric(float64(store.Count(o.op))/float64(n), "s3-"+o.name+"/op")
@@ -192,7 +192,7 @@ func reportS3Counts(b *testing.B, store *loophole.MemStore, n int) {
 // This is the scenario where range reads win: instead of downloading the
 // entire ~4MB layer, we fetch just the index + 4 compressed pages.
 func BenchmarkReadFewFromLargeLayer(b *testing.B) {
-	store := loophole.NewMemStore()
+	store := objstore.NewMemStore()
 	ctx := context.Background()
 
 	const totalPages = 1024

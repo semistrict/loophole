@@ -19,10 +19,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -377,14 +378,14 @@ func (f testFS) ReadDir(t *testing.T, name string) []string {
 
 // ---------- Shared helpers ----------
 
-func uniqueInstance(t testing.TB) loophole.Instance {
+func uniqueInstance(t testing.TB) env.ResolvedProfile {
 	t.Helper()
 	bucket := os.Getenv("BUCKET")
 	if bucket == "" {
 		bucket = "testbucket"
 	}
 	prefix := fmt.Sprintf("test-%s", uuid.NewString()[:8])
-	return loophole.Instance{
+	return env.ResolvedProfile{
 		ProfileName: "test",
 		Bucket:      bucket,
 		Prefix:      prefix,
@@ -558,12 +559,12 @@ func removeTracked(values []string, value string) []string {
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
-	var store loophole.ObjectStore
+	var store objstore.ObjectStore
 	var err error
 	if testInst.LocalDir != "" {
-		store, err = loophole.NewFileStore(testInst.LocalDir)
+		store, err = objstore.NewFileStore(testInst.LocalDir)
 	} else {
-		store, err = loophole.NewS3Store(ctx, testInst)
+		store, err = objstore.NewS3Store(ctx, testInst)
 	}
 	if err != nil {
 		return nil, nil, err

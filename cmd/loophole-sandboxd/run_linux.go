@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/sandboxd"
 )
 
@@ -48,8 +48,8 @@ func run(args []string) error {
 		return err
 	}
 
-	dir := loophole.DefaultDir()
-	cfg, err := loophole.LoadConfig(dir)
+	dir := env.DefaultDir()
+	cfg, err := env.LoadConfig(dir)
 	if err != nil {
 		return err
 	}
