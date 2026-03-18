@@ -3,5 +3,4 @@ go 1.25.2
 use (
 	.
 	./third_party/compress
-	./third_party/go-fuse
 )

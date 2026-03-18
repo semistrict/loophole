@@ -1,9 +1,6 @@
 [submodule "third_party/go-sqlite3"]
 	path = third_party/go-sqlite3
 	url = https://github.com/mattn/go-sqlite3.git
-[submodule "third_party/go-fuse"]
-	path = third_party/go-fuse
-	url = https://github.com/semistrict/go-fuse.git
 [submodule "third_party/firecracker"]
 	path = third_party/firecracker
 	url = git@github.com:semistrict/firecracker.git
