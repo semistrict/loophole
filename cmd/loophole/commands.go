@@ -35,7 +35,6 @@ func addCommands(root *cobra.Command) {
 		statusCmd(),
 		statsCmd(),
 		deviceCmd(),
-		sshCmd(),
 		breakLeaseCmd(),
 		s3testCmd(),
 	)

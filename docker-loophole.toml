@@ -1,7 +1,0 @@
-[profiles.default]
-bucket = "testbucket"
-endpoint = "http://s3:9000"
-access_key = "rustfsadmin"
-secret_key = "rustfsadmin"
-region = "us-east-1"
-mode = "fusefs"

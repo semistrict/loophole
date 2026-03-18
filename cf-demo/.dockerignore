@@ -1,9 +1,0 @@
-*
-!Dockerfile
-!entrypoint.sh
-!bin/
-!bin/loophole
-!bin/loophole-guest-agent
-!build/
-!build/loophole-src/
-!build/loophole-src/**

@@ -23,11 +23,9 @@ import (
 )
 
 var (
-	testDir         env.Dir
-	testInst        env.ResolvedProfile
-	testBin         string
-	testSandboxdBin string
-	testRunscBin    string
+	testDir  env.Dir
+	testInst env.ResolvedProfile
+	testBin  string
 )
 
 func debugCountersEnabled() bool {
@@ -96,7 +94,7 @@ log_level = %q
 	if err != nil {
 		log.Fatal(err)
 	}
-	testBin, testSandboxdBin, testRunscBin, err = resolveTestBinaries(cwd)
+	testBin, err = resolveTestBinary(cwd)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -105,60 +103,32 @@ log_level = %q
 	os.Exit(code)
 }
 
-func resolveTestBinaries(cwd string) (string, string, string, error) {
-	if loopholeBin, sandboxdBin, runscBin, ok := envTestBinaries(); ok {
-		return loopholeBin, sandboxdBin, runscBin, nil
+func resolveTestBinary(cwd string) (string, error) {
+	if bin := os.Getenv("LOOPHOLE_TEST_BIN"); bin != "" {
+		if _, err := os.Stat(bin); err == nil {
+			return bin, nil
+		}
 	}
 
 	repoRoot := filepath.Clean(filepath.Join(cwd, ".."))
 	if _, err := os.Stat(filepath.Join(repoRoot, "Makefile")); err == nil {
 		if _, err := exec.LookPath("make"); err == nil {
-			cmd := exec.Command("make", "loophole", "loophole-sandboxd", "runsc")
+			cmd := exec.Command("make", "loophole")
 			cmd.Dir = repoRoot
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
-				return "", "", "", fmt.Errorf("build loophole binaries: %w", err)
+				return "", fmt.Errorf("build loophole binary: %w", err)
 			}
-			return filepath.Join(repoRoot, "bin", fmt.Sprintf("loophole-%s-%s", runtime.GOOS, runtime.GOARCH)),
-				filepath.Join(repoRoot, "bin", fmt.Sprintf("loophole-sandboxd-%s-%s", runtime.GOOS, runtime.GOARCH)),
-				filepath.Join(repoRoot, "bin", fmt.Sprintf("runsc-linux-%s", runtime.GOARCH)),
-				nil
+			return filepath.Join(repoRoot, "bin", fmt.Sprintf("loophole-%s-%s", runtime.GOOS, runtime.GOARCH)), nil
 		}
 	}
 
 	loopholeBin, err := exec.LookPath("loophole")
 	if err != nil {
-		return "", "", "", fmt.Errorf("resolve loophole test binary: %w", err)
+		return "", fmt.Errorf("resolve loophole test binary: %w", err)
 	}
-	sandboxdBin, err := exec.LookPath("loophole-sandboxd")
-	if err != nil {
-		return "", "", "", fmt.Errorf("resolve loophole-sandboxd test binary: %w", err)
-	}
-	runscBin, err := exec.LookPath("runsc")
-	if err != nil {
-		return "", "", "", fmt.Errorf("resolve runsc test binary: %w", err)
-	}
-	return loopholeBin, sandboxdBin, runscBin, nil
-}
-
-func envTestBinaries() (string, string, string, bool) {
-	loopholeBin := os.Getenv("LOOPHOLE_TEST_BIN")
-	sandboxdBin := os.Getenv("LOOPHOLE_TEST_SANDBOXD_BIN")
-	runscBin := os.Getenv("LOOPHOLE_TEST_RUNSC_BIN")
-	if loopholeBin == "" || sandboxdBin == "" || runscBin == "" {
-		return "", "", "", false
-	}
-	if _, err := os.Stat(loopholeBin); err != nil {
-		return "", "", "", false
-	}
-	if _, err := os.Stat(sandboxdBin); err != nil {
-		return "", "", "", false
-	}
-	if _, err := os.Stat(runscBin); err != nil {
-		return "", "", "", false
-	}
-	return loopholeBin, sandboxdBin, runscBin, true
+	return loopholeBin, nil
 }
 
 // metricsSnapshot captures counter and gauge values keyed by "name{labels}".
