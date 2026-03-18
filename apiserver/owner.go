@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 // CreateAndMount creates a fresh volume and mounts it on this owner process.
-func (d *Daemon) CreateAndMount(ctx context.Context, p loophole.CreateParams, mountpoint string) (string, error) {
+func (d *Server) CreateAndMount(ctx context.Context, p loophole.CreateParams, mountpoint string) (string, error) {
 	if d.backend == nil {
 		return "", fmt.Errorf("storage not available: %s", d.startupErr)
 	}
@@ -32,7 +32,7 @@ func (d *Daemon) CreateAndMount(ctx context.Context, p loophole.CreateParams, mo
 }
 
 // MountVolume mounts an existing volume on this owner process.
-func (d *Daemon) MountVolume(ctx context.Context, volume, mountpoint string) (string, error) {
+func (d *Server) MountVolume(ctx context.Context, volume, mountpoint string) (string, error) {
 	if d.backend == nil {
 		return "", fmt.Errorf("storage not available: %s", d.startupErr)
 	}
@@ -52,7 +52,7 @@ func (d *Daemon) MountVolume(ctx context.Context, volume, mountpoint string) (st
 }
 
 // AttachVolume attaches an existing volume as a raw block device on this owner process.
-func (d *Daemon) AttachVolume(ctx context.Context, volume string) (string, error) {
+func (d *Server) AttachVolume(ctx context.Context, volume string) (string, error) {
 	if d.backend == nil {
 		return "", fmt.Errorf("storage not available: %s", d.startupErr)
 	}
@@ -69,8 +69,8 @@ func (d *Daemon) AttachVolume(ctx context.Context, volume string) (string, error
 	return devicePath, nil
 }
 
-// Cleanup tears down local daemon resources after a setup failure before Serve runs.
-func (d *Daemon) Cleanup(ctx context.Context) {
+// Cleanup tears down local server resources after a setup failure before Serve runs.
+func (d *Server) Cleanup(ctx context.Context) {
 	d.removeOwnerLinks()
 	if d.backend != nil {
 		_ = d.backend.Close(ctx)

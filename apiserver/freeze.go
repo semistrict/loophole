@@ -1,11 +1,11 @@
-package daemon
+package apiserver
 
 import (
 	"log/slog"
 	"net/http"
 )
 
-func (d *Daemon) handleFreeze(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleFreeze(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}

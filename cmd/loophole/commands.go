@@ -16,10 +16,10 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/apiserver"
 	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/daemon"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
 func addCommands(root *cobra.Command) {
@@ -50,7 +50,7 @@ func serveCmd() *cobra.Command {
 	var volume string
 	cmd := &cobra.Command{
 		Use:    "serve",
-		Short:  "Run the loophole daemon",
+		Short:  "Run the loophole API server",
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -59,7 +59,7 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			d, err := daemon.Start(cmd.Context(), inst, dir, daemon.Options{
+			d, err := apiserver.Start(cmd.Context(), inst, dir, apiserver.Options{
 				Foreground: true,
 				ListenAddr: listenAddr,
 				SocketPath: socketPath,
@@ -127,7 +127,7 @@ func createCmd() *cobra.Command {
 			if mountpoint == "" {
 				mountpoint = volume
 			}
-			d, err := startOwnerDaemon(cmd.Context(), volume)
+			d, err := startOwnerServer(cmd.Context(), volume)
 			if err != nil {
 				return err
 			}
@@ -225,7 +225,7 @@ func mountCmd() *cobra.Command {
 			if len(args) == 2 {
 				mountpoint = args[1]
 			}
-			d, err := startOwnerDaemon(cmd.Context(), volume)
+			d, err := startOwnerServer(cmd.Context(), volume)
 			if err != nil {
 				return err
 			}
@@ -422,7 +422,7 @@ func deviceCreateCmd() *cobra.Command {
 			}
 
 			volume := args[0]
-			d, err := startOwnerDaemon(cmd.Context(), volume)
+			d, err := startOwnerServer(cmd.Context(), volume)
 			if err != nil {
 				return err
 			}
@@ -454,7 +454,7 @@ func deviceAttachCmd() *cobra.Command {
 		Short: "Attach a volume device in the foreground",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			d, err := startOwnerDaemon(cmd.Context(), args[0])
+			d, err := startOwnerServer(cmd.Context(), args[0])
 			if err != nil {
 				return err
 			}
@@ -979,7 +979,7 @@ func socketFromMountpoint(mountpoint string) (string, error) {
 	symPath := dir.MountSymlink(mountpoint)
 	target, err := os.Readlink(symPath)
 	if err != nil {
-		return "", fmt.Errorf("cannot find daemon for mountpoint %q (no symlink at %s)", mountpoint, symPath)
+		return "", fmt.Errorf("cannot find owner for mountpoint %q (no symlink at %s)", mountpoint, symPath)
 	}
 	return target, nil
 }
@@ -1020,7 +1020,7 @@ func socketFromTarget(target string) (string, error) {
 
 func resolveOwnerClient(target string) (*client.Client, error) {
 	if globalPID != 0 {
-		return client.NewFromSocket(daemon.EmbedSocketPath(globalPID)), nil
+		return client.NewFromSocket(apiserver.EmbedSocketPath(globalPID)), nil
 	}
 	sock, err := socketFromTarget(target)
 	if err != nil {
@@ -1029,7 +1029,7 @@ func resolveOwnerClient(target string) (*client.Client, error) {
 	return client.NewFromSocket(sock), nil
 }
 
-func startOwnerDaemon(ctx context.Context, volume string) (*daemon.Daemon, error) {
+func startOwnerServer(ctx context.Context, volume string) (*apiserver.Server, error) {
 	dir := loophole.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
@@ -1049,14 +1049,14 @@ func startOwnerDaemon(ctx context.Context, volume string) (*daemon.Daemon, error
 	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("remove stale socket %s: %w", socketPath, err)
 	}
-	return daemon.Start(ctx, inst, dir, daemon.Options{
+	return apiserver.Start(ctx, inst, dir, apiserver.Options{
 		Foreground: true,
 		SocketPath: socketPath,
 		Volume:     volume,
 	})
 }
 
-func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
+func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 	dir := loophole.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
@@ -1071,7 +1071,7 @@ func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage2.NewVolumeManager(store, dir.Cache(inst.ProfileName), storage2.Config{}, nil, nil)
+	vm := storage.NewVolumeManager(store, dir.Cache(inst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		_ = vm.Close(context.Background())
 	}, nil

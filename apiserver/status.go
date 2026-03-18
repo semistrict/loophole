@@ -1,13 +1,13 @@
-package daemon
+package apiserver
 
 import (
 	"fmt"
 	"net/http"
 
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
-func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	state := "running"
 	if d.shuttingDown() {
 		select {
@@ -44,7 +44,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status)
 }
 
-func (d *Daemon) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 	if d.backend == nil {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return
@@ -57,7 +57,7 @@ func (d *Daemon) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"volumes": names})
 }
 
-func (d *Daemon) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
 	if d.backend == nil {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return
@@ -78,14 +78,14 @@ func (d *Daemon) handleVolumeInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, info)
 }
 
-func (d *Daemon) currentMountpoint() string {
+func (d *Server) currentMountpoint() string {
 	if d.backend != nil && d.managedVolume != "" {
 		return d.backend.MountpointForVolume(d.managedVolume)
 	}
 	return d.mountpoint
 }
 
-func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
 	if d.backend == nil {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return
@@ -103,7 +103,7 @@ func (d *Daemon) handleDebugVolume(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, fmt.Errorf("volume %q not open", volume))
 		return
 	}
-	info, ok := storage2.DebugInfo(vol)
+	info, ok := storage.DebugInfo(vol)
 	if !ok {
 		writeError(w, 500, fmt.Errorf("volume %q does not support debug info", volume))
 		return

@@ -1,5 +1,5 @@
 //go:build darwin
 
-package daemon
+package apiserver
 
 func tuneProcess() {}

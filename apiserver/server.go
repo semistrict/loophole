@@ -1,6 +1,6 @@
-// Package daemon implements the loophole HTTP/UDS API.
+// Package apiserver implements the loophole HTTP/UDS API.
 // It is a thin remoting layer over fsbackend.Backend.
-package daemon
+package apiserver
 
 import (
 	"context"
@@ -27,11 +27,11 @@ import (
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
-func storage2ConfigFromEnv() storage2.Config {
-	cfg := storage2.Config{}
+func storage2ConfigFromEnv() storage.Config {
+	cfg := storage.Config{}
 
 	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD"); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
@@ -41,13 +41,13 @@ func storage2ConfigFromEnv() storage2.Config {
 	return cfg
 }
 
-// Daemon serves the loophole HTTP API over a Unix socket.
-type Daemon struct {
+// Server serves the loophole HTTP API over a Unix socket.
+type Server struct {
 	inst      loophole.Instance
 	dir       loophole.Dir
 	socket    string
 	backend   *fsbackend.Backend
-	diskCache *storage2.PageCache
+	diskCache *storage.PageCache
 	ln        net.Listener
 
 	managedVolume string
@@ -64,10 +64,10 @@ type Daemon struct {
 }
 
 // Backend returns the underlying backend.
-func (d *Daemon) Backend() *fsbackend.Backend { return d.backend }
+func (d *Server) Backend() *fsbackend.Backend { return d.backend }
 
-// Start initializes everything and returns a Daemon ready to Serve.
-// Options configures daemon startup.
+// Start initializes everything and returns a Server ready to Serve.
+// Options configures server startup.
 type Options struct {
 	Foreground bool
 	SocketMode os.FileMode
@@ -76,7 +76,7 @@ type Options struct {
 	Volume     string // Volume name — used for per-volume log file path.
 }
 
-func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Daemon, error) {
+func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts Options) (*Server, error) {
 	foreground := opts.Foreground
 	socketMode := opts.SocketMode
 	logPath := dir.VolumeLog(opts.Volume)
@@ -123,7 +123,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 	}
 	logger := slog.New(handlers)
 	slog.SetDefault(logger)
-	slog.Info("starting daemon", "s3", inst.URL(), "log", logPath)
+	slog.Info("starting server", "s3", inst.URL(), "log", logPath)
 
 	tuneProcess()
 
@@ -142,14 +142,14 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		store, err = loophole.NewS3Store(ctx, inst)
 		if err != nil {
 			storeErr := fmt.Sprintf("create S3 store: %v", err)
-			slog.Error("S3 store init failed, daemon will start degraded", "error", err)
-			// Fall back to a nil store — volume operations will fail but daemon stays up.
+			slog.Error("S3 store init failed, server will start degraded", "error", err)
+			// Fall back to a nil store — volume operations will fail but server stays up.
 			store = nil
 			startupErr = storeErr
 		}
 	}
 
-	var diskCache *storage2.PageCache
+	var diskCache *storage.PageCache
 	var backend *fsbackend.Backend
 	if store != nil {
 		// Create volume manager
@@ -158,11 +158,11 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		// share the same on-disk cache.
 		cacheDir := dir.Cache(inst.ProfileName)
 		var err error
-		diskCache, err = storage2.NewPageCache(filepath.Join(cacheDir, "diskcache"))
+		diskCache, err = storage.NewPageCache(filepath.Join(cacheDir, "diskcache"))
 		if err != nil {
 			return nil, fmt.Errorf("create page cache: %w", err)
 		}
-		vm := storage2.NewVolumeManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
+		vm := storage.NewVolumeManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
 
 		backend, err = createBackend(vm, inst, dir)
 		if err != nil {
@@ -224,7 +224,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		}
 	}
 
-	d := &Daemon{
+	d := &Server{
 		inst:       inst,
 		dir:        dir,
 		socket:     socketPathFromOptions(opts),
@@ -241,7 +241,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 }
 
 // Serve blocks, handling HTTP requests until the context is cancelled.
-func (d *Daemon) Serve(ctx context.Context) error {
+func (d *Server) Serve(ctx context.Context) error {
 	defer func() {
 		if r := recover(); r != nil {
 			buf := make([]byte, 64<<10)
@@ -319,17 +319,17 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		}
 	}()
 
-	slog.Info("daemon ready", "mode", "fuse", "socket", d.socket)
+	slog.Info("server ready", "mode", "fuse", "socket", d.socket)
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil
 	}
 
-	slog.Info("daemon stopped")
+	slog.Info("server stopped")
 	return err
 }
 
-func (d *Daemon) shuttingDown() bool {
+func (d *Server) shuttingDown() bool {
 	select {
 	case <-d.shutdownCh:
 		return true
@@ -338,16 +338,16 @@ func (d *Daemon) shuttingDown() bool {
 	}
 }
 
-// rejectIfShuttingDown returns true (and writes a 503) if the daemon is shutting down.
-func (d *Daemon) rejectIfShuttingDown(w http.ResponseWriter) bool {
+// rejectIfShuttingDown returns true (and writes a 503) if the server is shutting down.
+func (d *Server) rejectIfShuttingDown(w http.ResponseWriter) bool {
 	if d.shuttingDown() {
-		writeError(w, 503, fmt.Errorf("daemon is shutting down"))
+		writeError(w, 503, fmt.Errorf("server is shutting down"))
 		return true
 	}
 	return false
 }
 
-func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
+func (d *Server) mux(stop context.CancelFunc) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("POST /device/checkpoint", d.handleDeviceCheckpoint)
@@ -395,7 +395,7 @@ func (d *Daemon) mux(stop context.CancelFunc) *http.ServeMux {
 }
 
 // instrument wraps a handler with logging and metrics.
-func (d *Daemon) instrument(next http.Handler) http.Handler {
+func (d *Server) instrument(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Skip endpoints that hijack the connection or don't need metrics.
 		if r.URL.Path == "/metrics" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/debug" || len(r.URL.Path) >= 6 && r.URL.Path[:6] == "/pprof" || len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/sandbox/" {
@@ -438,7 +438,7 @@ func (r *statusRecorder) Unwrap() http.ResponseWriter {
 }
 
 // requireBackend returns true (and writes 503) if storage is not available.
-func (d *Daemon) requireBackend(w http.ResponseWriter) bool {
+func (d *Server) requireBackend(w http.ResponseWriter) bool {
 	if d.backend == nil {
 		writeError(w, 503, fmt.Errorf("storage not available: %s", d.startupErr))
 		return true
@@ -476,7 +476,7 @@ func writeError(w http.ResponseWriter, code int, err error) {
 	}
 }
 
-func (d *Daemon) writeSymlink(mountpoint string) {
+func (d *Server) writeSymlink(mountpoint string) {
 	symPath := d.dir.MountSymlink(mountpoint)
 	if err := os.MkdirAll(filepath.Dir(symPath), 0o755); err != nil {
 		slog.Warn("create symlink dir failed", "path", symPath, "error", err)
@@ -490,7 +490,7 @@ func (d *Daemon) writeSymlink(mountpoint string) {
 	}
 }
 
-func (d *Daemon) writeDeviceSymlink(devicePath string) {
+func (d *Server) writeDeviceSymlink(devicePath string) {
 	symPath := d.dir.DeviceSymlink(devicePath)
 	if err := os.MkdirAll(filepath.Dir(symPath), 0o755); err != nil {
 		slog.Warn("create device symlink dir failed", "path", symPath, "error", err)
@@ -504,7 +504,7 @@ func (d *Daemon) writeDeviceSymlink(devicePath string) {
 	}
 }
 
-func (d *Daemon) removeOwnerLinks() {
+func (d *Server) removeOwnerLinks() {
 	if d.mountpoint != "" {
 		if err := os.Remove(d.dir.MountSymlink(d.mountpoint)); err != nil && !os.IsNotExist(err) {
 			slog.Warn("remove mount symlink failed", "mountpoint", d.mountpoint, "error", err)

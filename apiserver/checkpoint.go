@@ -1,11 +1,11 @@
-package daemon
+package apiserver
 
 import (
 	"log/slog"
 	"net/http"
 )
 
-func (d *Daemon) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}
@@ -34,7 +34,7 @@ func (d *Daemon) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok", "checkpoint": cpID})
 }
 
-func (d *Daemon) handleDeviceCheckpoint(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDeviceCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}
@@ -63,7 +63,7 @@ func (d *Daemon) handleDeviceCheckpoint(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]string{"status": "ok", "checkpoint": cpID})
 }
 
-func (d *Daemon) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}

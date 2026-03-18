@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"io"
@@ -6,10 +6,10 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
-func (d *Daemon) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
@@ -36,7 +36,7 @@ func (d *Daemon) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	buf := make([]byte, storage2.BlockSize)
+	buf := make([]byte, storage.BlockSize)
 	n, readErr := io.ReadFull(r.Body, buf)
 	if n > 0 {
 		if err := vol.Write(buf[:n], offset); err != nil {
@@ -54,7 +54,7 @@ func (d *Daemon) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-func (d *Daemon) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
@@ -80,7 +80,7 @@ func (d *Daemon) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxReadSize = storage2.BlockSize
+	const maxReadSize = storage.BlockSize
 	if size > maxReadSize {
 		http.Error(w, "size exceeds maximum ("+strconv.FormatUint(maxReadSize, 10)+")", 400)
 		return
@@ -107,7 +107,7 @@ func (d *Daemon) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(buf[:n])
 }
 
-func (d *Daemon) handleDeviceDDFinalize(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDeviceDDFinalize(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}

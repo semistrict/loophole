@@ -1,6 +1,6 @@
 //go:build linux
 
-package daemon
+package apiserver
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"syscall"
 )
 
-// tuneProcess applies best-effort performance tuning to the daemon process:
+// tuneProcess applies best-effort performance tuning to the server process:
 // high scheduling priority, OOM killer protection, and increased file descriptor limit.
 func tuneProcess() {
 	// Raise file descriptor limit to 100k.

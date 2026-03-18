@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"context"
@@ -12,22 +12,22 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
-// EmbedSocketPath returns the UDS path for an embedded daemon running in the
+// EmbedSocketPath returns the UDS path for an embedded server running in the
 // process with the given PID.
 func EmbedSocketPath(pid int) string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("loophole-%d.sock", pid))
 }
 
-// StartEmbedded starts a daemon HTTP server on a PID-derived UDS socket,
+// StartEmbedded starts an HTTP server on a PID-derived UDS socket,
 // reusing an existing VolumeManager. This is designed for the C API / embedded
 // use case where loophole is linked into another process (e.g. Firecracker).
 //
 // The returned cleanup function stops the server and removes the socket.
 // The server runs in background goroutines; it does not block.
-func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, inst loophole.Instance) (func(), error) {
+func StartEmbedded(vm loophole.VolumeManager, diskCache *storage.PageCache, inst loophole.Instance) (func(), error) {
 	pid := os.Getpid()
 	sockPath := EmbedSocketPath(pid)
 
@@ -48,7 +48,7 @@ func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, ins
 
 	backend := fsbackend.NewBackend(vm, nil)
 
-	d := &Daemon{
+	d := &Server{
 		inst:       inst,
 		backend:    backend,
 		diskCache:  diskCache,
@@ -63,13 +63,13 @@ func StartEmbedded(vm loophole.VolumeManager, diskCache *storage2.PageCache, ins
 
 	// Serve in background.
 	go func() {
-		slog.Info("embed: daemon ready", "socket", sockPath, "pid", pid)
+		slog.Info("embed: server ready", "socket", sockPath, "pid", pid)
 		if err := srv.Serve(ln); err != http.ErrServerClosed {
 			slog.Error("embed: serve error", "error", err)
 		}
 	}()
 
-	// Shutdown goroutine — mirrors the normal daemon's shutdown path.
+	// Shutdown goroutine — mirrors the normal server's shutdown path.
 	go func() {
 		<-ctx.Done()
 		close(d.shutdownCh)

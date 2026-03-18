@@ -1,11 +1,11 @@
-package daemon
+package apiserver
 
 import (
 	"log/slog"
 	"net/http"
 )
 
-func (d *Daemon) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}

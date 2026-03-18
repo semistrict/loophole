@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"fmt"
@@ -6,7 +6,7 @@ import (
 	"net/http"
 )
 
-func (d *Daemon) handleClone(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}

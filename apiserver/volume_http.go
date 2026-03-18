@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"fmt"
@@ -7,7 +7,7 @@ import (
 	"github.com/semistrict/loophole"
 )
 
-func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
@@ -28,7 +28,7 @@ func (d *Daemon) handleCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok", "volume": req.Volume})
 }
 
-func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleMount(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}
@@ -53,7 +53,7 @@ func (d *Daemon) handleMount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "ok", "volume": req.Volume, "mountpoint": mountpoint})
 }
 
-func (d *Daemon) handleDelete(w http.ResponseWriter, r *http.Request) {
+func (d *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	if d.rejectIfShuttingDown(w) || d.requireBackend(w) {
 		return
 	}

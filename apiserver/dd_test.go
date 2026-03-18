@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"bytes"
@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -27,7 +27,7 @@ func (s *slowReader) Read(p []byte) (int, error) {
 }
 
 func TestDDWrite_ReadFull_ViaHTTP(t *testing.T) {
-	data := make([]byte, storage2.BlockSize)
+	data := make([]byte, storage.BlockSize)
 	for i := range data {
 		data[i] = byte(i % 199)
 	}
@@ -37,7 +37,7 @@ func TestDDWrite_ReadFull_ViaHTTP(t *testing.T) {
 
 	// Simulate the server-side ReadFull behavior from handleDeviceDDWrite.
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, storage2.BlockSize)
+		buf := make([]byte, storage.BlockSize)
 		n, err := io.ReadFull(r.Body, buf)
 		gotErr = err
 		gotData = make([]byte, n)
@@ -55,7 +55,7 @@ func TestDDWrite_ReadFull_ViaHTTP(t *testing.T) {
 	resp.Body.Close()
 
 	require.NoError(t, gotErr)
-	assert.Equal(t, storage2.BlockSize, len(gotData))
+	assert.Equal(t, storage.BlockSize, len(gotData))
 	assert.Equal(t, data, gotData)
 }
 
@@ -70,7 +70,7 @@ func TestDDWrite_PartialBlock_ViaHTTP(t *testing.T) {
 	var gotErr error
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		buf := make([]byte, storage2.BlockSize)
+		buf := make([]byte, storage.BlockSize)
 		n, err := io.ReadFull(r.Body, buf)
 		gotErr = err
 		gotData = make([]byte, n)

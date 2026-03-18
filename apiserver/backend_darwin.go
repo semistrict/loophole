@@ -1,6 +1,6 @@
 //go:build darwin
 
-package daemon
+package apiserver
 
 import (
 	"fmt"

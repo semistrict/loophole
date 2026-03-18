@@ -1,4 +1,4 @@
-package daemon
+package apiserver
 
 import (
 	"fmt"
@@ -37,10 +37,10 @@ func cmdFlush(a volCmdArgs) (any, error) {
 	return map[string]string{"status": "ok"}, nil
 }
 
-// registerVolumeCmds registers volume commands on the daemon mux.
+// registerVolumeCmds registers volume commands on the server mux.
 // Accepts explicit volume/mountpoint in the request body; falls back to
-// the daemon's managed volume when omitted.
-func registerVolumeCmds(mux *http.ServeMux, d *Daemon) {
+// the server's managed volume when omitted.
+func registerVolumeCmds(mux *http.ServeMux, d *Server) {
 	for _, cmd := range volumeCommands {
 		cmd := cmd
 		mux.HandleFunc(cmd.method+" "+cmd.path, func(w http.ResponseWriter, r *http.Request) {
