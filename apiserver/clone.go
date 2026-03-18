@@ -11,8 +11,6 @@ func (d *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Mountpoint string `json:"mountpoint"`
-		Volume     string `json:"volume"`
 		Checkpoint string `json:"checkpoint"`
 		Clone      string `json:"clone"`
 	}
@@ -25,24 +23,18 @@ func (d *Server) handleClone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	name := d.volumeName()
+	if name == "" {
+		writeError(w, 400, errNoVolume)
+		return
+	}
+
 	var err error
-	switch {
-	case req.Checkpoint != "":
-		volume := req.Volume
-		if volume == "" {
-			volume = d.managedVolume
-		}
-		if volume == "" {
-			writeError(w, 400, errNoVolume)
-			return
-		}
-		slog.Info("clone", "volume", volume, "checkpoint", req.Checkpoint, "clone", req.Clone)
-		err = d.backend.CloneFromCheckpoint(r.Context(), volume, req.Checkpoint, req.Clone)
-	default:
-		mountpoint := req.Mountpoint
-		if mountpoint == "" {
-			mountpoint = d.currentMountpoint()
-		}
+	if req.Checkpoint != "" {
+		slog.Info("clone from checkpoint", "volume", name, "checkpoint", req.Checkpoint, "clone", req.Clone)
+		err = d.backend.CloneFromCheckpoint(r.Context(), name, req.Checkpoint, req.Clone)
+	} else {
+		mountpoint := d.currentMountpoint()
 		if mountpoint == "" {
 			writeError(w, 400, fmt.Errorf("no volume mounted"))
 			return

@@ -94,7 +94,7 @@ func sbFlushCmd(c *client.Client) *cobra.Command {
 		Short: "Flush volume data to S3",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := c.FlushVolume(cmd.Context(), ""); err != nil {
+			if err := c.Flush(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Println("flushed")
@@ -109,7 +109,7 @@ func sbCheckpointCmd(c *client.Client) *cobra.Command {
 		Short: "Create a checkpoint of the current volume",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cpID, err := c.Checkpoint(cmd.Context(), "")
+			cpID, err := c.Checkpoint(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -125,7 +125,7 @@ func sbCheckpointsCmd(c *client.Client) *cobra.Command {
 		Short: "List checkpoints",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cps, err := c.ListCheckpoints(cmd.Context(), "")
+			cps, err := c.ListCheckpoints(cmd.Context())
 			if err != nil {
 				return err
 			}

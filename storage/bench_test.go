@@ -29,7 +29,7 @@ func newBenchManager(b *testing.B, store *objstore.MemStore, config Config) *Man
 	}
 	m := NewManager(store, cacheDir, config, NewSimLocalFS(), dc)
 	b.Cleanup(func() {
-		_ = m.Close(b.Context())
+		_ = m.Close()
 		_ = dc.Close()
 	})
 	return m

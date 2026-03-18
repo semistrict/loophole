@@ -32,9 +32,7 @@ func (d *daemon) openManager(ctx context.Context) (*storage.Manager, func(), err
 		return nil, nil, err
 	}
 	return vm, func() {
-		if err := vm.Close(context.Background()); err != nil {
-			slog.Warn("close sandboxd manager", "error", err)
-		}
+		util.SafeClose(vm, "close sandboxd manager")
 	}, nil
 }
 
@@ -90,7 +88,7 @@ func (d *daemon) cloneVolume(ctx context.Context, source sourceSpec, cloneName s
 			return err
 		}
 		c := client.NewFromSocket(src.OwnerSocket)
-		return c.Clone(ctx, client.CloneParams{Mountpoint: src.Mountpoint, Clone: cloneName})
+		return c.Clone(ctx, client.CloneParams{Clone: cloneName})
 	case sourceKindVolume:
 		if source.Mode == "attach" {
 			return fmt.Errorf("attach source cannot be cloned directly")
@@ -100,7 +98,7 @@ func (d *daemon) cloneVolume(ctx context.Context, source sourceSpec, cloneName s
 		timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 		defer cancel()
 		if status, err := c.Status(timeoutCtx); err == nil && status.Mountpoint != "" {
-			return c.Clone(ctx, client.CloneParams{Mountpoint: status.Mountpoint, Clone: cloneName})
+			return c.Clone(ctx, client.CloneParams{Clone: cloneName})
 		}
 		vm, cleanup, err := d.openManager(ctx)
 		if err != nil {

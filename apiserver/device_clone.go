@@ -1,6 +1,7 @@
 package apiserver
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 )
@@ -10,7 +11,6 @@ func (d *Server) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Volume     string `json:"volume"`
 		Checkpoint string `json:"checkpoint"`
 		Clone      string `json:"clone"`
 	}
@@ -18,16 +18,17 @@ func (d *Server) handleDeviceClone(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err)
 		return
 	}
-	volume := req.Volume
-	if volume == "" {
-		volume = d.managedVolume
+	if req.Clone == "" {
+		writeError(w, 400, fmt.Errorf("missing clone parameter"))
+		return
 	}
-	if volume == "" {
+	name := d.volumeName()
+	if name == "" {
 		writeError(w, 400, errNoVolume)
 		return
 	}
-	slog.Info("device/clone", "volume", volume, "checkpoint", req.Checkpoint, "clone", req.Clone)
-	err := d.backend.DeviceClone(r.Context(), volume, req.Checkpoint, req.Clone)
+	slog.Info("device/clone", "volume", name, "checkpoint", req.Checkpoint, "clone", req.Clone)
+	err := d.backend.DeviceClone(r.Context(), name, req.Checkpoint, req.Clone)
 	if err != nil {
 		slog.Error("device/clone failed", "err", err)
 		writeError(w, 500, err)

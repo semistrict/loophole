@@ -34,7 +34,8 @@ type volumeRef struct {
 	Labels        map[string]string `json:"labels,omitempty"`
 }
 
-// Manager manages volumes backed by storage layers.
+// Manager manages a single volume backed by a storage layer.
+// Each process manages at most one open volume at a time.
 type Manager struct {
 	store     objstore.ObjectStore
 	cacheDir  string
@@ -46,11 +47,10 @@ type Manager struct {
 
 	volRefs objstore.ObjectStore // store.At("volumes")
 
-	mu         sync.Mutex
-	cond       *sync.Cond // broadcast on volume close
-	volumes    map[string]*Volume
-	openFlight singleflight[*Volume]
-	onRelease  func(ctx context.Context, volumeName string)
+	mu        sync.Mutex
+	cond      *sync.Cond // broadcast on volume close
+	volume    *Volume    // the single open volume, or nil
+	onRelease func(ctx context.Context, volumeName string)
 }
 
 // localFS abstracts local filesystem operations for memtable backing files.
@@ -82,7 +82,6 @@ func NewManager(store objstore.ObjectStore, cacheDir string, config Config, fs l
 		fs:        fs,
 		idGen:     uuid.NewString,
 		volRefs:   store.At("volumes"),
-		volumes:   make(map[string]*Volume),
 	}
 	m.cond = sync.NewCond(&m.mu)
 	lease.Handle("release", m.handleRelease)
@@ -142,55 +141,49 @@ func (m *Manager) OpenVolume(name string) (*Volume, error) {
 		return nil, err
 	}
 	m.mu.Lock()
-	if v, ok := m.volumes[name]; ok {
+	if m.volume != nil && m.volume.Name() == name {
+		v := m.volume
 		m.mu.Unlock()
 		return v, nil
 	}
 	m.mu.Unlock()
 
-	v, err := m.openFlight.do(name, func() (*Volume, error) {
-		// Re-check under singleflight in case another caller just opened it.
-		m.mu.Lock()
-		if v, ok := m.volumes[name]; ok {
-			m.mu.Unlock()
-			return v, nil
-		}
-		m.mu.Unlock()
-
-		ref, err := m.getVolumeRef(context.Background(), name)
-		if err != nil {
-			return nil, fmt.Errorf("resolve volume %q: %w", name, err)
-		}
-		return m.openVolume(name, ref)
-	})
+	ref, err := m.getVolumeRef(context.Background(), name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve volume %q: %w", name, err)
 	}
-	return v, nil
+	return m.openVolume(name, ref)
 }
 
 func (m *Manager) GetVolume(name string) *Volume {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	v, ok := m.volumes[name]
-	if !ok {
-		return nil
+	if m.volume != nil && m.volume.Name() == name {
+		return m.volume
 	}
-	return v
+	return nil
+}
+
+// Volume returns the single open volume, or nil.
+func (m *Manager) Volume() *Volume {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.volume
 }
 
 func (m *Manager) Volumes() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	names := make([]string, 0, len(m.volumes))
-	for name := range m.volumes {
-		names = append(names, name)
+	if m.volume != nil {
+		return []string{m.volume.Name()}
 	}
-	return names
+	return nil
 }
 
-func (m *Manager) ListAllVolumes(ctx context.Context) ([]string, error) {
-	objects, err := m.volRefs.ListKeys(ctx, "")
+// ListAllVolumes returns the names of all volumes in the store.
+func ListAllVolumes(ctx context.Context, store objstore.ObjectStore) ([]string, error) {
+	volRefs := store.At("volumes")
+	objects, err := volRefs.ListKeys(ctx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -208,28 +201,6 @@ func (m *Manager) ListAllVolumes(ctx context.Context) ([]string, error) {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return names, nil
-}
-
-func (m *Manager) ListVolumesByType(ctx context.Context, volType string) ([]string, error) {
-	allNames, err := m.ListAllVolumes(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var names []string
-	for _, name := range allNames {
-		key, err := volumeIndexKey(name)
-		if err != nil {
-			continue
-		}
-		ref, _, err := objstore.ReadJSON[volumeRef](ctx, m.volRefs, key)
-		if err != nil {
-			continue
-		}
-		if ref.Type == volType {
-			names = append(names, name)
-		}
-	}
 	return names, nil
 }
 
@@ -267,24 +238,21 @@ func (m *Manager) WaitClosed(ctx context.Context, name string) error {
 	done := ctx.Done()
 	m.mu.Lock()
 	for {
-		if _, ok := m.volumes[name]; !ok {
+		if m.volume == nil || m.volume.Name() != name {
 			m.mu.Unlock()
 			return nil
 		}
-		// Check context before waiting.
 		select {
 		case <-done:
 			m.mu.Unlock()
 			return ctx.Err()
 		default:
 		}
-		// Wait for a signal from closeVolume. Use a goroutine to
-		// unblock if the context is cancelled while waiting.
 		ch := make(chan struct{})
 		go func() {
 			select {
 			case <-done:
-				m.cond.Broadcast() // wake us up so we can check ctx
+				m.cond.Broadcast()
 			case <-ch:
 			}
 		}()
@@ -301,9 +269,9 @@ func (m *Manager) CloseVolume(name string) error {
 		return err
 	}
 	m.mu.Lock()
-	v, ok := m.volumes[name]
+	v := m.volume
 	m.mu.Unlock()
-	if !ok {
+	if v == nil || v.Name() != name {
 		return nil
 	}
 	return v.ReleaseRef()
@@ -314,7 +282,7 @@ func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
 		return err
 	}
 	m.mu.Lock()
-	if _, ok := m.volumes[name]; ok {
+	if m.volume != nil && m.volume.Name() == name {
 		m.mu.Unlock()
 		return fmt.Errorf("volume %q is open; close it first", name)
 	}
@@ -349,18 +317,20 @@ func (m *Manager) PageSize() int {
 	return PageSize
 }
 
-func (m *Manager) Close(ctx context.Context) error {
+// Store returns the underlying object store.
+func (m *Manager) Store() objstore.ObjectStore {
+	return m.store
+}
+
+func (m *Manager) Close() error {
+	ctx := context.Background()
+
 	m.mu.Lock()
-	vols := make([]*Volume, 0, len(m.volumes))
-	for _, v := range m.volumes {
-		vols = append(vols, v)
-	}
-	m.volumes = make(map[string]*Volume)
+	v := m.volume
+	m.volume = nil
 	m.mu.Unlock()
 
-	slog.Info("manager close: closing volumes", "count", len(vols))
-	for _, v := range vols {
-		slog.Info("manager close: volume", "volume", v.Name())
+	if v != nil {
 		slog.Info("manager close: flushing", "volume", v.Name())
 		if err := v.flush(); err != nil {
 			slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
@@ -507,13 +477,20 @@ func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
 	v := newVolume(name, ref.Size, ref.Type, ly, m)
 
 	m.mu.Lock()
-	if existing, ok := m.volumes[name]; ok {
+	if m.volume != nil {
+		if m.volume.Name() == name {
+			existing := m.volume
+			m.mu.Unlock()
+			ly.Close()
+			m.releaseVolumeLease(ctx, name)
+			return existing, nil
+		}
 		m.mu.Unlock()
 		ly.Close()
 		m.releaseVolumeLease(ctx, name)
-		return existing, nil
+		return nil, fmt.Errorf("manager already has volume %q open; cannot open %q", m.volume.Name(), name)
 	}
-	m.volumes[name] = v
+	m.volume = v
 	m.mu.Unlock()
 
 	return v, nil
@@ -557,7 +534,9 @@ func (m *Manager) putVolumeRef(ctx context.Context, name string, ref volumeRef) 
 
 func (m *Manager) closeVolume(name string) {
 	m.mu.Lock()
-	delete(m.volumes, name)
+	if m.volume != nil && m.volume.Name() == name {
+		m.volume = nil
+	}
 	m.cond.Broadcast()
 	m.mu.Unlock()
 }
@@ -640,13 +619,15 @@ func (m *Manager) handleRelease(ctx context.Context, params json.RawMessage) (an
 	}
 
 	m.mu.Lock()
-	v, ok := m.volumes[req.Volume]
-	if ok {
-		delete(m.volumes, req.Volume)
+	v := m.volume
+	if v != nil && v.Name() == req.Volume {
+		m.volume = nil
+	} else {
+		v = nil
 	}
 	m.mu.Unlock()
 
-	if !ok {
+	if v == nil {
 		return map[string]string{"status": "ok"}, nil
 	}
 

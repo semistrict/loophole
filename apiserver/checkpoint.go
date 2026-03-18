@@ -9,17 +9,7 @@ func (d *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}
-	var req struct {
-		Mountpoint string `json:"mountpoint"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	mountpoint := req.Mountpoint
-	if mountpoint == "" {
-		mountpoint = d.currentMountpoint()
-	}
+	mountpoint := d.currentMountpoint()
 	if mountpoint == "" {
 		writeError(w, 400, errNoVolume)
 		return
@@ -38,23 +28,13 @@ func (d *Server) handleDeviceCheckpoint(w http.ResponseWriter, r *http.Request) 
 	if d.requireBackend(w) {
 		return
 	}
-	var req struct {
-		Volume string `json:"volume"`
-	}
-	if err := readJSON(r, &req); err != nil {
-		writeError(w, 400, err)
-		return
-	}
-	volume := req.Volume
-	if volume == "" {
-		volume = d.managedVolume
-	}
-	if volume == "" {
+	vol := d.volume()
+	if vol == nil {
 		writeError(w, 400, errNoVolume)
 		return
 	}
-	slog.Info("device checkpoint", "volume", volume)
-	cpID, err := d.backend.DeviceCheckpoint(r.Context(), volume)
+	slog.Info("device checkpoint", "volume", vol.Name())
+	cpID, err := d.backend.DeviceCheckpoint(r.Context(), vol.Name())
 	if err != nil {
 		slog.Error("device checkpoint failed", "err", err)
 		writeError(w, 500, err)
@@ -67,15 +47,12 @@ func (d *Server) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	if d.requireBackend(w) {
 		return
 	}
-	volume := r.URL.Query().Get("volume")
-	if volume == "" {
-		volume = d.managedVolume
-	}
-	if volume == "" {
+	name := d.volumeName()
+	if name == "" {
 		writeError(w, 400, errNoVolume)
 		return
 	}
-	checkpoints, err := d.backend.VM().ListCheckpoints(r.Context(), volume)
+	checkpoints, err := d.backend.VM().ListCheckpoints(r.Context(), name)
 	if err != nil {
 		writeError(w, 500, err)
 		return

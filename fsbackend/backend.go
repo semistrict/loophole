@@ -13,24 +13,17 @@ import (
 	"github.com/semistrict/loophole/storage"
 )
 
-// mountEntry stores the volume, driver-specific handle, and the driver
-// that created the mount.
-type mountEntry struct {
-	vol           *storage.Volume
-	handle        fuseMount
-	driver        *FUSEDriver
-	beforeUnmount []func() // fired LIFO before driver.Unmount
-}
-
-// Backend owns a VolumeManager and the single surviving FUSE driver.
-// It provides the complete high-level API: mount, unmount, clone,
-// and filesystem access.
+// Backend owns a Manager and the single FUSE driver. Each Backend manages
+// at most one mounted volume at a time.
 type Backend struct {
 	vm     *storage.Manager
 	driver *FUSEDriver
 
-	mu     sync.Mutex
-	mounts map[string]mountEntry // mountpoint → entry
+	mu            sync.Mutex
+	vol           *storage.Volume
+	handle        fuseMount
+	mountpoint    string
+	beforeUnmount []func() // fired LIFO before driver.Unmount
 }
 
 // NewBackend creates a Backend with the remaining FUSE driver. The driver may
@@ -39,7 +32,6 @@ func NewBackend(vm *storage.Manager, driver *FUSEDriver) *Backend {
 	return &Backend{
 		vm:     vm,
 		driver: driver,
-		mounts: make(map[string]mountEntry),
 	}
 }
 
@@ -51,7 +43,7 @@ func (b *Backend) driverFor() (*FUSEDriver, error) {
 	return b.driver, nil
 }
 
-// VM returns the underlying VolumeManager.
+// VM returns the underlying Manager.
 func (b *Backend) VM() *storage.Manager { return b.vm }
 
 // Create creates a new volume and formats it.
@@ -124,32 +116,35 @@ func (b *Backend) Mount(ctx context.Context, volume string, mountpoint string) e
 	return b.mountVolume(ctx, vol, mountpoint)
 }
 
-// Unmount tears down the filesystem at mountpoint and closes the volume.
+// Unmount tears down the filesystem and closes the volume.
 func (b *Backend) Unmount(ctx context.Context, mountpoint string) error {
 	b.mu.Lock()
-	entry, ok := b.mounts[mountpoint]
-	b.mu.Unlock()
-
-	if !ok {
+	if b.vol == nil || b.mountpoint != mountpoint {
+		b.mu.Unlock()
 		return fmt.Errorf("mountpoint %q not tracked", mountpoint)
 	}
+	vol := b.vol
+	b.mu.Unlock()
 
-	b.doUnmount(ctx, mountpoint, entry)
-	return entry.vol.ReleaseRef()
+	b.doUnmount(ctx)
+	return vol.ReleaseRef()
 }
 
 // Checkpoint freezes the filesystem, creates a checkpoint, and thaws.
 func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
-	entry, err := b.entry(mountpoint)
-	if err != nil {
-		return "", err
+	b.mu.Lock()
+	if b.vol == nil {
+		b.mu.Unlock()
+		return "", fmt.Errorf("no volume mounted")
 	}
+	vol, handle, driver := b.vol, b.handle, b.driver
+	b.mu.Unlock()
 
-	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
+	if err := driver.Freeze(ctx, handle); err != nil {
 		return "", fmt.Errorf("freeze: %w", err)
 	}
-	cpID, cpErr := entry.vol.Checkpoint()
-	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
+	cpID, cpErr := vol.Checkpoint()
+	if thawErr := driver.Thaw(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after checkpoint", "mountpoint", mountpoint, "error", thawErr)
 		if cpErr == nil {
 			cpErr = thawErr
@@ -166,97 +161,104 @@ func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID,
 // Clone freezes the filesystem, creates the clone, and thaws without mounting it.
 func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string) error {
 	slog.Info("backend: cloning", "mountpoint", mountpoint, "clone", cloneName)
-	entry, err := b.entry(mountpoint)
-	if err != nil {
-		return err
+	b.mu.Lock()
+	if b.vol == nil {
+		b.mu.Unlock()
+		return fmt.Errorf("no volume mounted")
 	}
+	vol, handle, driver := b.vol, b.handle, b.driver
+	b.mu.Unlock()
 
 	slog.Debug("backend: freezing for clone", "mountpoint", mountpoint)
-	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
+	if err := driver.Freeze(ctx, handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
 	slog.Debug("backend: frozen, cloning volume", "clone", cloneName)
-	err = entry.vol.Clone(cloneName)
+	err := vol.Clone(cloneName)
 	slog.Debug("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
-	if thawErr := entry.driver.Thaw(ctx, entry.handle); thawErr != nil {
+	if thawErr := driver.Thaw(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
 			err = thawErr
 		}
 	}
 	slog.Debug("backend: thawed", "mountpoint", mountpoint)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 // MountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
 func (b *Backend) MountpointForVolume(volume string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for mp, entry := range b.mounts {
-		if entry.vol.Name() == volume {
-			return mp
-		}
+	if b.vol != nil && b.vol.Name() == volume {
+		return b.mountpoint
 	}
 	return ""
 }
 
 // OnBeforeUnmount registers a callback that fires (LIFO) before the
-// filesystem at mountpoint is unmounted.
+// filesystem is unmounted.
 func (b *Backend) OnBeforeUnmount(mountpoint string, fn func()) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if entry, ok := b.mounts[mountpoint]; ok {
-		entry.beforeUnmount = append(entry.beforeUnmount, fn)
-		b.mounts[mountpoint] = entry
+	if b.vol != nil && b.mountpoint == mountpoint {
+		b.beforeUnmount = append(b.beforeUnmount, fn)
 	}
 }
 
-// doUnmount tears down a single mount: fires beforeUnmount callbacks (LIFO),
-// unmounts the FS via the driver, removes the mount from tracking, and
-// unregisters the volume from the driver.
-func (b *Backend) doUnmount(ctx context.Context, mountpoint string, entry mountEntry) {
-	for i := len(entry.beforeUnmount) - 1; i >= 0; i-- {
-		entry.beforeUnmount[i]()
+// doUnmount tears down the mount: fires beforeUnmount callbacks (LIFO),
+// unmounts the FS via the driver, clears tracking, and unregisters the volume.
+func (b *Backend) doUnmount(ctx context.Context) {
+	b.mu.Lock()
+	callbacks := b.beforeUnmount
+	mountpoint := b.mountpoint
+	handle := b.handle
+	volName := b.vol.Name()
+	b.beforeUnmount = nil
+	b.vol = nil
+	b.mountpoint = ""
+	b.mu.Unlock()
+
+	for i := len(callbacks) - 1; i >= 0; i-- {
+		callbacks[i]()
 	}
-	if err := entry.driver.Unmount(ctx, entry.handle); err != nil {
+	if err := b.driver.Unmount(ctx, handle); err != nil {
 		slog.Warn("unmount failed", "mountpoint", mountpoint, "error", err)
 	}
-	b.mu.Lock()
-	delete(b.mounts, mountpoint)
-	b.mu.Unlock()
-	entry.driver.UnregisterVolume(entry.vol.Name())
+	b.driver.UnregisterVolume(volName)
 }
 
 // Thaw resumes the filesystem after Freeze.
 func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
-	entry, err := b.entry(mountpoint)
-	if err != nil {
-		return err
+	b.mu.Lock()
+	if b.vol == nil {
+		b.mu.Unlock()
+		return fmt.Errorf("no volume mounted")
 	}
-	return entry.driver.Thaw(ctx, entry.handle)
+	handle, driver := b.handle, b.driver
+	b.mu.Unlock()
+	return driver.Thaw(ctx, handle)
 }
 
-// FS returns a filesystem handle for the given mountpoint.
+// FS returns a filesystem handle for the mounted volume.
 func (b *Backend) FS(mountpoint string) (*RootFS, error) {
-	entry, err := b.entry(mountpoint)
-	if err != nil {
-		return nil, err
+	b.mu.Lock()
+	if b.vol == nil {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("no volume mounted")
 	}
-	return entry.driver.FS(entry.handle)
+	handle, driver := b.handle, b.driver
+	b.mu.Unlock()
+	return driver.FS(handle)
 }
 
 // FSForVolume returns a rooted filesystem for a volume by name, auto-mounting if needed.
 func (b *Backend) FSForVolume(ctx context.Context, volume string) (*RootFS, error) {
 	b.mu.Lock()
-	for _, entry := range b.mounts {
-		if entry.vol.Name() == volume {
-			b.mu.Unlock()
-			return entry.driver.FS(entry.handle)
-		}
+	if b.vol != nil && b.vol.Name() == volume {
+		handle, driver := b.handle, b.driver
+		b.mu.Unlock()
+		return driver.FS(handle)
 	}
 	b.mu.Unlock()
 
@@ -267,10 +269,8 @@ func (b *Backend) FSForVolume(ctx context.Context, volume string) (*RootFS, erro
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, entry := range b.mounts {
-		if entry.vol.Name() == volume {
-			return entry.driver.FS(entry.handle)
-		}
+	if b.vol != nil && b.vol.Name() == volume {
+		return b.driver.FS(b.handle)
 	}
 	return nil, fmt.Errorf("volume %q not found after auto-mount", volume)
 }
@@ -349,70 +349,61 @@ func (b *Backend) DevicePath(volume string) (string, error) {
 func (b *Backend) IsMounted(mountpoint string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	_, ok := b.mounts[mountpoint]
-	return ok
+	return b.vol != nil && b.mountpoint == mountpoint
 }
 
 // IsVolumeMounted returns true if the named volume is currently mounted.
 func (b *Backend) IsVolumeMounted(volume string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, entry := range b.mounts {
-		if entry.vol.Name() == volume {
-			return true
-		}
-	}
-	return false
+	return b.vol != nil && b.vol.Name() == volume
 }
 
 // VolumeAt returns the volume name mounted at mountpoint, or "" if none.
 func (b *Backend) VolumeAt(mountpoint string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	entry, ok := b.mounts[mountpoint]
-	if !ok {
-		return ""
+	if b.vol != nil && b.mountpoint == mountpoint {
+		return b.vol.Name()
 	}
-	return entry.vol.Name()
+	return ""
 }
 
 // Mounts returns a copy of all active mountpoint → volume name mappings.
 func (b *Backend) Mounts() map[string]string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	cp := make(map[string]string, len(b.mounts))
-	for k, v := range b.mounts {
-		cp[k] = v.vol.Name()
+	cp := make(map[string]string, 1)
+	if b.vol != nil {
+		cp[b.mountpoint] = b.vol.Name()
 	}
 	return cp
 }
 
-// Close shuts down all mounted volumes concurrently, then closes drivers and
-// the volume manager. Each volume independently goes through:
+// Close shuts down the mounted volume, then closes the driver and
+// the volume manager.
 //
 //  1. fsfreeze (quiesce filesystem so no new writes land)
 //  2. flush (persist dirty data to S3)
 //  3. unmount (detach the filesystem)
 //  4. flush again (catch any writes that landed between freeze and unmount)
 //
-// Every step is best-effort: failures are logged but never prevent later steps
-// or other volumes from proceeding.
+// Every step is best-effort: failures are logged but never prevent later steps.
 func (b *Backend) Close(ctx context.Context) error {
-	mounts := b.Mounts() // copy: mountpoint → volume name
-
-	slog.Info("backend close: unmounting volumes", "count", len(mounts))
-	var wg sync.WaitGroup
-	for mp, vol := range mounts {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			slog.Info("backend close: closing mount", "mountpoint", mp, "volume", vol)
-			b.closeMount(ctx, mp, vol)
-			slog.Info("backend close: mount closed", "mountpoint", mp, "volume", vol)
-		}()
+	b.mu.Lock()
+	mounted := b.vol != nil
+	var mountpoint, volume string
+	if mounted {
+		mountpoint = b.mountpoint
+		volume = b.vol.Name()
 	}
-	wg.Wait()
-	slog.Info("backend close: all mounts closed")
+	b.mu.Unlock()
+
+	if mounted {
+		slog.Info("backend close: closing mount", "mountpoint", mountpoint, "volume", volume)
+		b.closeMount(ctx, mountpoint, volume)
+		slog.Info("backend close: mount closed", "mountpoint", mountpoint, "volume", volume)
+	}
 
 	if b.driver != nil {
 		slog.Info("backend close: closing driver")
@@ -421,7 +412,7 @@ func (b *Backend) Close(ctx context.Context) error {
 		}
 	}
 	slog.Info("backend close: closing volume manager")
-	if err := b.vm.Close(ctx); err != nil {
+	if err := b.vm.Close(); err != nil {
 		slog.Warn("backend close: volume manager close failed", "error", err)
 		return err
 	}
@@ -429,67 +420,60 @@ func (b *Backend) Close(ctx context.Context) error {
 	return nil
 }
 
-// closeMount shuts down a single mount. Every step is best-effort.
+// closeMount shuts down the single mount. Every step is best-effort.
 func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
 	b.mu.Lock()
-	entry, ok := b.mounts[mountpoint]
-	b.mu.Unlock()
-	if !ok {
+	if b.vol == nil {
+		b.mu.Unlock()
 		return
 	}
+	vol := b.vol
+	handle := b.handle
+	driver := b.driver
+	b.mu.Unlock()
 
 	// 1. Quiesce FS (manual — shutdown doesn't use before_freeze hooks).
 	slog.Info("closeMount: freezing", "mountpoint", mountpoint, "volume", volume)
-	if err := entry.driver.Freeze(ctx, entry.handle); err != nil {
+	if err := driver.Freeze(ctx, handle); err != nil {
 		slog.Warn("freeze failed during close", "mountpoint", mountpoint, "error", err)
 	}
 
 	// 2. Flush to S3.
 	slog.Info("closeMount: flushing", "mountpoint", mountpoint, "volume", volume)
-	if err := entry.vol.Flush(); err != nil {
+	if err := vol.Flush(); err != nil {
 		slog.Warn("flush failed during close", "volume", volume, "error", err)
 	}
 
 	// 3. Tear down mount (chroot teardown, FS unmount, map cleanup).
 	slog.Info("closeMount: unmounting", "mountpoint", mountpoint, "volume", volume)
-	b.doUnmount(ctx, mountpoint, entry)
+	b.doUnmount(ctx)
 
 	// 4. Release ref (may trigger volume destruction which flushes again).
 	slog.Info("closeMount: releasing ref", "mountpoint", mountpoint, "volume", volume)
-	if err := entry.vol.ReleaseRef(); err != nil {
+	if err := vol.ReleaseRef(); err != nil {
 		slog.Warn("release ref failed during close", "volume", volume, "error", err)
 	}
 }
 
 // --- internal ---
 
-// mountpointFor returns the mountpoint for a volume, or "" if not mounted.
-// Caller must hold b.mu.
-func (b *Backend) mountpointFor(volume string) string {
-	for mp, entry := range b.mounts {
-		if entry.vol.Name() == volume {
-			return mp
-		}
-	}
-	return ""
-}
-
 // MountOpen mounts an already-open Volume at the given mountpoint.
 func (b *Backend) MountOpen(ctx context.Context, vol *storage.Volume, mountpoint string) error {
 	return b.mountVolume(ctx, vol, mountpoint)
 }
 
-// mountVolume mounts an already-open *Volume. Used by Mount, Clone, and MountOpen.
+// mountVolume mounts an already-open *Volume. Used by Mount and MountOpen.
 // Acquires a ref on the volume; Unmount releases it.
 func (b *Backend) mountVolume(ctx context.Context, vol *storage.Volume, mountpoint string) error {
 	slog.Debug("backend: mountVolume start", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
-	if mp := b.mountpointFor(vol.Name()); mp != "" {
-		b.mu.Unlock()
-		if mp == mountpoint {
+	if b.vol != nil && b.vol.Name() == vol.Name() {
+		if b.mountpoint == mountpoint {
+			b.mu.Unlock()
 			return nil
 		}
-		return fmt.Errorf("volume %q is already mounted at %s", vol.Name(), mp)
+		b.mu.Unlock()
+		return fmt.Errorf("volume %q is already mounted at %s", vol.Name(), b.mountpoint)
 	}
 	b.mu.Unlock()
 
@@ -515,19 +499,10 @@ func (b *Backend) mountVolume(ctx context.Context, vol *storage.Volume, mountpoi
 
 	slog.Debug("backend: mountVolume done", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
-	b.mounts[mountpoint] = mountEntry{vol: vol, handle: handle, driver: driver}
+	b.vol = vol
+	b.handle = handle
+	b.mountpoint = mountpoint
 	b.mu.Unlock()
 
 	return nil
-}
-
-// entry returns the mount entry for a mountpoint.
-func (b *Backend) entry(mountpoint string) (mountEntry, error) {
-	b.mu.Lock()
-	entry, ok := b.mounts[mountpoint]
-	b.mu.Unlock()
-	if !ok {
-		return mountEntry{}, fmt.Errorf("mountpoint %q not tracked", mountpoint)
-	}
-	return entry, nil
 }

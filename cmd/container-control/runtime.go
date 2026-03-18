@@ -158,7 +158,7 @@ func (s *controlServer) handleCheckpointVolume(w http.ResponseWriter, r *http.Re
 		return
 	}
 	c := s.ownerClient(sb.RootfsVolume)
-	cpID, err := c.Checkpoint(r.Context(), "")
+	cpID, err := c.Checkpoint(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

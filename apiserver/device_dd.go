@@ -14,13 +14,10 @@ func (d *Server) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	volume := r.URL.Query().Get("volume")
-	if volume == "" {
-		volume = d.managedVolume
-	}
+	vol := d.volume()
 	offsetStr := r.URL.Query().Get("offset")
-	if volume == "" || offsetStr == "" {
-		http.Error(w, "volume and offset required", 400)
+	if vol == nil || offsetStr == "" {
+		http.Error(w, "no volume or offset missing", 400)
 		return
 	}
 	offset, err := strconv.ParseUint(offsetStr, 10, 64)
@@ -29,18 +26,11 @@ func (d *Server) handleDeviceDDWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vm := d.backend.VM()
-	vol := vm.GetVolume(volume)
-	if vol == nil {
-		http.Error(w, "volume not open: "+volume, 404)
-		return
-	}
-
 	buf := make([]byte, storage.BlockSize)
 	n, readErr := io.ReadFull(r.Body, buf)
 	if n > 0 {
 		if err := vol.Write(buf[:n], offset); err != nil {
-			slog.Error("device/dd/write: write failed", "volume", volume, "offset", offset, "error", err)
+			slog.Error("device/dd/write: write failed", "volume", vol.Name(), "offset", offset, "error", err)
 			http.Error(w, "write failed: "+err.Error(), 500)
 			return
 		}
@@ -59,14 +49,11 @@ func (d *Server) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	volume := r.URL.Query().Get("volume")
-	if volume == "" {
-		volume = d.managedVolume
-	}
+	vol := d.volume()
 	offsetStr := r.URL.Query().Get("offset")
 	sizeStr := r.URL.Query().Get("size")
-	if volume == "" || offsetStr == "" || sizeStr == "" {
-		http.Error(w, "volume, offset, and size required", 400)
+	if vol == nil || offsetStr == "" || sizeStr == "" {
+		http.Error(w, "no volume, offset, or size missing", 400)
 		return
 	}
 	offset, err := strconv.ParseUint(offsetStr, 10, 64)
@@ -86,17 +73,10 @@ func (d *Server) handleDeviceDDRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vm := d.backend.VM()
-	vol := vm.GetVolume(volume)
-	if vol == nil {
-		http.Error(w, "volume not open: "+volume, 404)
-		return
-	}
-
 	buf := make([]byte, size)
 	n, err := vol.Read(r.Context(), buf, offset)
 	if err != nil {
-		slog.Error("device/dd/read: read failed", "volume", volume, "offset", offset, "error", err)
+		slog.Error("device/dd/read: read failed", "volume", vol.Name(), "offset", offset, "error", err)
 		http.Error(w, "read failed: "+err.Error(), 500)
 		return
 	}
@@ -112,32 +92,22 @@ func (d *Server) handleDeviceDDFinalize(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	volume := r.URL.Query().Get("volume")
-	if volume == "" {
-		volume = d.managedVolume
-	}
-	if volume == "" {
+	vol := d.volume()
+	if vol == nil {
 		http.Error(w, "no volume managed", 400)
 		return
 	}
 
-	vm := d.backend.VM()
-	vol := vm.GetVolume(volume)
-	if vol == nil {
-		http.Error(w, "volume not open: "+volume, 404)
-		return
-	}
-
 	if err := vol.Flush(); err != nil {
-		slog.Error("device/dd/finalize: flush failed", "volume", volume, "error", err)
+		slog.Error("device/dd/finalize: flush failed", "volume", vol.Name(), "error", err)
 		http.Error(w, "flush failed: "+err.Error(), 500)
 		return
 	}
 
 	if err := vol.ReleaseRef(); err != nil {
-		slog.Warn("device/dd/finalize: release ref", "volume", volume, "error", err)
+		slog.Warn("device/dd/finalize: release ref", "volume", vol.Name(), "error", err)
 	}
 
-	slog.Info("device/dd/finalize: complete", "volume", volume)
+	slog.Info("device/dd/finalize: complete", "volume", vol.Name())
 	w.WriteHeader(204)
 }

@@ -20,10 +20,11 @@ func skipWithoutFuse(t *testing.T) {
 }
 
 type fuseTestEnv struct {
-	vm  *storage.Manager
-	vol *storage.Volume
-	srv *fuseblockdev.Server
-	f   *os.File
+	store *objstore.MemStore
+	vm    *storage.Manager
+	vol   *storage.Volume
+	srv   *fuseblockdev.Server
+	f     *os.File
 }
 
 func setupFuse(t *testing.T) *fuseTestEnv {
@@ -32,7 +33,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 
 	store := objstore.NewMemStore()
 	vm := storage.NewManager(store, t.TempDir(), storage.Config{}, nil, nil)
-	t.Cleanup(func() { vm.Close(t.Context()) })
+	t.Cleanup(func() { vm.Close() })
 
 	vol, err := vm.NewVolume(storage.CreateParams{Volume: "testvol", Size: 4096})
 	require.NoError(t, err)
@@ -48,7 +49,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	require.NoError(t, err)
 	t.Cleanup(func() { f.Close() })
 
-	return &fuseTestEnv{vm: vm, vol: vol, srv: srv, f: f}
+	return &fuseTestEnv{store: store, vm: vm, vol: vol, srv: srv, f: f}
 }
 
 func TestFuseReadWrite(t *testing.T) {
@@ -154,7 +155,10 @@ func TestFuseReaddir(t *testing.T) {
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	newvol, err := env.vm.NewVolume(storage.CreateParams{Volume: "newvol", Size: 4096})
+	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	t.Cleanup(func() { vm2.Close() })
+
+	newvol, err := vm2.NewVolume(storage.CreateParams{Volume: "newvol", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("newvol", newvol)
 
@@ -179,7 +183,10 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
-	cloneVol, err := env.vm.NewVolume(storage.CreateParams{Volume: "clone", Size: 4096})
+	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	t.Cleanup(func() { vm2.Close() })
+
+	cloneVol, err := vm2.NewVolume(storage.CreateParams{Volume: "clone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("clone", cloneVol)
 
@@ -207,7 +214,10 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush())
 
-	dstVol, err := env.vm.NewVolume(storage.CreateParams{Volume: "refclone", Size: 4096})
+	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	t.Cleanup(func() { vm2.Close() })
+
+	dstVol, err := vm2.NewVolume(storage.CreateParams{Volume: "refclone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("refclone", dstVol)
 

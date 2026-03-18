@@ -40,10 +40,11 @@ type Server struct {
 	diskCache *storage.PageCache
 	ln        net.Listener
 
-	managedVolume string
-	mountpoint    string
-	devicePath    string
-	logPath       string
+	// mountpoint and devicePath are retained for symlink cleanup after
+	// the backend is closed during shutdown.
+	mountpoint string
+	devicePath string
+	logPath    string
 
 	startupErr string // non-fatal startup error (e.g. bad S3 creds)
 
@@ -51,6 +52,25 @@ type Server struct {
 
 	shutdownCh chan struct{} // closed when shutdown begins
 	doneCh     chan struct{} // closed when cleanup is complete
+}
+
+// volumeName returns the managed volume name, or "".
+func (d *Server) volumeName() string {
+	if d.backend == nil {
+		return ""
+	}
+	if v := d.backend.VM().Volume(); v != nil {
+		return v.Name()
+	}
+	return ""
+}
+
+// volume returns the managed volume, or nil.
+func (d *Server) volume() *storage.Volume {
+	if d.backend == nil {
+		return nil
+	}
+	return d.backend.VM().Volume()
 }
 
 // Backend returns the underlying backend.
@@ -161,13 +181,10 @@ func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Opti
 
 		// When a remote break-lease arrives, properly unmount/detach via the backend.
 		vm.SetOnRelease(func(ctx context.Context, volumeName string) {
-			// Unmount if mounted.
-			for mp, vol := range backend.Mounts() {
-				if vol == volumeName {
-					slog.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
-					if err := backend.Unmount(ctx, mp); err != nil {
-						slog.Warn("release: unmount failed", "volume", volumeName, "error", err)
-					}
+			if mp := backend.MountpointForVolume(volumeName); mp != "" {
+				slog.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
+				if err := backend.Unmount(ctx, mp); err != nil {
+					slog.Warn("release: unmount failed", "volume", volumeName, "error", err)
 				}
 			}
 			// Detach device if attached (and not already closed by Unmount).

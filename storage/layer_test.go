@@ -27,7 +27,7 @@ func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Ma
 	}
 	m := NewManager(store, cacheDir, config, nil, dc)
 	t.Cleanup(func() {
-		_ = m.Close(t.Context())
+		_ = m.Close()
 		_ = dc.Close()
 	})
 	return m

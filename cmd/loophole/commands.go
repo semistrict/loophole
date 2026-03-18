@@ -191,7 +191,7 @@ func lsCmd() *cobra.Command {
 			}
 			defer cleanup()
 			ctx := cmd.Context()
-			volumes, err := vm.ListAllVolumes(ctx)
+			volumes, err := storage.ListAllVolumes(ctx, vm.Store())
 			if err != nil {
 				return err
 			}
@@ -259,7 +259,7 @@ func checkpointCmd() *cobra.Command {
 				return err
 			}
 			c := client.NewFromSocket(sock)
-			cpID, err := c.Checkpoint(cmd.Context(), mountpoint)
+			cpID, err := c.Checkpoint(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -309,7 +309,6 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
 					return err
 				}
 				if err := c.Clone(cmd.Context(), client.CloneParams{
-					Volume:     args[0],
 					Checkpoint: fromCheckpoint,
 					Clone:      args[1],
 				}); err != nil {
@@ -324,8 +323,7 @@ With --from-checkpoint, the first arg is the volume name (not mountpoint):
 				return err
 			}
 			if err := c.Clone(cmd.Context(), client.CloneParams{
-				Mountpoint: args[0],
-				Clone:      args[1],
+				Clone: args[1],
 			}); err != nil {
 				return err
 			}
@@ -457,7 +455,7 @@ func deviceCheckpointCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			cpID, err := c.DeviceCheckpoint(cmd.Context(), args[0])
+			cpID, err := c.DeviceCheckpoint(cmd.Context())
 			if err != nil {
 				return err
 			}
@@ -479,7 +477,6 @@ func deviceCloneCmd() *cobra.Command {
 				return err
 			}
 			if err := c.DeviceClone(cmd.Context(), client.DeviceCloneParams{
-				Volume:     args[0],
 				Checkpoint: fromCheckpoint,
 				Clone:      args[1],
 			}); err != nil {
@@ -503,7 +500,7 @@ func deviceFlushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.FlushVolume(cmd.Context(), args[0]); err != nil {
+			if err := c.Flush(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Printf("flushed volume %s\n", args[0])
@@ -804,7 +801,7 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 		return nil, nil, err
 	}
 	return vm, func() {
-		_ = vm.Close(context.Background())
+		util.SafeClose(vm, "close direct manager")
 	}, nil
 }
 

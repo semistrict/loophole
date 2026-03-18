@@ -64,12 +64,13 @@ type Simulation struct {
 }
 
 // SimNode represents a single simulated instance.
+// Each open volume gets its own Manager (one volume per manager).
 type SimNode struct {
-	id      string
-	fs      *SimLocalFS
-	manager *Manager
-	volumes []string // volume names this node has open
-	alive   bool
+	id       string
+	fs       *SimLocalFS
+	managers map[string]*Manager // volume name → manager
+	volumes  []string            // volume names this node has open
+	alive    bool
 }
 
 func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
@@ -93,12 +94,11 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 	// Create nodes.
 	for i := range config.NumNodes {
 		node := &SimNode{
-			id:    fmt.Sprintf("node-%d", i),
-			fs:    NewSimLocalFS(),
-			alive: true,
+			id:       fmt.Sprintf("node-%d", i),
+			fs:       NewSimLocalFS(),
+			managers: make(map[string]*Manager),
+			alive:    true,
 		}
-		node.manager = sim.newManager(t.TempDir(), node.fs)
-		sim.allManagers = append(sim.allManagers, node.manager)
 		sim.nodes = append(sim.nodes, node)
 	}
 
@@ -138,6 +138,38 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 	)
 	m.idGen = sim.nextLayerID
 	return m
+}
+
+// managerFor returns the manager for a volume on a node, creating one if needed.
+func (sim *Simulation) managerFor(node *SimNode, volName string) *Manager {
+	if m, ok := node.managers[volName]; ok {
+		return m
+	}
+	m := sim.newManager(sim.t.TempDir(), node.fs)
+	node.managers[volName] = m
+	sim.allManagers = append(sim.allManagers, m)
+	return m
+}
+
+// anyManager returns any existing manager on the node (for S3-only operations
+// like ListCheckpoints, CloneFromCheckpoint, DeleteVolume). Creates a
+// throwaway one if the node has no managers.
+func (sim *Simulation) anyManager(node *SimNode) *Manager {
+	for _, m := range node.managers {
+		return m
+	}
+	m := sim.newManager(sim.t.TempDir(), node.fs)
+	sim.allManagers = append(sim.allManagers, m)
+	return m
+}
+
+// getVolume returns the *Volume for a name on a node, or nil.
+func (sim *Simulation) getVolume(node *SimNode, name string) *Volume {
+	m, ok := node.managers[name]
+	if !ok {
+		return nil
+	}
+	return m.GetVolume(name)
 }
 
 func (sim *Simulation) fillRandomBytes(dst []byte) {
@@ -186,7 +218,7 @@ func (sim *Simulation) Run() {
 			continue
 		}
 		for _, volName := range node.volumes {
-			v := node.manager.GetVolume(volName)
+			v := sim.getVolume(node, volName)
 			if v == nil {
 				continue
 			}
@@ -259,7 +291,7 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -306,7 +338,7 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -433,7 +465,7 @@ func (sim *Simulation) opRead(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -462,7 +494,7 @@ func (sim *Simulation) opFlush(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -482,7 +514,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -547,7 +579,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -574,7 +606,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 	if err := v.Clone(cloneName); err != nil {
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -617,7 +649,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -639,7 +671,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 	if err := v.Clone(cloneName); err != nil {
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -683,7 +715,7 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -720,7 +752,7 @@ func (sim *Simulation) opFlushAndVerify(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -786,7 +818,7 @@ func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
 	name := fmt.Sprintf("vol-%d", sim.nextVolID)
 	sim.nextVolID++
 
-	v, err := node.manager.NewVolume(CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
+	v, err := sim.managerFor(node, name).NewVolume(CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		return // S3 faults can cause creation failures
 	}
@@ -818,8 +850,8 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	dstName := node.volumes[i]
 	srcName := node.volumes[j]
 
-	dst := node.manager.GetVolume(dstName)
-	src := node.manager.GetVolume(srcName)
+	dst := sim.getVolume(node, dstName)
+	src := sim.getVolume(node, srcName)
 	if dst == nil || src == nil {
 		return
 	}
@@ -873,7 +905,7 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -943,7 +975,7 @@ func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -992,7 +1024,10 @@ func (sim *Simulation) opDeleteVolume(ctx context.Context, node *SimNode) {
 	sort.Strings(candidates)
 
 	name := candidates[sim.rng.IntN(len(candidates))]
-	if err := node.manager.DeleteVolume(ctx, name); err != nil {
+	// Use a temporary manager for the delete (volume is not open on any node).
+	dm := sim.newManager(sim.t.TempDir(), node.fs)
+	sim.allManagers = append(sim.allManagers, dm)
+	if err := dm.DeleteVolume(ctx, name); err != nil {
 		return
 	}
 
@@ -1009,7 +1044,7 @@ func (sim *Simulation) opCloseVolume(ctx context.Context, node *SimNode) {
 	idx := sim.rng.IntN(len(node.volumes))
 	volName := node.volumes[idx]
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -1024,8 +1059,12 @@ func (sim *Simulation) opCloseVolume(ctx context.Context, node *SimNode) {
 	// ReleaseRef → destroy → closeVolume when refcount hits zero.
 	v.ReleaseRef()
 
-	// Remove from node's volume list and release lease.
+	// Remove from node's volume list, close the per-volume manager, and release lease.
 	node.volumes = append(node.volumes[:idx], node.volumes[idx+1:]...)
+	if m, ok := node.managers[volName]; ok {
+		m.Close()
+		delete(node.managers, volName)
+	}
 	delete(sim.leases, volName)
 }
 
@@ -1040,7 +1079,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(srcName)
+	v := sim.getVolume(node, srcName)
 	if v == nil {
 		return
 	}
@@ -1064,7 +1103,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 	if err := v.Clone(cloneName); err != nil {
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1130,7 +1169,7 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 	}
 
 	// Open the snapshot temporarily.
-	snapVol, err := node.manager.OpenVolume(snapName)
+	snapVol, err := sim.managerFor(node, snapName).OpenVolume(snapName)
 	if err != nil {
 		return
 	}
@@ -1152,7 +1191,7 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 		delete(sim.leases, snapName)
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		snapVol.ReleaseRef()
 		delete(sim.leases, snapName)
@@ -1196,7 +1235,7 @@ func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -1256,7 +1295,7 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 	var srcVolName string
 	var checkpoints []CheckpointInfo
 	for _, name := range volNames {
-		cps, err := node.manager.ListCheckpoints(ctx, name)
+		cps, err := sim.anyManager(node).ListCheckpoints(ctx, name)
 		if err != nil || len(cps) == 0 {
 			continue
 		}
@@ -1282,10 +1321,10 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 		return
 	}
 
-	if err := node.manager.CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName); err != nil {
+	if err := sim.anyManager(node).CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName); err != nil {
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1320,7 +1359,7 @@ func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -1353,7 +1392,7 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	v := node.manager.GetVolume(volName)
+	v := sim.getVolume(node, volName)
 	if v == nil {
 		return
 	}
@@ -1383,7 +1422,7 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 	if err := v.Clone(cloneName); err != nil {
 		return
 	}
-	clone, err := node.manager.OpenVolume(cloneName)
+	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
 	if err != nil {
 		return
 	}
@@ -1479,14 +1518,16 @@ func (sim *Simulation) opCrash(_ context.Context, node *SimNode) {
 	// Discard unflushed oracle state.
 	sim.oracle.RecordCrash(node.id)
 
-	// Kill the manager's background goroutines most of the time to keep the
+	// Kill the managers' background goroutines most of the time to keep the
 	// synctest bubble lean. Leave them running ~5% of the time to exercise
 	// the case where a crashed process's goroutines linger (e.g. stuck I/O).
 	if sim.rng.Float64() > 0.05 {
-		node.manager.Close(context.Background())
+		for _, m := range node.managers {
+			m.Close()
+		}
 	}
 
-	node.manager = nil
+	node.managers = make(map[string]*Manager)
 	node.volumes = nil
 }
 
@@ -1494,9 +1535,7 @@ func (sim *Simulation) recoverNode(ctx context.Context, node *SimNode) {
 	node.fs = NewSimLocalFS()
 	node.alive = true
 	node.volumes = nil
-
-	node.manager = sim.newManager(sim.t.TempDir(), node.fs)
-	sim.allManagers = append(sim.allManagers, node.manager)
+	node.managers = make(map[string]*Manager)
 
 	// Re-acquire up to 3 unleased volumes. Production nodes typically serve
 	// multiple volumes; this exercises concurrent timeline opens and shared
@@ -1527,7 +1566,7 @@ func (sim *Simulation) recoverNode(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
-	v := node.manager.GetVolume(name)
+	v := sim.getVolume(node, name)
 	if v == nil {
 		return
 	}
@@ -1539,7 +1578,7 @@ func (sim *Simulation) setTimelineDebugLog(node *SimNode, name string) {
 }
 
 func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name string) {
-	v, err := node.manager.NewVolume(CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
+	v, err := sim.managerFor(node, name).NewVolume(CreateParams{Volume: name, Size: uint64(sim.config.DevicePages) * PageSize})
 	if err != nil {
 		sim.t.Fatalf("create volume %s: %v", name, err)
 	}
@@ -1558,7 +1597,7 @@ func (sim *Simulation) createVolume(ctx context.Context, node *SimNode, name str
 }
 
 func (sim *Simulation) acquireVolume(ctx context.Context, node *SimNode, name string) {
-	_, err := node.manager.OpenVolume(name)
+	_, err := sim.managerFor(node, name).OpenVolume(name)
 	if err != nil {
 		return
 	}
@@ -1581,14 +1620,11 @@ func (sim *Simulation) FullScan() {
 	ctx := sim.t.Context()
 	sim.store.ClearFaults()
 
-	m := sim.newManager(sim.t.TempDir(), NewSimLocalFS())
-	sim.allManagers = append(sim.allManagers, m)
-
 	// Verify ListAllVolumes contains every tracked volume.
 	// Note: S3 may also contain partially-created volumes from faulted
 	// opCreateVolume calls (ref written but getVolRef failed), so we only
 	// check that every tracked volume is present, not the reverse.
-	allNames, err := m.ListAllVolumes(ctx)
+	allNames, err := ListAllVolumes(ctx, sim.store.Store())
 	if err != nil {
 		sim.t.Fatalf("ListAllVolumes: %v", err)
 	}
@@ -1626,7 +1662,11 @@ func (sim *Simulation) FullScan() {
 			sim.t.Fatalf("full scan: vol %s timeline mismatch: oracle=%s s3=%s", volName, timelineID, ref.LayerID)
 		}
 
-		v, err := m.OpenVolume(volName)
+		// Each volume gets its own manager (one volume per manager).
+		vm := sim.newManager(sim.t.TempDir(), NewSimLocalFS())
+		sim.allManagers = append(sim.allManagers, vm)
+
+		v, err := vm.OpenVolume(volName)
 		if err != nil {
 			// Volume may have been created during a fault window and
 			// partially written. Skip unloadable volumes.
@@ -1648,16 +1688,9 @@ func (sim *Simulation) FullScan() {
 				sim.reportMismatch(ctx, v, volName, "", timelineID, pageIdx, buf, expected)
 			}
 		}
+		vm.Close()
 		scanned++
 	}
-
-	// Verify Volumes() matches the number of successfully opened volumes.
-	openNames := m.Volumes()
-	if len(openNames) != scanned {
-		sim.t.Fatalf("Volumes() returned %d names, expected %d", len(openNames), scanned)
-	}
-
-	m.Close(ctx)
 
 	// Structural invariant checks: verify layer reference integrity.
 	sim.verifyLayerIntegrity(ctx, volNames)
@@ -1786,7 +1819,7 @@ func runSimulation(t *testing.T, seed uint64, config SimConfig) []string {
 		sim := NewSimulation(t, seed, config)
 		defer func() {
 			for _, m := range sim.allManagers {
-				m.Close(context.Background())
+				m.Close()
 			}
 		}()
 		sim.Run()
@@ -1843,7 +1876,7 @@ func TestSimulation(t *testing.T) {
 		// "deadlock: main bubble goroutine has exited but blocked goroutines remain".
 		defer func() {
 			for _, m := range sim.allManagers {
-				m.Close(context.Background())
+				m.Close()
 			}
 		}()
 		sim.Run()
@@ -1926,13 +1959,13 @@ func TestSimulationSharedLayerReadExercise(t *testing.T) {
 		})
 		defer func() {
 			for _, m := range sim.allManagers {
-				m.Close(context.Background())
+				m.Close()
 			}
 		}()
 
 		ctx := t.Context()
 		sim.createVolume(ctx, sim.nodes[0], "vol-0")
-		v := sim.nodes[0].manager.GetVolume("vol-0")
+		v := sim.getVolume(sim.nodes[0], "vol-0")
 		require.NotNil(t, v)
 
 		timelineID := sim.volumeTimelines["vol-0"]

@@ -29,7 +29,7 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 
 	m := NewManager(objstore.NewMemStore(), t.TempDir(), cfg, nil, cache)
 	t.Cleanup(func() {
-		_ = m.Close(t.Context())
+		_ = m.Close()
 	})
 
 	v, err := m.NewVolume(CreateParams{
@@ -63,9 +63,10 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	}
 
 	cacheDir := t.TempDir()
-	m := NewManager(objstore.NewMemStore(), cacheDir, cfg, nil, cache)
+	store := objstore.NewMemStore()
+	m := NewManager(store, cacheDir, cfg, nil, cache)
 	t.Cleanup(func() {
-		_ = m.Close(t.Context())
+		_ = m.Close()
 	})
 
 	v, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -84,7 +85,11 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 
 	parent.layer.blockCache.clear()
 
-	child, err := m.OpenVolume("child")
+	// Open child on a separate manager (same store, same cache).
+	m2 := NewManager(store, cacheDir, cfg, nil, cache)
+	t.Cleanup(func() { _ = m2.Close() })
+
+	child, err := m2.OpenVolume("child")
 	require.NoError(t, err)
 	childVol := child
 	childVol.layer.blockCache.clear()
@@ -118,9 +123,10 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 		FlushInterval:  -1,
 	}
 
-	m := NewManager(objstore.NewMemStore(), t.TempDir(), cfg, nil, cache)
+	store := objstore.NewMemStore()
+	m := NewManager(store, t.TempDir(), cfg, nil, cache)
 	t.Cleanup(func() {
-		_ = m.Close(t.Context())
+		_ = m.Close()
 	})
 
 	parent, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -131,7 +137,11 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, parent.Flush())
 	require.NoError(t, parent.Clone("child"))
 
-	child, err := m.OpenVolume("child")
+	// Open child on a separate manager (same store).
+	m2 := NewManager(store, t.TempDir(), cfg, nil, cache)
+	t.Cleanup(func() { _ = m2.Close() })
+
+	child, err := m2.OpenVolume("child")
 	require.NoError(t, err)
 	childVol := child
 

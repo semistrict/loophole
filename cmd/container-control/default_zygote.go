@@ -121,7 +121,7 @@ func (s *controlServer) bootstrapDefaultZygote(ctx context.Context, name, volume
 		return "", err
 	}
 
-	cpID, err := ownerC.Checkpoint(ctx, "")
+	cpID, err := ownerC.Checkpoint(ctx)
 	if err != nil {
 		return "", fmt.Errorf("checkpoint zygote: %w", err)
 	}

@@ -35,13 +35,20 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	}
 
 	// Build a chain of 1000 clones: root → c0 → c1 → ... → c999.
+	// Each iteration: clone from prev, close prev, open clone.
 	const chainLen = 1000
 	prev := v
 	for i := range chainLen {
 		name := fmt.Sprintf("c%d", i)
-		next := cloneOpen(t, prev, name)
+		if err := prev.Clone(name); err != nil {
+			t.Fatalf("clone %d: %v", i, err)
+		}
 		if err := prev.ReleaseRef(); err != nil {
 			t.Fatalf("release %d: %v", i, err)
+		}
+		next, err := m.OpenVolume(name)
+		if err != nil {
+			t.Fatalf("open clone %d: %v", i, err)
 		}
 		prev = next
 	}

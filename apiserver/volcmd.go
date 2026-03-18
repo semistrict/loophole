@@ -5,16 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/storage"
 )
 
 // volCmdArgs is passed to every volume command handler.
 type volCmdArgs struct {
 	vol        *storage.Volume
-	volName    string
 	mountpoint string
-	backend    *fsbackend.Backend
 }
 
 // volCmd defines a per-volume command.
@@ -30,7 +27,7 @@ var volumeCommands = []volCmd{
 }
 
 func cmdFlush(a volCmdArgs) (any, error) {
-	slog.Info("flush", "volume", a.volName)
+	slog.Info("flush", "volume", a.vol.Name())
 	if err := a.vol.Flush(); err != nil {
 		return nil, fmt.Errorf("flush: %w", err)
 	}
@@ -38,8 +35,6 @@ func cmdFlush(a volCmdArgs) (any, error) {
 }
 
 // registerVolumeCmds registers volume commands on the server mux.
-// Accepts explicit volume/mountpoint in the request body; falls back to
-// the server's managed volume when omitted.
 func registerVolumeCmds(mux *http.ServeMux, d *Server) {
 	for _, cmd := range volumeCommands {
 		cmd := cmd
@@ -47,35 +42,14 @@ func registerVolumeCmds(mux *http.ServeMux, d *Server) {
 			if d.requireBackend(w) {
 				return
 			}
-			var req struct {
-				Volume     string `json:"volume"`
-				Mountpoint string `json:"mountpoint"`
-			}
-			if err := readJSON(r, &req); err != nil {
-				writeError(w, 400, err)
-				return
-			}
-
-			volName := req.Volume
-			mp := req.Mountpoint
-			if volName == "" {
-				volName = d.managedVolume
-			}
-			if mp == "" {
-				mp = d.currentMountpoint()
-			}
-			if volName == "" {
+			vol := d.volume()
+			if vol == nil {
 				writeError(w, 400, errNoVolume)
 				return
 			}
-			vol := d.backend.VM().GetVolume(volName)
-			if vol == nil {
-				writeError(w, 500, fmt.Errorf("volume %s not open", volName))
-				return
-			}
 			result, err := cmd.handler(volCmdArgs{
-				vol: vol, volName: volName, mountpoint: mp,
-				backend: d.backend,
+				vol:        vol,
+				mountpoint: d.currentMountpoint(),
 			})
 			if err != nil {
 				writeError(w, 500, err)

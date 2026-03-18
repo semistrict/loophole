@@ -20,7 +20,8 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 	}
-	m := newTestManager(t, objstore.NewMemStore(), cfg)
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
 	v, err := m.NewVolume(CreateParams{Volume: "parent", Size: 128 * 1024 * 1024})
@@ -43,7 +44,9 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 		t.Fatalf("pre-clone flush: %v", err)
 	}
 
-	snap := cloneOpen(t, v, "child")
+	if err := v.Clone("child"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Phase 3: Write more pages to parent after clone.
 	for i := 0; i < 5; i++ {
@@ -71,7 +74,13 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 		t.Fatalf("expected parent page 0 = 0xF0, got 0x%02x", buf[0])
 	}
 
-	// Verify child still has old data.
+	// Open child on a separate manager to verify it has the old data.
+	m2 := newTestManager(t, store, cfg)
+	snap, err := m2.OpenVolume("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	n, err = snap.Read(ctx, buf, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +99,8 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 	}
-	m := newTestManager(t, objstore.NewMemStore(), cfg)
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 128 * 1024 * 1024})
@@ -107,7 +117,9 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	}
 
 	// Clone.
-	child := cloneOpen(t, v, "child")
+	if err := v.Clone("child"); err != nil {
+		t.Fatal(err)
+	}
 
 	// Write to parent after clone.
 	for i := 0; i < 10; i++ {
@@ -122,12 +134,18 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 		t.Fatalf("flush parent: %v", err)
 	}
 
+	// Open child on a separate manager and verify all 50 pages.
+	m2 := newTestManager(t, store, cfg)
+	child, err := m2.OpenVolume("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	// Flush child (should be a no-op since it has no writes).
 	if err := child.Flush(); err != nil {
 		t.Fatalf("flush child: %v", err)
 	}
 
-	// Verify all 50 pages in child.
 	buf := make([]byte, PageSize)
 	for i := 0; i < 50; i++ {
 		n, err := child.Read(ctx, buf, uint64(i)*PageSize)

@@ -25,7 +25,6 @@ func (d *Server) CreateAndMount(ctx context.Context, p storage.CreateParams, mou
 	if err := d.backend.Mount(ctx, p.Volume, mountpoint); err != nil {
 		return "", err
 	}
-	d.managedVolume = p.Volume
 	d.mountpoint = mountpoint
 	d.writeSymlink(mountpoint)
 	return mountpoint, nil
@@ -45,7 +44,6 @@ func (d *Server) MountVolume(ctx context.Context, volume, mountpoint string) (st
 	if err := d.backend.Mount(ctx, volume, mountpoint); err != nil {
 		return "", err
 	}
-	d.managedVolume = volume
 	d.mountpoint = mountpoint
 	d.writeSymlink(mountpoint)
 	return mountpoint, nil
@@ -63,7 +61,6 @@ func (d *Server) AttachVolume(ctx context.Context, volume string) (string, error
 	if err != nil {
 		return "", err
 	}
-	d.managedVolume = volume
 	d.devicePath = devicePath
 	d.writeDeviceSymlink(devicePath)
 	return devicePath, nil

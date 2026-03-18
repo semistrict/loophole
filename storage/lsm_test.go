@@ -190,7 +190,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	m1 := NewManager(store, cacheDir, config, nil, dc1)
-	t.Cleanup(func() { m1.Close(t.Context()) })
+	t.Cleanup(func() { m1.Close() })
 	t.Cleanup(func() { dc1.Close() })
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
@@ -205,7 +205,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m1.Close(ctx); err != nil {
+	if err := m1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -228,7 +228,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 		t.Fatal("data mismatch after reopen")
 	}
 
-	if err := m2.Close(ctx); err != nil {
+	if err := m2.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -821,14 +821,15 @@ func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Open both snapshots on a fresh manager.
-	m2 := newTestManager(t, store, cfg)
-
-	snapPre, err := m2.OpenVolume("snap-pre")
+	// Open each snapshot on its own manager.
+	mPre := newTestManager(t, store, cfg)
+	snapPre, err := mPre.OpenVolume("snap-pre")
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapPost, err := m2.OpenVolume("snap-post")
+
+	mPost := newTestManager(t, store, cfg)
+	snapPost, err := mPost.OpenVolume("snap-post")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -984,7 +985,7 @@ func TestDeleteVolumeThenList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	names, err := m.ListAllVolumes(ctx)
+	names, err := ListAllVolumes(ctx, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1001,14 +1002,10 @@ func TestVolumesAndGetVolume(t *testing.T) {
 	if _, err := m.NewVolume(CreateParams{Volume: "a", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(CreateParams{Volume: "b", Size: 1024 * 1024}); err != nil {
-		t.Fatal(err)
-	}
 
 	names := m.Volumes()
-	sort.Strings(names)
-	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
-		t.Fatalf("expected [a, b], got %v", names)
+	if len(names) != 1 || names[0] != "a" {
+		t.Fatalf("expected [a], got %v", names)
 	}
 
 	if m.GetVolume("a") == nil {
@@ -1021,16 +1018,12 @@ func TestVolumesAndGetVolume(t *testing.T) {
 
 func TestManagerClose(t *testing.T) {
 	m := testManager(t)
-	ctx := t.Context()
 
 	if _, err := m.NewVolume(CreateParams{Volume: "v1", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(CreateParams{Volume: "v2", Size: 1024 * 1024}); err != nil {
-		t.Fatal(err)
-	}
 
-	if err := m.Close(ctx); err != nil {
+	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if len(m.Volumes()) != 0 {
@@ -1142,7 +1135,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 	if err := store.DeleteObject(ctx, layersKey); err != nil {
 		t.Fatal(err)
 	}
-	if err := m1.Close(ctx); err != nil {
+	if err := m1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1173,17 +1166,33 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 }
 
 func TestListAllVolumes(t *testing.T) {
-	m := testManager(t)
+	store := objstore.NewMemStore()
 	ctx := t.Context()
 
-	if _, err := m.NewVolume(CreateParams{Volume: "alpha", Size: 1024 * 1024}); err != nil {
+	// Create two volumes via separate managers (one volume per manager),
+	// then verify ListAllVolumes sees both in S3.
+	m1 := newTestManager(t, store, testConfig)
+	v1, err := m1.NewVolume(CreateParams{Volume: "alpha", Size: 1024 * 1024})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.NewVolume(CreateParams{Volume: "beta", Size: 1024 * 1024}); err != nil {
+	if err := v1.ReleaseRef(); err != nil {
+		t.Fatal(err)
+	}
+	if err := m1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	names, err := m.ListAllVolumes(ctx)
+	m2 := newTestManager(t, store, testConfig)
+	v2, err := m2.NewVolume(CreateParams{Volume: "beta", Size: 1024 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v2.ReleaseRef(); err != nil {
+		t.Fatal(err)
+	}
+
+	names, err := ListAllVolumes(ctx, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1294,13 +1303,13 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 
 // TestListAllVolumesFail tests that a ListKeys failure propagates from ListAllVolumes.
 func TestListAllVolumesFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	store := objstore.NewMemStore()
 	ctx := t.Context()
 
 	store.SetFault(objstore.OpListKeys, "", objstore.Fault{
 		Err: fmt.Errorf("simulated list failure"),
 	})
-	_, err := m.ListAllVolumes(ctx)
+	_, err := ListAllVolumes(ctx, store)
 	if err == nil || !strings.Contains(err.Error(), "simulated list failure") {
 		t.Fatalf("expected list failure, got: %v", err)
 	}
@@ -1335,7 +1344,6 @@ func TestOpenVolumeRefFail(t *testing.T) {
 // propagates from OpenVolume (volume ref reads fine, but timeline meta fails).
 func TestWritePartialPageReadFail(t *testing.T) {
 	store, m := testStoreManager(t)
-	ctx := t.Context()
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
@@ -1353,7 +1361,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	}
 
 	// Close the first manager to release the lease.
-	m.Close(ctx)
+	m.Close()
 
 	// Open on a fresh manager (empty local cache) so reads must go to S3.
 	m2 := newTestManager(t, store, m.config)
@@ -1595,11 +1603,11 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 		FlushThreshold: 2 * PageSize,
 		FlushInterval:  -1,
 	}
-	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
-	// Create source volume with 4 pages of known data.
-	src, err := m.NewVolume(CreateParams{Volume: "src", Size: 64 * PageSize})
+	// Create source volume on its own manager.
+	mSrc := newTestManager(t, store, cfg)
+	src, err := mSrc.NewVolume(CreateParams{Volume: "src", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1614,8 +1622,9 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create destination volume.
-	dst, err := m.NewVolume(CreateParams{Volume: "dst", Size: 64 * PageSize})
+	// Create destination volume on a separate manager (same store).
+	mDst := newTestManager(t, store, cfg)
+	dst, err := mDst.NewVolume(CreateParams{Volume: "dst", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1695,11 +1704,11 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 		FlushThreshold: 2 * PageSize,
 		FlushInterval:  -1,
 	}
-	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
 	// Create a "parent" volume and write distinct data to pages 0-3.
-	parent, err := m.NewVolume(CreateParams{Volume: "parent", Size: 64 * PageSize})
+	mParent := newTestManager(t, store, cfg)
+	parent, err := mParent.NewVolume(CreateParams{Volume: "parent", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1714,11 +1723,24 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Clone parent → dst. dst inherits parent's data for pages 0-3.
-	dst := cloneOpen(t, parent, "dst")
+	if err := parent.Clone("dst"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mParent.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Open dst on its own manager.
+	mDst := newTestManager(t, store, cfg)
+	dst, err := mDst.OpenVolume("dst")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create a separate source volume with zeros on pages 0-3
 	// (never written, so they're zeros).
-	src, err := m.NewVolume(CreateParams{Volume: "src", Size: 64 * PageSize})
+	mSrc := newTestManager(t, store, cfg)
+	src, err := mSrc.NewVolume(CreateParams{Volume: "src", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1740,7 +1762,8 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Close and reopen dst on a fresh manager (simulates different node).
-	m.Close(ctx)
+	mDst.Close()
+	mSrc.Close()
 	m2 := newTestManager(t, store, cfg)
 	dst2, err := m2.OpenVolume("dst")
 	if err != nil {
@@ -1850,7 +1873,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	}
 
 	// Close and reopen.
-	m.Close(ctx)
+	m.Close()
 	m2 := newTestManager(t, store, cfg)
 	v2, err := m2.OpenVolume("test")
 	if err != nil {
@@ -2014,7 +2037,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m1.Close(ctx); err != nil {
+	if err := m1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2120,7 +2143,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	if err := v1.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := m1.Close(ctx); err != nil {
+	if err := m1.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2168,7 +2191,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	}
 	m := NewManager(store, cacheDir, config, nil, dc)
 	t.Cleanup(func() { dc.Close() })
-	defer m.Close(ctx)
+	defer m.Close()
 
 	const numPages = testSlotCap + 100
 	v, err := m.NewVolume(CreateParams{Volume: "backpressure-test", Size: uint64(numPages+10) * PageSize})
@@ -3151,7 +3174,7 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 
 	clone1 := cloneOpen(t, v, "clone-1")
 	_ = clone1.ReleaseRef()
-	_ = m1.Close(ctx) // shut down node 1
+	_ = m1.Close() // shut down node 1
 
 	// Node 2: Reopen "mem-vol", write dirty pages, clone-2.
 	m2 := newTestManager(t, store, cfg)
@@ -3247,7 +3270,7 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 	}
 	clone2 := cloneOpen(t, v, "clone-2")
 	_ = clone2.ReleaseRef()
-	_ = m1.Close(ctx)
+	_ = m1.Close()
 
 	// --- Phase 3: Fresh node reads clone-2 ---
 	m2 := newTestManager(t, store, cfg)

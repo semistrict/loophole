@@ -41,9 +41,9 @@ func httpClient(sock string) *http.Client {
 // Socket returns the Unix socket path for this client.
 func (c *Client) Socket() string { return c.sock }
 
-// FlushVolume flushes a named volume.
-func (c *Client) FlushVolume(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/flush", "volume", volume)
+// Flush flushes the managed volume.
+func (c *Client) Flush(ctx context.Context) error {
+	_, err := c.post(ctx, "/flush", nil)
 	return err
 }
 
@@ -86,22 +86,21 @@ func (c *Client) Mount(ctx context.Context, volume, mountpoint string) error {
 	return err
 }
 
-// Clone creates an unmounted clone of a mounted volume or checkpoint.
+// CloneParams controls how Clone operates.
 type CloneParams struct {
-	Mountpoint string `json:"mountpoint,omitempty"`
-	Volume     string `json:"volume,omitempty"`
 	Checkpoint string `json:"checkpoint,omitempty"`
 	Clone      string `json:"clone"`
 }
 
+// Clone creates an unmounted clone of the managed volume.
 func (c *Client) Clone(ctx context.Context, p CloneParams) error {
 	_, err := c.post(ctx, "/clone", p)
 	return err
 }
 
 // Checkpoint creates a checkpoint and returns the checkpoint ID (timestamp).
-func (c *Client) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
-	resp, err := c.post(ctx, "/checkpoint", "mountpoint", mountpoint)
+func (c *Client) Checkpoint(ctx context.Context) (string, error) {
+	resp, err := c.post(ctx, "/checkpoint", nil)
 	if err != nil {
 		return "", err
 	}
@@ -113,8 +112,8 @@ func (c *Client) Checkpoint(ctx context.Context, mountpoint string) (string, err
 }
 
 // DeviceCheckpoint creates a checkpoint at the device level.
-func (c *Client) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
-	resp, err := c.post(ctx, "/device/checkpoint", "volume", volume)
+func (c *Client) DeviceCheckpoint(ctx context.Context) (string, error) {
+	resp, err := c.post(ctx, "/device/checkpoint", nil)
 	if err != nil {
 		return "", err
 	}
@@ -125,9 +124,9 @@ func (c *Client) DeviceCheckpoint(ctx context.Context, volume string) (string, e
 	return result.Checkpoint, nil
 }
 
-// ListCheckpoints returns all checkpoints for a volume.
-func (c *Client) ListCheckpoints(ctx context.Context, volume string) ([]storage.CheckpointInfo, error) {
-	resp, err := c.get(ctx, "/checkpoints?volume="+volume)
+// ListCheckpoints returns all checkpoints for the managed volume.
+func (c *Client) ListCheckpoints(ctx context.Context) ([]storage.CheckpointInfo, error) {
+	resp, err := c.get(ctx, "/checkpoints")
 	if err != nil {
 		return nil, err
 	}
@@ -158,12 +157,11 @@ func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
 }
 
 type DeviceCloneParams struct {
-	Volume     string `json:"volume"`
 	Checkpoint string `json:"checkpoint,omitempty"`
 	Clone      string `json:"clone"`
 }
 
-// DeviceClone creates an unattached clone of a volume or checkpoint.
+// DeviceClone creates an unattached clone of the managed volume.
 func (c *Client) DeviceClone(ctx context.Context, p DeviceCloneParams) error {
 	_, err := c.post(ctx, "/device/clone", p)
 	return err

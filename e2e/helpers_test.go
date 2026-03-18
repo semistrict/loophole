@@ -163,8 +163,7 @@ func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName string
 		return fmt.Errorf("no owner for mountpoint %s", srcMountpoint)
 	}
 	if err := owner.client.Clone(ctx, client.CloneParams{
-		Mountpoint: srcMountpoint,
-		Clone:      cloneName,
+		Clone: cloneName,
 	}); err != nil {
 		return err
 	}
@@ -177,7 +176,7 @@ func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string
 	if owner == nil {
 		return "", fmt.Errorf("no owner for mountpoint %s", mountpoint)
 	}
-	return owner.client.Checkpoint(ctx, mountpoint)
+	return owner.client.Checkpoint(ctx)
 }
 
 func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
@@ -186,7 +185,6 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 		return err
 	}
 	if err := owner.client.Clone(ctx, client.CloneParams{
-		Volume:     volume,
 		Checkpoint: checkpointID,
 		Clone:      cloneName,
 	}); err != nil {
@@ -237,7 +235,7 @@ func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (stri
 	if err != nil {
 		return "", err
 	}
-	return owner.client.DeviceCheckpoint(ctx, volume)
+	return owner.client.DeviceCheckpoint(ctx)
 }
 
 func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) error {
@@ -245,7 +243,7 @@ func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) err
 	if err != nil {
 		return err
 	}
-	if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{Volume: volume, Clone: clone}); err != nil {
+	if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{Clone: clone}); err != nil {
 		return err
 	}
 	b.trackCreated(clone)
@@ -563,7 +561,7 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 		return nil, nil, err
 	}
 	return vm, func() {
-		_ = vm.Close(context.Background())
+		util.SafeClose(vm, "close e2e manager")
 	}, nil
 }
 

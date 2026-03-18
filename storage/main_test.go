@@ -34,12 +34,18 @@ func snapshotVolume(t testing.TB, v *Volume, name string) error {
 	return v.Clone(name)
 }
 
+// cloneOpen clones a volume and opens the clone on a separate manager
+// (sharing the same store), mirroring production where each volume is
+// owned by a different process.
 func cloneOpen(t testing.TB, v *Volume, name string) *Volume {
 	t.Helper()
 	if err := v.Clone(name); err != nil {
 		t.Fatalf("clone %q: %v", name, err)
 	}
-	clone, err := v.manager.OpenVolume(name)
+	m := v.manager
+	m2 := NewManager(m.store, m.cacheDir, m.config, m.fs, m.diskCache)
+	t.Cleanup(func() { _ = m2.Close() })
+	clone, err := m2.OpenVolume(name)
 	if err != nil {
 		t.Fatalf("open clone %q: %v", name, err)
 	}
