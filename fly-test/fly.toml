@@ -1,9 +1,0 @@
-app = 'loophole-test'
-primary_region = 'sjc'
-
-[build]
-  dockerfile = "Dockerfile"
-
-[[vm]]
-  size = 'performance-2x'
-  memory = '4gb'

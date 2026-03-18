@@ -1,9 +1,0 @@
-version = 2
-
-[plugins."io.containerd.grpc.v1.cri".containerd]
-  snapshotter = "loophole"
-
-[proxy_plugins]
-  [proxy_plugins.loophole]
-    type = "snapshot"
-    address = "/run/containerd/loophole.sock"
