@@ -9,8 +9,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
+	"github.com/semistrict/loophole/storage"
 )
 
 // fuseMount is the per-mount handle for FUSEDriver.
@@ -32,12 +32,12 @@ type FUSEDriver struct {
 }
 
 // NewFUSEDriver starts the FUSE block device server.
-func NewFUSEDriver(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (*FUSEDriver, error) {
+func NewFUSEDriver(fuseDir string, vm *storage.Manager, opts *fuseblockdev.Options) (*FUSEDriver, error) {
 	return &FUSEDriver{baseDir: fuseDir, opts: opts, pageSize: vm.PageSize()}, nil
 }
 
 // NewFUSE starts the FUSE block device server and returns a backend.
-func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Options) (*Backend, error) {
+func NewFUSE(fuseDir string, vm *storage.Manager, opts *fuseblockdev.Options) (*Backend, error) {
 	d, err := NewFUSEDriver(fuseDir, vm, opts)
 	if err != nil {
 		return nil, err
@@ -45,7 +45,7 @@ func NewFUSE(fuseDir string, vm loophole.VolumeManager, opts *fuseblockdev.Optio
 	return NewBackend(vm, d), nil
 }
 
-func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
+func (f *FUSEDriver) Format(ctx context.Context, vol *storage.Volume) error {
 	if err := f.ensureServer(vol.Name(), vol); err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func (f *FUSEDriver) Format(ctx context.Context, vol loophole.Volume) error {
 	return err
 }
 
-func (f *FUSEDriver) Mount(ctx context.Context, vol loophole.Volume, mountpoint string) (fuseMount, error) {
+func (f *FUSEDriver) Mount(ctx context.Context, vol *storage.Volume, mountpoint string) (fuseMount, error) {
 	if err := f.ensureServer(vol.Name(), vol); err != nil {
 		return fuseMount{}, err
 	}
@@ -114,7 +114,7 @@ func (f *FUSEDriver) Thaw(ctx context.Context, h fuseMount) error {
 	return err
 }
 
-func (f *FUSEDriver) RegisterVolume(name string, vol loophole.Volume) {
+func (f *FUSEDriver) RegisterVolume(name string, vol *storage.Volume) {
 	if err := f.ensureServer(name, vol); err != nil {
 		panic(err)
 	}
@@ -153,7 +153,7 @@ func (f *FUSEDriver) FS(h fuseMount) (*RootFS, error) {
 	return NewRootFS(h.mountpoint), nil
 }
 
-func (f *FUSEDriver) ensureServer(volume string, vol loophole.Volume) error {
+func (f *FUSEDriver) ensureServer(volume string, vol *storage.Volume) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 

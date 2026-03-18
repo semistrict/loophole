@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
 // TestE2E_DeviceDD_DirectL2 verifies that DeviceDD writes block-aligned,
@@ -21,7 +21,7 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	ctx := t.Context()
 
 	const nBlocks = 3
-	dataSize := uint64(nBlocks * storage2.BlockSize)
+	dataSize := uint64(nBlocks * storage.BlockSize)
 
 	// Generate random data so compression doesn't collapse it.
 	data := make([]byte, dataSize)
@@ -68,7 +68,7 @@ func TestE2E_DeviceDD_ReadBack(t *testing.T) {
 
 	// Use a size that's not a multiple of BlockSize to exercise the
 	// partial last block path.
-	dataSize := uint64(2*storage2.BlockSize + 12345)
+	dataSize := uint64(2*storage.BlockSize + 12345)
 
 	data := make([]byte, dataSize)
 	_, err := rand.Read(data)
@@ -99,7 +99,7 @@ func TestE2E_DeviceDD_VolumeMetadata(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	dataSize := uint64(storage2.BlockSize)
+	dataSize := uint64(storage.BlockSize)
 	data := make([]byte, dataSize)
 
 	volName := "dd-metadata-test"

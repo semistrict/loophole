@@ -189,15 +189,17 @@ type sandboxRecord struct {
 
 func TestE2E_Sandboxd_CreateFromZygote(t *testing.T) {
 	skipE2E(t)
-	b, _ := setupBusyboxVolume(t, "sandboxd-zygote")
-	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-zygote"))
+	b, mp := setupBusyboxVolume(t, "sandboxd-zygote")
+	cpID, err := b.Checkpoint(t.Context(), mp)
+	require.NoError(t, err)
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)
 
 	client.jsonRequest(t, http.MethodPost, "/v1/zygotes", map[string]any{
-		"name":   "busybox",
-		"volume": "sandboxd-zygote",
+		"name":       "busybox",
+		"volume":     "sandboxd-zygote",
+		"checkpoint": cpID,
 	})
 
 	data := client.jsonRequest(t, http.MethodPost, "/v1/sandboxes", map[string]any{
@@ -280,15 +282,17 @@ func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableDuringFlush(t *t
 
 func TestE2E_Sandboxd_TTYShell(t *testing.T) {
 	skipE2E(t)
-	b, _ := setupBusyboxVolume(t, "sandboxd-tty")
-	require.NoError(t, b.FreezeVolume(t.Context(), "sandboxd-tty"))
+	b, mp := setupBusyboxVolume(t, "sandboxd-tty")
+	cpID, err := b.Checkpoint(t.Context(), mp)
+	require.NoError(t, err)
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)
 
 	client.jsonRequest(t, http.MethodPost, "/v1/zygotes", map[string]any{
-		"name":   "busybox-tty",
-		"volume": "sandboxd-tty",
+		"name":       "busybox-tty",
+		"volume":     "sandboxd-tty",
+		"checkpoint": cpID,
 	})
 
 	data := client.jsonRequest(t, http.MethodPost, "/v1/sandboxes", map[string]any{

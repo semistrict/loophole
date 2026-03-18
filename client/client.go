@@ -11,8 +11,7 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/semistrict/loophole"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
 // Client talks to a running loophole daemon over its Unix socket.
@@ -50,8 +49,8 @@ func (c *Client) FlushVolume(ctx context.Context, volume string) error {
 
 // --- RPC methods ---
 
-// CreateParams is an alias for loophole.CreateParams.
-type CreateParams = loophole.CreateParams
+// CreateParams is an alias for storage.CreateParams.
+type CreateParams = storage.CreateParams
 
 func (c *Client) Create(ctx context.Context, p CreateParams) error {
 	_, err := c.post(ctx, "/create", p)
@@ -100,12 +99,6 @@ func (c *Client) Clone(ctx context.Context, p CloneParams) error {
 	return err
 }
 
-// Freeze makes a volume permanently immutable.
-func (c *Client) Freeze(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/freeze", "volume", volume)
-	return err
-}
-
 // Checkpoint creates a checkpoint and returns the checkpoint ID (timestamp).
 func (c *Client) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
 	resp, err := c.post(ctx, "/checkpoint", "mountpoint", mountpoint)
@@ -133,12 +126,12 @@ func (c *Client) DeviceCheckpoint(ctx context.Context, volume string) (string, e
 }
 
 // ListCheckpoints returns all checkpoints for a volume.
-func (c *Client) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
+func (c *Client) ListCheckpoints(ctx context.Context, volume string) ([]storage.CheckpointInfo, error) {
 	resp, err := c.get(ctx, "/checkpoints?volume="+volume)
 	if err != nil {
 		return nil, err
 	}
-	var result struct{ Checkpoints []loophole.CheckpointInfo }
+	var result struct{ Checkpoints []storage.CheckpointInfo }
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
 	}
@@ -186,7 +179,7 @@ func (c *Client) DeviceDD(ctx context.Context, p CreateParams, body io.Reader, p
 		return fmt.Errorf("create volume: %w", err)
 	}
 
-	const chunkSize = storage2.BlockSize
+	const chunkSize = storage.BlockSize
 	buf := make([]byte, chunkSize)
 	var offset uint64
 
@@ -222,7 +215,7 @@ func (c *Client) DeviceDD(ctx context.Context, p CreateParams, body io.Reader, p
 
 // DeviceDDWriteExisting writes a raw disk image into an already-open volume.
 func (c *Client) DeviceDDWriteExisting(ctx context.Context, volume string, body io.Reader, progress io.Writer) error {
-	const chunkSize = storage2.BlockSize
+	const chunkSize = storage.BlockSize
 	buf := make([]byte, chunkSize)
 	var offset uint64
 
@@ -284,7 +277,7 @@ func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64,
 // DeviceDD (write). The caller must open the volume first (e.g. via Create or
 // by having previously written to it).
 func (c *Client) DeviceDDRead(ctx context.Context, volume string, size uint64, dst io.Writer, progress io.Writer) error {
-	const chunkSize = storage2.BlockSize
+	const chunkSize = storage.BlockSize
 	var offset uint64
 
 	for offset < size {
@@ -332,27 +325,27 @@ func (c *Client) ddReadBlock(ctx context.Context, volume string, offset, size ui
 }
 
 // VolumeInfo returns metadata about a volume (does not need to be open).
-func (c *Client) VolumeInfo(ctx context.Context, volume string) (loophole.VolumeInfo, error) {
+func (c *Client) VolumeInfo(ctx context.Context, volume string) (storage.VolumeInfo, error) {
 	resp, err := c.get(ctx, "/volume-info?volume="+volume)
 	if err != nil {
-		return loophole.VolumeInfo{}, err
+		return storage.VolumeInfo{}, err
 	}
-	var info loophole.VolumeInfo
+	var info storage.VolumeInfo
 	if err := json.Unmarshal(resp, &info); err != nil {
-		return loophole.VolumeInfo{}, err
+		return storage.VolumeInfo{}, err
 	}
 	return info, nil
 }
 
 // VolumeDebugInfo returns debug information about an open volume.
-func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage2.VolumeDebugInfo, error) {
+func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage.VolumeDebugInfo, error) {
 	resp, err := c.get(ctx, "/debug/volume?volume="+volume)
 	if err != nil {
-		return storage2.VolumeDebugInfo{}, err
+		return storage.VolumeDebugInfo{}, err
 	}
-	var info storage2.VolumeDebugInfo
+	var info storage.VolumeDebugInfo
 	if err := json.Unmarshal(resp, &info); err != nil {
-		return storage2.VolumeDebugInfo{}, err
+		return storage.VolumeDebugInfo{}, err
 	}
 	return info, nil
 }

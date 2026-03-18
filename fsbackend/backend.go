@@ -9,14 +9,14 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/storage"
 )
 
 // mountEntry stores the volume, driver-specific handle, and the driver
 // that created the mount.
 type mountEntry struct {
-	vol           loophole.Volume
+	vol           *storage.Volume
 	handle        fuseMount
 	driver        *FUSEDriver
 	beforeUnmount []func() // fired LIFO before driver.Unmount
@@ -26,7 +26,7 @@ type mountEntry struct {
 // It provides the complete high-level API: mount, unmount, clone,
 // and filesystem access.
 type Backend struct {
-	vm     loophole.VolumeManager
+	vm     *storage.Manager
 	driver *FUSEDriver
 
 	mu     sync.Mutex
@@ -35,7 +35,7 @@ type Backend struct {
 
 // NewBackend creates a Backend with the remaining FUSE driver. The driver may
 // be nil for embedded/raw-volume use cases that never mount filesystems.
-func NewBackend(vm loophole.VolumeManager, driver *FUSEDriver) *Backend {
+func NewBackend(vm *storage.Manager, driver *FUSEDriver) *Backend {
 	return &Backend{
 		vm:     vm,
 		driver: driver,
@@ -52,15 +52,15 @@ func (b *Backend) driverFor() (*FUSEDriver, error) {
 }
 
 // VM returns the underlying VolumeManager.
-func (b *Backend) VM() loophole.VolumeManager { return b.vm }
+func (b *Backend) VM() *storage.Manager { return b.vm }
 
 // Create creates a new volume and formats it.
 // Size is the volume size in bytes; 0 means use the default.
-func (b *Backend) Create(ctx context.Context, p loophole.CreateParams) error {
+func (b *Backend) Create(ctx context.Context, p storage.CreateParams) error {
 	slog.Info("backend: creating volume", "volume", p.Volume, "size", p.Size, "type", p.Type)
 	volType := p.Type
 	if volType == "" {
-		volType = loophole.VolumeTypeExt4
+		volType = storage.VolumeTypeExt4
 	}
 	p.Type = volType
 
@@ -190,40 +190,6 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 	}
 
 	return nil
-}
-
-// FreezeVolume permanently freezes a volume, making it immutable.
-// vol.Freeze() fires before_freeze hooks (which flush the FS cache),
-// then persists the volume. If mounted, the mount is explicitly torn
-// down afterward (chroot teardown, FS unmount, volume ref release).
-func (b *Backend) FreezeVolume(ctx context.Context, volume string) error {
-	vol, err := b.vm.OpenVolume(volume)
-	if err != nil {
-		return fmt.Errorf("open volume: %w", err)
-	}
-	if vol.ReadOnly() {
-		return fmt.Errorf("volume %q is already frozen", volume)
-	}
-
-	slog.Info("freeze: persisting volume", "volume", volume)
-	if err := vol.Freeze(); err != nil {
-		return err
-	}
-
-	// Explicitly tear down mount if mounted.
-	if mp := b.MountpointForVolume(volume); mp != "" {
-		b.mu.Lock()
-		entry, ok := b.mounts[mp]
-		b.mu.Unlock()
-		if ok {
-			b.doUnmount(ctx, mp, entry)
-			if err := entry.vol.ReleaseRef(); err != nil {
-				return err
-			}
-			return b.vm.CloseVolume(volume)
-		}
-	}
-	return b.vm.CloseVolume(volume)
 }
 
 // MountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
@@ -509,13 +475,13 @@ func (b *Backend) mountpointFor(volume string) string {
 }
 
 // MountOpen mounts an already-open Volume at the given mountpoint.
-func (b *Backend) MountOpen(ctx context.Context, vol loophole.Volume, mountpoint string) error {
+func (b *Backend) MountOpen(ctx context.Context, vol *storage.Volume, mountpoint string) error {
 	return b.mountVolume(ctx, vol, mountpoint)
 }
 
 // mountVolume mounts an already-open *Volume. Used by Mount, Clone, and MountOpen.
 // Acquires a ref on the volume; Unmount releases it.
-func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoint string) error {
+func (b *Backend) mountVolume(ctx context.Context, vol *storage.Volume, mountpoint string) error {
 	slog.Debug("backend: mountVolume start", "volume", vol.Name(), "mountpoint", mountpoint)
 	b.mu.Lock()
 	if mp := b.mountpointFor(vol.Name()); mp != "" {
@@ -551,11 +517,6 @@ func (b *Backend) mountVolume(ctx context.Context, vol loophole.Volume, mountpoi
 	b.mu.Lock()
 	b.mounts[mountpoint] = mountEntry{vol: vol, handle: handle, driver: driver}
 	b.mu.Unlock()
-
-	// Register before-freeze hook — flushes FS cache before volume freeze.
-	vol.OnBeforeFreeze(func() error {
-		return driver.Freeze(ctx, handle)
-	})
 
 	return nil
 }

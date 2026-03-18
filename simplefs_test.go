@@ -1,23 +1,25 @@
-package loophole
+package loophole_test
 
 import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/semistrict/loophole/storage"
 )
 
 // SimpleFS is a trivial flat filesystem on top of a Volume for testing.
 // Each file is allocated a fixed-size region of the volume. No directories,
 // no growing files — just named byte ranges.
 type SimpleFS struct {
-	vol      Volume
+	vol      *storage.Volume
 	slotSize uint64
 	mu       sync.Mutex
 	files    map[string]uint64 // name → slot index
 	nextSlot uint64
 }
 
-func NewSimpleFS(vol Volume, slotSize uint64) *SimpleFS {
+func NewSimpleFS(vol *storage.Volume, slotSize uint64) *SimpleFS {
 	return &SimpleFS{
 		vol:      vol,
 		slotSize: slotSize,

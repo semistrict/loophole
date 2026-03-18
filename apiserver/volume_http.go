@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/storage"
 )
 
 func (d *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -12,7 +12,7 @@ func (d *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req loophole.CreateParams
+	var req storage.CreateParams
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, 400, err)
 		return

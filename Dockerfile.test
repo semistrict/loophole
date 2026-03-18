@@ -29,6 +29,10 @@ RUN apt-get update && apt-get install -y \
     make \
     nfs-kernel-server \
     && rm -rf /var/lib/apt/lists/* \
+    && printf '%s\n' 'export PATH="/usr/local/go/bin:/go/bin:$PATH"' > /etc/profile.d/go-path.sh \
+    && chmod 0644 /etc/profile.d/go-path.sh \
+    && ln -sf /usr/local/go/bin/go /usr/local/bin/go \
+    && ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt \
     && mkdir -p /opt/loophole-busybox/amd64/usr/bin /opt/loophole-busybox/arm64/usr/bin \
     && cp /bin/busybox /opt/loophole-busybox/$(dpkg --print-architecture)/usr/bin/busybox
 

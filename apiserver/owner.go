@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/semistrict/loophole"
+	"github.com/semistrict/loophole/storage"
 )
 
 // CreateAndMount creates a fresh volume and mounts it on this owner process.
-func (d *Server) CreateAndMount(ctx context.Context, p loophole.CreateParams, mountpoint string) (string, error) {
+func (d *Server) CreateAndMount(ctx context.Context, p storage.CreateParams, mountpoint string) (string, error) {
 	if d.backend == nil {
 		return "", fmt.Errorf("storage not available: %s", d.startupErr)
 	}

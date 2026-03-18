@@ -7,7 +7,7 @@ import (
 
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fuseblockdev"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,8 +20,8 @@ func skipWithoutFuse(t *testing.T) {
 }
 
 type fuseTestEnv struct {
-	vm  loophole.VolumeManager
-	vol loophole.Volume
+	vm  *storage.Manager
+	vol *storage.Volume
 	srv *fuseblockdev.Server
 	f   *os.File
 }
@@ -31,10 +31,10 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	skipWithoutFuse(t)
 
 	store := loophole.NewMemStore()
-	vm := storage2.NewVolumeManager(store, t.TempDir(), storage2.Config{}, nil, nil)
+	vm := storage.NewManager(store, t.TempDir(), storage.Config{}, nil, nil)
 	t.Cleanup(func() { vm.Close(t.Context()) })
 
-	vol, err := vm.NewVolume(loophole.CreateParams{Volume: "testvol", Size: 4096})
+	vol, err := vm.NewVolume(storage.CreateParams{Volume: "testvol", Size: 4096})
 	require.NoError(t, err)
 
 	mountDir := t.TempDir()
@@ -151,62 +151,10 @@ func TestFuseReaddir(t *testing.T) {
 	require.False(t, entries[0].IsDir())
 }
 
-func TestFuseChmodFreezesVolume(t *testing.T) {
-	env := setupFuse(t)
-
-	data := []byte("freeze me")
-	_, err := env.f.WriteAt(data, 0)
-	require.NoError(t, err)
-
-	err = os.Chmod(env.srv.DevicePath("testvol"), 0o400)
-	require.NoError(t, err)
-
-	assert.True(t, env.vol.ReadOnly())
-
-	info, err := os.Stat(env.srv.DevicePath("testvol"))
-	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o400), info.Mode().Perm())
-
-	_, err = env.f.WriteAt([]byte("nope"), 0)
-	require.Error(t, err)
-
-	buf := make([]byte, len(data))
-	_, err = env.f.ReadAt(buf, 0)
-	require.NoError(t, err)
-	assert.Equal(t, data, buf)
-}
-
-func TestFuseReadOnlyOpenRejected(t *testing.T) {
-	env := setupFuse(t)
-
-	// Write some data, then freeze (make read-only).
-	_, err := env.f.WriteAt([]byte("data"), 0)
-	require.NoError(t, err)
-	env.f.Close()
-
-	err = os.Chmod(env.srv.DevicePath("testvol"), 0o400)
-	require.NoError(t, err)
-	require.True(t, env.vol.ReadOnly())
-
-	// Opening with O_RDWR should fail with EROFS.
-	_, err = os.OpenFile(env.srv.DevicePath("testvol"), os.O_RDWR, 0)
-	require.Error(t, err, "O_RDWR open on read-only volume should fail")
-
-	// Opening with O_RDONLY should succeed.
-	f, err := os.OpenFile(env.srv.DevicePath("testvol"), os.O_RDONLY, 0)
-	require.NoError(t, err)
-	defer f.Close()
-
-	buf := make([]byte, 4)
-	_, err = f.ReadAt(buf, 0)
-	require.NoError(t, err)
-	require.Equal(t, []byte("data"), buf)
-}
-
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	newvol, err := env.vm.NewVolume(loophole.CreateParams{Volume: "newvol", Size: 4096})
+	newvol, err := env.vm.NewVolume(storage.CreateParams{Volume: "newvol", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("newvol", newvol)
 
@@ -231,7 +179,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
-	cloneVol, err := env.vm.NewVolume(loophole.CreateParams{Volume: "clone", Size: 4096})
+	cloneVol, err := env.vm.NewVolume(storage.CreateParams{Volume: "clone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("clone", cloneVol)
 
@@ -259,7 +207,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush())
 
-	dstVol, err := env.vm.NewVolume(loophole.CreateParams{Volume: "refclone", Size: 4096})
+	dstVol, err := env.vm.NewVolume(storage.CreateParams{Volume: "refclone", Size: 4096})
 	require.NoError(t, err)
 	env.srv.Add("refclone", dstVol)
 

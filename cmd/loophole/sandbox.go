@@ -30,7 +30,6 @@ func sandboxRootCmd() *cobra.Command {
 		sbCheckpointCmd(c),
 		sbCheckpointsCmd(c),
 		sbCloneCmd(c),
-		sbFreezeCmd(c),
 	)
 
 	return root
@@ -148,21 +147,6 @@ func sbCloneCmd(c *client.Client) *cobra.Command {
 				return err
 			}
 			fmt.Printf("cloned: %s\n", args[0])
-			return nil
-		},
-	}
-}
-
-func sbFreezeCmd(c *client.Client) *cobra.Command {
-	return &cobra.Command{
-		Use:   "freeze",
-		Short: "Make the current volume permanently immutable",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := c.Freeze(cmd.Context(), ""); err != nil {
-				return err
-			}
-			fmt.Println("frozen")
 			return nil
 		},
 	}

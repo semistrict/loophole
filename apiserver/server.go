@@ -162,7 +162,7 @@ func Start(ctx context.Context, inst loophole.Instance, dir loophole.Dir, opts O
 		if err != nil {
 			return nil, fmt.Errorf("create page cache: %w", err)
 		}
-		vm := storage.NewVolumeManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
+		vm := storage.NewManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
 
 		backend, err = createBackend(vm, inst, dir)
 		if err != nil {
@@ -359,7 +359,6 @@ func (d *Server) mux(stop context.CancelFunc) *http.ServeMux {
 	mux.HandleFunc("POST /create", d.handleCreate)
 	mux.HandleFunc("POST /mount", d.handleMount)
 	mux.HandleFunc("POST /delete", d.handleDelete)
-	mux.HandleFunc("POST /freeze", d.handleFreeze)
 	mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
 	mux.HandleFunc("POST /clone", d.handleClone)
 	mux.HandleFunc("GET /checkpoints", d.handleListCheckpoints)

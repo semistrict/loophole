@@ -155,36 +155,6 @@ func TestE2E_CloneFromCheckpointNonexistentVolume(t *testing.T) {
 	require.Error(t, err, "clone from nonexistent volume should fail")
 }
 
-// ---------- Freeze errors ----------
-
-func TestE2E_FreezeAlreadyFrozenVolume(t *testing.T) {
-	b := newBackend(t)
-	ctx := t.Context()
-
-	vol := "freeze-twice"
-	mp := mountpoint(t, vol)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
-	require.NoError(t, b.Mount(ctx, vol, mp))
-
-	tfs := newTestFS(t, b, mp)
-	tfs.WriteFile(t, "data.txt", []byte("hello"))
-
-	require.NoError(t, b.FreezeVolume(ctx, vol))
-
-	// Freeze the same volume again — should fail because it is already frozen.
-	err := b.FreezeVolume(ctx, vol)
-	require.Error(t, err, "freezing an already-frozen volume should fail")
-	assert.Contains(t, err.Error(), "already frozen")
-}
-
-func TestE2E_FreezeNonexistentVolume(t *testing.T) {
-	b := newBackend(t)
-	ctx := t.Context()
-
-	err := b.FreezeVolume(ctx, "no-such-freeze-vol")
-	require.Error(t, err, "freezing a nonexistent volume should fail")
-}
-
 // ---------- Delete errors ----------
 
 func TestE2E_DeleteNonexistentVolume(t *testing.T) {
@@ -244,34 +214,6 @@ func TestE2E_VolumeSurvivesFailedClone(t *testing.T) {
 	verifyTestFiles(t, tfs, randomMD5)
 	tfs.WriteFile(t, "after-failed-clone.txt", []byte("still works"))
 	require.Equal(t, "still works", string(tfs.ReadFile(t, "after-failed-clone.txt")))
-}
-
-func TestE2E_FrozenVolumeIsReadOnly(t *testing.T) {
-	b := newBackend(t)
-	ctx := t.Context()
-
-	vol := "frozen-ro"
-	mp := mountpoint(t, vol)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
-	require.NoError(t, b.Mount(ctx, vol, mp))
-
-	tfs := newTestFS(t, b, mp)
-	tfs.WriteFile(t, "before.txt", []byte("written before freeze"))
-
-	require.NoError(t, b.FreezeVolume(ctx, vol))
-
-	// Remount the frozen volume.
-	mp2 := mountpoint(t, vol+"-ro")
-	require.NoError(t, b.Mount(ctx, vol, mp2))
-
-	tfs2 := newTestFS(t, b, mp2)
-
-	// Verify data is readable.
-	require.Equal(t, "written before freeze", string(tfs2.ReadFile(t, "before.txt")))
-
-	// Writing to a frozen volume should fail.
-	err := tfs2.fs.WriteFile("should-fail.txt", []byte("nope"), 0o644)
-	require.Error(t, err, "writing to a frozen (read-only) volume should fail")
 }
 
 // ---------- ListCheckpoints errors ----------
@@ -348,34 +290,4 @@ func TestE2E_RemoveNonexistentFile(t *testing.T) {
 
 	err := tfs.fs.Remove("does-not-exist.txt")
 	require.Error(t, err, "removing a nonexistent file should fail")
-}
-
-func TestE2E_WriteToReadOnlyFS(t *testing.T) {
-	b := newBackend(t)
-	ctx := t.Context()
-
-	vol := "ro-write"
-	mp := mountpoint(t, vol)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
-	require.NoError(t, b.Mount(ctx, vol, mp))
-
-	tfs := newTestFS(t, b, mp)
-	tfs.WriteFile(t, "data.txt", []byte("data"))
-
-	// Freeze and remount.
-	require.NoError(t, b.FreezeVolume(ctx, vol))
-
-	mp2 := mountpoint(t, vol+"-frozen")
-	require.NoError(t, b.Mount(ctx, vol, mp2))
-	roFS := newTestFS(t, b, mp2)
-
-	// All write operations should fail.
-	err := roFS.fs.WriteFile("new.txt", []byte("nope"), 0o644)
-	require.Error(t, err, "WriteFile on frozen volume should fail")
-
-	err = roFS.fs.MkdirAll("newdir", 0o755)
-	require.Error(t, err, "MkdirAll on frozen volume should fail")
-
-	err = roFS.fs.Remove("data.txt")
-	require.Error(t, err, "Remove on frozen volume should fail")
 }

@@ -5,13 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/storage"
 )
 
 // volCmdArgs is passed to every volume command handler.
 type volCmdArgs struct {
-	vol        loophole.Volume
+	vol        *storage.Volume
 	volName    string
 	mountpoint string
 	backend    *fsbackend.Backend

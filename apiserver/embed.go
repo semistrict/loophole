@@ -27,7 +27,7 @@ func EmbedSocketPath(pid int) string {
 //
 // The returned cleanup function stops the server and removes the socket.
 // The server runs in background goroutines; it does not block.
-func StartEmbedded(vm loophole.VolumeManager, diskCache *storage.PageCache, inst loophole.Instance) (func(), error) {
+func StartEmbedded(vm *storage.Manager, diskCache *storage.PageCache, inst loophole.Instance) (func(), error) {
 	pid := os.Getpid()
 	sockPath := EmbedSocketPath(pid)
 

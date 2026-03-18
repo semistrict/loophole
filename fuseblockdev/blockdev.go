@@ -16,8 +16,8 @@ import (
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
-	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/storage"
 )
 
 // safeFileName encodes a volume name for safe use as a filename.
@@ -36,7 +36,7 @@ type Server struct {
 	root     *rootNode
 
 	mu        sync.Mutex
-	volumes   map[string]loophole.Volume // safeFileName(name) → volume
+	volumes   map[string]*storage.Volume // safeFileName(name) → volume
 	origNames map[string]string          // safeFileName(name) → original name
 }
 
@@ -60,7 +60,7 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 	}
 
 	srv := &Server{
-		volumes:   make(map[string]loophole.Volume),
+		volumes:   make(map[string]*storage.Volume),
 		origNames: make(map[string]string),
 	}
 	root := &rootNode{srv: srv}
@@ -120,7 +120,7 @@ func UnmountStale(dir string) {
 }
 
 // Add registers a volume so it becomes visible as a device file.
-func (s *Server) Add(name string, vol loophole.Volume) {
+func (s *Server) Add(name string, vol *storage.Volume) {
 	safe := safeFileName(name)
 	s.mu.Lock()
 	s.volumes[safe] = vol
@@ -139,7 +139,7 @@ func (s *Server) Remove(name string) {
 }
 
 // getVolume looks up a volume by its safe (filesystem-encoded) name.
-func (s *Server) getVolume(safeName string) loophole.Volume {
+func (s *Server) getVolume(safeName string) *storage.Volume {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.volumes[safeName]
@@ -218,12 +218,12 @@ type deviceNode struct {
 // It looks up the volume dynamically from the server so that
 // a re-registered volume (after unmount+remount) is picked up
 // even if the kernel reuses a cached inode.
-func (d *deviceNode) volume() loophole.Volume {
+func (d *deviceNode) volume() *storage.Volume {
 	return d.srv.getVolume(d.safeName)
 }
 
 type deviceHandle struct {
-	vol  loophole.Volume
+	vol  *storage.Volume
 	once sync.Once
 }
 
@@ -246,12 +246,8 @@ var _ = (fs.NodeReleaser)((*deviceNode)(nil))
 var _ = (fs.NodeAllocater)((*deviceNode)(nil))
 var _ = (fs.NodeCopyFileRanger)((*deviceNode)(nil))
 
-func (d *deviceNode) fillAttr(out *fuse.Attr, vol loophole.Volume) {
-	if vol.ReadOnly() {
-		out.Mode = syscall.S_IFREG | 0o400
-	} else {
-		out.Mode = syscall.S_IFREG | 0o600
-	}
+func (d *deviceNode) fillAttr(out *fuse.Attr, vol *storage.Volume) {
+	out.Mode = syscall.S_IFREG | 0o600
 	out.Size = vol.Size()
 	out.Blocks = vol.Size() / 512
 	out.Nlink = 1
@@ -271,14 +267,6 @@ func (d *deviceNode) Setattr(ctx context.Context, _ fs.FileHandle, in *fuse.SetA
 	if vol == nil {
 		return syscall.ENOENT
 	}
-	if mode, ok := in.GetMode(); ok {
-		writable := mode&0o200 != 0
-		if !writable && !vol.ReadOnly() {
-			if err := vol.Freeze(); err != nil {
-				return syscall.EIO
-			}
-		}
-	}
 	return d.Getattr(ctx, nil, out)
 }
 
@@ -288,10 +276,6 @@ func (d *deviceNode) Open(_ context.Context, flags uint32) (fs.FileHandle, uint3
 	if vol == nil {
 		done(syscall.ENOENT)
 		return nil, 0, syscall.ENOENT
-	}
-	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 && vol.ReadOnly() {
-		done(syscall.EROFS)
-		return nil, 0, syscall.EROFS
 	}
 	if err := vol.AcquireRef(); err != nil {
 		slog.Warn("fuse open: acquire ref", "error", err)
@@ -356,10 +340,6 @@ func (d *deviceNode) Write(ctx context.Context, fh fs.FileHandle, data []byte, o
 		return 0, syscall.EBADF
 	}
 	vol := h.vol
-	if vol.ReadOnly() {
-		done(syscall.EROFS)
-		return 0, syscall.EROFS
-	}
 	slog.Debug("blockdev: write", "off", off, "len", len(data), "volSize", vol.Size())
 	if off < 0 || uint64(off) >= vol.Size() {
 		done(syscall.EFBIG)
@@ -431,11 +411,6 @@ func (d *deviceNode) Allocate(ctx context.Context, fh fs.FileHandle, off uint64,
 		return syscall.EBADF
 	}
 	vol := h.vol
-	if vol.ReadOnly() {
-		metrics.FuseOps.WithLabelValues("fallocate_readonly", "error").Inc()
-		return syscall.EROFS
-	}
-
 	var opName string
 	switch mode {
 	case fallocKeepSize | fallocPunchHole:
@@ -481,11 +456,6 @@ func (d *deviceNode) CopyFileRange(ctx context.Context, fhIn fs.FileHandle, offI
 	}
 	srcVol := hIn.vol
 	dstVol := hOut.vol
-	if dstVol.ReadOnly() {
-		done(syscall.EROFS)
-		return 0, syscall.EROFS
-	}
-
 	if offIn >= srcVol.Size() {
 		done(fs.OK)
 		return 0, fs.OK

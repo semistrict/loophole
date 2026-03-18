@@ -23,7 +23,7 @@ import (
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB
@@ -88,7 +88,7 @@ type testBackend struct {
 	deviceVols  []string
 }
 
-func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error {
+func (b *testBackend) Create(ctx context.Context, p storage.CreateParams) error {
 	if p.Size == 0 {
 		p.Size = defaultVolumeSize
 	}
@@ -125,6 +125,12 @@ func (b *testBackend) Create(ctx context.Context, p loophole.CreateParams) error
 }
 
 func (b *testBackend) Mount(ctx context.Context, volume, mountpoint string) error {
+	if owner := b.ownerByVolume(volume); owner != nil {
+		if owner.mountpoint == mountpoint {
+			return nil
+		}
+		return fmt.Errorf("volume %q is already mounted at %s", volume, owner.mountpoint)
+	}
 	owner, err := startMountedOwner(ctx, volume, mountpoint)
 	if err != nil {
 		return err
@@ -190,30 +196,6 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 	return nil
 }
 
-func (b *testBackend) FreezeVolume(ctx context.Context, volume string) error {
-	owner := b.ownerByVolume(volume)
-	if owner == nil {
-		var err error
-		owner, err = startAttachedOwner(ctx, volume)
-		if err != nil {
-			return err
-		}
-	}
-	if err := owner.client.Freeze(ctx, volume); err != nil {
-		return err
-	}
-	if err := shutdownOwner(ctx, owner); err != nil {
-		return err
-	}
-
-	b.mu.Lock()
-	delete(b.owners, volume)
-	b.mountedMPs = removeTracked(b.mountedMPs, owner.mountpoint)
-	b.deviceVols = removeTracked(b.deviceVols, volume)
-	b.mu.Unlock()
-	return nil
-}
-
 func (b *testBackend) DeviceAttach(ctx context.Context, volume string) (string, error) {
 	owner, err := startAttachedOwner(ctx, volume)
 	if err != nil {
@@ -241,7 +223,7 @@ func (b *testBackend) DeviceDetach(ctx context.Context, volume string) error {
 	return nil
 }
 
-func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]loophole.CheckpointInfo, error) {
+func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]storage.CheckpointInfo, error) {
 	vm, cleanup, err := openDirectManager(ctx)
 	if err != nil {
 		return nil, err
@@ -575,7 +557,7 @@ func removeTracked(values []string, value string) []string {
 	return values
 }
 
-func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
+func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 	var store loophole.ObjectStore
 	var err error
 	if testInst.LocalDir != "" {
@@ -586,7 +568,7 @@ func openDirectManager(ctx context.Context) (*storage2.Manager, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage2.NewVolumeManager(store, testDir.Cache(testInst.ProfileName), storage2.Config{}, nil, nil)
+	vm := storage.NewManager(store, testDir.Cache(testInst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		_ = vm.Close(context.Background())
 	}, nil
@@ -601,7 +583,7 @@ func startMountedOwner(ctx context.Context, volume, mountpoint string) (*testOwn
 	return owner, nil
 }
 
-func startCreateOwner(ctx context.Context, p loophole.CreateParams, mountpoint string) (*testOwner, error) {
+func startCreateOwner(ctx context.Context, p storage.CreateParams, mountpoint string) (*testOwner, error) {
 	args := []string{"create", "--mount", mountpoint}
 	if p.Size != 0 {
 		args = append(args, "--size", fmt.Sprintf("%d", p.Size))
@@ -633,6 +615,14 @@ func startAttachedOwner(ctx context.Context, volume string) (*testOwner, error) 
 }
 
 func startOwnerProcess(ctx context.Context, volume string, args ...string) (*testOwner, error) {
+	socketPath := testDir.VolumeSocket(volume)
+	c := client.NewFromSocket(socketPath)
+	timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	if _, err := c.Status(timeoutCtx); err == nil {
+		return nil, fmt.Errorf("volume %q is already managed at %s", volume, socketPath)
+	}
+
 	logPath := filepath.Join(string(testDir), fmt.Sprintf("owner-%s.log", volume))
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -653,7 +643,6 @@ func startOwnerProcess(ctx context.Context, volume string, args ...string) (*tes
 		util.SafeClose(logFile, "close owner log file")
 	}()
 
-	c := client.NewFromSocket(testDir.VolumeSocket(volume))
 	waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
 	defer waitCancel()
 	for {

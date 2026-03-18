@@ -17,7 +17,7 @@ import (
 	"github.com/semistrict/loophole"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage2"
+	"github.com/semistrict/loophole/storage"
 )
 
 type ownerHandle struct {
@@ -27,7 +27,7 @@ type ownerHandle struct {
 	PID        int
 }
 
-func (d *Daemon) openManager(ctx context.Context) (*storage2.Manager, func(), error) {
+func (d *Daemon) openManager(ctx context.Context) (*storage.Manager, func(), error) {
 	var store loophole.ObjectStore
 	var err error
 	if d.inst.LocalDir != "" {
@@ -38,7 +38,7 @@ func (d *Daemon) openManager(ctx context.Context) (*storage2.Manager, func(), er
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage2.NewVolumeManager(store, d.dir.Cache(d.inst.ProfileName), storage2.Config{}, nil, nil)
+	vm := storage.NewManager(store, d.dir.Cache(d.inst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		if err := vm.Close(context.Background()); err != nil {
 			slog.Warn("close sandboxd manager", "error", err)
@@ -47,34 +47,24 @@ func (d *Daemon) openManager(ctx context.Context) (*storage2.Manager, func(), er
 }
 
 func (d *Daemon) validateZygoteSource(ctx context.Context, req RegisterZygoteRequest) error {
-	if req.Name == "" || req.Volume == "" {
-		return fmt.Errorf("name and volume are required")
+	if req.Name == "" || req.Volume == "" || req.Checkpoint == "" {
+		return fmt.Errorf("name, volume, and checkpoint are required")
 	}
 	vm, cleanup, err := d.openManager(ctx)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	if req.Checkpoint != "" {
-		checkpoints, err := vm.ListCheckpoints(ctx, req.Volume)
-		if err != nil {
-			return err
-		}
-		for _, cp := range checkpoints {
-			if cp.ID == req.Checkpoint {
-				return nil
-			}
-		}
-		return fmt.Errorf("checkpoint %q not found for volume %q", req.Checkpoint, req.Volume)
-	}
-	vol, err := vm.OpenVolume(req.Volume)
+	checkpoints, err := vm.ListCheckpoints(ctx, req.Volume)
 	if err != nil {
 		return err
 	}
-	if !vol.ReadOnly() {
-		return fmt.Errorf("zygote volume %q must be frozen/read-only", req.Volume)
+	for _, cp := range checkpoints {
+		if cp.ID == req.Checkpoint {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("checkpoint %q not found for volume %q", req.Checkpoint, req.Volume)
 }
 
 func (d *Daemon) cloneVolume(ctx context.Context, source SourceSpec, cloneName string) error {
@@ -93,47 +83,15 @@ func (d *Daemon) cloneVolume(ctx context.Context, source SourceSpec, cloneName s
 		if !ok {
 			return fmt.Errorf("unknown zygote %q", source.Zygote)
 		}
-		if zygote.Checkpoint != "" {
-			vm, cleanup, err := d.openManager(ctx)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			return vm.CloneFromCheckpoint(ctx, zygote.Volume, zygote.Checkpoint, cloneName)
+		if zygote.Checkpoint == "" {
+			return fmt.Errorf("zygote %q is missing a checkpoint", zygote.Name)
 		}
-		tempMount := filepath.Join(d.dir.SandboxdState(), "zygotes", zygote.Name)
-		owner, err := d.ensureMountedRootfs(ctx, zygote.Volume, tempMount, false)
+		vm, cleanup, err := d.openManager(ctx)
 		if err != nil {
 			return err
 		}
-		cleanupOwner := func(h ownerHandle) {
-			if !h.Spawned {
-				return
-			}
-			if err := d.stopOwner(context.Background(), h.Socket); err != nil {
-				slog.Warn("stop temporary zygote owner", "zygote", zygote.Name, "error", err)
-			}
-		}
-		c := client.NewFromSocket(owner.Socket)
-		err = c.Clone(ctx, client.CloneParams{Mountpoint: owner.Mountpoint, Clone: cloneName})
-		if err == nil {
-			cleanupOwner(owner)
-			return nil
-		}
-		if !owner.Spawned && strings.Contains(err.Error(), "not tracked") {
-			if stopErr := d.stopOwner(ctx, owner.Socket); stopErr != nil {
-				return err
-			}
-			owner, mountErr := d.ensureMountedRootfs(ctx, zygote.Volume, tempMount, false)
-			if mountErr != nil {
-				return mountErr
-			}
-			err = client.NewFromSocket(owner.Socket).Clone(ctx, client.CloneParams{Mountpoint: owner.Mountpoint, Clone: cloneName})
-			cleanupOwner(owner)
-			return err
-		}
-		cleanupOwner(owner)
-		return err
+		defer cleanup()
+		return vm.CloneFromCheckpoint(ctx, zygote.Volume, zygote.Checkpoint, cloneName)
 	case SourceKindSandbox:
 		src, err := d.lookupSandbox(source.SandboxID)
 		if err != nil {
@@ -190,7 +148,7 @@ func (d *Daemon) ensureMountedRootfs(ctx context.Context, volume string, preferr
 				PID:        0,
 			}, nil
 		}
-		// A live owner with no tracked mount is stale after freeze/unmount.
+		// A live owner with no tracked mount is stale after checkpoint/unmount.
 		// Stop it before reusing the socket path for a fresh mount owner.
 		if err := d.stopOwner(ctx, socket); err != nil {
 			return ownerHandle{}, err

@@ -90,11 +90,15 @@ fi
 echo "extracting ${ROOTFS_TAR_IN_CONTAINER}"
 tar xf "${ROOTFS_TAR_IN_CONTAINER}" -C "${ROOTFS_MOUNT}"
 
-echo "freezing ${DEMO_ROOTFS_VOLUME}"
-"${LOOPHOLE_BIN}" -p default freeze "${DEMO_ROOTFS_VOLUME}"
+echo "checkpointing ${DEMO_ROOTFS_VOLUME}"
+DEMO_ROOTFS_CHECKPOINT="$("${LOOPHOLE_BIN}" -p default checkpoint "${ROOTFS_MOUNT}" | awk '/^checkpoint / { print $2 }')"
+if [[ -z "${DEMO_ROOTFS_CHECKPOINT}" ]]; then
+  echo "failed to create checkpoint for ${DEMO_ROOTFS_VOLUME}" >&2
+  exit 1
+fi
 echo "shutting down owner for ${DEMO_ROOTFS_VOLUME}"
 if ! "${LOOPHOLE_BIN}" -p default shutdown "${DEMO_ROOTFS_VOLUME}"; then
-  echo "owner already stopped after freeze; continuing"
+  echo "owner already stopped after checkpoint; continuing"
 fi
 wait "${OWNER_PID}" || true
 
@@ -114,7 +118,7 @@ done
 echo "registering zygote ${DEMO_ZYGOTE_NAME}"
 curl --silent --show-error --unix-socket "${SANDBOXD_SOCKET}" \
   -H "content-type: application/json" \
-  -d "{\"name\":\"${DEMO_ZYGOTE_NAME}\",\"volume\":\"${DEMO_ROOTFS_VOLUME}\"}" \
+  -d "{\"name\":\"${DEMO_ZYGOTE_NAME}\",\"volume\":\"${DEMO_ROOTFS_VOLUME}\",\"checkpoint\":\"${DEMO_ROOTFS_CHECKPOINT}\"}" \
   http://localhost/v1/zygotes >/tmp/demo-zygote.json
 
 echo "creating sandbox ${DEMO_SANDBOX_NAME}"

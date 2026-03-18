@@ -30,7 +30,6 @@ func addCommands(root *cobra.Command) {
 		deleteCmd(),
 		lsCmd(),
 		mountCmd(),
-		freezeCmd(),
 		checkpointCmd(),
 		cloneCmd(),
 		checkpointsCmd(),
@@ -236,25 +235,6 @@ func mountCmd() *cobra.Command {
 			}
 			fmt.Printf("mounted %s at %s\n", volume, actualMountpoint)
 			return d.Serve(cmd.Context())
-		},
-	}
-}
-
-func freezeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "freeze <mountpoint|volume|device>",
-		Short: "Freeze the volume managed by an existing owner process",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveOwnerClient(args[0])
-			if err != nil {
-				return err
-			}
-			if err := c.Freeze(cmd.Context(), args[0]); err != nil {
-				return err
-			}
-			fmt.Printf("volume %q frozen\n", args[0])
-			return nil
 		},
 	}
 }
@@ -1071,7 +1051,7 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage.NewVolumeManager(store, dir.Cache(inst.ProfileName), storage.Config{}, nil, nil)
+	vm := storage.NewManager(store, dir.Cache(inst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		_ = vm.Close(context.Background())
 	}, nil
