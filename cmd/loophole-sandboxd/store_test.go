@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"testing"
@@ -14,18 +14,18 @@ import (
 func TestSandboxdStateRoundTrip(t *testing.T) {
 	dir := env.Dir(t.TempDir())
 	state := persistedState{
-		Zygotes: map[string]ZygoteRecord{
+		Zygotes: map[string]zygoteRecord{
 			"ubuntu": {
 				Name:      "ubuntu",
 				Volume:    "zygote-ubuntu",
 				CreatedAt: time.Unix(1, 0).UTC(),
 			},
 		},
-		Sandboxes: map[string]SandboxRecord{
+		Sandboxes: map[string]sandboxRecord{
 			"sbx_1": {
 				ID:           "sbx_1",
 				Name:         "sandbox-1",
-				State:        StateRunning,
+				State:        stateRunning,
 				RootfsVolume: "sandbox-1",
 				Mountpoint:   "/tmp/sandbox-1",
 				OwnerSocket:  "/tmp/sandbox-1.sock",

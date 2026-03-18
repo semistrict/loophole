@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole/env"
-	"github.com/semistrict/loophole/sandboxd"
 )
 
 func run(args []string) error {
@@ -58,7 +57,7 @@ func run(args []string) error {
 		return err
 	}
 
-	d, err := sandboxd.Start(context.Background(), inst, dir, sandboxd.Options{
+	d, err := startDaemon(context.Background(), inst, dir, daemonOptions{
 		SocketPath:  socketPath,
 		LoopholeBin: loopholeBin,
 		RunscBin:    runscBin,
@@ -66,7 +65,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	return d.Serve(context.Background())
+	return d.serve(context.Background())
 }
 
 func runInternalInit() error {

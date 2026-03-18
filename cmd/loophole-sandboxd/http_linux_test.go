@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"encoding/json"
@@ -12,14 +12,14 @@ import (
 func TestStatusEndpointReportsRunscPlatform(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{
+	d := &daemon{
 		runscBin:   "/usr/local/bin/runsc",
 		runscDebug: true,
 		runscRoot:  "/tmp/runsc-root",
-		zygotes: map[string]ZygoteRecord{
+		zygotes: map[string]zygoteRecord{
 			"zygote-1": {Name: "zygote-1"},
 		},
-		sandboxes: map[string]SandboxRecord{
+		sandboxes: map[string]sandboxRecord{
 			"sb-1": {ID: "sb-1"},
 			"sb-2": {ID: "sb-2"},
 		},
@@ -33,7 +33,7 @@ func TestStatusEndpointReportsRunscPlatform(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusOK)
 	}
 
-	var got StatusResponse
+	var got statusResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
@@ -64,7 +64,7 @@ func TestWriteErrorIncludesSandboxDebugInfo(t *testing.T) {
 	rec := httptest.NewRecorder()
 	writeError(rec, http.StatusInternalServerError, &sandboxDebugError{
 		err: assertError("runsc run failed"),
-		debug: SandboxDebugInfo{
+		debug: sandboxDebugInfo{
 			SandboxID:     "sbx_test",
 			SandboxDir:    "/root/.loophole/sandboxd/sandboxes/sbx_test",
 			RunscRunLog:   "/root/.loophole/sandboxd/sandboxes/sbx_test/runsc-run.log",
@@ -77,7 +77,7 @@ func TestWriteErrorIncludesSandboxDebugInfo(t *testing.T) {
 		t.Fatalf("status code = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 
-	var got ErrorResponse
+	var got errorResponse
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}

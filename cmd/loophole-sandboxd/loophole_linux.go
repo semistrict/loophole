@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"context"
@@ -26,7 +26,7 @@ type ownerHandle struct {
 	PID        int
 }
 
-func (d *Daemon) openManager(ctx context.Context) (*storage.Manager, func(), error) {
+func (d *daemon) openManager(ctx context.Context) (*storage.Manager, func(), error) {
 	vm, err := storage.OpenManagerForProfile(ctx, d.inst, d.dir, nil)
 	if err != nil {
 		return nil, nil, err
@@ -38,7 +38,7 @@ func (d *Daemon) openManager(ctx context.Context) (*storage.Manager, func(), err
 	}, nil
 }
 
-func (d *Daemon) validateZygoteSource(ctx context.Context, req RegisterZygoteRequest) error {
+func (d *daemon) validateZygoteSource(ctx context.Context, req registerZygoteRequest) error {
 	if req.Name == "" || req.Volume == "" || req.Checkpoint == "" {
 		return fmt.Errorf("name, volume, and checkpoint are required")
 	}
@@ -59,16 +59,16 @@ func (d *Daemon) validateZygoteSource(ctx context.Context, req RegisterZygoteReq
 	return fmt.Errorf("checkpoint %q not found for volume %q", req.Checkpoint, req.Volume)
 }
 
-func (d *Daemon) cloneVolume(ctx context.Context, source SourceSpec, cloneName string) error {
+func (d *daemon) cloneVolume(ctx context.Context, source sourceSpec, cloneName string) error {
 	switch source.Kind {
-	case SourceKindCheckpoint:
+	case sourceKindCheckpoint:
 		vm, cleanup, err := d.openManager(ctx)
 		if err != nil {
 			return err
 		}
 		defer cleanup()
 		return vm.CloneFromCheckpoint(ctx, source.Volume, source.Checkpoint, cloneName)
-	case SourceKindZygote:
+	case sourceKindZygote:
 		d.mu.Lock()
 		zygote, ok := d.zygotes[source.Zygote]
 		d.mu.Unlock()
@@ -84,14 +84,14 @@ func (d *Daemon) cloneVolume(ctx context.Context, source SourceSpec, cloneName s
 		}
 		defer cleanup()
 		return vm.CloneFromCheckpoint(ctx, zygote.Volume, zygote.Checkpoint, cloneName)
-	case SourceKindSandbox:
+	case sourceKindSandbox:
 		src, err := d.lookupSandbox(source.SandboxID)
 		if err != nil {
 			return err
 		}
 		c := client.NewFromSocket(src.OwnerSocket)
 		return c.Clone(ctx, client.CloneParams{Mountpoint: src.Mountpoint, Clone: cloneName})
-	case SourceKindVolume:
+	case sourceKindVolume:
 		if source.Mode == "attach" {
 			return fmt.Errorf("attach source cannot be cloned directly")
 		}
@@ -117,7 +117,7 @@ func (d *Daemon) cloneVolume(ctx context.Context, source SourceSpec, cloneName s
 	}
 }
 
-func (d *Daemon) deleteVolume(ctx context.Context, volume string) error {
+func (d *daemon) deleteVolume(ctx context.Context, volume string) error {
 	vm, cleanup, err := d.openManager(ctx)
 	if err != nil {
 		return err
@@ -126,7 +126,7 @@ func (d *Daemon) deleteVolume(ctx context.Context, volume string) error {
 	return vm.DeleteVolume(ctx, volume)
 }
 
-func (d *Daemon) ensureMountedRootfs(ctx context.Context, volume string, preferredMountpoint string, adopt bool) (ownerHandle, error) {
+func (d *daemon) ensureMountedRootfs(ctx context.Context, volume string, preferredMountpoint string, adopt bool) (ownerHandle, error) {
 	socket := d.dir.VolumeSocket(volume)
 	c := client.NewFromSocket(socket)
 	timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
@@ -214,7 +214,7 @@ func (d *Daemon) ensureMountedRootfs(ctx context.Context, volume string, preferr
 	return ownerHandle{}, fmt.Errorf("owner for %s did not become ready", volume)
 }
 
-func (d *Daemon) stopOwner(ctx context.Context, socket string) error {
+func (d *daemon) stopOwner(ctx context.Context, socket string) error {
 	c := client.NewFromSocket(socket)
 	if err := c.Shutdown(ctx); err != nil {
 		if isNoDaemonError(err) {
@@ -230,7 +230,7 @@ func (d *Daemon) stopOwner(ctx context.Context, socket string) error {
 	return nil
 }
 
-func (d *Daemon) forceStopOwner(ctx context.Context, pid int, socket string, mountpoint string) error {
+func (d *daemon) forceStopOwner(ctx context.Context, pid int, socket string, mountpoint string) error {
 	if pid <= 0 {
 		return fmt.Errorf("force stop owner: missing pid")
 	}
@@ -264,7 +264,7 @@ func (d *Daemon) forceStopOwner(ctx context.Context, pid int, socket string, mou
 	return nil
 }
 
-func (d *Daemon) breakLeaseForce(ctx context.Context, volume string) error {
+func (d *daemon) breakLeaseForce(ctx context.Context, volume string) error {
 	vm, cleanup, err := d.openManager(ctx)
 	if err != nil {
 		return err
@@ -273,17 +273,17 @@ func (d *Daemon) breakLeaseForce(ctx context.Context, volume string) error {
 	return vm.ForceClearLease(ctx, volume)
 }
 
-func (d *Daemon) lookupSandbox(id string) (SandboxRecord, error) {
+func (d *daemon) lookupSandbox(id string) (sandboxRecord, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	sb, ok := d.sandboxes[id]
 	if !ok {
-		return SandboxRecord{}, fmt.Errorf("unknown sandbox %q", id)
+		return sandboxRecord{}, fmt.Errorf("unknown sandbox %q", id)
 	}
 	return sb, nil
 }
 
-func (d *Daemon) volumeExists(ctx context.Context, volume string) bool {
+func (d *daemon) volumeExists(ctx context.Context, volume string) bool {
 	vm, cleanup, err := d.openManager(ctx)
 	if err != nil {
 		return false

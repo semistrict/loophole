@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"encoding/json"
@@ -20,8 +20,8 @@ const (
 
 func loadState(dir env.Dir) (persistedState, error) {
 	state := persistedState{
-		Zygotes:   map[string]ZygoteRecord{},
-		Sandboxes: map[string]SandboxRecord{},
+		Zygotes:   map[string]zygoteRecord{},
+		Sandboxes: map[string]sandboxRecord{},
 	}
 	root := dir.SandboxdState()
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -92,8 +92,8 @@ func saveJSON(path string, value any) error {
 	return nil
 }
 
-func sortedZygotes(m map[string]ZygoteRecord) []ZygoteRecord {
-	out := make([]ZygoteRecord, 0, len(m))
+func sortedZygotes(m map[string]zygoteRecord) []zygoteRecord {
+	out := make([]zygoteRecord, 0, len(m))
 	for _, z := range m {
 		out = append(out, z)
 	}
@@ -101,8 +101,8 @@ func sortedZygotes(m map[string]ZygoteRecord) []ZygoteRecord {
 	return out
 }
 
-func sortedSandboxes(m map[string]SandboxRecord) []SandboxRecord {
-	out := make([]SandboxRecord, 0, len(m))
+func sortedSandboxes(m map[string]sandboxRecord) []sandboxRecord {
+	out := make([]sandboxRecord, 0, len(m))
 	for _, s := range m {
 		out = append(out, s)
 	}

@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"os"
@@ -13,7 +13,7 @@ import (
 func TestRunscArgsDefault(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{
+	d := &daemon{
 		dir:       env.Dir(t.TempDir()),
 		runscRoot: "/tmp/runsc-root",
 	}
@@ -37,7 +37,7 @@ func TestRunscArgsWithDebug(t *testing.T) {
 	t.Parallel()
 
 	dir := env.Dir(t.TempDir())
-	d := &Daemon{
+	d := &daemon{
 		dir:        dir,
 		runscRoot:  "/tmp/runsc-root",
 		runscDebug: true,
@@ -63,8 +63,8 @@ func TestRunscArgsWithDebug(t *testing.T) {
 func TestBundleSpecRootlessAddsUserNamespaceMappings(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{runscRootless: true}
-	spec, err := d.bundleSpec(SandboxRecord{
+	d := &daemon{runscRootless: true}
+	spec, err := d.bundleSpec(sandboxRecord{
 		Name:       "sandbox-1",
 		Mountpoint: "/tmp/rootfs",
 	})
@@ -99,8 +99,8 @@ func TestBundleSpecRootlessAddsUserNamespaceMappings(t *testing.T) {
 func TestBundleSpecDefaultOmitsUserNamespaceMappings(t *testing.T) {
 	t.Parallel()
 
-	d := &Daemon{}
-	spec, err := d.bundleSpec(SandboxRecord{
+	d := &daemon{}
+	spec, err := d.bundleSpec(sandboxRecord{
 		Name:       "sandbox-1",
 		Mountpoint: "/tmp/rootfs",
 	})
@@ -127,11 +127,11 @@ func TestBundleSpecBindMounts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	d := &Daemon{
+	d := &daemon{
 		dir:           env.Dir(tmpDir),
 		runscRootless: true,
 	}
-	spec, err := d.bundleSpec(SandboxRecord{
+	spec, err := d.bundleSpec(sandboxRecord{
 		Name:        "sandbox-1",
 		Mountpoint:  "/tmp/rootfs",
 		OwnerSocket: sock,

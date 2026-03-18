@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"bytes"
@@ -46,31 +46,31 @@ var defaultSandboxCapabilities = []string{
 	"CAP_SYS_CHROOT",
 }
 
-func (d *Daemon) sandboxDir(id string) string {
+func (d *daemon) sandboxDir(id string) string {
 	return filepath.Join(d.dir.SandboxdState(), "sandboxes", id)
 }
 
-func (d *Daemon) bundleDir(id string) string {
+func (d *daemon) bundleDir(id string) string {
 	return filepath.Join(d.sandboxDir(id), "bundle")
 }
 
-func (d *Daemon) mountDir(id string) string {
+func (d *daemon) mountDir(id string) string {
 	return filepath.Join(d.sandboxDir(id), "rootfs")
 }
 
-func (d *Daemon) runscDebugDir(id string) string {
+func (d *daemon) runscDebugDir(id string) string {
 	return filepath.Join(d.sandboxDir(id), "runsc-debug")
 }
 
-func (d *Daemon) runscPanicLogPath(id string) string {
+func (d *daemon) runscPanicLogPath(id string) string {
 	return filepath.Join(d.sandboxDir(id), "runsc-panic.log")
 }
 
-func (d *Daemon) sandboxFailureDir(id string) string {
+func (d *daemon) sandboxFailureDir(id string) string {
 	return filepath.Join(d.dir.SandboxdState(), "failures", id)
 }
 
-func (d *Daemon) buildBundle(sb SandboxRecord) error {
+func (d *daemon) buildBundle(sb sandboxRecord) error {
 	bundleDir := d.bundleDir(sb.ID)
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		return err
@@ -93,7 +93,7 @@ func (d *Daemon) buildBundle(sb SandboxRecord) error {
 	return os.WriteFile(filepath.Join(bundleDir, "config.json"), data, 0o644)
 }
 
-func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
+func (d *daemon) bundleSpec(sb sandboxRecord) (map[string]any, error) {
 	mounts := []map[string]any{
 		{"destination": "/proc", "type": "proc", "source": "proc"},
 		{"destination": "/dev", "type": "tmpfs", "source": "tmpfs", "options": []string{"nosuid", "strictatime", "mode=755", "size=65536k"}},
@@ -206,14 +206,14 @@ func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 
 // guestBinDir returns the host-side directory containing binaries that get
 // bind-mounted into every sandbox at /.loophole/bin.
-func (d *Daemon) guestBinDir() string {
+func (d *daemon) guestBinDir() string {
 	return filepath.Join(d.dir.SandboxdState(), "guest-bin")
 }
 
 // prepareGuestBinDir creates the host-side /.loophole/bin staging directory
 // with hard links to sandboxd and loophole. This directory is bind-mounted
 // into every sandbox, keeping the ext4 volume clean.
-func (d *Daemon) prepareGuestBinDir() error {
+func (d *daemon) prepareGuestBinDir() error {
 	dir := d.guestBinDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
@@ -294,7 +294,7 @@ func copyExecutable(src, dst string) error {
 	return os.Rename(tmp, dst)
 }
 
-func (d *Daemon) runscArgs(sandboxID string, args ...string) []string {
+func (d *daemon) runscArgs(sandboxID string, args ...string) []string {
 	base := []string{
 		"--root=" + d.runscRoot,
 	}
@@ -320,7 +320,7 @@ func (d *Daemon) runscArgs(sandboxID string, args ...string) []string {
 	return base
 }
 
-func (d *Daemon) runscCmd(ctx context.Context, sandboxID string, args ...string) *exec.Cmd {
+func (d *daemon) runscCmd(ctx context.Context, sandboxID string, args ...string) *exec.Cmd {
 	base := d.runscArgs(sandboxID, args...)
 	return exec.CommandContext(ctx, d.runscBin, base...)
 }
@@ -329,7 +329,7 @@ const networkModeHost = "host"
 
 type sandboxDebugError struct {
 	err   error
-	debug SandboxDebugInfo
+	debug sandboxDebugInfo
 }
 
 func (e *sandboxDebugError) Error() string {
@@ -340,8 +340,8 @@ func (e *sandboxDebugError) Unwrap() error {
 	return e.err
 }
 
-func (d *Daemon) sandboxDebugInfo(id string) SandboxDebugInfo {
-	return SandboxDebugInfo{
+func (d *daemon) sandboxDebugInfo(id string) sandboxDebugInfo {
+	return sandboxDebugInfo{
 		SandboxID:     id,
 		SandboxDir:    d.sandboxDir(id),
 		FailureDir:    d.sandboxFailureDir(id),
@@ -351,7 +351,7 @@ func (d *Daemon) sandboxDebugInfo(id string) SandboxDebugInfo {
 	}
 }
 
-func (d *Daemon) annotateSandboxError(id string, err error) error {
+func (d *daemon) annotateSandboxError(id string, err error) error {
 	if err == nil {
 		return nil
 	}
@@ -366,7 +366,7 @@ func (d *Daemon) annotateSandboxError(id string, err error) error {
 	}
 }
 
-func (d *Daemon) snapshotSandboxDebugInfo(id string) SandboxDebugInfo {
+func (d *daemon) snapshotSandboxDebugInfo(id string) sandboxDebugInfo {
 	debug := d.sandboxDebugInfo(id)
 	failureDir := d.sandboxFailureDir(id)
 	if err := os.MkdirAll(failureDir, 0o755); err != nil {
@@ -453,7 +453,7 @@ func copyDirIfExists(srcDir, dstDir string) (bool, error) {
 	return true, nil
 }
 
-func (d *Daemon) startRunsc(ctx context.Context, sb SandboxRecord) error {
+func (d *daemon) startRunsc(ctx context.Context, sb sandboxRecord) error {
 	if err := d.buildBundle(sb); err != nil {
 		return err
 	}
@@ -484,7 +484,7 @@ func (d *Daemon) startRunsc(ctx context.Context, sb SandboxRecord) error {
 	return nil
 }
 
-func (d *Daemon) waitRunscReady(ctx context.Context, sb SandboxRecord) error {
+func (d *daemon) waitRunscReady(ctx context.Context, sb sandboxRecord) error {
 	readyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -504,7 +504,7 @@ func (d *Daemon) waitRunscReady(ctx context.Context, sb SandboxRecord) error {
 	return readyCtx.Err()
 }
 
-func (d *Daemon) runscState(ctx context.Context, sb SandboxRecord) error {
+func (d *daemon) runscState(ctx context.Context, sb sandboxRecord) error {
 	cmd := d.runscCmd(ctx, sb.ID, "state", sb.RunscID)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -513,7 +513,7 @@ func (d *Daemon) runscState(ctx context.Context, sb SandboxRecord) error {
 	return nil
 }
 
-func (d *Daemon) stopRunsc(ctx context.Context, sb SandboxRecord) error {
+func (d *daemon) stopRunsc(ctx context.Context, sb sandboxRecord) error {
 	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer killCancel()
 	kill := d.runscCmd(killCtx, sb.ID, "kill", sb.RunscID, "TERM")
@@ -541,10 +541,10 @@ func isMissingControlSocket(err error, output string) bool {
 	return strings.Contains(msg, "no control socket found")
 }
 
-func (d *Daemon) execOneShot(ctx context.Context, sb SandboxRecord, req ProcessCreateRequest) (ExecResult, error) {
+func (d *daemon) execOneShot(ctx context.Context, sb sandboxRecord, req processCreateRequest) (execResult, error) {
 	args, err := internalExecArgs(req)
 	if err != nil {
-		return ExecResult{}, err
+		return execResult{}, err
 	}
 	for attempt := 0; attempt < 3; attempt++ {
 		cmd := d.runscCmd(ctx, sb.ID, append([]string{"exec", sb.RunscID}, args...)...)
@@ -556,10 +556,10 @@ func (d *Daemon) execOneShot(ctx context.Context, sb SandboxRecord, req ProcessC
 			if exitErr, ok := err.(*exec.ExitError); ok {
 				exitCode = exitErr.ExitCode()
 			} else {
-				return ExecResult{}, err
+				return execResult{}, err
 			}
 		}
-		result := ExecResult{
+		result := execResult{
 			ExitCode: exitCode,
 			Stdout:   stdout.String(),
 			Stderr:   stderr.String(),
@@ -569,10 +569,10 @@ func (d *Daemon) execOneShot(ctx context.Context, sb SandboxRecord, req ProcessC
 		}
 		time.Sleep(500 * time.Millisecond)
 	}
-	return ExecResult{}, fmt.Errorf("unreachable")
+	return execResult{}, fmt.Errorf("unreachable")
 }
 
-func shouldRetryExecResult(result ExecResult) bool {
+func shouldRetryExecResult(result execResult) bool {
 	if result.ExitCode == 0 {
 		return false
 	}
@@ -580,7 +580,7 @@ func shouldRetryExecResult(result ExecResult) bool {
 	return strings.Contains(msg, "input/output error") || strings.Contains(msg, "timed out waiting for executable")
 }
 
-func (d *Daemon) startSession(ctx context.Context, processID string, sb SandboxRecord, req ProcessCreateRequest) (*execSession, error) {
+func (d *daemon) startSession(ctx context.Context, processID string, sb sandboxRecord, req processCreateRequest) (*execSession, error) {
 	args, err := internalExecArgs(req)
 	if err != nil {
 		return nil, err
@@ -646,7 +646,7 @@ func (d *Daemon) startSession(ctx context.Context, processID string, sb SandboxR
 	return session, nil
 }
 
-func recordUpdater(d *Daemon, sessionID string) func(processEvent) {
+func recordUpdater(d *daemon, sessionID string) func(processEvent) {
 	return func(event processEvent) {
 		now := time.Now().UTC()
 		d.mu.Lock()
@@ -657,10 +657,10 @@ func recordUpdater(d *Daemon, sessionID string) func(processEvent) {
 		}
 		if event.Stream == "exit" {
 			code, _ := strconv.Atoi(string(event.Data))
-			s.record.State = StateStopped
+			s.record.State = stateStopped
 			s.record.ExitCode = &code
 		} else {
-			s.record.State = StateBroken
+			s.record.State = stateBroken
 		}
 		s.record.StoppedAt = &now
 		d.sessions[sessionID] = s
@@ -721,7 +721,7 @@ func streamPTY(events chan<- processEvent, readers *sync.WaitGroup, f *os.File) 
 	}
 }
 
-func (d *Daemon) resizeSession(id string, rows, cols int) error {
+func (d *daemon) resizeSession(id string, rows, cols int) error {
 	if rows <= 0 || cols <= 0 {
 		return fmt.Errorf("rows and cols must be positive")
 	}
@@ -737,7 +737,7 @@ func (d *Daemon) resizeSession(id string, rows, cols int) error {
 	})
 }
 
-func internalExecArgs(req ProcessCreateRequest) ([]string, error) {
+func internalExecArgs(req processCreateRequest) ([]string, error) {
 	command := normalizedCommand(req)
 	if len(command) == 0 {
 		return nil, fmt.Errorf("command is required")
@@ -759,14 +759,14 @@ func internalExecArgs(req ProcessCreateRequest) ([]string, error) {
 	return args, nil
 }
 
-func normalizedCommand(req ProcessCreateRequest) []string {
+func normalizedCommand(req processCreateRequest) []string {
 	if len(req.Command) > 0 {
 		return req.Command
 	}
 	return req.Argv
 }
 
-func (d *Daemon) reconcileAll(ctx context.Context) error {
+func (d *daemon) reconcileAll(ctx context.Context) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	for id, sb := range d.sandboxes {
@@ -783,16 +783,16 @@ func (d *Daemon) reconcileAll(ctx context.Context) error {
 		}
 		switch {
 		case ownerAlive && runscAlive:
-			sb.State = StateRunning
+			sb.State = stateRunning
 		case ownerAlive && !runscAlive:
-			sb.State = StateStopped
+			sb.State = stateStopped
 		case !ownerAlive && runscAlive:
-			sb.State = StateBroken
+			sb.State = stateBroken
 		default:
 			if d.volumeExists(ctx, sb.RootfsVolume) {
-				sb.State = StateStopped
+				sb.State = stateStopped
 			} else {
-				sb.State = StateMissing
+				sb.State = stateMissing
 			}
 		}
 		d.sandboxes[id] = sb

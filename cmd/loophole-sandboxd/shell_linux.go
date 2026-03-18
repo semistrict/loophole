@@ -21,7 +21,6 @@ import (
 
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/sandboxd"
 )
 
 type shellExitError struct {
@@ -69,7 +68,7 @@ func runShell(args []string) error {
 	socketPath = firstNonEmpty(socketPath, env.DefaultDir().SandboxdSocket())
 	rows, cols := termSize()
 
-	req := sandboxd.ProcessCreateRequest{
+	req := processCreateRequest{
 		Argv:       command,
 		Background: true,
 		TTY:        true,
@@ -83,7 +82,7 @@ func runShell(args []string) error {
 	return attachShell(socketPath, sandboxID, processID)
 }
 
-func createShellProcess(socketPath, sandboxID string, req sandboxd.ProcessCreateRequest) (string, error) {
+func createShellProcess(socketPath, sandboxID string, req processCreateRequest) (string, error) {
 	data, err := json.Marshal(req)
 	if err != nil {
 		return "", err

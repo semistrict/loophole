@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"context"
@@ -25,7 +25,7 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 )
 
-type Options struct {
+type daemonOptions struct {
 	SocketPath    string
 	LoopholeBin   string
 	RunscBin      string
@@ -34,7 +34,7 @@ type Options struct {
 	SelfBin       string
 }
 
-type Daemon struct {
+type daemon struct {
 	dir                 env.Dir
 	inst                env.ResolvedProfile
 	socketPath          string
@@ -50,13 +50,13 @@ type Daemon struct {
 	logFile             *os.File
 
 	mu        sync.Mutex
-	zygotes   map[string]ZygoteRecord
-	sandboxes map[string]SandboxRecord
+	zygotes   map[string]zygoteRecord
+	sandboxes map[string]sandboxRecord
 	sessions  map[string]*session
 }
 
 type session struct {
-	record         ProcessRecord
+	record         processRecord
 	cmd            *execSession
 	sandbox        string
 	streamAttached bool
@@ -78,7 +78,7 @@ type processEvent struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Options) (*Daemon, error) {
+func startDaemon(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts daemonOptions) (*daemon, error) {
 	socketPath := opts.SocketPath
 	if socketPath == "" {
 		socketPath = dir.SandboxdSocket()
@@ -192,7 +192,7 @@ func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Opti
 		runscPlatformSource = "option"
 	}
 
-	d := &Daemon{
+	d := &daemon{
 		dir:                 dir,
 		inst:                inst,
 		socketPath:          socketPath,
@@ -221,7 +221,7 @@ func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Opti
 	return d, nil
 }
 
-func (d *Daemon) Serve(ctx context.Context) error {
+func (d *daemon) serve(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -240,7 +240,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	return d.shutdown(context.Background())
 }
 
-func (d *Daemon) shutdown(ctx context.Context) error {
+func (d *daemon) shutdown(ctx context.Context) error {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -271,7 +271,7 @@ func (d *Daemon) shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (d *Daemon) cleanupSandboxes(ctx context.Context) {
+func (d *daemon) cleanupSandboxes(ctx context.Context) {
 	d.mu.Lock()
 	ids := make([]string, 0, len(d.sandboxes))
 	for id := range d.sandboxes {
@@ -286,7 +286,7 @@ func (d *Daemon) cleanupSandboxes(ctx context.Context) {
 	}
 }
 
-func (d *Daemon) saveLocked() error {
+func (d *daemon) saveLocked() error {
 	return saveState(d.dir, persistedState{Zygotes: d.zygotes, Sandboxes: d.sandboxes})
 }
 

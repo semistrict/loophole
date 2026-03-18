@@ -1,6 +1,6 @@
 //go:build linux
 
-package sandboxd
+package main
 
 import (
 	"context"
@@ -23,7 +23,7 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 )
 
-func (d *Daemon) routes() http.Handler {
+func (d *daemon) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", d.handleStatus)
 	mux.HandleFunc("GET /v1/zygotes", d.handleListZygotes)
@@ -35,7 +35,7 @@ func (d *Daemon) routes() http.Handler {
 	return mux
 }
 
-func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (d *daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	platform := d.runscPlatform
 	platformSource := d.runscPlatformSource
@@ -45,7 +45,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if platformSource == "" {
 		platformSource = "bundled runsc default"
 	}
-	status := StatusResponse{
+	status := statusResponse{
 		OK:                  true,
 		RunscBin:            d.runscBin,
 		RunscPlatform:       platform,
@@ -60,14 +60,14 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, status)
 }
 
-func (d *Daemon) handleListZygotes(w http.ResponseWriter, _ *http.Request) {
+func (d *daemon) handleListZygotes(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	writeJSON(w, sortedZygotes(d.zygotes))
 }
 
-func (d *Daemon) handleRegisterZygote(w http.ResponseWriter, r *http.Request) {
-	var req RegisterZygoteRequest
+func (d *daemon) handleRegisterZygote(w http.ResponseWriter, r *http.Request) {
+	var req registerZygoteRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -76,7 +76,7 @@ func (d *Daemon) handleRegisterZygote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	record := ZygoteRecord{
+	record := zygoteRecord{
 		Name:       req.Name,
 		Volume:     req.Volume,
 		Checkpoint: req.Checkpoint,
@@ -93,7 +93,7 @@ func (d *Daemon) handleRegisterZygote(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, record)
 }
 
-func (d *Daemon) handleZygote(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleZygote(w http.ResponseWriter, r *http.Request) {
 	name := path.Base(r.URL.Path)
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -117,14 +117,14 @@ func (d *Daemon) handleZygote(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (d *Daemon) handleListSandboxes(w http.ResponseWriter, _ *http.Request) {
+func (d *daemon) handleListSandboxes(w http.ResponseWriter, _ *http.Request) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	writeJSON(w, sortedSandboxes(d.sandboxes))
 }
 
-func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
-	var req CreateSandboxRequest
+func (d *daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
+	var req createSandboxRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -137,7 +137,7 @@ func (d *Daemon) handleCreateSandbox(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sb)
 }
 
-func (d *Daemon) handleSandbox(w http.ResponseWriter, r *http.Request) {
+func (d *daemon) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/v1/sandboxes/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -198,12 +198,12 @@ func (d *Daemon) handleSandbox(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (d *Daemon) handleProcesses(w http.ResponseWriter, r *http.Request, sandboxID string, rest []string) {
+func (d *daemon) handleProcesses(w http.ResponseWriter, r *http.Request, sandboxID string, rest []string) {
 	if len(rest) == 0 {
 		switch r.Method {
 		case http.MethodGet:
 			d.mu.Lock()
-			var out []ProcessRecord
+			var out []processRecord
 			for _, s := range d.sessions {
 				if s.sandbox == sandboxID {
 					out = append(out, s.record)
@@ -212,7 +212,7 @@ func (d *Daemon) handleProcesses(w http.ResponseWriter, r *http.Request, sandbox
 			d.mu.Unlock()
 			writeJSON(w, out)
 		case http.MethodPost:
-			var req ProcessCreateRequest
+			var req processCreateRequest
 			if err := readJSON(r, &req); err != nil {
 				writeError(w, http.StatusBadRequest, err)
 				return
@@ -294,7 +294,7 @@ func (d *Daemon) handleProcesses(w http.ResponseWriter, r *http.Request, sandbox
 	}
 }
 
-func (d *Daemon) handleProcessStream(w http.ResponseWriter, r *http.Request, sandboxID, processID string) {
+func (d *daemon) handleProcessStream(w http.ResponseWriter, r *http.Request, sandboxID, processID string) {
 	d.mu.Lock()
 	s, ok := d.sessions[processID]
 	if ok && s.sandbox == sandboxID {
@@ -370,7 +370,7 @@ func (d *Daemon) handleProcessStream(w http.ResponseWriter, r *http.Request, san
 	}
 }
 
-func (d *Daemon) handleFS(w http.ResponseWriter, r *http.Request, sandboxID string, _ []string) {
+func (d *daemon) handleFS(w http.ResponseWriter, r *http.Request, sandboxID string, _ []string) {
 	sb, err := d.lookupSandbox(sandboxID)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err)
@@ -466,9 +466,9 @@ func (d *Daemon) handleFS(w http.ResponseWriter, r *http.Request, sandboxID stri
 	}
 }
 
-func (d *Daemon) createSandbox(ctx context.Context, req CreateSandboxRequest) (SandboxRecord, error) {
+func (d *daemon) createSandbox(ctx context.Context, req createSandboxRequest) (sandboxRecord, error) {
 	if req.Source.Kind == "" {
-		return SandboxRecord{}, fmt.Errorf("source.kind is required")
+		return sandboxRecord{}, fmt.Errorf("source.kind is required")
 	}
 	id := newID("sbx")
 	name := req.Name
@@ -479,16 +479,16 @@ func (d *Daemon) createSandbox(ctx context.Context, req CreateSandboxRequest) (S
 	derived := true
 
 	switch req.Source.Kind {
-	case SourceKindVolume:
+	case sourceKindVolume:
 		if req.Source.Volume == "" {
-			return SandboxRecord{}, fmt.Errorf("source.volume is required")
+			return sandboxRecord{}, fmt.Errorf("source.volume is required")
 		}
 		if req.Source.Mode == "attach" {
 			d.mu.Lock()
 			for _, existing := range d.sandboxes {
 				if existing.RootfsVolume == req.Source.Volume {
 					d.mu.Unlock()
-					return SandboxRecord{}, fmt.Errorf("volume %q is already attached to sandbox %q", req.Source.Volume, existing.ID)
+					return sandboxRecord{}, fmt.Errorf("volume %q is already attached to sandbox %q", req.Source.Volume, existing.ID)
 				}
 			}
 			d.mu.Unlock()
@@ -496,28 +496,28 @@ func (d *Daemon) createSandbox(ctx context.Context, req CreateSandboxRequest) (S
 			derived = false
 		} else {
 			if err := d.cloneVolume(ctx, req.Source, rootfsVolume); err != nil {
-				return SandboxRecord{}, err
+				return sandboxRecord{}, err
 			}
 		}
-	case SourceKindCheckpoint, SourceKindZygote, SourceKindSandbox:
+	case sourceKindCheckpoint, sourceKindZygote, sourceKindSandbox:
 		if err := d.cloneVolume(ctx, req.Source, rootfsVolume); err != nil {
-			return SandboxRecord{}, err
+			return sandboxRecord{}, err
 		}
 	default:
-		return SandboxRecord{}, fmt.Errorf("unsupported source kind %q", req.Source.Kind)
+		return sandboxRecord{}, fmt.Errorf("unsupported source kind %q", req.Source.Kind)
 	}
 
 	mountpoint := d.mountDir(id)
-	adopt := req.Source.Kind == SourceKindVolume && req.Source.Mode == "attach"
+	adopt := req.Source.Kind == sourceKindVolume && req.Source.Mode == "attach"
 	owner, err := d.ensureMountedRootfs(ctx, rootfsVolume, mountpoint, adopt)
 	if err != nil {
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 
-	sb := SandboxRecord{
+	sb := sandboxRecord{
 		ID:           id,
 		Name:         name,
-		State:        StateStopped,
+		State:        stateStopped,
 		Source:       req.Source,
 		RootfsVolume: rootfsVolume,
 		Mountpoint:   owner.Mountpoint,
@@ -537,23 +537,23 @@ func (d *Daemon) createSandbox(ctx context.Context, req CreateSandboxRequest) (S
 	d.sandboxes[id] = sb
 	if err := d.saveLocked(); err != nil {
 		d.mu.Unlock()
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 	d.mu.Unlock()
 	return d.startSandbox(ctx, id)
 }
 
-func (d *Daemon) startSandbox(ctx context.Context, id string) (SandboxRecord, error) {
+func (d *daemon) startSandbox(ctx context.Context, id string) (sandboxRecord, error) {
 	sb, err := d.lookupSandbox(id)
 	if err != nil {
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
-	if sb.State == StateRunning {
+	if sb.State == stateRunning {
 		return sb, nil
 	}
-	owner, err := d.ensureMountedRootfs(ctx, sb.RootfsVolume, d.mountDir(id), sb.Source.Kind == SourceKindVolume && sb.Source.Mode == VolumeModeAttach)
+	owner, err := d.ensureMountedRootfs(ctx, sb.RootfsVolume, d.mountDir(id), sb.Source.Kind == sourceKindVolume && sb.Source.Mode == volumeModeAttach)
 	if err != nil {
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 	ownerMode := map[bool]string{true: "spawned", false: "adopted"}[owner.Spawned]
 	ownerPID := owner.PID
@@ -567,7 +567,7 @@ func (d *Daemon) startSandbox(ctx context.Context, id string) (SandboxRecord, er
 	sb.OwnerPID = ownerPID
 	if err := d.startRunsc(ctx, sb); err != nil {
 		now := time.Now().UTC()
-		sb.State = StateBroken
+		sb.State = stateBroken
 		sb.StartedAt = nil
 		sb.StoppedAt = &now
 		d.mu.Lock()
@@ -575,45 +575,45 @@ func (d *Daemon) startSandbox(ctx context.Context, id string) (SandboxRecord, er
 		saveErr := d.saveLocked()
 		d.mu.Unlock()
 		if saveErr != nil {
-			return SandboxRecord{}, fmt.Errorf("%w (save broken state: %v)", d.annotateSandboxError(id, err), saveErr)
+			return sandboxRecord{}, fmt.Errorf("%w (save broken state: %v)", d.annotateSandboxError(id, err), saveErr)
 		}
-		return SandboxRecord{}, d.annotateSandboxError(id, err)
+		return sandboxRecord{}, d.annotateSandboxError(id, err)
 	}
 	now := time.Now().UTC()
-	sb.State = StateRunning
+	sb.State = stateRunning
 	sb.StartedAt = &now
 	sb.StoppedAt = nil
 	d.mu.Lock()
 	d.sandboxes[id] = sb
 	if err := d.saveLocked(); err != nil {
 		d.mu.Unlock()
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 	d.mu.Unlock()
 	if len(sb.Entrypoint) > 0 {
-		_, err := d.createSession(ctx, id, ProcessCreateRequest{
+		_, err := d.createSession(ctx, id, processCreateRequest{
 			Command:    sb.Entrypoint,
 			Cwd:        sb.Cwd,
 			Env:        sb.Env,
 			Background: true,
 		})
 		if err != nil {
-			return SandboxRecord{}, err
+			return sandboxRecord{}, err
 		}
 	}
 	return sb, nil
 }
 
-func (d *Daemon) stopSandbox(ctx context.Context, id string) (SandboxRecord, error) {
+func (d *daemon) stopSandbox(ctx context.Context, id string) (sandboxRecord, error) {
 	sb, err := d.lookupSandbox(id)
 	if err != nil {
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 	if err := d.stopRunsc(ctx, sb); err != nil {
-		return SandboxRecord{}, err
+		return sandboxRecord{}, err
 	}
 	now := time.Now().UTC()
-	sb.State = StateStopped
+	sb.State = stateStopped
 	sb.StoppedAt = &now
 	d.mu.Lock()
 	d.sandboxes[id] = sb
@@ -622,12 +622,12 @@ func (d *Daemon) stopSandbox(ctx context.Context, id string) (SandboxRecord, err
 	return sb, err
 }
 
-func (d *Daemon) deleteSandbox(ctx context.Context, id string) error {
+func (d *daemon) deleteSandbox(ctx context.Context, id string) error {
 	sb, err := d.lookupSandbox(id)
 	if err != nil {
 		return err
 	}
-	if sb.State == StateRunning {
+	if sb.State == stateRunning {
 		if _, err := d.stopSandbox(ctx, id); err != nil {
 			return err
 		}
@@ -685,23 +685,23 @@ func removeAllRetry(ctx context.Context, target string) error {
 	return lastErr
 }
 
-func (d *Daemon) execProcess(ctx context.Context, sandboxID string, req ProcessCreateRequest) (ProcessRecord, ExecResult, error) {
+func (d *daemon) execProcess(ctx context.Context, sandboxID string, req processCreateRequest) (processRecord, execResult, error) {
 	sb, err := d.lookupSandbox(sandboxID)
 	if err != nil {
-		return ProcessRecord{}, ExecResult{}, err
+		return processRecord{}, execResult{}, err
 	}
-	if sb.State != StateRunning {
-		return ProcessRecord{}, ExecResult{}, fmt.Errorf("sandbox %q is not running", sandboxID)
+	if sb.State != stateRunning {
+		return processRecord{}, execResult{}, fmt.Errorf("sandbox %q is not running", sandboxID)
 	}
 	now := time.Now().UTC()
 	command := normalizedCommand(req)
-	record := ProcessRecord{
+	record := processRecord{
 		ID:         newID("proc"),
 		SandboxID:  sandboxID,
 		Command:    command,
 		Cwd:        req.Cwd,
 		Env:        req.Env,
-		State:      StateRunning,
+		State:      stateRunning,
 		TTY:        req.TTY,
 		Background: req.Background,
 		CreatedAt:  now,
@@ -709,27 +709,27 @@ func (d *Daemon) execProcess(ctx context.Context, sandboxID string, req ProcessC
 	}
 	result, err := d.execOneShot(ctx, sb, req)
 	if err != nil {
-		return ProcessRecord{}, ExecResult{}, err
+		return processRecord{}, execResult{}, err
 	}
 	exit := result.ExitCode
 	record.ExitCode = &exit
-	record.State = StateStopped
+	record.State = stateStopped
 	stopped := time.Now().UTC()
 	record.StoppedAt = &stopped
 	return record, result, nil
 }
 
-func (d *Daemon) createSession(ctx context.Context, sandboxID string, req ProcessCreateRequest) (ProcessRecord, error) {
+func (d *daemon) createSession(ctx context.Context, sandboxID string, req processCreateRequest) (processRecord, error) {
 	sb, err := d.lookupSandbox(sandboxID)
 	if err != nil {
-		return ProcessRecord{}, err
+		return processRecord{}, err
 	}
-	if sb.State != StateRunning {
-		return ProcessRecord{}, fmt.Errorf("sandbox %q is not running", sandboxID)
+	if sb.State != stateRunning {
+		return processRecord{}, fmt.Errorf("sandbox %q is not running", sandboxID)
 	}
 	now := time.Now().UTC()
 	command := normalizedCommand(req)
-	record := ProcessRecord{
+	record := processRecord{
 		ID:         newID("proc"),
 		SandboxID:  sandboxID,
 		Command:    command,
@@ -737,7 +737,7 @@ func (d *Daemon) createSession(ctx context.Context, sandboxID string, req Proces
 		Env:        req.Env,
 		TTY:        req.TTY,
 		Background: true,
-		State:      StateRunning,
+		State:      stateRunning,
 		CreatedAt:  now,
 		StartedAt:  &now,
 	}
@@ -749,7 +749,7 @@ func (d *Daemon) createSession(ctx context.Context, sandboxID string, req Proces
 		d.mu.Lock()
 		delete(d.sessions, record.ID)
 		d.mu.Unlock()
-		return ProcessRecord{}, err
+		return processRecord{}, err
 	}
 	d.mu.Lock()
 	s := d.sessions[record.ID]
@@ -762,7 +762,7 @@ func (d *Daemon) createSession(ctx context.Context, sandboxID string, req Proces
 	return record, nil
 }
 
-func (d *Daemon) signalSession(id string, signalName string) error {
+func (d *daemon) signalSession(id string, signalName string) error {
 	d.mu.Lock()
 	s := d.sessions[id]
 	d.mu.Unlock()
@@ -805,7 +805,7 @@ func writeJSON(w http.ResponseWriter, value any) {
 func writeError(w http.ResponseWriter, code int, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
-	payload := ErrorResponse{Error: err.Error()}
+	payload := errorResponse{Error: err.Error()}
 	var debugErr *sandboxDebugError
 	if errors.As(err, &debugErr) {
 		debug := debugErr.debug
