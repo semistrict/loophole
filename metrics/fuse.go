@@ -1,8 +1,7 @@
 package metrics
 
 import (
-	"syscall"
-
+	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,16 +37,16 @@ var (
 )
 
 // FuseOp records a FUSE operation. Call the returned function when done.
-func FuseOp(op string) func(syscall.Errno) {
+func FuseOp(op string) func(fuse.Status) {
 	FuseInflight.WithLabelValues(op).Inc()
 	t := NewTimer(FuseDuration.WithLabelValues(op))
-	return func(errno syscall.Errno) {
+	return func(status fuse.Status) {
 		FuseInflight.WithLabelValues(op).Dec()
 		t.ObserveDuration()
-		status := "ok"
-		if errno != 0 {
-			status = "error"
+		label := "ok"
+		if status != fuse.OK {
+			label = "error"
 		}
-		FuseOps.WithLabelValues(op, status).Inc()
+		FuseOps.WithLabelValues(op, label).Inc()
 	}
 }

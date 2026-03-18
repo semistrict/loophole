@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fuseblockdev"
 	"github.com/semistrict/loophole/objstore"
@@ -40,7 +39,7 @@ func envOrDefault(key, fallback string) string {
 }
 
 type fuseBackend struct {
-	Service
+	*Backend
 	fuseDir string
 }
 
@@ -78,7 +77,7 @@ func newFUSEBackend(t *testing.T) *fuseBackend {
 		defer cancel()
 		_ = b.Close(cleanupCtx)
 	})
-	return &fuseBackend{Service: b, fuseDir: fuseDir}
+	return &fuseBackend{Backend: b, fuseDir: fuseDir}
 }
 
 // loopDevicesFor returns the number of loop devices whose backing file
@@ -106,7 +105,7 @@ func TestFUSE_CreateMountUnmount_CleansUpLoopDevice(t *testing.T) {
 
 	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir))
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "looptest"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "looptest"}))
 
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "looptest", mp))
@@ -129,7 +128,7 @@ func TestFUSE_MultipleVolumes_AllCleaned(t *testing.T) {
 	mps := make([]string, n)
 	for i := range n {
 		name := fmt.Sprintf("multi-%d", i)
-		require.NoError(t, b.Create(ctx, client.CreateParams{Volume: name}))
+		require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: name}))
 		mps[i] = t.TempDir()
 		require.NoError(t, b.Mount(ctx, name, mps[i]))
 	}
@@ -149,7 +148,7 @@ func TestFUSE_Close_CleansUpLoopDevices(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "closetest"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "closetest"}))
 	mp := t.TempDir()
 	require.NoError(t, b.Mount(ctx, "closetest", mp))
 
@@ -167,7 +166,7 @@ func TestFUSE_CreateDoesNotLeakLoopDevice(t *testing.T) {
 	b := newFUSEBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "noleak"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "noleak"}))
 
 	require.Equal(t, 0, loopDevicesFor(t, b.fuseDir), "Create/Format should not leak a loop device")
 }
