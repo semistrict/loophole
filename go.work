@@ -4,5 +4,4 @@ use (
 	.
 	./third_party/compress
 	./third_party/go-fuse
-	./third_party/prometheus-client
 )
