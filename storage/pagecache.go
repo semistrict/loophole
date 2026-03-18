@@ -28,6 +28,7 @@ type cacheSlotRef struct {
 type cacheStore interface {
 	// Arena
 	ReadSlot(ref cacheSlotRef) ([]byte, error)
+	ReadSlotRef(ref cacheSlotRef) ([]byte, func(), error)
 	PrepareSlot(slot int, data []byte) (cacheSlotRef, error)
 	AllocArena(maxSlots int) error
 	ArenaSlots() int
@@ -139,6 +140,28 @@ func (c *PageCache) GetPage(key cacheKey) []byte {
 		return nil
 	}
 	return data
+}
+
+// GetPageRef returns a slice pointing directly into the mmap'd arena without
+// copying. The caller MUST call the returned unpin function when done.
+// Returns (nil, nil) on cache miss.
+func (c *PageCache) GetPageRef(key cacheKey) ([]byte, func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, nil
+	}
+
+	ref, ok, err := c.store.LookupPage(key)
+	if !ok || err != nil {
+		return nil, nil
+	}
+	c.accessBuf = append(c.accessBuf, key)
+	data, unpin, err := c.store.ReadSlotRef(ref)
+	if err != nil || len(data) != PageSize {
+		return nil, nil
+	}
+	return data, unpin
 }
 
 func (c *PageCache) PutPage(key cacheKey, data []byte) {

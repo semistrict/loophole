@@ -59,6 +59,14 @@ func (s *mockStore) ReadSlot(ref cacheSlotRef) ([]byte, error) {
 	return bytes.Clone(slot.data), nil
 }
 
+func (s *mockStore) ReadSlotRef(ref cacheSlotRef) ([]byte, func(), error) {
+	data, err := s.ReadSlot(ref)
+	if err != nil {
+		return nil, nil, err
+	}
+	return data, func() {}, nil
+}
+
 func (s *mockStore) PrepareSlot(slot int, data []byte) (cacheSlotRef, error) {
 	ms := s.slots[slot]
 	if ms == nil {

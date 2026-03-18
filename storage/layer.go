@@ -293,6 +293,132 @@ func (ly *layer) readWithSnapshot(ctx context.Context, buf []byte, offset uint64
 	return total, nil
 }
 
+// ReadPages collects per-page slices for the given byte range using zero-copy
+// references where possible. Each slice is appended to *slices, and each
+// corresponding unpin function (or nil) is appended to *unpins.
+func (ly *layer) ReadPages(ctx context.Context, offset uint64, length int, slices *[][]byte, unpins *[]func()) error {
+	snap := ly.snapshotLayers()
+	err := ly.readPagesWithSnapshot(ctx, offset, length, slices, unpins, &snap)
+	if err == nil {
+		return nil
+	}
+	if !ly.shouldRetryAfterLayoutError(err) {
+		return err
+	}
+	refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+	if refreshErr != nil || !refreshed {
+		return err
+	}
+	return ly.ReadPages(ctx, offset, length, slices, unpins)
+}
+
+func (ly *layer) readPagesWithSnapshot(ctx context.Context, offset uint64, length int, slices *[][]byte, unpins *[]func(), snap *layerSnapshot) error {
+	remaining := length
+	for remaining > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pageIdx, pageOff := PageIdxOf(offset)
+
+		data, unpin, err := ly.readPageRef(ctx, snap, pageIdx)
+		if err != nil {
+			return err
+		}
+
+		slice := data[pageOff:]
+		if len(slice) > remaining {
+			slice = slice[:remaining]
+		}
+		*slices = append(*slices, slice)
+		*unpins = append(*unpins, unpin)
+		n := len(slice)
+		offset += uint64(n)
+		remaining -= n
+	}
+	return nil
+}
+
+// readPageRef reads a single page using zero-copy references where possible.
+// Returns (data, unpin, err). The caller MUST call unpin (if non-nil) when done.
+func (ly *layer) readPageRef(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, func(), error) {
+	// 1. Active memtable.
+	if snap.memtable != nil {
+		if slot, ok := snap.memtable.get(pageIdx); ok {
+			data, unpin, err := snap.memtable.readDataRef(slot)
+			if err == nil {
+				metrics.PageReadSource.WithLabelValues("memtable").Inc()
+				return data, unpin, nil
+			}
+			fresh := ly.snapshotLayers()
+			return ly.readPageRef(ctx, &fresh, pageIdx)
+		}
+	}
+
+	// 2. Frozen memtables (newest first).
+	for i := len(snap.frozen) - 1; i >= 0; i-- {
+		if slot, ok := snap.frozen[i].get(pageIdx); ok {
+			data, unpin, err := snap.frozen[i].readDataRef(slot)
+			if err == nil {
+				metrics.PageReadSource.WithLabelValues("frozen").Inc()
+				return data, unpin, nil
+			}
+			fresh := ly.snapshotLayers()
+			return ly.readPageRef(ctx, &fresh, pageIdx)
+		}
+	}
+
+	// 3. L1 (sparse blocks).
+	if layer, seq := snap.l1.Find(pageIdx.Block()); layer != "" {
+		if data, unpin := ly.cachedPageRef(layer, pageIdx); data != nil {
+			return data, unpin, nil
+		}
+		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if found {
+			ly.cachePage(layer, pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l1").Inc()
+			return data, nil, nil // freshly allocated, no unpin needed
+		}
+	}
+
+	// 4. L2 (dense blocks).
+	if layer, seq := snap.l2.Find(pageIdx.Block()); layer != "" {
+		if data, unpin := ly.cachedPageRef(layer, pageIdx); data != nil {
+			return data, unpin, nil
+		}
+		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if found {
+			ly.cachePage(layer, pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l2").Inc()
+			return data, nil, nil
+		}
+	}
+
+	// 5. Zero page — static, no unpin.
+	metrics.PageReadSource.WithLabelValues("zero").Inc()
+	return zeroPage[:], nil, nil
+}
+
+// cachedPageRef returns a zero-copy reference into the page cache arena.
+func (ly *layer) cachedPageRef(sourceLayerID string, pageIdx PageIdx) ([]byte, func()) {
+	if !ly.shouldUsePersistentPageCache(sourceLayerID) {
+		return nil, nil
+	}
+	key := cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}
+	if data, unpin := ly.diskCache.GetPageRef(key); data != nil {
+		metrics.CacheHits.Inc()
+		metrics.PageReadSource.WithLabelValues("cache").Inc()
+		return data, unpin
+	}
+	metrics.CacheMisses.Inc()
+	return nil, nil
+}
+
 // readPageWith reads a single page using a pre-captured layer snapshot.
 func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, error) {
 	// 1. Active memtable (nil for frozen layers).

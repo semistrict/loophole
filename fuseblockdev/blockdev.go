@@ -27,6 +27,29 @@ const (
 	firstDevIno uint64 = 2
 )
 
+// sliceReadResult implements fuse.ReadResult and the juicedata go-fuse
+// withSlice interface for zero-copy reads via writev.
+type sliceReadResult struct {
+	slices  [][]byte
+	size    int
+	cleanup func()
+}
+
+func (r *sliceReadResult) Slices() ([][]byte, int) { return r.slices, 0 }
+func (r *sliceReadResult) Size() int               { return r.size }
+func (r *sliceReadResult) Done() {
+	if r.cleanup != nil {
+		r.cleanup()
+	}
+}
+func (r *sliceReadResult) Bytes(buf []byte) ([]byte, int) {
+	n := 0
+	for _, s := range r.slices {
+		n += copy(buf[n:], s)
+	}
+	return buf[:n], 0
+}
+
 // safeFileName encodes a volume name for safe use as a filename.
 // Encodes % → %25 and / → %2F.
 func safeFileName(name string) string {
@@ -72,6 +95,7 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 		DirectMount:     true,
 		Debug:           opts.Debug,
 		EnableWriteback: opts.EnableWriteback,
+		NoAllocForRead:  true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fuse mount: %w", err)
@@ -347,28 +371,24 @@ func (fs *blockDevFS) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse
 	vol := h.vol
 	off := in.Offset
 	size := int(in.Size)
-	slog.Debug("blockdev: read", "off", off, "len", size, "volSize", vol.Size())
 	if off >= vol.Size() {
 		done(fuse.OK)
 		return fuse.ReadResultData(nil), fuse.OK
 	}
-
-	end := off + uint64(size)
-	if end > vol.Size() {
+	if off+uint64(size) > vol.Size() {
 		size = int(vol.Size() - off)
 	}
-	dest := buf[:size]
 
-	n, err := vol.Read(context.Background(), dest, off)
+	slices := make([][]byte, 0, (size+storage.PageSize-1)/storage.PageSize)
+	cleanup, err := vol.ReadPages(context.Background(), off, size, &slices)
 	if err != nil {
 		slog.Warn("blockdev: read error", "off", off, "len", size, "error", err)
 		done(fuse.Status(syscall.EIO))
 		return nil, fuse.Status(syscall.EIO)
 	}
-	slog.Debug("blockdev: read done", "off", off, "n", n)
-	metrics.FuseBytes.WithLabelValues("read").Add(float64(n))
+	metrics.FuseBytes.WithLabelValues("read").Add(float64(size))
 	done(fuse.OK)
-	return fuse.ReadResultData(dest[:n]), fuse.OK
+	return &sliceReadResult{slices: slices, size: size, cleanup: cleanup}, fuse.OK
 }
 
 func (fs *blockDevFS) Write(_ <-chan struct{}, in *fuse.WriteIn, data []byte) (uint32, fuse.Status) {

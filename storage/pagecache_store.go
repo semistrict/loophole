@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/semistrict/loophole/internal/util"
@@ -21,6 +22,7 @@ type sqliteStore struct {
 	arenaFile *os.File
 	arenaMmap []byte
 	slots     int
+	slotPins  []atomic.Int32 // per-slot pin count for zero-copy reads
 	lockFile  *os.File
 
 	stmtLookup *sql.Stmt
@@ -221,6 +223,7 @@ func (s *sqliteStore) AllocArena(maxSlots int) error {
 	s.arenaFile = f
 	s.arenaMmap = mapped
 	s.slots = actualSlots
+	s.slotPins = make([]atomic.Int32, actualSlots)
 	return nil
 }
 
@@ -277,6 +280,29 @@ func (s *sqliteStore) ReadSlot(ref cacheSlotRef) ([]byte, error) {
 	buf := make([]byte, PageSize)
 	copy(buf, s.arenaMmap[off:off+PageSize])
 	return buf, nil
+}
+
+// ReadSlotRef returns a slice pointing directly into the mmap'd arena without
+// copying. The caller MUST call the returned unpin function when done. The pin
+// prevents EvictLow from reusing the slot while the slice is in use.
+func (s *sqliteStore) ReadSlotRef(ref cacheSlotRef) ([]byte, func(), error) {
+	if s.arenaMmap == nil {
+		return nil, nil, fmt.Errorf("arena not allocated")
+	}
+	if ref.Slot < 0 || ref.Slot >= s.slots {
+		return nil, nil, fmt.Errorf("slot %d out of range [0, %d)", ref.Slot, s.slots)
+	}
+	gen, err := s.readGeneration(ref.Slot)
+	if err != nil {
+		return nil, nil, err
+	}
+	if gen != ref.Generation {
+		return nil, nil, fmt.Errorf("stale slot generation: slot=%d have=%d want=%d", ref.Slot, gen, ref.Generation)
+	}
+	s.slotPins[ref.Slot].Add(1)
+	off := s.slotOffset(ref.Slot) + cacheSlotHeaderSize
+	slot := ref.Slot
+	return s.arenaMmap[off : off+PageSize], func() { s.slotPins[slot].Add(-1) }, nil
 }
 
 func (s *sqliteStore) PrepareSlot(slot int, data []byte) (cacheSlotRef, error) {
@@ -368,6 +394,14 @@ func (s *sqliteStore) EvictLow(count int) ([]int, error) {
 		var slot int
 		if err := rows.Scan(&slot); err != nil {
 			return slots, err
+		}
+		// Skip pinned slots — their arena data is still in use by a writev
+		// syscall. The slot's index entry is already deleted so it won't be
+		// found by LookupPage, but we must not add it to the free list until
+		// the pin is released. In practice pins last microseconds so this
+		// path is rarely hit.
+		if slot < len(s.slotPins) && s.slotPins[slot].Load() > 0 {
+			continue
 		}
 		slots = append(slots, slot)
 	}

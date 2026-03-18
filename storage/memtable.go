@@ -139,6 +139,23 @@ func (mt *memtable) readData(slot int) ([]byte, error) {
 	return buf, nil
 }
 
+// readDataRef returns a slice pointing directly into the mmap without copying.
+// The caller MUST call the returned unpin function when done with the slice.
+// The pin prevents cleanup() from unmapping the memory while the slice is in use.
+func (mt *memtable) readDataRef(slot int) ([]byte, func(), error) {
+	mt.mu.RLock()
+	defer mt.mu.RUnlock()
+	mt.pins.Add(1)
+
+	if mt.closed.Load() {
+		mt.pins.Add(-1)
+		return nil, nil, errmemtableCleanedUp
+	}
+
+	off := slot * PageSize
+	return mt.mmap[off : off+PageSize], func() { mt.pins.Add(-1) }, nil
+}
+
 func (mt *memtable) freeze(endSeq uint64) {
 	mt.mu.Lock()
 	defer mt.mu.Unlock()

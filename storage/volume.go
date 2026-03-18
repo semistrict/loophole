@@ -46,6 +46,34 @@ func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 	return v.layer.Read(ctx, buf, offset)
 }
 
+// ReadPages collects per-page zero-copy slices for the given byte range.
+// Each element of *slices is a sub-slice pointing directly into mmap'd memory.
+// The returned cleanup function MUST be called when the caller is done with all
+// slices (e.g. after writev completes). The caller must not modify the slices.
+func (v *Volume) ReadPages(ctx context.Context, offset uint64, length int, slices *[][]byte) (cleanup func(), err error) {
+	v.mu.RLock()
+	var unpins []func()
+	err = v.layer.ReadPages(ctx, offset, length, slices, &unpins)
+	if err != nil {
+		// Release all pins acquired so far.
+		for _, f := range unpins {
+			if f != nil {
+				f()
+			}
+		}
+		v.mu.RUnlock()
+		return nil, err
+	}
+	return func() {
+		for _, f := range unpins {
+			if f != nil {
+				f()
+			}
+		}
+		v.mu.RUnlock()
+	}, nil
+}
+
 func (v *Volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, error) {
 	buf := make([]byte, n)
 	v.mu.RLock()
