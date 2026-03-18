@@ -14,6 +14,7 @@ import (
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/sandboxapi"
 )
 
 // ownerClient returns a client connected to the per-volume owner process.
@@ -22,23 +23,7 @@ func (s *controlServer) ownerClient(volume string) *client.Client {
 	return client.NewFromSocket(dir.VolumeSocket(volume))
 }
 
-type sandboxSource struct {
-	Kind       string `json:"kind"`
-	Zygote     string `json:"zygote,omitempty"`
-	Volume     string `json:"volume,omitempty"`
-	Mode       string `json:"mode,omitempty"`
-	Checkpoint string `json:"checkpoint,omitempty"`
-	SandboxID  string `json:"sandbox_id,omitempty"`
-}
-
-type sandboxRecord struct {
-	ID           string        `json:"id"`
-	Name         string        `json:"name"`
-	State        string        `json:"state"`
-	Source       sandboxSource `json:"source"`
-	RootfsVolume string        `json:"rootfs_volume"`
-	Mountpoint   string        `json:"mountpoint"`
-}
+type sandboxRecord = sandboxapi.SandboxRecord
 
 func (u *upstream) do(ctx context.Context, method, path string, body []byte, contentType string) (*http.Response, error) {
 	if u == nil {

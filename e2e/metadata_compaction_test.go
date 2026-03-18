@@ -35,7 +35,7 @@ func TestE2E_MetadataChurnDuringFlush(t *testing.T) {
 	// Keep flush aggressive without making the one-off create/format owner
 	// path pay the full cost. The mounted owner below is the one this test
 	// actually stresses.
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "16384")
+	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	owner := b.ownerByMountpoint(mp)

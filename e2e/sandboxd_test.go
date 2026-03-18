@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/sandboxapi"
 )
 
 type sandboxdClient struct {
@@ -177,15 +178,7 @@ func sandboxdLogPath() string {
 	return filepath.Join(string(testDir), "sandboxd-e2e.log")
 }
 
-type sandboxRecord struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	State        string `json:"state"`
-	RootfsVolume string `json:"rootfs_volume"`
-	Mountpoint   string `json:"mountpoint"`
-	OwnerSocket  string `json:"owner_socket"`
-	OwnerMode    string `json:"owner_mode"`
-}
+type sandboxRecord = sandboxapi.SandboxRecord
 
 func TestE2E_Sandboxd_CreateFromZygote(t *testing.T) {
 	skipE2E(t)
@@ -234,7 +227,7 @@ func TestE2E_Sandboxd_CreateFromZygote(t *testing.T) {
 func TestE2E_Sandboxd_CreateFromClonedVolume_KeepsRootfsReadableDuringFlush(t *testing.T) {
 	skipE2E(t)
 	setupBusyboxVolume(t, "sandboxd-zygote-flush")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "32768")
+	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "32768")
 
 	socket := startSandboxd(t)
 	client := newSandboxdClient(t, socket)

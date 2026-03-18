@@ -19,16 +19,12 @@ import (
 type mountOpts struct {
 	Source     string
 	Mountpoint string
-	ReadOnly   bool
 	NoAtime    bool
 	NoBarrier  bool
 }
 
 func mountExt4(opts mountOpts) error {
 	var flags uintptr
-	if opts.ReadOnly {
-		flags |= unix.MS_RDONLY
-	}
 	if opts.NoAtime {
 		flags |= unix.MS_NOATIME
 	}
@@ -141,8 +137,6 @@ const (
 	loopConfigure  = 0x4C0A
 	loopCtlGetFree = 0x4C82
 
-	loFlagsReadOnly = 1
-
 	loNameSize = 64
 	loKeySize  = 32
 )
@@ -176,15 +170,10 @@ type loopDevice struct {
 
 type loopAttachOpts struct {
 	OptimalIOSize int
-	ReadOnly      bool
 }
 
 func loopAttach(backingPath string, opts loopAttachOpts) (*loopDevice, error) {
-	openFlags := unix.O_RDWR | unix.O_CLOEXEC
-	if opts.ReadOnly {
-		openFlags = unix.O_RDONLY | unix.O_CLOEXEC
-	}
-	backingFD, err := unix.Open(backingPath, openFlags, 0)
+	backingFD, err := unix.Open(backingPath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open backing file %s: %w", backingPath, err)
 	}
@@ -196,7 +185,7 @@ func loopAttach(backingPath string, opts loopAttachOpts) (*loopDevice, error) {
 
 	const maxRetries = 6
 	for attempt := range maxRetries {
-		devPath, err := loopConfigure1(backingFD, opts.ReadOnly)
+		devPath, err := loopConfigure1(backingFD)
 		if err == nil {
 			dev := &loopDevice{Path: devPath}
 			dev.tuneBlockQueue(opts.OptimalIOSize)
@@ -224,7 +213,7 @@ func isEBUSY(err error) bool {
 	return false
 }
 
-func loopConfigure1(backingFD int, readOnly bool) (string, error) {
+func loopConfigure1(backingFD int) (string, error) {
 	ctl, err := os.OpenFile("/dev/loop-control", os.O_RDWR, 0)
 	if err != nil {
 		return "", fmt.Errorf("open loop-control: %w", err)
@@ -245,23 +234,13 @@ func loopConfigure1(backingFD int, readOnly bool) (string, error) {
 		}
 	}
 
-	loopOpenFlags := os.O_RDWR
-	if readOnly {
-		loopOpenFlags = os.O_RDONLY
-	}
-	loopFile, err := os.OpenFile(devPath, loopOpenFlags, 0)
+	loopFile, err := os.OpenFile(devPath, os.O_RDWR, 0)
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", devPath, err)
-	}
-
-	var flags uint32
-	if readOnly {
-		flags |= loFlagsReadOnly
 	}
 	cfg := loopConfig{
 		FD:        uint32(backingFD),
 		BlockSize: 4096,
-		Info:      loopInfo64{Flags: flags},
 	}
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(loopFile.Fd()), uintptr(loopConfigure), uintptr(unsafe.Pointer(&cfg)))
 	if cerr := loopFile.Close(); cerr != nil {
@@ -362,7 +341,7 @@ func mountFS(ctx context.Context, devicePath, mountpoint string, opts loopAttach
 		return "", err
 	}
 
-	if err := mountExt4(mountOpts{Source: dev.Path, Mountpoint: mountpoint, ReadOnly: opts.ReadOnly, NoAtime: true}); err != nil {
+	if err := mountExt4(mountOpts{Source: dev.Path, Mountpoint: mountpoint, NoAtime: true}); err != nil {
 		if derr := dev.Detach(); derr != nil {
 			slog.Warn("loop detach failed", "error", derr)
 		}

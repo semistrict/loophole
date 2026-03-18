@@ -64,7 +64,6 @@ func (f *FUSEDriver) Mount(ctx context.Context, vol *storage.Volume, mountpoint 
 	slog.Debug("fuse: mounting", "volume", vol.Name(), "device", devPath, "mountpoint", mountpoint)
 	loopDev, err := mountFS(ctx, devPath, mountpoint, loopAttachOpts{
 		OptimalIOSize: f.pageSize,
-		ReadOnly:      vol.ReadOnly(),
 	})
 	if err != nil {
 		slog.Debug("fuse: mount failed", "volume", vol.Name(), "error", err)

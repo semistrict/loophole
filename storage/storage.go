@@ -8,8 +8,6 @@
 // Snapshots freeze the current layer and move the volume to a new child.
 // Each layer's index.json is self-contained — it references all data files
 // it needs, including inherited ones from ancestors.
-//
-// See storage.md for the full design.
 package storage
 
 import (

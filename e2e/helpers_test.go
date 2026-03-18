@@ -23,7 +23,6 @@ import (
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -559,17 +558,10 @@ func removeTracked(values []string, value string) []string {
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
-	var store objstore.ObjectStore
-	var err error
-	if testInst.LocalDir != "" {
-		store, err = objstore.NewFileStore(testInst.LocalDir)
-	} else {
-		store, err = objstore.NewS3Store(ctx, testInst)
-	}
+	vm, err := storage.OpenManagerForProfile(ctx, testInst, testDir, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage.NewManager(store, testDir.Cache(testInst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		_ = vm.Close(context.Background())
 	}, nil

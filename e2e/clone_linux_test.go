@@ -15,7 +15,7 @@ func TestE2E_CloneMountStaysReadableDuringAggressiveFlush(t *testing.T) {
 	skipE2E(t)
 
 	b, parentMP := setupBusyboxVolume(t, "cln-stress-parent")
-	t.Setenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD", "16384")
+	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
 
 	ctx := t.Context()
 	cloneMP := mountpoint(t, "cln-stress-clone")

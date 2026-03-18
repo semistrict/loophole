@@ -38,7 +38,6 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 
 func (v *Volume) Name() string       { return v.name }
 func (v *Volume) Size() uint64       { return v.size }
-func (v *Volume) ReadOnly() bool     { return false }
 func (v *Volume) VolumeType() string { return v.volType }
 
 func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
@@ -310,21 +309,19 @@ func (v *Volume) WritePagesDirect(pages []DirectPage) error {
 
 // VolumeDebugInfo holds volume + layer structure details for the debug endpoint.
 type VolumeDebugInfo struct {
-	Name     string         `json:"name"`
-	Size     uint64         `json:"size"`
-	Type     string         `json:"type"`
-	ReadOnly bool           `json:"read_only"`
-	Refs     int32          `json:"refs"`
-	Layer    LayerDebugInfo `json:"layer"`
+	Name  string         `json:"name"`
+	Size  uint64         `json:"size"`
+	Type  string         `json:"type"`
+	Refs  int32          `json:"refs"`
+	Layer LayerDebugInfo `json:"layer"`
 }
 
 func (v *Volume) DebugInfo() VolumeDebugInfo {
 	return VolumeDebugInfo{
-		Name:     v.name,
-		Size:     v.size,
-		Type:     v.volType,
-		ReadOnly: false,
-		Refs:     v.refs.Load(),
-		Layer:    v.layer.debugInfo(),
+		Name:  v.name,
+		Size:  v.size,
+		Type:  v.volType,
+		Refs:  v.refs.Load(),
+		Layer: v.layer.debugInfo(),
 	}
 }

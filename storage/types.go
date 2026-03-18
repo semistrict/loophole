@@ -28,12 +28,11 @@ type CreateParams struct {
 
 // VolumeInfo describes a volume's metadata.
 type VolumeInfo struct {
-	Name     string            `json:"name"`
-	Size     uint64            `json:"size"`
-	ReadOnly bool              `json:"read_only,omitempty"`
-	Type     string            `json:"type,omitempty"`
-	Parent   string            `json:"parent,omitempty"`
-	Labels   map[string]string `json:"labels,omitempty"`
+	Name   string            `json:"name"`
+	Size   uint64            `json:"size"`
+	Type   string            `json:"type,omitempty"`
+	Parent string            `json:"parent,omitempty"`
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // DirectPage is a contiguous range of full logical pages to persist through

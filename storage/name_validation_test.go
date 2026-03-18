@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/semistrict/loophole/objstore"
@@ -46,4 +47,10 @@ func TestValidateVolumeName(t *testing.T) {
 		assert.Error(t, ValidateVolumeName("sandbox/1"))
 		assert.Error(t, ValidateVolumeName(`sandbox\1`))
 	})
+}
+
+func TestVolumeInfoOmitsReadOnly(t *testing.T) {
+	data, err := json.Marshal(VolumeInfo{Name: "sandbox-1", Size: 123, Type: VolumeTypeExt4})
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "read_only")
 }

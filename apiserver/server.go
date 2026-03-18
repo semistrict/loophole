@@ -31,17 +31,6 @@ import (
 	"github.com/semistrict/loophole/storage"
 )
 
-func storage2ConfigFromEnv() storage.Config {
-	cfg := storage.Config{}
-
-	if v := os.Getenv("LOOPHOLE_TEST_STORAGE2_FLUSH_THRESHOLD"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
-			cfg.FlushThreshold = n
-		}
-	}
-	return cfg
-}
-
 // Server serves the loophole HTTP API over a Unix socket.
 type Server struct {
 	inst      env.ResolvedProfile
@@ -133,14 +122,14 @@ func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Opti
 	var store objstore.ObjectStore
 	if inst.LocalDir != "" {
 		var err error
-		store, err = objstore.NewFileStore(inst.LocalDir)
+		store, err = objstore.OpenForProfile(ctx, inst)
 		if err != nil {
 			return nil, fmt.Errorf("create file store: %w", err)
 		}
 		slog.Warn("using local file store — data is NOT replicated to S3")
 	} else {
 		var err error
-		store, err = objstore.NewS3Store(ctx, inst)
+		store, err = objstore.OpenForProfile(ctx, inst)
 		if err != nil {
 			storeErr := fmt.Sprintf("create S3 store: %v", err)
 			slog.Error("S3 store init failed, server will start degraded", "error", err)
@@ -157,13 +146,12 @@ func Start(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, opts Opti
 		// The page cache remains profile-scoped even though each process now
 		// manages a single volume. That lets all owner processes for a profile
 		// share the same on-disk cache.
-		cacheDir := dir.Cache(inst.ProfileName)
 		var err error
-		diskCache, err = storage.NewPageCache(filepath.Join(cacheDir, "diskcache"))
+		diskCache, err = storage.OpenPageCacheForProfile(dir, inst)
 		if err != nil {
 			return nil, fmt.Errorf("create page cache: %w", err)
 		}
-		vm := storage.NewManager(store, cacheDir, storage2ConfigFromEnv(), nil, diskCache)
+		vm := storage.NewManagerForProfile(inst, dir, store, diskCache)
 
 		backend, err = createBackend(vm, inst, dir)
 		if err != nil {

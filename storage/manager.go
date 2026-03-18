@@ -27,7 +27,6 @@ type checkpointRef struct {
 type volumeRef struct {
 	LayerID       string            `json:"layer_id"`
 	Size          uint64            `json:"size,omitempty"`
-	ReadOnly      bool              `json:"read_only,omitempty"`
 	Type          string            `json:"type,omitempty"`
 	LeaseToken    string            `json:"lease_token,omitempty"`
 	WriteLeaseSeq uint64            `json:"write_lease_seq,omitempty"`
@@ -243,12 +242,11 @@ func (m *Manager) VolumeInfo(ctx context.Context, name string) (VolumeInfo, erro
 		return VolumeInfo{}, err
 	}
 	return VolumeInfo{
-		Name:     name,
-		Size:     ref.Size,
-		ReadOnly: ref.ReadOnly,
-		Type:     ref.Type,
-		Parent:   ref.Parent,
-		Labels:   ref.Labels,
+		Name:   name,
+		Size:   ref.Size,
+		Type:   ref.Type,
+		Parent: ref.Parent,
+		Labels: ref.Labels,
 	}, nil
 }
 
@@ -481,7 +479,7 @@ func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
 	// Acquire write lease before opening the layer so we have the
 	// writeLeaseSeq for file naming.
 	var writeLeaseSeq uint64
-	if !ref.ReadOnly && ref.LeaseToken != m.lease.Token() {
+	if ref.LeaseToken != m.lease.Token() {
 		seq, err := m.acquireVolumeLease(ctx, name)
 		if err != nil {
 			return nil, fmt.Errorf("acquire lease for %q: %w", name, err)

@@ -16,7 +16,6 @@ import (
 
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -28,17 +27,10 @@ type ownerHandle struct {
 }
 
 func (d *Daemon) openManager(ctx context.Context) (*storage.Manager, func(), error) {
-	var store objstore.ObjectStore
-	var err error
-	if d.inst.LocalDir != "" {
-		store, err = objstore.NewFileStore(d.inst.LocalDir)
-	} else {
-		store, err = objstore.NewS3Store(ctx, d.inst)
-	}
+	vm, err := storage.OpenManagerForProfile(ctx, d.inst, d.dir, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage.NewManager(store, d.dir.Cache(d.inst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		if err := vm.Close(context.Background()); err != nil {
 			slog.Warn("close sandboxd manager", "error", err)

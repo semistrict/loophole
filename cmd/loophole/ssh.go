@@ -20,17 +20,10 @@ import (
 
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/sandboxapi"
 )
 
-type remoteSandboxRecord struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	State  string `json:"state"`
-	Source struct {
-		Kind   string `json:"kind"`
-		Volume string `json:"volume"`
-	} `json:"source"`
-}
+type remoteSandboxRecord = sandboxapi.SandboxRecord
 
 func sshCmd() *cobra.Command {
 	var urlFlag string

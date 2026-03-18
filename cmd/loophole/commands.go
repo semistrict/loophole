@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,7 +18,6 @@ import (
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -39,7 +37,6 @@ func addCommands(root *cobra.Command) {
 		deviceCmd(),
 		sshCmd(),
 		breakLeaseCmd(),
-		migrateCmd(),
 		s3testCmd(),
 	)
 }
@@ -714,247 +711,6 @@ func breakLeaseCmd() *cobra.Command {
 	return cmd
 }
 
-// migrationState tracks which migrations have been run. Stored as migrations.json
-// at the root of the S3 bucket.
-type migrationState struct {
-	Migrations map[string]migrationRecord `json:"migrations"`
-}
-
-type migrationRecord struct {
-	StartedAt   string `json:"started_at"`
-	CompletedAt string `json:"completed_at,omitempty"`
-}
-
-func loadMigrationState(ctx context.Context, store objstore.ObjectStore) (migrationState, string, error) {
-	state, etag, err := objstore.ReadJSON[migrationState](ctx, store, "migrations.json")
-	if errors.Is(err, objstore.ErrNotFound) {
-		return migrationState{Migrations: map[string]migrationRecord{}}, "", nil
-	}
-	if err != nil {
-		return migrationState{}, "", err
-	}
-	if state.Migrations == nil {
-		state.Migrations = map[string]migrationRecord{}
-	}
-	return state, etag, nil
-}
-
-func saveMigrationState(ctx context.Context, store objstore.ObjectStore, state migrationState, etag string) (string, error) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return "", err
-	}
-	if etag == "" {
-		if err := store.PutIfNotExists(ctx, "migrations.json", data); err != nil {
-			if !errors.Is(err, objstore.ErrExists) {
-				return "", err
-			}
-			// Race — someone else created it. Read back etag and CAS.
-			_, freshEtag, rerr := objstore.ReadJSON[migrationState](ctx, store, "migrations.json")
-			if rerr != nil {
-				return "", fmt.Errorf("read back migrations.json: %w", rerr)
-			}
-			return store.PutBytesCAS(ctx, "migrations.json", data, freshEtag)
-		}
-		// Read back etag for subsequent CAS writes.
-		_, freshEtag, rerr := objstore.ReadBytes(ctx, store, "migrations.json")
-		if rerr != nil {
-			return "", fmt.Errorf("read back migrations.json etag: %w", rerr)
-		}
-		return freshEtag, nil
-	}
-	return store.PutBytesCAS(ctx, "migrations.json", data, etag)
-}
-
-func migrateCmd() *cobra.Command {
-	var dryRun bool
-	cmd := &cobra.Command{
-		Use:   "migrate",
-		Short: "Migrate S3 data to the current format",
-		Long:  "Rewrites volume refs (timeline_id → layer_id) and merges layer meta.json into index.json.",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			dir := env.DefaultDir()
-			inst, err := resolveProfile(dir)
-			if err != nil {
-				return err
-			}
-			store, err := objstore.NewS3Store(ctx, inst)
-			if err != nil {
-				return fmt.Errorf("connect to S3: %w", err)
-			}
-
-			// Load migration state.
-			state, stateEtag, err := loadMigrationState(ctx, store)
-			if err != nil {
-				return fmt.Errorf("load migrations.json: %w", err)
-			}
-
-			const migName = "001_timeline_id_to_layer_id"
-			if rec, ok := state.Migrations[migName]; ok && rec.CompletedAt != "" {
-				fmt.Printf("migration %s already completed at %s\n", migName, rec.CompletedAt)
-				return nil
-			}
-
-			now := time.Now().UTC().Format(time.RFC3339)
-
-			// Mark started (unless dry run).
-			if !dryRun {
-				state.Migrations[migName] = migrationRecord{StartedAt: now}
-				newEtag, err := saveMigrationState(ctx, store, state, stateEtag)
-				if err != nil {
-					return fmt.Errorf("save migration started: %w", err)
-				}
-				stateEtag = newEtag
-				fmt.Printf("migration %s: started at %s\n", migName, now)
-			}
-
-			// Migrate volume refs: timeline_id → layer_id.
-			fmt.Println("migrating volume refs...")
-			volRefs := store.At("volumes")
-			objects, err := volRefs.ListKeys(ctx, "")
-			if err != nil {
-				return fmt.Errorf("list volumes: %w", err)
-			}
-			for _, obj := range objects {
-				// Only process index.json files (volume refs).
-				if !strings.HasSuffix(obj.Key, "/index.json") || strings.Contains(obj.Key, "/checkpoints/") {
-					continue
-				}
-				raw, etag, err := objstore.ReadBytes(ctx, volRefs, obj.Key)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  skip %s: %v\n", obj.Key, err)
-					continue
-				}
-
-				var m map[string]json.RawMessage
-				if err := json.Unmarshal(raw, &m); err != nil {
-					fmt.Fprintf(os.Stderr, "  skip %s: bad JSON: %v\n", obj.Key, err)
-					continue
-				}
-
-				changed := false
-
-				// Rename timeline_id → layer_id.
-				if val, ok := m["timeline_id"]; ok {
-					if _, hasNew := m["layer_id"]; !hasNew {
-						m["layer_id"] = val
-					}
-					delete(m, "timeline_id")
-					changed = true
-				}
-
-				if !changed {
-					fmt.Printf("  %s: ok\n", obj.Key)
-					continue
-				}
-
-				out, err := json.Marshal(m)
-				if err != nil {
-					return fmt.Errorf("marshal %s: %w", obj.Key, err)
-				}
-
-				if dryRun {
-					fmt.Printf("  %s: would rewrite (timeline_id → layer_id)\n", obj.Key)
-					continue
-				}
-
-				if _, err := volRefs.PutBytesCAS(ctx, obj.Key, out, etag); err != nil {
-					return fmt.Errorf("write %s: %w", obj.Key, err)
-				}
-				fmt.Printf("  %s: migrated\n", obj.Key)
-			}
-
-			// Migrate frozen layers: move FrozenAt from meta.json body to
-			// index.json object metadata (no body rewrite needed).
-			fmt.Println("migrating frozen layer metadata...")
-			layersStore := store.At("layers")
-			layerDirs, err := layersStore.ListKeys(ctx, "")
-			if err != nil {
-				return fmt.Errorf("list layers: %w", err)
-			}
-			// Collect unique layer IDs from directory listing.
-			seen := map[string]bool{}
-			for _, obj := range layerDirs {
-				parts := strings.SplitN(obj.Key, "/", 2)
-				if len(parts) > 0 && parts[0] != "" {
-					seen[parts[0]] = true
-				}
-			}
-			for layerID := range seen {
-				ls := layersStore.At(layerID)
-
-				// Read meta.json — if it doesn't exist or has no FrozenAt, skip.
-				metaRaw, _, err := objstore.ReadBytes(ctx, ls, "meta.json")
-				if err != nil {
-					continue // no meta.json — nothing to migrate
-				}
-				var oldMeta struct {
-					FrozenAt  string `json:"frozen_at"`
-					CreatedAt string `json:"created_at"`
-				}
-				if err := json.Unmarshal(metaRaw, &oldMeta); err != nil {
-					continue
-				}
-
-				// Check if index.json already has the metadata.
-				existingMeta, err := ls.HeadMeta(ctx, "index.json")
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "  layer %s: no index.json, skip\n", layerID[:8])
-					continue
-				}
-				if existingMeta["frozen_at"] != "" && existingMeta["created_at"] != "" {
-					continue // already migrated
-				}
-
-				// Build new metadata from meta.json fields.
-				newMeta := make(map[string]string)
-				for k, v := range existingMeta {
-					newMeta[k] = v
-				}
-				if oldMeta.CreatedAt != "" && newMeta["created_at"] == "" {
-					newMeta["created_at"] = oldMeta.CreatedAt
-				}
-				if oldMeta.FrozenAt != "" && newMeta["frozen_at"] == "" {
-					newMeta["frozen_at"] = oldMeta.FrozenAt
-				}
-
-				if len(newMeta) == len(existingMeta) {
-					continue // nothing to add
-				}
-
-				if dryRun {
-					fmt.Printf("  layer %s: would set metadata frozen_at=%s created_at=%s\n",
-						layerID[:8], newMeta["frozen_at"], newMeta["created_at"])
-					continue
-				}
-
-				if err := ls.SetMeta(ctx, "index.json", newMeta); err != nil {
-					return fmt.Errorf("set metadata for layer %s: %w", layerID[:8], err)
-				}
-				fmt.Printf("  layer %s: migrated metadata to index.json object\n", layerID[:8])
-			}
-
-			if dryRun {
-				fmt.Println("dry run — no changes written")
-			} else {
-				// Mark completed.
-				rec := state.Migrations[migName]
-				rec.CompletedAt = time.Now().UTC().Format(time.RFC3339)
-				state.Migrations[migName] = rec
-				if _, err := saveMigrationState(ctx, store, state, stateEtag); err != nil {
-					return fmt.Errorf("save migration completed: %w", err)
-				}
-				fmt.Printf("migration %s: completed\n", migName)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would change without writing")
-	return cmd
-}
-
 func socketFromMountpoint(mountpoint string) (string, error) {
 	dir := env.DefaultDir()
 	symPath := dir.MountSymlink(mountpoint)
@@ -1043,16 +799,10 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	var store objstore.ObjectStore
-	if inst.LocalDir != "" {
-		store, err = objstore.NewFileStore(inst.LocalDir)
-	} else {
-		store, err = objstore.NewS3Store(ctx, inst)
-	}
+	vm, err := storage.OpenManagerForProfile(ctx, inst, dir, nil)
 	if err != nil {
 		return nil, nil, err
 	}
-	vm := storage.NewManager(store, dir.Cache(inst.ProfileName), storage.Config{}, nil, nil)
 	return vm, func() {
 		_ = vm.Close(context.Background())
 	}, nil

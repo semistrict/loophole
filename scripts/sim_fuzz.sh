@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Repeatedly run storage2 TestSimulation until a failure appears.
+# Repeatedly run storage TestSimulation until a failure appears.
 # Uses make test (never direct go test) so repo test flags stay consistent.
 
 RUN_TEST="${RUN_TEST:-^TestSimulation$}"
 SIM_PAGES_FIXED="${SIM_PAGES_FIXED:-256}"
 
-LOG_DIR="${SIM_FUZZ_LOG_DIR:-/tmp/sim-fuzz-storage2}"
+LOG_DIR="${SIM_FUZZ_LOG_DIR:-/tmp/sim-fuzz-storage}"
 START_RUN="${SIM_FUZZ_START_RUN:-1}"
 MAX_RUNS="${SIM_FUZZ_MAX_RUNS:-0}" # 0 means run forever
 PARALLELISM="${SIM_FUZZ_PARALLELISM:-4}"
