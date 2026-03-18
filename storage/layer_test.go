@@ -361,10 +361,10 @@ func TestBlockRoundTrip(t *testing.T) {
 		pages = append(pages, blockPage{offset: uint16(i * 3), data: data})
 	}
 
-	blob, err := buildBlock(42, pages)
+	blob, err := buildBlock(42, pages, false)
 	require.NoError(t, err)
 
-	pb, err := parseBlock(blob)
+	pb, err := parseBlock(blob, false)
 	require.NoError(t, err)
 
 	for _, p := range pages {

@@ -68,7 +68,7 @@ type compressedPage struct {
 // compression (no dictionary). Pages must belong to the same block address.
 // Compression is parallelized across NumCPU goroutines.
 // Returns the serialized blob.
-func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
+func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, error) {
 	if len(pages) == 0 {
 		return nil, fmt.Errorf("no pages")
 	}
@@ -87,34 +87,44 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 
 	// Compress all pages in parallel using NumCPU goroutines.
 	compressed := make([]compressedPage, len(pages))
-	var wg sync.WaitGroup
-	workers := runtime.NumCPU()
-	if workers > len(pages) {
-		workers = len(pages)
-	}
-	work := make(chan int, len(pages))
-	for i := range pages {
-		work <- i
-	}
-	close(work)
+	if compress {
+		var wg sync.WaitGroup
+		workers := runtime.NumCPU()
+		if workers > len(pages) {
+			workers = len(pages)
+		}
+		work := make(chan int, len(pages))
+		for i := range pages {
+			work <- i
+		}
+		close(work)
 
-	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			enc := getZstdEncoder()
-			defer putZstdEncoder(enc)
-			for i := range work {
-				c := enc.EncodeAll(pages[i].data, nil)
-				compressed[i] = compressedPage{
-					offset:     pages[i].offset,
-					compressed: c,
-					crc32:      crc32.ChecksumIEEE(c),
+		for range workers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				enc := getZstdEncoder()
+				defer putZstdEncoder(enc)
+				for i := range work {
+					c := enc.EncodeAll(pages[i].data, nil)
+					compressed[i] = compressedPage{
+						offset:     pages[i].offset,
+						compressed: c,
+						crc32:      crc32.ChecksumIEEE(c),
+					}
 				}
+			}()
+		}
+		wg.Wait()
+	} else {
+		for i, p := range pages {
+			compressed[i] = compressedPage{
+				offset:     p.offset,
+				compressed: p.data,
+				crc32:      crc32.ChecksumIEEE(p.data),
 			}
-		}()
+		}
 	}
-	wg.Wait()
 
 	// Assemble the block from compressed results.
 	var buf bytes.Buffer
@@ -168,16 +178,18 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage) ([]byte, error) {
 
 // parsedBlock holds a parsed block file's header, dictionary, and index.
 type parsedBlock struct {
-	data      []byte // full blob; nil for range-read mode
-	header    blockHeader
-	dictBytes []byte // shared dictionary; may be nil
-	index     []blockIndexEntry
-	store     objstore.ObjectStore
-	key       string
+	data       []byte // full blob; nil for range-read mode
+	header     blockHeader
+	dictBytes  []byte // shared dictionary; may be nil
+	index      []blockIndexEntry
+	store      objstore.ObjectStore
+	key        string
+	compressed bool // true if pages are zstd-compressed
 }
 
-// parseBlock parses a complete block blob.
-func parseBlock(data []byte) (*parsedBlock, error) {
+// parseBlock parses a complete block blob. If compressed is true, pages
+// are zstd-compressed and will be decompressed on read.
+func parseBlock(data []byte, compressed bool) (*parsedBlock, error) {
 	if len(data) < blockHeaderSize {
 		return nil, fmt.Errorf("block file too small: %d bytes", len(data))
 	}
@@ -215,10 +227,11 @@ func parseBlock(data []byte) (*parsedBlock, error) {
 	}
 
 	return &parsedBlock{
-		data:      data,
-		header:    hdr,
-		dictBytes: dictBytes,
-		index:     entries,
+		data:       data,
+		header:     hdr,
+		dictBytes:  dictBytes,
+		index:      entries,
+		compressed: compressed,
 	}, nil
 }
 
@@ -267,6 +280,15 @@ func (pb *parsedBlock) decompressPage(ctx context.Context, ie *blockIndexEntry, 
 	// Verify CRC.
 	if crc32.ChecksumIEEE(compressed) != ie.CRC32 {
 		return nil, fmt.Errorf("CRC mismatch for page %d", pageIdx)
+	}
+
+	if !pb.compressed {
+		if len(compressed) != PageSize {
+			return nil, fmt.Errorf("uncompressed page %d size %d, expected %d", pageIdx, len(compressed), PageSize)
+		}
+		page := make([]byte, PageSize)
+		copy(page, compressed)
+		return page, nil
 	}
 
 	dec := getZstdDecoder()
@@ -332,7 +354,7 @@ func (pb *parsedBlock) compressedEntriesExcluding2(excludeA, excludeB map[uint16
 // patchBlock builds a block from a mix of pre-compressed entries (copied
 // verbatim) and new uncompressed pages (compressed during build). Entries
 // are sorted by page offset for binary search on read.
-func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []blockPage) ([]byte, error) {
+func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []blockPage, compress bool) ([]byte, error) {
 	totalEntries := len(existing) + len(newPages)
 	if totalEntries == 0 {
 		return nil, fmt.Errorf("no pages")
@@ -348,34 +370,44 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 	// Compress new pages in parallel using NumCPU goroutines.
 	newCompressed := make([]compressedPage, len(newPages))
 	if len(newPages) > 0 {
-		var wg sync.WaitGroup
-		workers := runtime.NumCPU()
-		if workers > len(newPages) {
-			workers = len(newPages)
-		}
-		work := make(chan int, len(newPages))
-		for i := range newPages {
-			work <- i
-		}
-		close(work)
+		if compress {
+			var wg sync.WaitGroup
+			workers := runtime.NumCPU()
+			if workers > len(newPages) {
+				workers = len(newPages)
+			}
+			work := make(chan int, len(newPages))
+			for i := range newPages {
+				work <- i
+			}
+			close(work)
 
-		for range workers {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				enc := getZstdEncoder()
-				defer putZstdEncoder(enc)
-				for i := range work {
-					c := enc.EncodeAll(newPages[i].data, nil)
-					newCompressed[i] = compressedPage{
-						offset:     newPages[i].offset,
-						compressed: c,
-						crc32:      crc32.ChecksumIEEE(c),
+			for range workers {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					enc := getZstdEncoder()
+					defer putZstdEncoder(enc)
+					for i := range work {
+						c := enc.EncodeAll(newPages[i].data, nil)
+						newCompressed[i] = compressedPage{
+							offset:     newPages[i].offset,
+							compressed: c,
+							crc32:      crc32.ChecksumIEEE(c),
+						}
 					}
+				}()
+			}
+			wg.Wait()
+		} else {
+			for i, p := range newPages {
+				newCompressed[i] = compressedPage{
+					offset:     p.offset,
+					compressed: p.data,
+					crc32:      crc32.ChecksumIEEE(p.data),
 				}
-			}()
+			}
 		}
-		wg.Wait()
 	}
 
 	var buf bytes.Buffer

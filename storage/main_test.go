@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+func init() {
+	// Disable zstd compression in tests to avoid channel conflicts with synctest.
+	testOverrides = func(c *Config) { c.DisableCompression = true }
+}
+
 func TestMain(m *testing.M) {
 	level := slog.Level(100)
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {

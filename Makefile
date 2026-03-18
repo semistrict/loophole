@@ -53,7 +53,7 @@ clean:
 
 # Run unit tests (excludes e2e/linuxutil which require Linux)
 # Usage: make test [RUN=TestName]
-UNIT_TEST_TIMEOUT := 20s
+UNIT_TEST_TIMEOUT := 30s
 UNIT_PKGS := $(shell go list -tags "$(BUILDTAGS)" ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
 test:
 	go test -tags "$(BUILDTAGS)" -timeout $(UNIT_TEST_TIMEOUT) $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)

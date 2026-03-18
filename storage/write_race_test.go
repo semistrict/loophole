@@ -79,12 +79,7 @@ func TestConcurrentPartialPageWrites(t *testing.T) {
 // the write, causing reads to return zeros where data was expected.
 func TestConcurrentWriteAndPunchHole(t *testing.T) {
 	cfg := testConfig
-	// Use a very large threshold so auto-flush never triggers. This prevents
-	// delta layer creation, which avoids zstd decompression. The zstd decoder
-	// pool is global; if TestSimulation (synctest) runs first, its channels
-	// get tainted by the synctest bubble, causing "receive on synctest channel
-	// from outside bubble" when this non-synctest test uses zstd.
-	cfg.FlushThreshold = 1 << 62
+	cfg.FlushThreshold = 256 * PageSize
 
 	m := newTestManager(t, objstore.NewMemStore(), cfg)
 	ctx := t.Context()

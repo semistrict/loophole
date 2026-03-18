@@ -132,7 +132,15 @@ type Config struct {
 	// MaxMemtableSlots caps the number of unique page slots in a memtable.
 	// 0 = default (65536). Only useful for tests.
 	MaxMemtableSlots int
+
+	// DisableCompression stores pages uncompressed in blocks. This is used
+	// in tests to avoid zstd's internal goroutine channels which are
+	// incompatible with synctest.
+	DisableCompression bool
 }
+
+// testOverrides is set by test code to apply defaults for all Configs.
+var testOverrides func(*Config)
 
 func (c *Config) setDefaults() {
 	if c.FlushThreshold == 0 {
@@ -140,6 +148,9 @@ func (c *Config) setDefaults() {
 	}
 	if c.FlushInterval == 0 {
 		c.FlushInterval = DefaultFlushInterval
+	}
+	if testOverrides != nil {
+		testOverrides(c)
 	}
 }
 

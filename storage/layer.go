@@ -548,7 +548,7 @@ func (ly *layer) getParsedBlock(ctx context.Context, key string) (*parsedBlock, 
 			return nil, fmt.Errorf("read block %s: %w", key, err)
 		}
 
-		pb, err := parseBlock(data)
+		pb, err := parseBlock(data, !ly.config.DisableCompression)
 		if err != nil {
 			return nil, fmt.Errorf("parse block %s: %w", key, err)
 		}
@@ -611,7 +611,7 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	}
 
 	// Build the L2 block blob.
-	blob, err := buildBlock(blockIdx, pages)
+	blob, err := buildBlock(blockIdx, pages, !ly.config.DisableCompression)
 	if err != nil {
 		return fmt.Errorf("build direct L2 block %d: %w", blockIdx, err)
 	}
@@ -949,7 +949,7 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 				}
 			}
 
-			blockData, err := patchBlock(blockAddr, existing, newPages)
+			blockData, err := patchBlock(blockAddr, existing, newPages, !ly.config.DisableCompression)
 			if err != nil {
 				return fmt.Errorf("build block %d: %w", blockAddr, err)
 			}
@@ -990,7 +990,7 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 
 			// Parse block header for cache (best-effort).
 			var pb *parsedBlock
-			if parsed, parseErr := parseBlock(blockData); parseErr == nil {
+			if parsed, parseErr := parseBlock(blockData, !ly.config.DisableCompression); parseErr == nil {
 				pb = parsed
 			}
 
