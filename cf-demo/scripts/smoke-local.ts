@@ -72,7 +72,7 @@ async function main() {
     const direct = await request<CommandResponse>(
       'POST',
       `/toolbox/${encodeURIComponent(created.id)}/toolbox/process/execute`,
-      { argv: ['/.loophole/bin/busybox', 'echo', 'hello'], cwd: '/' },
+      { argv: ['/bin/echo', 'hello'], cwd: '/' },
     )
     assert(direct.exit_code === 0, `expected direct exec exit 0, got ${direct.exit_code}`)
     assert(direct.stdout === 'hello\n', `unexpected direct stdout: ${JSON.stringify(direct.stdout)}`)

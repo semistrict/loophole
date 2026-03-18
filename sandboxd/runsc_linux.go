@@ -5,7 +5,6 @@ package sandboxd
 import (
 	"bytes"
 	"context"
-	"debug/elf"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -30,10 +29,6 @@ import (
 const sandboxdGuestBin = "/.loophole/bin/loophole-sandboxd"
 const defaultRunscPlatform = "systrap"
 
-const (
-	amd64BusyboxPath = "/opt/loophole-busybox/amd64/usr/bin/busybox"
-	arm64BusyboxPath = "/opt/loophole-busybox/arm64/usr/bin/busybox"
-)
 
 var defaultSandboxCapabilities = []string{
 	"CAP_AUDIT_WRITE",
@@ -120,7 +115,7 @@ func (d *Daemon) bundleSpec(sb SandboxRecord) (map[string]any, error) {
 		}
 	}
 	// Bind-mount the host-side guest bin directory into the sandbox.
-	// Contains loophole CLI, loophole-sandboxd (init), and busybox.
+	// Contains loophole CLI and loophole-sandboxd (init).
 	mounts = append(mounts, map[string]any{
 		"destination": "/.loophole/bin",
 		"type":        "bind",
@@ -217,8 +212,8 @@ func (d *Daemon) guestBinDir() string {
 }
 
 // prepareGuestBinDir creates the host-side /.loophole/bin staging directory
-// with hard links to sandboxd, loophole, and busybox. This directory is
-// bind-mounted into every sandbox, keeping the ext4 volume clean.
+// with hard links to sandboxd and loophole. This directory is bind-mounted
+// into every sandbox, keeping the ext4 volume clean.
 func (d *Daemon) prepareGuestBinDir() error {
 	dir := d.guestBinDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -227,12 +222,6 @@ func (d *Daemon) prepareGuestBinDir() error {
 	bins := map[string]string{
 		"loophole-sandboxd": d.selfBin,
 		"loophole":          d.loopholeBin,
-	}
-	busybox, err := busyboxForExecutable(d.selfBin)
-	if err != nil {
-		slog.Warn("busybox not found, skipping", "error", err)
-	} else {
-		bins["busybox"] = busybox
 	}
 	for name, src := range bins {
 		dst := filepath.Join(dir, name)
@@ -280,23 +269,6 @@ func prepareRootfs(rootfs string) error {
 		util.SafeClose(f, "close prepared guest file")
 	}
 	return nil
-}
-
-func busyboxForExecutable(path string) (string, error) {
-	f, err := elf.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("open executable %q: %w", path, err)
-	}
-	defer util.SafeClose(f, "close executable elf")
-
-	switch f.FileHeader.Machine {
-	case elf.EM_X86_64:
-		return amd64BusyboxPath, nil
-	case elf.EM_AARCH64:
-		return arm64BusyboxPath, nil
-	default:
-		return "", fmt.Errorf("unsupported architecture %v", f.FileHeader.Machine)
-	}
 }
 
 func copyExecutable(src, dst string) error {

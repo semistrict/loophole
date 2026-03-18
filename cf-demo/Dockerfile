@@ -27,11 +27,6 @@ RUN dpkg --add-architecture arm64 \
     strace \
     squashfs-tools \
     tmux \
-    && mkdir -p /opt/loophole-busybox/amd64 /opt/loophole-busybox/arm64 \
-    && apt-get download busybox-static:amd64 busybox-static:arm64 \
-    && dpkg-deb -x busybox-static_*_amd64.deb /opt/loophole-busybox/amd64 \
-    && dpkg-deb -x busybox-static_*_arm64.deb /opt/loophole-busybox/arm64 \
-    && rm -f busybox-static_*_amd64.deb busybox-static_*_arm64.deb \
     && rm -rf /var/lib/apt/lists/*
 
 COPY bin/loophole /usr/local/bin/loophole
