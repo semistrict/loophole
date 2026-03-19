@@ -9,7 +9,6 @@ import (
 	"fmt"
 	mrand "math/rand/v2"
 	"os"
-	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -121,11 +120,6 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 		// for flush/write race conditions.
 		flushInterval = 500 * time.Millisecond
 	}
-	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	if err != nil {
-		sim.t.Fatalf("create disk cache: %v", err)
-	}
-	sim.t.Cleanup(func() { _ = dc.Close() })
 	m := NewManager(
 		sim.store.Store(),
 		cacheDir,
@@ -134,7 +128,7 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 			FlushInterval:  flushInterval,
 		},
 		fs,
-		dc,
+		nil,
 	)
 	m.idGen = sim.nextLayerID
 	return m

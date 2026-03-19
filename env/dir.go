@@ -47,6 +47,16 @@ func (d Dir) Cache(profile string) string {
 	return filepath.Join(string(d), "cache", profile)
 }
 
+// CachedSocket returns the page cache daemon socket path for the given profile.
+func (d Dir) CachedSocket(profile string) string {
+	return filepath.Join(string(d), "cache", profile, "cached.sock")
+}
+
+// CachedLog returns the page cache daemon log file path for the given profile.
+func (d Dir) CachedLog(profile string) string {
+	return filepath.Join(string(d), "cache", profile, "cached.log")
+}
+
 // SandboxdSocket returns the Unix socket path for the sandbox daemon.
 func (d Dir) SandboxdSocket() string {
 	return filepath.Join(string(d), "sandboxd.sock")

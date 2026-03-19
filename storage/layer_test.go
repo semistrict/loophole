@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"path/filepath"
 	"testing"
 
 	"github.com/semistrict/loophole/objstore"
@@ -17,18 +16,18 @@ var testConfig = Config{
 
 func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Manager {
 	t.Helper()
+	return newTestManagerWithCache(t, store, config, nil)
+}
+
+func newTestManagerWithCache(t *testing.T, store objstore.ObjectStore, config Config, dc *PageCache) *Manager {
+	t.Helper()
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
 	}
 	cacheDir := t.TempDir()
-	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	if err != nil {
-		t.Fatalf("create page cache: %v", err)
-	}
 	m := NewManager(store, cacheDir, config, nil, dc)
 	t.Cleanup(func() {
 		_ = m.Close()
-		_ = dc.Close()
 	})
 	return m
 }

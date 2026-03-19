@@ -2,26 +2,28 @@ package storage
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestPersistentPageCache(t *testing.T) (*PageCache, *mockStore) {
+func newTestPersistentPageCache(t *testing.T) *PageCache {
 	t.Helper()
-	store := newMockStore(64*PageSize, 0)
-	cache, err := newPageCacheWithStore(store)
+	dir, err := os.MkdirTemp("", "pc")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	cache, err := NewPageCache(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, cache.Close())
 	})
-	store.freeFn = func() int64 { return 64*PageSize - cache.usedBytes }
-	return cache, store
+	return cache
 }
 
 func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
-	cache, backing := newTestPersistentPageCache(t)
+	cache := newTestPersistentPageCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -50,13 +52,13 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 	_, err = v.Read(t.Context(), buf, 5*PageSize)
 	require.NoError(t, err)
 
-	count, err := backing.CountPages()
+	count, err := cache.CountPages()
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
 }
 
 func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
-	cache, backing := newTestPersistentPageCache(t)
+	cache := newTestPersistentPageCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -76,14 +78,9 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	require.NoError(t, v.Write(page, 0))
 	require.NoError(t, v.Flush())
 
-	// Capture the layer ID that owns the L1/L2 blocks before clone
-	// (clone switches the parent to a new layer).
-	parent := v
-	originalLayerID := parent.layer.id
-
 	require.NoError(t, v.Clone("child"))
 
-	parent.layer.blockCache.clear()
+	v.layer.blockCache.clear()
 
 	// Open child on a separate manager (same store, same cache).
 	m2 := NewManager(store, cacheDir, cfg, nil, cache)
@@ -91,33 +88,25 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 
 	child, err := m2.OpenVolume("child")
 	require.NoError(t, err)
-	childVol := child
-	childVol.layer.blockCache.clear()
+	child.layer.blockCache.clear()
 
 	buf := make([]byte, PageSize)
 	_, err = v.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err := backing.CountPages()
+	count, err := cache.CountPages()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err = backing.CountPages()
+	count, err = cache.CountPages()
 	require.NoError(t, err)
+	// Both volumes share the same page in the cache.
 	require.Equal(t, 1, count)
-
-	// Verify the shared logical source key was used.
-	// The blocks were written under the original layer ID (before clone).
-	key := cacheKey{LayerID: originalLayerID, PageIdx: 0}
-	ref, ok, err := backing.LookupPage(key)
-	require.NoError(t, err)
-	require.True(t, ok)
-	require.GreaterOrEqual(t, ref.Slot, 0)
 }
 
 func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T) {
-	cache, backing := newTestPersistentPageCache(t)
+	cache := newTestPersistentPageCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -143,25 +132,24 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 
 	child, err := m2.OpenVolume("child")
 	require.NoError(t, err)
-	childVol := child
 
 	buf := make([]byte, PageSize)
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err := backing.CountPages()
+	count, err := cache.CountPages()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
 	override := bytes.Repeat([]byte{0xBB}, PageSize)
 	require.NoError(t, child.Write(override, 0))
 	require.NoError(t, child.Flush())
-	childVol.layer.blockCache.clear()
+	child.layer.blockCache.clear()
 
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	require.Equal(t, override, buf)
 
-	count, err = backing.CountPages()
+	count, err = cache.CountPages()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 }

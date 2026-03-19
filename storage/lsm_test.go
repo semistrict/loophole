@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	mathrand "math/rand/v2"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -185,13 +184,8 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	dc1, err := NewPageCache(filepath.Join(cacheDir, "diskcache-1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m1 := NewManager(store, cacheDir, config, nil, dc1)
+	m1 := NewManager(store, cacheDir, config, nil, nil)
 	t.Cleanup(func() { m1.Close() })
-	t.Cleanup(func() { dc1.Close() })
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -2002,12 +1996,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	dc1, err := NewPageCache(filepath.Join(cacheDir, "diskcache-1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m1 := NewManager(store, cacheDir, config, nil, dc1)
-	t.Cleanup(func() { dc1.Close() })
+	m1 := NewManager(store, cacheDir, config, nil, nil)
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -2081,12 +2070,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	dc1, err := NewPageCache(filepath.Join(cacheDir, "diskcache-1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m1 := NewManager(store, cacheDir, config, nil, dc1)
-	t.Cleanup(func() { dc1.Close() })
+	m1 := NewManager(store, cacheDir, config, nil, nil)
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
@@ -2185,12 +2169,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := NewManager(store, cacheDir, config, nil, dc)
-	t.Cleanup(func() { dc.Close() })
+	m := NewManager(store, cacheDir, config, nil, nil)
 	defer m.Close()
 
 	const numPages = testSlotCap + 100

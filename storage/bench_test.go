@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2"
-	"path/filepath"
 	"testing"
 
 	"github.com/semistrict/loophole/objstore"
@@ -23,14 +22,9 @@ func randomPage(rng *rand.Rand, buf []byte) {
 func newBenchManager(b *testing.B, store *objstore.MemStore, config Config) *Manager {
 	b.Helper()
 	cacheDir := b.TempDir()
-	dc, err := NewPageCache(filepath.Join(cacheDir, "diskcache"))
-	if err != nil {
-		b.Fatalf("create page cache: %v", err)
-	}
-	m := NewManager(store, cacheDir, config, NewSimLocalFS(), dc)
+	m := NewManager(store, cacheDir, config, NewSimLocalFS(), nil)
 	b.Cleanup(func() {
 		_ = m.Close()
-		_ = dc.Close()
 	})
 	return m
 }

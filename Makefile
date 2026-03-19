@@ -1,4 +1,4 @@
-.PHONY: build loophole install check fmt test clean deps e2e bench-fuse fly-bin
+.PHONY: build loophole loophole-cached install check fmt test clean deps e2e bench-fuse fly-bin
 
 .DEFAULT_GOAL := loophole
 
@@ -12,9 +12,13 @@ BUILDTAGS :=
 build:
 	go build -tags "$(BUILDTAGS)" ./...
 
-# Build loophole binary
-loophole:
+# Build loophole binary (also builds loophole-cached, which loophole spawns)
+loophole: loophole-cached
 	go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-$(GOOS)-$(GOARCH) ./cmd/loophole
+
+# Build loophole-cached daemon binary
+loophole-cached:
+	go build -tags "$(BUILDTAGS)" -o $(BINDIR)/loophole-cached-$(GOOS)-$(GOARCH) ./cmd/loophole-cached
 
 # Build e2e test binary
 e2e.test:
