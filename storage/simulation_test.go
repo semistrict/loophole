@@ -1695,6 +1695,42 @@ func (sim *Simulation) FullScan() {
 	// Structural invariant checks: verify layer reference integrity.
 	sim.verifyLayerIntegrity(ctx, volNames)
 
+	// Run GC and verify it doesn't delete any reachable layers.
+	// Dry-run first to count orphans, then real run to delete them.
+	dryResult, err := GarbageCollect(ctx, sim.store.Store(), true)
+	if err != nil {
+		sim.t.Fatalf("GC dry-run: %v", err)
+	}
+	sim.t.Logf("full scan: GC dry-run: %d reachable, %d orphaned layers",
+		dryResult.ReachableLayers, dryResult.OrphanedLayers)
+
+	if dryResult.OrphanedLayers > 0 {
+		result, err := GarbageCollect(ctx, sim.store.Store(), false)
+		if err != nil {
+			sim.t.Fatalf("GC: %v", err)
+		}
+		sim.t.Logf("full scan: GC deleted %d orphaned layers (%d objects, %.1f KB)",
+			result.OrphanedLayers, result.DeletedObjects, float64(result.DeletedBytes)/1024)
+
+		// Verify all tracked volumes are still readable after GC.
+		for _, volName := range volNames {
+			tlID := sim.volumeTimelines[volName]
+			layerStore := sim.store.Store().At("layers/" + tlID)
+			if _, _, err := layerStore.Get(ctx, "index.json"); err != nil {
+				sim.t.Fatalf("GC deleted reachable layer %s for volume %s: %v", tlID[:8], volName, err)
+			}
+		}
+
+		// Run GC again — should find 0 orphans (idempotent).
+		recheck, err := GarbageCollect(ctx, sim.store.Store(), true)
+		if err != nil {
+			sim.t.Fatalf("GC recheck: %v", err)
+		}
+		if recheck.OrphanedLayers != 0 {
+			sim.t.Fatalf("GC recheck found %d orphans after deletion (expected 0)", recheck.OrphanedLayers)
+		}
+	}
+
 	sim.t.Logf("full scan: verified %d volumes, %d pages each", scanned, sim.config.DevicePages)
 }
 

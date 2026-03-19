@@ -36,6 +36,7 @@ func addCommands(root *cobra.Command) {
 		deviceCmd(),
 		breakLeaseCmd(),
 		s3testCmd(),
+		gcCmd(),
 	)
 }
 
@@ -634,6 +635,62 @@ func breakLeaseCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "forcibly clear the lease if the holder doesn't respond")
+	return cmd
+}
+
+func gcCmd() *cobra.Command {
+	var dryRun, yes bool
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Delete orphaned layers that are no longer referenced by any volume or checkpoint",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			vm, cleanup, err := openDirectManager(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer cleanup()
+
+			// Always do a dry-run first to show what would be deleted.
+			result, err := storage.GarbageCollect(cmd.Context(), vm.Store(), true)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Reachable layers: %d\n", result.ReachableLayers)
+			fmt.Printf("Orphaned layers:  %d\n", result.OrphanedLayers)
+			if result.OrphanedLayers == 0 {
+				fmt.Println("Nothing to do.")
+				return nil
+			}
+
+			if dryRun {
+				fmt.Println("Run without --dry-run to delete orphaned layers.")
+				return nil
+			}
+
+			if !yes {
+				fmt.Printf("Delete %d orphaned layers? [y/N] ", result.OrphanedLayers)
+				var answer string
+				if _, err := fmt.Scanln(&answer); err != nil {
+					slog.Warn("read input", "error", err)
+				}
+				if answer != "y" && answer != "Y" {
+					fmt.Println("aborted")
+					return nil
+				}
+			}
+
+			result, err = storage.GarbageCollect(cmd.Context(), vm.Store(), false)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Deleted %d objects (%.1f MB freed)\n", result.DeletedObjects, float64(result.DeletedBytes)/(1024*1024))
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be deleted without deleting")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip confirmation prompt")
 	return cmd
 }
 
