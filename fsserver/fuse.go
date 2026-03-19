@@ -1,6 +1,6 @@
 //go:build linux
 
-package fsbackend
+package fsserver
 
 import (
 	"context"
@@ -146,10 +146,6 @@ func (f *FUSEDriver) DevicePath(volumeName string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.devicePathLocked()
-}
-
-func (f *FUSEDriver) FS(h fuseMount) (*RootFS, error) {
-	return NewRootFS(h.mountpoint), nil
 }
 
 func (f *FUSEDriver) ensureServer(volume string, vol *storage.Volume) error {

@@ -1,6 +1,6 @@
 //go:build !linux
 
-package fsbackend
+package fsserver
 
 import (
 	"context"
@@ -41,6 +41,3 @@ func (f *FUSEDriver) Close(context.Context) error            { return nil }
 func (f *FUSEDriver) RegisterVolume(string, *storage.Volume) {}
 func (f *FUSEDriver) UnregisterVolume(string)                {}
 func (f *FUSEDriver) DevicePath(string) string               { return "" }
-func (f *FUSEDriver) FS(fuseMount) (*RootFS, error) {
-	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
-}

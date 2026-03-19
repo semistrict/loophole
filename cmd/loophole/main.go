@@ -13,20 +13,8 @@ import (
 var globalProfile string
 var globalPID int
 
-const sandboxSocketPath = "/.loophole/api.sock"
-
-func inSandbox() bool {
-	_, err := os.Stat("/.loophole")
-	return err == nil
-}
-
 func main() {
-	var root *cobra.Command
-	if inSandbox() {
-		root = sandboxRootCmd()
-	} else {
-		root = rootCmd()
-	}
+	root := rootCmd()
 	if err := root.Execute(); err != nil {
 		var exitErr *exitCodeError
 		if errors.As(err, &exitErr) {

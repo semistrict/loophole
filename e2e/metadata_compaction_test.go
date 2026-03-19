@@ -17,8 +17,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
+	"github.com/semistrict/loophole/storage"
 )
 
 func TestE2E_MetadataChurnDuringFlush(t *testing.T) {
@@ -30,7 +30,7 @@ func TestE2E_MetadataChurnDuringFlush(t *testing.T) {
 	vol := "meta-churn"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol}))
 
 	// Keep flush aggressive without making the one-off create/format owner
 	// path pay the full cost. The mounted owner below is the one this test

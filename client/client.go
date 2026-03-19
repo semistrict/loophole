@@ -41,19 +41,15 @@ func httpClient(sock string) *http.Client {
 // Socket returns the Unix socket path for this client.
 func (c *Client) Socket() string { return c.sock }
 
-// Flush flushes the managed volume.
+// Flush flushes the managed volume (FS mode).
 func (c *Client) Flush(ctx context.Context) error {
 	_, err := c.post(ctx, "/flush", nil)
 	return err
 }
 
-// --- RPC methods ---
-
-// CreateParams is an alias for storage.CreateParams.
-type CreateParams = storage.CreateParams
-
-func (c *Client) Create(ctx context.Context, p CreateParams) error {
-	_, err := c.post(ctx, "/create", p)
+// DeviceFlush flushes the managed volume (device mode).
+func (c *Client) DeviceFlush(ctx context.Context) error {
+	_, err := c.post(ctx, "/device/flush", nil)
 	return err
 }
 
@@ -72,18 +68,6 @@ func (c *Client) BreakLease(ctx context.Context, volume string, force bool) (gra
 		return false, fmt.Errorf("decode break-lease response: %w", err)
 	}
 	return result.Graceful, nil
-}
-
-// Delete removes a volume.
-func (c *Client) Delete(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/delete", "volume", volume)
-	return err
-}
-
-// Mount mounts an existing volume at mountpoint.
-func (c *Client) Mount(ctx context.Context, volume, mountpoint string) error {
-	_, err := c.post(ctx, "/mount", "volume", volume, "mountpoint", mountpoint)
-	return err
 }
 
 // CloneParams controls how Clone operates.
@@ -124,38 +108,7 @@ func (c *Client) DeviceCheckpoint(ctx context.Context) (string, error) {
 	return result.Checkpoint, nil
 }
 
-// ListCheckpoints returns all checkpoints for the managed volume.
-func (c *Client) ListCheckpoints(ctx context.Context) ([]storage.CheckpointInfo, error) {
-	resp, err := c.get(ctx, "/checkpoints")
-	if err != nil {
-		return nil, err
-	}
-	var result struct{ Checkpoints []storage.CheckpointInfo }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, err
-	}
-	return result.Checkpoints, nil
-}
-
-// DeviceAttach opens a volume and returns the FUSE device path.
-func (c *Client) DeviceAttach(ctx context.Context, volume string) (string, error) {
-	resp, err := c.post(ctx, "/device/attach", "volume", volume)
-	if err != nil {
-		return "", err
-	}
-	var result struct{ Device string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("decode device/attach response: %w", err)
-	}
-	return result.Device, nil
-}
-
-// DeviceDetach closes a volume device.
-func (c *Client) DeviceDetach(ctx context.Context, volume string) error {
-	_, err := c.post(ctx, "/device/detach", "volume", volume)
-	return err
-}
-
+// DeviceCloneParams controls how DeviceClone operates.
 type DeviceCloneParams struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	Clone      string `json:"clone"`
@@ -165,50 +118,6 @@ type DeviceCloneParams struct {
 func (c *Client) DeviceClone(ctx context.Context, p DeviceCloneParams) error {
 	_, err := c.post(ctx, "/device/clone", p)
 	return err
-}
-
-// DeviceDD imports a raw disk image into a new volume via the daemon.
-// It first creates the volume with the given params (NoFormat is forced true),
-// then reads from body in BlockSize chunks and sends each as a separate
-// request so the server can write them directly to L2.
-func (c *Client) DeviceDD(ctx context.Context, p CreateParams, body io.Reader, progress io.Writer) error {
-	p.NoFormat = true
-	if err := c.Create(ctx, p); err != nil {
-		return fmt.Errorf("create volume: %w", err)
-	}
-
-	const chunkSize = storage.BlockSize
-	buf := make([]byte, chunkSize)
-	var offset uint64
-
-	for {
-		n, readErr := io.ReadFull(body, buf)
-		if n > 0 {
-			if err := c.ddWriteBlock(ctx, p.Volume, offset, buf[:n]); err != nil {
-				return err
-			}
-			offset += uint64(n)
-			if progress != nil && offset%(64<<20) == 0 {
-				_, _ = fmt.Fprintf(progress, "  %d MiB / %d MiB\n", offset>>20, p.Size>>20)
-			}
-		}
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-			break
-		}
-		if readErr != nil {
-			return fmt.Errorf("read input: %w", readErr)
-		}
-	}
-
-	if progress != nil {
-		_, _ = fmt.Fprintf(progress, "  %d MiB written\n", offset>>20)
-	}
-
-	// Flush and release the volume ref so it can be opened by others.
-	if _, err := c.post(ctx, "/device/dd/finalize?volume="+p.Volume); err != nil {
-		return fmt.Errorf("finalize: %w", err)
-	}
-	return nil
 }
 
 // DeviceDDWriteExisting writes a raw disk image into an already-open volume.
@@ -270,18 +179,34 @@ func (c *Client) ddWriteBlock(ctx context.Context, volume string, offset uint64,
 	return nil
 }
 
+// DeviceDDSize returns the volume size in bytes via the server.
+func (c *Client) DeviceDDSize(ctx context.Context) (uint64, error) {
+	resp, err := c.get(ctx, "/device/dd/size")
+	if err != nil {
+		return 0, err
+	}
+	var result struct{ Size uint64 }
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return 0, err
+	}
+	return result.Size, nil
+}
+
 // DeviceDDRead reads a volume's raw block data in BlockSize chunks and writes
-// it to dst. The volume must already be open. This is the read counterpart of
-// DeviceDD (write). The caller must open the volume first (e.g. via Create or
-// by having previously written to it).
-func (c *Client) DeviceDDRead(ctx context.Context, volume string, size uint64, dst io.Writer, progress io.Writer) error {
+// it to dst. The volume must already be open.
+func (c *Client) DeviceDDRead(ctx context.Context, dst io.Writer, progress io.Writer) error {
+	size, err := c.DeviceDDSize(ctx)
+	if err != nil {
+		return fmt.Errorf("get volume size: %w", err)
+	}
+
 	const chunkSize = storage.BlockSize
 	var offset uint64
 
 	for offset < size {
 		readSize := min(uint64(chunkSize), size-offset)
 
-		data, err := c.ddReadBlock(ctx, volume, offset, readSize)
+		data, err := c.ddReadBlock(ctx, offset, readSize)
 		if err != nil {
 			return err
 		}
@@ -300,8 +225,8 @@ func (c *Client) DeviceDDRead(ctx context.Context, volume string, size uint64, d
 	return nil
 }
 
-func (c *Client) ddReadBlock(ctx context.Context, volume string, offset, size uint64) ([]byte, error) {
-	path := fmt.Sprintf("/device/dd/read?volume=%s&offset=%d&size=%d", volume, offset, size)
+func (c *Client) ddReadBlock(ctx context.Context, offset, size uint64) ([]byte, error) {
+	path := fmt.Sprintf("/device/dd/read?offset=%d&size=%d", offset, size)
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://loophole"+path, nil)
 	if err != nil {
 		return nil, err
@@ -322,19 +247,6 @@ func (c *Client) ddReadBlock(ctx context.Context, volume string, offset, size ui
 	return data, nil
 }
 
-// VolumeInfo returns metadata about a volume (does not need to be open).
-func (c *Client) VolumeInfo(ctx context.Context, volume string) (storage.VolumeInfo, error) {
-	resp, err := c.get(ctx, "/volume-info?volume="+volume)
-	if err != nil {
-		return storage.VolumeInfo{}, err
-	}
-	var info storage.VolumeInfo
-	if err := json.Unmarshal(resp, &info); err != nil {
-		return storage.VolumeInfo{}, err
-	}
-	return info, nil
-}
-
 // VolumeDebugInfo returns debug information about an open volume.
 func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage.VolumeDebugInfo, error) {
 	resp, err := c.get(ctx, "/debug/volume?volume="+volume)
@@ -346,19 +258,6 @@ func (c *Client) VolumeDebugInfo(ctx context.Context, volume string) (storage.Vo
 		return storage.VolumeDebugInfo{}, err
 	}
 	return info, nil
-}
-
-// ListVolumes returns all volume names from the store (not just open ones).
-func (c *Client) ListVolumes(ctx context.Context) ([]string, error) {
-	resp, err := c.get(ctx, "/volumes")
-	if err != nil {
-		return nil, err
-	}
-	var result struct{ Volumes []string }
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return nil, err
-	}
-	return result.Volumes, nil
 }
 
 // Shutdown asks the daemon to shut down gracefully.
@@ -373,6 +272,7 @@ func (c *Client) ShutdownWait(ctx context.Context) error {
 	return err
 }
 
+// StatusResponse holds the daemon status JSON.
 type StatusResponse struct {
 	S3         string            `json:"s3"`
 	Mode       string            `json:"mode"`

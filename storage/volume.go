@@ -353,3 +353,19 @@ func (v *Volume) DebugInfo() VolumeDebugInfo {
 		Layer: v.layer.debugInfo(),
 	}
 }
+
+// ListCheckpoints lists checkpoints for this volume (convenience for Manager.ListCheckpoints).
+func (v *Volume) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
+	return v.manager.ListCheckpoints(ctx, v.name)
+}
+
+// CloneFromCheckpoint creates a clone from a checkpoint of this volume
+// (convenience for Manager.CloneFromCheckpoint).
+func (v *Volume) CloneFromCheckpoint(ctx context.Context, checkpointID, cloneName string) error {
+	return v.manager.CloneFromCheckpoint(ctx, v.name, checkpointID, cloneName)
+}
+
+// Info returns metadata for this volume (convenience for Manager.VolumeInfo).
+func (v *Volume) Info(ctx context.Context) (VolumeInfo, error) {
+	return v.manager.VolumeInfo(ctx, v.name)
+}

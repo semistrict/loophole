@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/storage"
 )
 
@@ -29,7 +28,7 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	require.NoError(t, err)
 
 	volName := "dd-direct-l2-test"
-	require.NoError(t, b.Create(ctx, client.CreateParams{
+	require.NoError(t, b.Create(ctx, storage.CreateParams{
 		Volume:   volName,
 		Size:     dataSize,
 		Type:     "ext4",
@@ -42,7 +41,7 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 
 	// Read all data back via the dd read API.
 	var readBuf bytes.Buffer
-	err = owner.client.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
+	err = owner.client.DeviceDDRead(ctx, &readBuf, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 
@@ -75,7 +74,7 @@ func TestE2E_DeviceDD_ReadBack(t *testing.T) {
 	require.NoError(t, err)
 
 	volName := "dd-readback-test"
-	require.NoError(t, b.Create(ctx, client.CreateParams{
+	require.NoError(t, b.Create(ctx, storage.CreateParams{
 		Volume:   volName,
 		Size:     dataSize,
 		Type:     "ext4",
@@ -88,7 +87,7 @@ func TestE2E_DeviceDD_ReadBack(t *testing.T) {
 
 	// Read all data back and compare.
 	var readBuf bytes.Buffer
-	err = owner.client.DeviceDDRead(ctx, volName, dataSize, &readBuf, nil)
+	err = owner.client.DeviceDDRead(ctx, &readBuf, nil)
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 }
@@ -104,7 +103,7 @@ func TestE2E_DeviceDD_VolumeMetadata(t *testing.T) {
 
 	volName := "dd-metadata-test"
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{
+	require.NoError(t, b.Create(ctx, storage.CreateParams{
 		Volume:   volName,
 		Size:     dataSize,
 		Type:     "ext4",

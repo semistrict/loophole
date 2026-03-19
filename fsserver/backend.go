@@ -1,7 +1,4 @@
-// Package fsbackend abstracts the filesystem stack that sits on top of
-// loophole volumes. The remaining implementation is a single FUSE-backed
-// kernel ext4 path with mount tracking and volume lifecycle helpers.
-package fsbackend
+package fsserver
 
 import (
 	"context"
@@ -238,41 +235,6 @@ func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
 	handle, driver := b.handle, b.driver
 	b.mu.Unlock()
 	return driver.Thaw(ctx, handle)
-}
-
-// FS returns a filesystem handle for the mounted volume.
-func (b *Backend) FS(mountpoint string) (*RootFS, error) {
-	b.mu.Lock()
-	if b.vol == nil {
-		b.mu.Unlock()
-		return nil, fmt.Errorf("no volume mounted")
-	}
-	handle, driver := b.handle, b.driver
-	b.mu.Unlock()
-	return driver.FS(handle)
-}
-
-// FSForVolume returns a rooted filesystem for a volume by name, auto-mounting if needed.
-func (b *Backend) FSForVolume(ctx context.Context, volume string) (*RootFS, error) {
-	b.mu.Lock()
-	if b.vol != nil && b.vol.Name() == volume {
-		handle, driver := b.handle, b.driver
-		b.mu.Unlock()
-		return driver.FS(handle)
-	}
-	b.mu.Unlock()
-
-	slog.Info("auto-mounting volume", "volume", volume)
-	if err := b.Mount(ctx, volume, volume); err != nil {
-		return nil, fmt.Errorf("auto-mount %q: %w", volume, err)
-	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.vol != nil && b.vol.Name() == volume {
-		return b.driver.FS(b.handle)
-	}
-	return nil, fmt.Errorf("volume %q not found after auto-mount", volume)
 }
 
 // --- Device-level operations (raw block device access) ---

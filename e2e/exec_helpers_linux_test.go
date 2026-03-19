@@ -9,7 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/storage"
 )
 
 func findBusybox(t *testing.T) string {
@@ -31,7 +31,7 @@ func setupBusyboxVolume(t *testing.T, name string) (*testBackend, string) {
 	b := newBackend(t)
 	mp := mountpoint(t, name)
 
-	require.NoError(t, b.Create(t.Context(), client.CreateParams{Volume: name}))
+	require.NoError(t, b.Create(t.Context(), storage.CreateParams{Volume: name}))
 	require.NoError(t, b.Mount(t.Context(), name, mp))
 
 	tfs := newTestFS(t, b, mp)

@@ -10,7 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/storage"
 )
 
 // TestE2E_UnmountWithActiveProcess verifies that unmounting completes
@@ -27,7 +27,7 @@ func TestE2E_UnmountWithActiveProcess(t *testing.T) {
 	vol := "unmount-active"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	tfs := newTestFS(t, b, mp)

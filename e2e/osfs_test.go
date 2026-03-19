@@ -1,4 +1,4 @@
-package fsbackend
+package e2e
 
 import (
 	"io/fs"

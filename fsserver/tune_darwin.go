@@ -1,5 +1,5 @@
 //go:build darwin
 
-package apiserver
+package fsserver
 
 func tuneProcess() {}

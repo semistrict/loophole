@@ -1,6 +1,6 @@
 //go:build linux
 
-package apiserver
+package fsserver
 
 import (
 	"fmt"

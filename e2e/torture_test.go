@@ -15,7 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/storage"
 )
 
 // TestE2E_Torture is a multi-phase torture test that exercises branching, clone,
@@ -39,7 +39,7 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 1: Create root volume, populate with diverse data ---
 
 	rootMP := mountpoint(t, "tort-root")
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "tort-root"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "tort-root"}))
 	require.NoError(t, b.Mount(ctx, "tort-root", rootMP))
 	rootFS := newTestFS(t, b, rootMP)
 

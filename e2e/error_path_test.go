@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/storage"
 )
 
 // ---------- Create errors ----------
@@ -16,9 +16,9 @@ func TestE2E_CreateDuplicateVolume(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "dup-create", Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "dup-create", Size: defaultVolumeSize}))
 
-	err := b.Create(ctx, client.CreateParams{Volume: "dup-create", Size: defaultVolumeSize})
+	err := b.Create(ctx, storage.CreateParams{Volume: "dup-create", Size: defaultVolumeSize})
 	require.Error(t, err, "creating a volume that already exists should fail")
 	assert.Contains(t, err.Error(), "already exists")
 }
@@ -34,7 +34,7 @@ func TestE2E_CreateInvalidVolumeName(t *testing.T) {
 		"has..dotdot",
 		"has\x00null",
 	} {
-		err := b.Create(ctx, client.CreateParams{Volume: name, Size: defaultVolumeSize})
+		err := b.Create(ctx, storage.CreateParams{Volume: name, Size: defaultVolumeSize})
 		assert.Error(t, err, "volume name %q should be rejected", name)
 	}
 }
@@ -55,7 +55,7 @@ func TestE2E_MountAlreadyMountedAtDifferentPath(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "mount-conflict"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 
 	mp1 := mountpoint(t, vol+"-1")
 	require.NoError(t, b.Mount(ctx, vol, mp1))
@@ -71,7 +71,7 @@ func TestE2E_MountIdempotent(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "mount-idem"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 
 	mp := mountpoint(t, vol)
 	require.NoError(t, b.Mount(ctx, vol, mp))
@@ -98,7 +98,7 @@ func TestE2E_CloneNonexistentVolume(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "clone-src"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 	mp := mountpoint(t, vol)
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
@@ -112,12 +112,12 @@ func TestE2E_CloneDuplicateName(t *testing.T) {
 	ctx := t.Context()
 
 	// Create source volume and mount it.
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "clone-dup-src", Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "clone-dup-src", Size: defaultVolumeSize}))
 	mp := mountpoint(t, "clone-dup-src")
 	require.NoError(t, b.Mount(ctx, "clone-dup-src", mp))
 
 	// Create a volume that will collide with the clone name.
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "clone-dup-target", Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "clone-dup-target", Size: defaultVolumeSize}))
 
 	// Clone into existing name should fail.
 	err := b.Clone(ctx, mp, "clone-dup-target")
@@ -140,7 +140,7 @@ func TestE2E_CloneFromBadCheckpointID(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "cp-bad-id"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 
 	// Try cloning from a checkpoint that doesn't exist.
 	err := b.CloneFromCheckpoint(ctx, vol, "99999999999999", "cp-bad-clone")
@@ -175,7 +175,7 @@ func TestE2E_DeleteOpenVolume(t *testing.T) {
 
 	vol := "delete-open"
 	mp := mountpoint(t, vol)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	// Deleting a mounted volume via the owner daemon should still work
@@ -197,14 +197,14 @@ func TestE2E_VolumeSurvivesFailedClone(t *testing.T) {
 
 	vol := "survive-bad-clone"
 	mp := mountpoint(t, vol)
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	tfs := newTestFS(t, b, mp)
 	randomMD5 := writeTestFiles(t, tfs)
 
 	// Create a colliding volume so clone fails.
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "survive-collider", Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "survive-collider", Size: defaultVolumeSize}))
 
 	// Clone should fail due to name collision.
 	err := b.Clone(ctx, mp, "survive-collider")
@@ -234,7 +234,7 @@ func TestE2E_ListCheckpointsEmptyVolume(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "list-cp-empty"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize}))
 
 	cps, err := b.ListCheckpoints(ctx, vol)
 	require.NoError(t, err)
@@ -256,7 +256,7 @@ func TestE2E_DeviceCheckpointNoOwner(t *testing.T) {
 	ctx := t.Context()
 
 	vol := "dev-cp-no-owner"
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol, Size: defaultVolumeSize, NoFormat: true}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol, Size: defaultVolumeSize, NoFormat: true}))
 
 	// DeviceCheckpoint requires an attached owner. Asking for a checkpoint
 	// on a volume with no owner should fail or auto-attach and succeed.

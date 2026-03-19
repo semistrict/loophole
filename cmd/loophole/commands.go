@@ -14,16 +14,15 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/apiserver"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
+	"github.com/semistrict/loophole/fsserver"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage"
 )
 
 func addCommands(root *cobra.Command) {
 	root.AddCommand(
-		serveCmd(),
 		shutdownCmd(),
 		createCmd(),
 		deleteCmd(),
@@ -38,39 +37,6 @@ func addCommands(root *cobra.Command) {
 		breakLeaseCmd(),
 		s3testCmd(),
 	)
-}
-
-func serveCmd() *cobra.Command {
-	var listenAddr string
-	var socketPath string
-	var volume string
-	cmd := &cobra.Command{
-		Use:    "serve",
-		Short:  "Run the loophole API server",
-		Hidden: true,
-		Args:   cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := env.DefaultDir()
-			inst, err := resolveProfile(dir)
-			if err != nil {
-				return err
-			}
-			d, err := apiserver.Start(cmd.Context(), inst, dir, apiserver.Options{
-				Foreground: true,
-				ListenAddr: listenAddr,
-				SocketPath: socketPath,
-				Volume:     volume,
-			})
-			if err != nil {
-				return err
-			}
-			return d.Serve(cmd.Context())
-		},
-	}
-	cmd.Flags().StringVar(&listenAddr, "listen-addr", "", "listen address (for example tcp://0.0.0.0:8080)")
-	cmd.Flags().StringVar(&socketPath, "socket-path", "", "unix socket path override")
-	cmd.Flags().StringVar(&volume, "volume", "", "volume name (used for per-volume log file)")
-	return cmd
 }
 
 func shutdownCmd() *cobra.Command {
@@ -115,26 +81,15 @@ func createCmd() *cobra.Command {
 				}
 			}
 			volume := args[0]
-			p := client.CreateParams{
+			inst, dir, opts, err := resolveOwnerOpts(volume)
+			if err != nil {
+				return err
+			}
+			return fsserver.CreateFSAndServe(cmd.Context(), inst, dir, storage.CreateParams{
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
-			}
-			if mountpoint == "" {
-				mountpoint = volume
-			}
-			d, err := startOwnerServer(cmd.Context(), volume)
-			if err != nil {
-				return err
-			}
-			actualMountpoint, err := d.CreateAndMount(cmd.Context(), p, mountpoint)
-			if err != nil {
-				d.Cleanup(context.Background())
-				return err
-			}
-			fmt.Printf("created volume %s\n", volume)
-			fmt.Printf("mounted %s at %s\n", volume, actualMountpoint)
-			return d.Serve(cmd.Context())
+			}, mountpoint, opts)
 		},
 	}
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path (default: volume name)")
@@ -221,17 +176,11 @@ func mountCmd() *cobra.Command {
 			if len(args) == 2 {
 				mountpoint = args[1]
 			}
-			d, err := startOwnerServer(cmd.Context(), volume)
+			inst, dir, opts, err := resolveOwnerOpts(volume)
 			if err != nil {
 				return err
 			}
-			actualMountpoint, err := d.MountVolume(cmd.Context(), volume, mountpoint)
-			if err != nil {
-				d.Cleanup(context.Background())
-				return err
-			}
-			fmt.Printf("mounted %s at %s\n", volume, actualMountpoint)
-			return d.Serve(cmd.Context())
+			return fsserver.MountFSAndServe(cmd.Context(), inst, dir, volume, mountpoint, opts)
 		},
 	}
 }
@@ -395,28 +344,15 @@ func deviceCreateCmd() *cobra.Command {
 			if size == 0 {
 				return fmt.Errorf("--size is required for device create")
 			}
-
 			volume := args[0]
-			d, err := startOwnerServer(cmd.Context(), volume)
+			inst, dir, opts, err := resolveOwnerOpts(volume)
 			if err != nil {
 				return err
 			}
-			if err := d.Backend().Create(cmd.Context(), client.CreateParams{
-				Volume:   volume,
-				Size:     size,
-				NoFormat: true,
-			}); err != nil {
-				d.Cleanup(context.Background())
-				return err
-			}
-
-			device, err := d.AttachVolume(cmd.Context(), volume)
-			if err != nil {
-				d.Cleanup(context.Background())
-				return err
-			}
-			fmt.Printf("created raw volume %s\n%s\n", volume, device)
-			return d.Serve(cmd.Context())
+			return fsserver.CreateBlockDeviceAndServe(cmd.Context(), inst, dir, storage.CreateParams{
+				Volume: volume,
+				Size:   size,
+			}, opts)
 		},
 	}
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB)")
@@ -429,17 +365,12 @@ func deviceAttachCmd() *cobra.Command {
 		Short: "Attach a volume device in the foreground",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			d, err := startOwnerServer(cmd.Context(), args[0])
+			volume := args[0]
+			inst, dir, opts, err := resolveOwnerOpts(volume)
 			if err != nil {
 				return err
 			}
-			device, err := d.AttachVolume(cmd.Context(), args[0])
-			if err != nil {
-				d.Cleanup(context.Background())
-				return err
-			}
-			fmt.Println(device)
-			return d.Serve(cmd.Context())
+			return fsserver.AttachBlockDeviceAndServe(cmd.Context(), inst, dir, volume, opts)
 		},
 	}
 }
@@ -499,7 +430,7 @@ func deviceFlushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := c.Flush(cmd.Context()); err != nil {
+			if err := c.DeviceFlush(cmd.Context()); err != nil {
 				return err
 			}
 			fmt.Printf("flushed volume %s\n", args[0])
@@ -517,13 +448,12 @@ func deviceDDCmd() *cobra.Command {
 		Long: `Copy raw block data between local files and loophole volumes.
 Use the volume: syntax to refer to a volume as a raw block device.
 
-Import (file → volume): creates a new volume and writes the image into it.
-Export (volume → file): reads raw volume data and writes it to a file.
+Import (file -> volume): writes the image into an already-attached volume.
+Export (volume -> file): reads raw volume data and writes it to a file.
 
 Examples:
   loophole device dd if=/path/to/rootfs.ext4 of=myvolume:
-  loophole device dd if=myvolume: of=/path/to/output.img
-  loophole device dd if=/path/to/rootfs.ext4 of=myvolume:`,
+  loophole device dd if=myvolume: of=/path/to/output.img`,
 		Args:                  cobra.ArbitraryArgs,
 		DisableFlagsInUseLine: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -596,7 +526,7 @@ func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume strin
 		return fmt.Errorf("stat image: %w", err)
 	}
 	size := uint64(fi.Size())
-	fmt.Printf("Import: %s (%d bytes, %.1f GiB) → %s\n",
+	fmt.Printf("Import: %s (%d bytes, %.1f GiB) -> %s\n",
 		filePath, size, float64(size)/(1<<30), volume)
 
 	return c.DeviceDDWriteExisting(cmd.Context(), volume, f, os.Stdout)
@@ -606,9 +536,9 @@ func deviceDDImport(cmd *cobra.Command, c *client.Client, filePath, volume strin
 func deviceDDExport(cmd *cobra.Command, c *client.Client, volume, filePath string) error {
 	ctx := cmd.Context()
 
-	info, err := c.VolumeInfo(ctx, volume)
+	size, err := c.DeviceDDSize(ctx)
 	if err != nil {
-		return fmt.Errorf("get volume info: %w", err)
+		return fmt.Errorf("get volume size: %w", err)
 	}
 
 	f, err := os.Create(filePath)
@@ -617,10 +547,10 @@ func deviceDDExport(cmd *cobra.Command, c *client.Client, volume, filePath strin
 	}
 	defer util.SafeClose(f, "close dd export output")
 
-	fmt.Printf("Export: %s (%d bytes, %.1f GiB) → %s\n",
-		volume, info.Size, float64(info.Size)/(1<<30), filePath)
+	fmt.Printf("Export: %s (%d bytes, %.1f GiB) -> %s\n",
+		volume, size, float64(size)/(1<<30), filePath)
 
-	return c.DeviceDDRead(ctx, volume, info.Size, f, os.Stdout)
+	return c.DeviceDDRead(ctx, f, os.Stdout)
 }
 
 // --- helpers ---
@@ -753,7 +683,7 @@ func socketFromTarget(target string) (string, error) {
 
 func resolveOwnerClient(target string) (*client.Client, error) {
 	if globalPID != 0 {
-		return client.NewFromSocket(apiserver.EmbedSocketPath(globalPID)), nil
+		return client.NewFromSocket(fsserver.EmbedSocketPath(globalPID)), nil
 	}
 	sock, err := socketFromTarget(target)
 	if err != nil {
@@ -762,31 +692,28 @@ func resolveOwnerClient(target string) (*client.Client, error) {
 	return client.NewFromSocket(sock), nil
 }
 
-func startOwnerServer(ctx context.Context, volume string) (*apiserver.Server, error) {
+// resolveOwnerOpts resolves profile, dir, and ServerOptions for an owner command.
+// It also checks for an existing owner process on the same socket.
+func resolveOwnerOpts(volume string) (env.ResolvedProfile, env.Dir, fsserver.ServerOptions, error) {
 	dir := env.DefaultDir()
 	inst, err := resolveProfile(dir)
 	if err != nil {
-		return nil, err
+		return env.ResolvedProfile{}, "", fsserver.ServerOptions{}, err
 	}
 	socketPath := dir.VolumeSocket(volume)
 	if err := os.MkdirAll(filepath.Dir(socketPath), 0o755); err != nil {
-		return nil, err
+		return env.ResolvedProfile{}, "", fsserver.ServerOptions{}, err
 	}
-	if c := client.NewFromSocket(socketPath); true {
-		timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		defer cancel()
-		if _, err := c.Status(timeoutCtx); err == nil {
-			return nil, fmt.Errorf("volume %q is already managed at %s", volume, socketPath)
-		}
+	c := client.NewFromSocket(socketPath)
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := c.Status(timeoutCtx); err == nil {
+		return env.ResolvedProfile{}, "", fsserver.ServerOptions{}, fmt.Errorf("volume %q is already managed at %s", volume, socketPath)
 	}
-	if err := os.Remove(socketPath); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("remove stale socket %s: %w", socketPath, err)
-	}
-	return apiserver.Start(ctx, inst, dir, apiserver.Options{
+	return inst, dir, fsserver.ServerOptions{
 		Foreground: true,
 		SocketPath: socketPath,
-		Volume:     volume,
-	})
+	}, nil
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {

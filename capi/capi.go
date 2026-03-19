@@ -34,6 +34,7 @@ import (
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/volserver"
 )
 
 // handle bundles everything needed for a single open volume.
@@ -41,6 +42,8 @@ type handle struct {
 	vol       *storage.Volume
 	manager   *storage.Manager
 	diskCache *storage.PageCache
+	srv       *volserver.Server
+	srvCancel context.CancelFunc
 }
 
 // alive keeps handle pointers reachable so the GC doesn't collect them.
@@ -61,6 +64,8 @@ func int64ToPtr(id C.int64_t) *handle {
 
 // loophole_open opens a volume by name. Each call creates its own store,
 // cache, and manager — the returned handle is fully self-contained.
+// A volserver is started on a UDS socket so the CLI can discover and
+// interact with the volume (status, checkpoint, clone, etc.).
 //
 // config_dir: path to the config directory (e.g. ~/.loophole), or NULL to
 // use the default. The LOOPHOLE_HOME env var overrides the default.
@@ -127,7 +132,28 @@ func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C
 		return -6
 	}
 
-	h := &handle{vol: vol, manager: manager, diskCache: diskCache}
+	// Start a volserver so the CLI can interact with this volume.
+	socketPath := dir.VolumeSocket(goName)
+	srv, err := volserver.Start(vol, socketPath)
+	if err != nil {
+		slog.Error("loophole_open: start volserver", "volume", goName, "error", err)
+		// Non-fatal: the volume is still usable via the C API, just not
+		// discoverable by the CLI. Continue with srv=nil.
+		srv = nil
+	}
+	var srvCancel context.CancelFunc
+	if srv != nil {
+		var srvCtx context.Context
+		srvCtx, srvCancel = context.WithCancel(context.Background())
+		go func() {
+			if err := srv.Serve(srvCtx); err != nil {
+				slog.Warn("volserver exited", "volume", goName, "error", err)
+			}
+		}()
+		slog.Info("loophole_open: volserver started", "volume", goName, "socket", socketPath)
+	}
+
+	h := &handle{vol: vol, manager: manager, diskCache: diskCache, srv: srv, srvCancel: srvCancel}
 
 	aliveMu.Lock()
 	alive[uintptr(unsafe.Pointer(h))] = h
@@ -211,16 +237,24 @@ func loophole_close(id C.int64_t) C.int32_t {
 	delete(alive, uintptr(unsafe.Pointer(h)))
 	aliveMu.Unlock()
 
-	var ret C.int32_t
-	if err := h.vol.ReleaseRef(); err != nil {
-		slog.Error("loophole_close: release ref", "error", err)
-		ret = -2
+	// Stop the volserver first — its shutdown flushes and releases the vol ref.
+	if h.srv != nil {
+		h.srvCancel()
+		h.srv.Close()
+	} else {
+		// No volserver — flush and release manually.
+		if err := h.vol.Flush(); err != nil {
+			slog.Error("loophole_close: flush", "error", err)
+		}
+		if err := h.vol.ReleaseRef(); err != nil {
+			slog.Error("loophole_close: release ref", "error", err)
+		}
 	}
+
+	var ret C.int32_t
 	if err := h.manager.Close(); err != nil {
 		slog.Error("loophole_close: close manager", "error", err)
-		if ret == 0 {
-			ret = -3
-		}
+		ret = -3
 	}
 	if err := h.diskCache.Close(); err != nil {
 		slog.Error("loophole_close: close page cache", "error", err)

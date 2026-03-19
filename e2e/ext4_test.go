@@ -17,8 +17,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/fsbackend"
+	"github.com/semistrict/loophole/fsserver"
+	"github.com/semistrict/loophole/storage"
 )
 
 func TestE2E_FormatCreatesMountableExt4(t *testing.T) {
@@ -128,7 +128,7 @@ func TestE2E_RemountEmptyVolume(t *testing.T) {
 	vol := "remount-empty"
 	mp := mountpoint(t, vol)
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: vol}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: vol}))
 
 	err := b.Mount(ctx, vol, mp)
 	require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestE2E_DataPersistsAcrossMountCycles(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "persist")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "persist"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "persist"}))
 
 	// Phase 1: mount, write, unmount.
 	err := b.Mount(ctx, "persist", mp)
@@ -201,7 +201,7 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 	ctx := t.Context()
 	mp := mountpoint(t, "survive")
 
-	require.NoError(t, b.Create(ctx, client.CreateParams{Volume: "survive"}))
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "survive"}))
 
 	// Phase 1: write.
 	err := b.Mount(ctx, "survive", mp)
@@ -221,7 +221,7 @@ func TestE2E_FilesSurviveRemount(t *testing.T) {
 func TestE2E_ConcurrentMountCycles(t *testing.T) {
 	b := newBackend(t)
 	nWorkers := 10
-	if maxLoop, err := fsbackend.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
+	if maxLoop, err := fsserver.MaxLoopDevices(); err == nil && maxLoop > 0 && nWorkers > maxLoop {
 		t.Logf("capping workers to max_loop=%d", maxLoop)
 		nWorkers = maxLoop
 	}
@@ -233,7 +233,7 @@ func TestE2E_ConcurrentMountCycles(t *testing.T) {
 			volName := fmt.Sprintf("concurrent-%d", i)
 			mp := mountpoint(t, volName)
 
-			if err := b.Create(ctx, client.CreateParams{Volume: volName}); err != nil {
+			if err := b.Create(ctx, storage.CreateParams{Volume: volName}); err != nil {
 				return fmt.Errorf("worker %d create: %w", i, err)
 			}
 
@@ -286,7 +286,7 @@ func TestE2E_NBDDeviceExclOpen(t *testing.T) {
 	g, gctx := errgroup.WithContext(ctx)
 	for i := range nDevices {
 		vols[i] = fmt.Sprintf("excl-%d", i)
-		require.NoError(t, b.Create(gctx, client.CreateParams{Volume: vols[i]}))
+		require.NoError(t, b.Create(gctx, storage.CreateParams{Volume: vols[i]}))
 	}
 
 	// Now connect all at once

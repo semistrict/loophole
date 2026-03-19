@@ -21,7 +21,6 @@ import (
 
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
-	"github.com/semistrict/loophole/fsbackend"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage"
 )
@@ -184,11 +183,22 @@ func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpoin
 	if err != nil {
 		return err
 	}
-	if err := owner.client.Clone(ctx, client.CloneParams{
-		Checkpoint: checkpointID,
-		Clone:      cloneName,
-	}); err != nil {
-		return err
+	if owner.mountpoint != "" {
+		// FS mode — use the FS-level clone endpoint.
+		if err := owner.client.Clone(ctx, client.CloneParams{
+			Checkpoint: checkpointID,
+			Clone:      cloneName,
+		}); err != nil {
+			return err
+		}
+	} else {
+		// Device mode — use the device-level clone endpoint.
+		if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{
+			Checkpoint: checkpointID,
+			Clone:      cloneName,
+		}); err != nil {
+			return err
+		}
 	}
 	b.trackCreated(cloneName)
 	return nil
@@ -306,7 +316,7 @@ func newBackend(t testing.TB) *testBackend {
 
 // testFS wraps a rooted filesystem for test convenience methods.
 type testFS struct {
-	fs         *fsbackend.RootFS
+	fs         *RootFS
 	mountpoint string
 }
 
@@ -455,7 +465,7 @@ func mountVolume(t testing.TB, name string) (testFS, *testBackend) {
 	b := newBackend(t)
 	ctx := t.Context()
 
-	err := b.Create(ctx, client.CreateParams{Volume: name, Size: 512 * 1024 * 1024}) // 512MB keeps the FUSE e2e path reasonably fast
+	err := b.Create(ctx, storage.CreateParams{Volume: name, Size: 512 * 1024 * 1024}) // 512MB keeps the FUSE e2e path reasonably fast
 	require.NoError(t, err)
 
 	mp := mountpoint(t, name)
@@ -480,8 +490,8 @@ func mountpoint(t testing.TB, volume string) string {
 	return "/" + volume
 }
 
-func (b *testBackend) FS(mountpoint string) (*fsbackend.RootFS, error) {
-	return fsbackend.NewRootFS(mountpoint), nil
+func (b *testBackend) FS(mountpoint string) (*RootFS, error) {
+	return NewRootFS(mountpoint), nil
 }
 
 func (b *testBackend) VolumeAt(mountpoint string) string {

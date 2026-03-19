@@ -1,6 +1,6 @@
 //go:build linux
 
-package fsbackend
+package fsserver
 
 import (
 	"bufio"
