@@ -26,7 +26,7 @@ type layer struct {
 	layerStore objstore.ObjectStore // rooted at layers/<id>/ (for index.json)
 
 	config    Config
-	diskCache *PageCache
+	diskCache PageCache
 	cacheDir  string
 	lease     *objstore.LeaseManager
 
@@ -82,7 +82,7 @@ type layerSnapshot struct {
 
 // openLayer loads a layer from S3 and initializes its local state.
 // store is the global root (not scoped to a layer prefix).
-func openLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string) (*layer, error) {
+func openLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache PageCache, cacheDir string) (*layer, error) {
 	config.setDefaults()
 
 	layerPrefix := "layers/" + id
@@ -117,7 +117,7 @@ func openLayer(ctx context.Context, store objstore.ObjectStore, id string, confi
 
 // openFrozenLayer loads a frozen (immutable) layer. Reads index.json but
 // creates no memtable.
-func openFrozenLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache *PageCache) (*layer, error) {
+func openFrozenLayer(ctx context.Context, store objstore.ObjectStore, id string, config Config, diskCache PageCache) (*layer, error) {
 	idx, _, err := objstore.ReadJSON[layerIndex](ctx, store.At("layers/"+id), "index.json")
 	if err != nil {
 		return nil, fmt.Errorf("read frozen layer index: %w", err)
@@ -128,7 +128,7 @@ func openFrozenLayer(ctx context.Context, store objstore.ObjectStore, id string,
 // initLayerFromIndex creates a mutable layer from a pre-loaded index.
 // No S3 reads — the caller already has the index. Used by Clone to avoid
 // re-reading the child index that was just written.
-func initLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache *PageCache, cacheDir string, idx layerIndex) (*layer, error) {
+func initLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache PageCache, cacheDir string, idx layerIndex) (*layer, error) {
 	config.setDefaults()
 	ly := &layer{
 		id:         id,
@@ -159,7 +159,7 @@ func initLayerFromIndex(store objstore.ObjectStore, id string, config Config, di
 
 // initFrozenLayerFromIndex creates a frozen (immutable) layer from a pre-loaded
 // index. No S3 reads required — the caller already has the index.
-func initFrozenLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache *PageCache, idx layerIndex) *layer {
+func initFrozenLayerFromIndex(store objstore.ObjectStore, id string, config Config, diskCache PageCache, idx layerIndex) *layer {
 	config.setDefaults()
 	ly := &layer{
 		id:         id,
@@ -409,8 +409,7 @@ func (ly *layer) cachedPageRef(sourceLayerID string, pageIdx PageIdx) ([]byte, f
 	if !ly.shouldUsePersistentPageCache(sourceLayerID) {
 		return nil, nil
 	}
-	key := cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}
-	if data, unpin := ly.diskCache.GetPageRef(key); data != nil {
+	if data, unpin := ly.diskCache.GetPageRef(sourceLayerID, uint64(pageIdx)); data != nil {
 		metrics.CacheHits.Inc()
 		metrics.PageReadSource.WithLabelValues("cache").Inc()
 		return data, unpin
@@ -500,8 +499,7 @@ func (ly *layer) cachedPage(sourceLayerID string, pageIdx PageIdx) []byte {
 	if !ly.shouldUsePersistentPageCache(sourceLayerID) {
 		return nil
 	}
-	key := cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}
-	if data := ly.diskCache.GetPage(key); data != nil {
+	if data := ly.diskCache.GetPage(sourceLayerID, uint64(pageIdx)); data != nil {
 		metrics.CacheHits.Inc()
 		metrics.PageReadSource.WithLabelValues("cache").Inc()
 		return data
@@ -512,7 +510,7 @@ func (ly *layer) cachedPage(sourceLayerID string, pageIdx PageIdx) []byte {
 
 func (ly *layer) cachePage(sourceLayerID string, pageIdx PageIdx, data []byte) {
 	if ly.shouldUsePersistentPageCache(sourceLayerID) {
-		ly.diskCache.PutPage(cacheKey{LayerID: sourceLayerID, PageIdx: pageIdx}, data)
+		ly.diskCache.PutPage(sourceLayerID, uint64(pageIdx), data)
 	}
 }
 

@@ -5,11 +5,9 @@ import (
 	"os"
 	"sync"
 	"testing"
-)
 
-func pk(tl string, idx PageIdx) cacheKey {
-	return cacheKey{LayerID: tl, PageIdx: idx}
-}
+	"github.com/semistrict/loophole/cached"
+)
 
 // shortTempDir creates a temp dir with a short path to avoid
 // exceeding macOS's 104-byte Unix socket path limit.
@@ -23,10 +21,10 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-func newTestPageCache(t *testing.T) *PageCache {
+func newTestPageCache(t *testing.T) *cached.PageCache {
 	t.Helper()
 	dir := shortTempDir(t)
-	cache, err := NewPageCache(dir)
+	cache, err := cached.NewPageCache(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,15 +36,15 @@ func TestDiskCachePageRoundTrip(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	page := bytes.Repeat([]byte{0xAB}, PageSize)
-	cache.PutPage(pk("tl", 1), page)
+	cache.PutPage("tl", 1, page)
 
-	got := cache.GetPage(pk("tl", 1))
+	got := cache.GetPage("tl", 1)
 	if !bytes.Equal(got, page) {
 		t.Fatalf("page mismatch")
 	}
 
-	cache.DeletePage(pk("tl", 1))
-	if got := cache.GetPage(pk("tl", 1)); got != nil {
+	cache.InvalidatePage("tl", 1)
+	if got := cache.GetPage("tl", 1); got != nil {
 		t.Fatalf("expected page miss after delete")
 	}
 }
@@ -55,9 +53,9 @@ func TestGetPageRoundTrip(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	page := bytes.Repeat([]byte{0xCD}, PageSize)
-	cache.PutPage(pk("p", 1), page)
+	cache.PutPage("p", 1, page)
 
-	data := cache.GetPage(pk("p", 1))
+	data := cache.GetPage("p", 1)
 	if data == nil {
 		t.Fatal("expected cache hit")
 	}
@@ -65,7 +63,7 @@ func TestGetPageRoundTrip(t *testing.T) {
 		t.Fatal("cached data mismatch")
 	}
 
-	if got := cache.GetPage(pk("missing", 0)); got != nil {
+	if got := cache.GetPage("missing", 0); got != nil {
 		t.Fatal("expected nil for cache miss")
 	}
 }
@@ -74,9 +72,9 @@ func TestGetPageReturnsCopy(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	page := bytes.Repeat([]byte{0x11}, PageSize)
-	cache.PutPage(pk("t", 1), page)
+	cache.PutPage("t", 1, page)
 
-	data := cache.GetPage(pk("t", 1))
+	data := cache.GetPage("t", 1)
 	if data == nil {
 		t.Fatal("expected hit")
 	}
@@ -84,7 +82,7 @@ func TestGetPageReturnsCopy(t *testing.T) {
 	// Mutate the returned copy — should not affect the cache.
 	data[0] = 0xFF
 
-	got := cache.GetPage(pk("t", 1))
+	got := cache.GetPage("t", 1)
 	if got == nil {
 		t.Fatal("expected hit on second read")
 	}
@@ -101,10 +99,9 @@ func TestDiskCacheConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			key := pk("t", PageIdx(i))
 			page := bytes.Repeat([]byte{byte(i)}, PageSize)
-			cache.PutPage(key, page)
-			got := cache.GetPage(key)
+			cache.PutPage("t", uint64(i), page)
+			got := cache.GetPage("t", uint64(i))
 			if !bytes.Equal(got, page) {
 				t.Errorf("page %d mismatch", i)
 			}
@@ -116,26 +113,26 @@ func TestDiskCacheConcurrentAccess(t *testing.T) {
 func TestPageCachePersistence(t *testing.T) {
 	dir := shortTempDir(t)
 
-	cache, err := NewPageCache(dir)
+	cache, err := cached.NewPageCache(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	page := bytes.Repeat([]byte{0xAB}, PageSize)
-	cache.PutPage(pk("tl", 1), page)
+	cache.PutPage("tl", 1, page)
 
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Reopen — data should still be there (persisted via SQLite).
-	cache2, err := NewPageCache(dir)
+	cache2, err := cached.NewPageCache(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cache2.Close() })
 
-	got := cache2.GetPage(pk("tl", 1))
+	got := cache2.GetPage("tl", 1)
 	if !bytes.Equal(got, page) {
 		t.Fatalf("page not persisted across restart")
 	}
@@ -144,24 +141,24 @@ func TestPageCachePersistence(t *testing.T) {
 func TestPageCacheMultiClient(t *testing.T) {
 	dir := shortTempDir(t)
 
-	cache1, err := NewPageCache(dir)
+	cache1, err := cached.NewPageCache(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cache1.Close() })
 
 	page := bytes.Repeat([]byte{0xCD}, PageSize)
-	cache1.PutPage(pk("shared", 1), page)
+	cache1.PutPage("shared", 1, page)
 
 	// Second client connects to the same daemon.
-	cache2, err := NewPageCache(dir)
+	cache2, err := cached.NewPageCache(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Close cache2 before cache1 (cache1 owns the daemon).
 	t.Cleanup(func() { _ = cache2.Close() })
 
-	got := cache2.GetPage(pk("shared", 1))
+	got := cache2.GetPage("shared", 1)
 	if !bytes.Equal(got, page) {
 		t.Fatalf("second client should see first client's page")
 	}
@@ -171,15 +168,15 @@ func TestPageCacheCloseIsIdempotent(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	page := bytes.Repeat([]byte{0xEE}, PageSize)
-	cache.PutPage(pk("t", 1), page)
+	cache.PutPage("t", 1, page)
 
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	// Writes/reads after close are silently ignored.
-	cache.PutPage(pk("t", 2), page)
-	if got := cache.GetPage(pk("t", 1)); got != nil {
+	cache.PutPage("t", 2, page)
+	if got := cache.GetPage("t", 1); got != nil {
 		t.Fatalf("expected nil after close")
 	}
 
@@ -193,9 +190,9 @@ func TestPageCacheGetPageRef(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	page := bytes.Repeat([]byte{0xDD}, PageSize)
-	cache.PutPage(pk("ref", 1), page)
+	cache.PutPage("ref", 1, page)
 
-	data, unpin := cache.GetPageRef(pk("ref", 1))
+	data, unpin := cache.GetPageRef("ref", 1)
 	if data == nil {
 		t.Fatal("expected hit")
 	}
@@ -206,7 +203,7 @@ func TestPageCacheGetPageRef(t *testing.T) {
 	}
 
 	// Miss should return (nil, nil).
-	data, unpin = cache.GetPageRef(pk("missing", 0))
+	data, unpin = cache.GetPageRef("missing", 0)
 	if data != nil || unpin != nil {
 		t.Fatal("expected nil for cache miss")
 	}
@@ -216,10 +213,10 @@ func TestPageCacheCountPages(t *testing.T) {
 	cache := newTestPageCache(t)
 
 	for i := range 5 {
-		cache.PutPage(pk("t", PageIdx(i)), bytes.Repeat([]byte{byte(i)}, PageSize))
+		cache.PutPage("t", uint64(i), bytes.Repeat([]byte{byte(i)}, PageSize))
 	}
 
-	count, err := cache.CountPages()
+	count, err := cache.Count()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,8 +224,8 @@ func TestPageCacheCountPages(t *testing.T) {
 		t.Fatalf("expected 5 pages, got %d", count)
 	}
 
-	cache.DeletePage(pk("t", 2))
-	count, err = cache.CountPages()
+	cache.InvalidatePage("t", 2)
+	count, err = cache.Count()
 	if err != nil {
 		t.Fatal(err)
 	}

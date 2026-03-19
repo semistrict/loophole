@@ -125,11 +125,11 @@ func makeArena(slots int) []byte { return make([]byte, slots*slotSize) }
 
 func makePage(b byte) []byte { return bytes.Repeat([]byte{b}, slotSize) }
 
-func setup(t *testing.T, arenaSlots int) (*Client, *mockServer) {
+func setup(t *testing.T, arenaSlots int) (*PageCache, *mockServer) {
 	t.Helper()
 	arena := makeArena(arenaSlots)
 	clientConn, serverConn := net.Pipe()
-	client := newClientForTest(clientConn, arena)
+	client := newPageCacheForTest(newConnForTest(clientConn, arena))
 	server := newMockServer(serverConn, arena)
 	go server.serve()
 	t.Cleanup(func() {
@@ -139,11 +139,11 @@ func setup(t *testing.T, arenaSlots int) (*Client, *mockServer) {
 	return client, server
 }
 
-func setupDrain(t *testing.T, arenaSlots int) (*Client, *drainServer) {
+func setupDrain(t *testing.T, arenaSlots int) (*PageCache, *drainServer) {
 	t.Helper()
 	arena := makeArena(arenaSlots)
 	clientConn, serverConn := net.Pipe()
-	client := newClientForTest(clientConn, arena)
+	client := newPageCacheForTest(newConnForTest(clientConn, arena))
 	server := newDrainServer(serverConn, arena)
 	go server.serve()
 	t.Cleanup(func() {
@@ -167,7 +167,7 @@ func TestClient_PutGetDelete(t *testing.T) {
 			t.Fatalf("got %x, want %x", got[:4], page[:4])
 		}
 
-		client.DeletePage("layer1", 1)
+		client.InvalidatePage("layer1", 1)
 		if got := client.GetPage("layer1", 1); got != nil {
 			t.Fatal("expected nil after delete")
 		}
@@ -340,13 +340,13 @@ func TestClient_MultipleClientsDrain(t *testing.T) {
 		// Create a server conn per client. Each client talks to the
 		// same mock server goroutine via its own pipe.
 		type pair struct {
-			client *Client
+			client *PageCache
 			srv    *drainServer
 		}
 		pairs := make([]pair, nClients)
 		for i := range nClients {
 			cc, sc := net.Pipe()
-			cl := newClientForTest(cc, arena)
+			cl := newPageCacheForTest(newConnForTest(cc, arena))
 			sv := newDrainServer(sc, arena)
 			go sv.serve()
 			t.Cleanup(func() { cl.Close(); sc.Close() })
@@ -404,7 +404,7 @@ func TestClient_ClosedClientReturnsNil(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -430,7 +430,7 @@ func TestClient_DaemonDiesWhileIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -462,7 +462,7 @@ func TestClient_DaemonDiesDuringRequest(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		defer client.Close()
 
 		// Server: read one populate, respond. Then read next request and crash.
@@ -500,7 +500,7 @@ func TestClient_DaemonDiesDuringDrain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		srv := newDrainServer(sc, arena)
 		go srv.serve()
 
@@ -523,9 +523,8 @@ func TestClient_DaemonDiesDuringDrain(t *testing.T) {
 			t.Fatal("expected nil after daemon death during drain")
 		}
 
-		// draining must be cleared so ops don't silently return nil forever.
-		if client.draining.Load() {
-			t.Fatal("draining should be cleared after daemon death")
+		if !client.Dead() {
+			t.Fatal("client should report dead after daemon death")
 		}
 	})
 }
@@ -536,7 +535,7 @@ func TestClient_ClientDiesDuringDrain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 
 		// Manual server: populate, then drain, then expect client death.
 		enc := json.NewEncoder(sc)
@@ -590,7 +589,7 @@ func TestClient_DaemonDiesThenReconnect(t *testing.T) {
 
 		// First daemon.
 		cc1, sc1 := net.Pipe()
-		client1 := newClientForTest(cc1, arena)
+		client1 := newPageCacheForTest(newConnForTest(cc1, arena))
 		srv1 := newMockServer(sc1, arena)
 		go srv1.serve()
 
@@ -607,7 +606,7 @@ func TestClient_DaemonDiesThenReconnect(t *testing.T) {
 
 		// Second daemon starts (same arena — simulates SQLite reload).
 		cc2, sc2 := net.Pipe()
-		client2 := newClientForTest(cc2, arena)
+		client2 := newPageCacheForTest(newConnForTest(cc2, arena))
 		srv2 := newMockServer(sc2, arena)
 		// Manually restore index (simulates loading from SQLite).
 		srv2.index["r:1"] = 0
@@ -630,7 +629,7 @@ func TestClient_MultipleClientsSomeDisconnect(t *testing.T) {
 		const nClients = 4
 
 		type pair struct {
-			client *Client
+			client *PageCache
 			cc     net.Conn
 			sc     net.Conn
 			srv    *mockServer
@@ -638,7 +637,7 @@ func TestClient_MultipleClientsSomeDisconnect(t *testing.T) {
 		pairs := make([]pair, nClients)
 		for i := range nClients {
 			cc, sc := net.Pipe()
-			cl := newClientForTest(cc, arena)
+			cl := newPageCacheForTest(newConnForTest(cc, arena))
 			sv := newMockServer(sc, arena)
 			go sv.serve()
 			pairs[i] = pair{cl, cc, sc, sv}
@@ -676,7 +675,7 @@ func TestClient_Dead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -701,7 +700,7 @@ func TestClient_DaemonDiesDuringDrainPinHeld(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newClientForTest(cc, arena)
+		client := newPageCacheForTest(newConnForTest(cc, arena))
 		defer client.Close()
 		srv := newDrainServer(sc, arena)
 		go srv.serve()
@@ -728,7 +727,7 @@ func TestClient_DaemonDiesDuringDrainPinHeld(t *testing.T) {
 		time.Sleep(time.Millisecond)
 
 		// readLoop exited → draining cleared, conn dead.
-		if client.draining.Load() {
+		if client.client.draining.Load() {
 			t.Fatal("draining should be cleared after daemon death")
 		}
 		if !client.Dead() {

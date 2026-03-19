@@ -40,7 +40,7 @@ type Manager struct {
 	store     objstore.ObjectStore
 	cacheDir  string
 	config    Config
-	diskCache *PageCache
+	diskCache PageCache
 	lease     *objstore.LeaseManager
 	fs        localFS
 	idGen     func() string
@@ -66,7 +66,7 @@ func (osLocalFS) MkdirAll(path string, perm uint32) error {
 }
 
 // NewManager creates a Manager.
-func NewManager(store objstore.ObjectStore, cacheDir string, config Config, fs localFS, diskCache *PageCache) *Manager {
+func NewManager(store objstore.ObjectStore, cacheDir string, config Config, fs localFS, diskCache PageCache) *Manager {
 	store = objstore.NewRetryStore(store)
 	config.setDefaults()
 	if fs == nil {

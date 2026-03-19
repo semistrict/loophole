@@ -31,7 +31,7 @@ type server struct {
 	dir       env.Dir
 	socket    string
 	backend   *Backend
-	diskCache *storage.PageCache
+	diskCache storage.PageCache
 	ln        net.Listener
 	vs        *volserver.Server // embedded volume server (nil until volume is set)
 

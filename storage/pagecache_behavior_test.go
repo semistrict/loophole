@@ -5,16 +5,17 @@ import (
 	"os"
 	"testing"
 
+	"github.com/semistrict/loophole/cached"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestPersistentPageCache(t *testing.T) *PageCache {
+func newTestPersistentPageCache(t *testing.T) *cached.PageCache {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "pc")
 	require.NoError(t, err)
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	cache, err := NewPageCache(dir)
+	cache, err := cached.NewPageCache(dir)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, cache.Close())
@@ -52,7 +53,7 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 	_, err = v.Read(t.Context(), buf, 5*PageSize)
 	require.NoError(t, err)
 
-	count, err := cache.CountPages()
+	count, err := cache.Count()
 	require.NoError(t, err)
 	require.Equal(t, 0, count)
 }
@@ -93,13 +94,13 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	buf := make([]byte, PageSize)
 	_, err = v.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err := cache.CountPages()
+	count, err := cache.Count()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err = cache.CountPages()
+	count, err = cache.Count()
 	require.NoError(t, err)
 	// Both volumes share the same page in the cache.
 	require.Equal(t, 1, count)
@@ -136,7 +137,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	buf := make([]byte, PageSize)
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	count, err := cache.CountPages()
+	count, err := cache.Count()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 
@@ -149,7 +150,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, override, buf)
 
-	count, err = cache.CountPages()
+	count, err = cache.Count()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 }

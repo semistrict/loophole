@@ -41,7 +41,7 @@ import (
 type handle struct {
 	vol       *storage.Volume
 	manager   *storage.Manager
-	diskCache *storage.PageCache
+	diskCache storage.PageCache
 	srv       *volserver.Server
 	srvCancel context.CancelFunc
 }
