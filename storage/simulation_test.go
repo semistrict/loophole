@@ -1697,7 +1697,7 @@ func (sim *Simulation) FullScan() {
 
 	// Run GC and verify it doesn't delete any reachable layers.
 	// Dry-run first to count orphans, then real run to delete them.
-	dryResult, err := GarbageCollect(ctx, sim.store.Store(), true)
+	dryResult, err := GarbageCollect(ctx, sim.store.Store(), true, 0)
 	if err != nil {
 		sim.t.Fatalf("GC dry-run: %v", err)
 	}
@@ -1705,7 +1705,7 @@ func (sim *Simulation) FullScan() {
 		dryResult.ReachableLayers, dryResult.OrphanedLayers)
 
 	if dryResult.OrphanedLayers > 0 {
-		result, err := GarbageCollect(ctx, sim.store.Store(), false)
+		result, err := GarbageCollect(ctx, sim.store.Store(), false, 0)
 		if err != nil {
 			sim.t.Fatalf("GC: %v", err)
 		}
@@ -1722,7 +1722,7 @@ func (sim *Simulation) FullScan() {
 		}
 
 		// Run GC again — should find 0 orphans (idempotent).
-		recheck, err := GarbageCollect(ctx, sim.store.Store(), true)
+		recheck, err := GarbageCollect(ctx, sim.store.Store(), true, 0)
 		if err != nil {
 			sim.t.Fatalf("GC recheck: %v", err)
 		}

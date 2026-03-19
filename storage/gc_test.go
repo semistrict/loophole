@@ -31,21 +31,21 @@ func TestGarbageCollect(t *testing.T) {
 	require.NoError(t, m.DeleteVolume(ctx, "test-vol"))
 
 	// Dry-run should find 1 orphan but not delete anything.
-	result, err := GarbageCollect(ctx, store, true)
+	result, err := GarbageCollect(ctx, store, true, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.ReachableLayers)
 	assert.Equal(t, 1, result.OrphanedLayers)
 	assert.Equal(t, 0, result.DeletedObjects)
 
 	// Real run should delete the orphan.
-	result, err = GarbageCollect(ctx, store, false)
+	result, err = GarbageCollect(ctx, store, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.ReachableLayers)
 	assert.Equal(t, 1, result.OrphanedLayers)
 	assert.Greater(t, result.DeletedObjects, 0)
 
 	// Running again should find no orphans.
-	result, err = GarbageCollect(ctx, store, false)
+	result, err = GarbageCollect(ctx, store, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 0, result.ReachableLayers)
 	assert.Equal(t, 0, result.OrphanedLayers)
@@ -69,7 +69,7 @@ func TestGarbageCollectPreservesReachable(t *testing.T) {
 	require.NoError(t, v.Flush())
 
 	// GC should find 0 orphans and preserve the reachable layer.
-	result, err := GarbageCollect(ctx, store, false)
+	result, err := GarbageCollect(ctx, store, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.ReachableLayers)
 	assert.Equal(t, 0, result.OrphanedLayers)
@@ -108,7 +108,7 @@ func TestGarbageCollectWithCheckpoints(t *testing.T) {
 
 	// GC should delete the clone's orphaned layer but preserve the original
 	// volume's layers (including the frozen parent referenced via blockRanges).
-	result, err := GarbageCollect(ctx, store, false)
+	result, err := GarbageCollect(ctx, store, false, 0)
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.OrphanedLayers)
 	assert.Greater(t, result.ReachableLayers, 0)

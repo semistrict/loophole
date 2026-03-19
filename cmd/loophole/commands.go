@@ -652,7 +652,7 @@ func gcCmd() *cobra.Command {
 			defer cleanup()
 
 			// Always do a dry-run first to show what would be deleted.
-			result, err := storage.GarbageCollect(cmd.Context(), vm.Store(), true)
+			result, err := storage.GarbageCollect(cmd.Context(), vm.Store(), true, 0)
 			if err != nil {
 				return err
 			}
@@ -681,7 +681,7 @@ func gcCmd() *cobra.Command {
 				}
 			}
 
-			result, err = storage.GarbageCollect(cmd.Context(), vm.Store(), false)
+			result, err = storage.GarbageCollect(cmd.Context(), vm.Store(), false, 0)
 			if err != nil {
 				return err
 			}
