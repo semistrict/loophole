@@ -161,9 +161,12 @@ func StartServer(d string) error {
 
 // StartServerWithListener initializes the daemon and starts accepting on ln.
 // If ln is nil, a Unix socket listener is created at dir/cached.sock.
+// If InitInMemory was called first, initDaemon is skipped.
 func StartServerWithListener(d string, ln net.Listener) error {
-	if err := initDaemon(d); err != nil {
-		return err
+	if arena == nil {
+		if err := initDaemon(d); err != nil {
+			return err
+		}
 	}
 
 	if ln == nil {

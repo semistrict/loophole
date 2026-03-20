@@ -2,41 +2,40 @@ package storage
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/cached/cachedserver"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
-func newTestCacheDir(t *testing.T) string {
+// startInProcessCache starts an in-process page cache server and returns
+// a PageCache client. The server is stopped on test cleanup.
+func startInProcessCache(t *testing.T) *cached.PageCache {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "pc")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
-
-func openObservedCache(t *testing.T, dir string) *cached.PageCache {
-	t.Helper()
-	cache, err := cached.NewPageCache(filepath.Join(dir, "diskcache"), safepoint.New())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = cache.Close() })
-	return cache
+	cachedserver.InitInMemory(256)
+	ln := cachedserver.NewPipeListener()
+	require.NoError(t, cachedserver.StartServerWithListener("", ln))
+	t.Cleanup(func() {
+		ln.Close()
+		cachedserver.Shutdown()
+	})
+	sp := safepoint.New()
+	client := ln.Dial(sp)
+	t.Cleanup(func() { client.Close() })
+	return client
 }
 
 func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
-	cacheDir := newTestCacheDir(t)
-	cache := openObservedCache(t, cacheDir)
+	cache := startInProcessCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
-	m := &Manager{ObjectStore: objstore.NewMemStore(), CacheDir: cacheDir, config: cfg}
+	m := &Manager{ObjectStore: objstore.NewMemStore(), config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{
@@ -63,15 +62,14 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 }
 
 func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
-	cacheDir := newTestCacheDir(t)
-	cache := openObservedCache(t, cacheDir)
+	cache := startInProcessCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
 	store := objstore.NewMemStore()
-	m := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
+	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -85,8 +83,8 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 
 	v.layer.blockCache.clear()
 
-	// Open child on a separate manager (same store, same cache dir).
-	m2 := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
+	// Open child on a separate manager (same store, same cache).
+	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")
@@ -102,22 +100,20 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	// Both volumes share the same page in the cache.
 	count, err = cache.Count()
 	require.NoError(t, err)
 	require.Equal(t, 1, count)
 }
 
 func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T) {
-	cacheDir := newTestCacheDir(t)
-	cache := openObservedCache(t, cacheDir)
+	cache := startInProcessCache(t)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
 	store := objstore.NewMemStore()
-	m := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
+	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	parent, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -128,8 +124,8 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, parent.Flush())
 	require.NoError(t, parent.Clone("child"))
 
-	// Open child on a separate manager (same store, same cache dir).
-	m2 := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
+	// Open child on a separate manager (same store).
+	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")
