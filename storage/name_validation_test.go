@@ -20,7 +20,7 @@ func TestManagerRejectsInvalidVolumeNames(t *testing.T) {
 func TestManagerRejectsInvalidCheckpointIDs(t *testing.T) {
 	m := newTestManager(t, objstore.NewMemStore(), testConfig)
 
-	err := m.CloneFromCheckpoint(t.Context(), "sandbox-1", "../evil", "clone-1")
+	err := CloneFromCheckpoint(t.Context(), m.Store(), "sandbox-1", "../evil", "clone-1")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid checkpoint id")
 }

@@ -6,11 +6,8 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -266,64 +263,6 @@ func logKernelDebug(t *testing.T, mountpoint, volume string) {
 	logCmd(t, "findmnt", "-n", "-o", "SOURCE,TARGET,FSTYPE,OPTIONS", mountpoint)
 	logCmd(t, "sh", "-c", "losetup -a | grep '"+volume+"' || true")
 	logCmd(t, "sh", "-c", "findmnt -rn -t ext4 -o TARGET,SOURCE | grep '^/tmp/loophole-e2e-' || true")
-}
-
-// TestE2E_NBDDeviceExclOpen checks whether a freshly-connected NBD device
-// can be opened with O_EXCL, which mkfs.ext4 uses to detect "in use" devices.
-func TestE2E_NBDDeviceExclOpen(t *testing.T) {
-	t.Skip("test removed with NBD backend")
-
-	b := newBackend(t)
-	ctx := t.Context()
-
-	// Connect 2 devices concurrently — kept low to avoid exhausting
-	// available NBD devices (nbds_max may be as low as 4, and other
-	// tests or prior killed runs may have leaked connected devices).
-	nDevices := 2
-	vols := make([]string, nDevices)
-	devs := make([]string, nDevices)
-
-	g, gctx := errgroup.WithContext(ctx)
-	for i := range nDevices {
-		vols[i] = fmt.Sprintf("excl-%d", i)
-		require.NoError(t, b.Create(gctx, storage.CreateParams{Volume: vols[i]}))
-	}
-
-	// Now connect all at once
-	for i := range nDevices {
-		g.Go(func() error {
-			dev, err := b.DeviceAttach(gctx, vols[i])
-			if err != nil {
-				return fmt.Errorf("connect %d: %w", i, err)
-			}
-			devs[i] = dev
-			return nil
-		})
-	}
-	require.NoError(t, g.Wait())
-
-	for i, dev := range devs {
-		t.Logf("vol %d: %s", i, dev)
-	}
-
-	// Now try O_EXCL on each device
-	for i, dev := range devs {
-		fd, err := os.OpenFile(dev, os.O_RDONLY|syscall.O_EXCL, 0)
-		if err != nil {
-			t.Logf("vol %d (%s) O_EXCL FAILED: %v", i, dev, err)
-			// Check holders
-			logCmd(t, "sh", "-c", fmt.Sprintf("ls -la /sys/block/%s/holders/", filepath.Base(dev)))
-			logCmd(t, "sh", "-c", fmt.Sprintf("cat /sys/block/%s/partscan", filepath.Base(dev)))
-		} else {
-			t.Logf("vol %d (%s) O_EXCL ok", i, dev)
-			fd.Close()
-		}
-	}
-
-	// Also try running mkfs on the last device
-	last := devs[nDevices-1]
-	out, _ := exec.Command("strace", "-e", "trace=open,openat", "mkfs.ext4", "-n", "-q", last).CombinedOutput()
-	t.Logf("strace mkfs.ext4 -n %s:\n%s", last, string(out))
 }
 
 func logCmd(t *testing.T, name string, args ...string) {

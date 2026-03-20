@@ -165,7 +165,7 @@ func TestE2E_DeleteNonexistentVolume(t *testing.T) {
 	require.NoError(t, err)
 	defer cleanup()
 
-	err = vm.DeleteVolume(ctx, "no-such-delete-vol")
+	err = storage.DeleteVolume(ctx, vm.Store(), "no-such-delete-vol")
 	require.Error(t, err, "deleting a nonexistent volume should fail")
 }
 
@@ -185,7 +185,7 @@ func TestE2E_DeleteOpenVolume(t *testing.T) {
 	require.NoError(t, err)
 	defer cleanup()
 
-	err = vm.DeleteVolume(ctx, vol)
+	err = storage.DeleteVolume(ctx, vm.Store(), vol)
 	require.Error(t, err, "deleting a volume held by another process should fail")
 }
 

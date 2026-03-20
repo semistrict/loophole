@@ -123,7 +123,7 @@ func deleteCmd() *cobra.Command {
 					return nil
 				}
 			}
-			if err := vm.DeleteVolume(cmd.Context(), volume); err != nil {
+			if err := storage.DeleteVolume(cmd.Context(), vm.Store(), volume); err != nil {
 				return err
 			}
 			fmt.Printf("deleted volume %s\n", volume)
@@ -229,7 +229,7 @@ func checkpointsCmd() *cobra.Command {
 				return err
 			}
 			defer cleanup()
-			checkpoints, err := vm.ListCheckpoints(cmd.Context(), args[0])
+			checkpoints, err := storage.ListCheckpoints(cmd.Context(), vm.Store(), args[0])
 			if err != nil {
 				return err
 			}
@@ -622,7 +622,7 @@ func breakLeaseCmd() *cobra.Command {
 			}
 			defer cleanup()
 			volume := args[0]
-			graceful, err := vm.BreakLease(cmd.Context(), volume, force)
+			graceful, err := storage.BreakLease(cmd.Context(), vm.Store(), volume, force)
 			if err != nil {
 				return err
 			}

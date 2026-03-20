@@ -28,7 +28,7 @@ func TestGarbageCollect(t *testing.T) {
 	require.NoError(t, v.ReleaseRef())
 
 	// Delete the volume ref (leaves the layer orphaned).
-	require.NoError(t, m.DeleteVolume(ctx, "test-vol"))
+	require.NoError(t, DeleteVolume(ctx, m.Store(), "test-vol"))
 
 	// Dry-run should find 1 orphan but not delete anything.
 	result, err := GarbageCollect(ctx, store, true, 0)
@@ -104,7 +104,7 @@ func TestGarbageCollectWithCheckpoints(t *testing.T) {
 	// Close and delete the clone but keep the original volume.
 	m2 := &Manager{ObjectStore: store, CacheDir: m.CacheDir, config: m.config, fs: m.fs}
 	t.Cleanup(func() { _ = m2.Close() })
-	require.NoError(t, m2.DeleteVolume(ctx, "cp-clone"))
+	require.NoError(t, DeleteVolume(ctx, m2.Store(), "cp-clone"))
 
 	// GC should delete the clone's orphaned layer but preserve the original
 	// volume's layers (including the frozen parent referenced via blockRanges).

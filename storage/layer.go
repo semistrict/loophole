@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -26,11 +27,10 @@ type layer struct {
 	store      objstore.ObjectStore // global root (for reading blobs by full key)
 	layerStore objstore.ObjectStore // rooted at layers/<id>/ (for index.json)
 
-	config    Config
-	diskCache PageCache
-	safepoint *safepoint.Safepoint
-	cacheDir  string
-	lease     *objstore.LeaseManager
+	config     Config
+	diskCache  PageCache
+	safepoint  *safepoint.Safepoint
+	scratchDir string
 
 	// writeLeaseSeq is the monotonically increasing sequence number
 	// assigned when the write lease was acquired. All files written
@@ -90,11 +90,14 @@ type layerParams struct {
 	config    Config
 	diskCache PageCache
 	safepoint *safepoint.Safepoint
-	workDir   string
 }
 
-func newLayer(p layerParams) *layer {
+func newLayer(p layerParams) (*layer, error) {
 	p.config.setDefaults()
+	scratchDir, err := os.MkdirTemp("", "loophole-layer-*")
+	if err != nil {
+		return nil, fmt.Errorf("create layer work dir: %w", err)
+	}
 	ly := &layer{
 		id:         p.id,
 		store:      p.store,
@@ -102,14 +105,14 @@ func newLayer(p layerParams) *layer {
 		config:     p.config,
 		diskCache:  p.diskCache,
 		safepoint:  p.safepoint,
-		cacheDir:   p.workDir,
+		scratchDir: scratchDir,
 	}
 	ly.blockCache.init(p.config.MaxCacheEntries)
-	return ly
+	return ly, nil
 }
 
 func (ly *layer) initMemtable() error {
-	memDir := filepath.Join(ly.cacheDir, "mem")
+	memDir := filepath.Join(ly.scratchDir, "mem")
 	if err := ensureDir(memDir); err != nil {
 		return fmt.Errorf("create mem dir: %w", err)
 	}
@@ -123,11 +126,16 @@ func (ly *layer) initMemtable() error {
 
 // openLayer loads a layer from S3 and initializes its local state.
 func openLayer(ctx context.Context, p layerParams) (*layer, error) {
-	ly := newLayer(p)
+	ly, err := newLayer(p)
+	if err != nil {
+		return nil, err
+	}
 	if err := ly.loadIndex(ctx); err != nil {
+		ly.Close()
 		return nil, fmt.Errorf("load index: %w", err)
 	}
 	if err := ly.initMemtable(); err != nil {
+		ly.Close()
 		return nil, err
 	}
 	return ly, nil
@@ -136,12 +144,16 @@ func openLayer(ctx context.Context, p layerParams) (*layer, error) {
 // initLayerFromIndex creates a mutable layer from a pre-loaded index.
 // No S3 reads — the caller already has the index.
 func initLayerFromIndex(p layerParams, idx layerIndex) (*layer, error) {
-	ly := newLayer(p)
+	ly, err := newLayer(p)
+	if err != nil {
+		return nil, err
+	}
 	ly.index = idx
 	ly.nextSeq.Store(idx.NextSeq)
 	ly.l1Map = newBlockRangeMap(idx.L1)
 	ly.l2Map = newBlockRangeMap(idx.L2)
 	if err := ly.initMemtable(); err != nil {
+		ly.Close()
 		return nil, err
 	}
 	return ly, nil
@@ -744,7 +756,7 @@ func (ly *layer) freezememtable() error {
 		return nil
 	}
 
-	memDir := filepath.Join(ly.cacheDir, "mem")
+	memDir := filepath.Join(ly.scratchDir, "mem")
 	if err := ensureDir(memDir); err != nil {
 		return fmt.Errorf("ensure mem dir: %w", err)
 	}
@@ -1152,6 +1164,13 @@ func (ly *layer) Close() {
 		}
 		ly.frozen = nil
 		ly.frozenMu.Unlock()
+
+		if ly.scratchDir != "" {
+			if err := os.RemoveAll(ly.scratchDir); err != nil {
+				slog.Warn("remove layer work dir", "layer", ly.id, "error", err)
+			}
+			ly.scratchDir = ""
+		}
 	})
 }
 

@@ -237,7 +237,7 @@ func (b *testBackend) ListCheckpoints(ctx context.Context, volume string) ([]sto
 		return nil, err
 	}
 	defer cleanup()
-	return vm.ListCheckpoints(ctx, volume)
+	return storage.ListCheckpoints(ctx, vm.Store(), volume)
 }
 
 func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
@@ -292,7 +292,7 @@ func (b *testBackend) cleanup() {
 	}
 	defer cleanup()
 	for _, vol := range created {
-		_ = vm.DeleteVolume(ctx, vol)
+		_ = storage.DeleteVolume(ctx, vm.Store(), vol)
 	}
 }
 

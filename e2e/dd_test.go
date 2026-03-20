@@ -117,7 +117,7 @@ func TestE2E_DeviceDD_VolumeMetadata(t *testing.T) {
 	vm, cleanup, err := openDirectManager(ctx)
 	require.NoError(t, err)
 	defer cleanup()
-	info, err := vm.VolumeInfo(ctx, volName)
+	info, err := storage.GetVolumeInfo(ctx, vm.Store(), volName)
 	require.NoError(t, err)
 	assert.Equal(t, "ext4", info.Type)
 	assert.Equal(t, dataSize, info.Size)

@@ -140,22 +140,6 @@ func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume st
 		return nil, err
 	}
 
-	// When a remote break-lease arrives, properly unmount/detach via the backend.
-	vm.SetOnRelease(func(ctx context.Context, volumeName string) {
-		if mp := backend.MountpointForVolume(volumeName); mp != "" {
-			slog.Info("release: unmounting", "volume", volumeName, "mountpoint", mp)
-			if err := backend.Unmount(ctx, mp); err != nil {
-				slog.Warn("release: unmount failed", "volume", volumeName, "error", err)
-			}
-		}
-		if v := vm.GetVolume(volumeName); v != nil {
-			slog.Info("release: detaching device", "volume", volumeName)
-			if err := backend.DeviceDetach(ctx, volumeName); err != nil {
-				slog.Warn("release: device detach failed", "volume", volumeName, "error", err)
-			}
-		}
-	})
-
 	ln, err := listen(opts)
 	if err != nil {
 		util.SafeClose(vm, "close manager after listen failure")

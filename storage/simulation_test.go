@@ -50,7 +50,7 @@ type Simulation struct {
 	leases map[string]string
 	// Monotonic volume name counter (never reuses names after deletion).
 	nextVolID int
-	// Monotonic timeline ID counter for deterministic manager id generation.
+	// Monotonic timeline ID counter for deterministic layer ID generation.
 	nextTLID int
 	// Deleted volume names (removed from volumeTimelines).
 	deletedVolumes map[string]bool
@@ -128,8 +128,15 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 		},
 		fs: fs,
 	}
-	m.idGen = sim.nextLayerID
 	return m
+}
+
+func (sim *Simulation) useDeterministicLayerIDs() func() {
+	prev := newLayerID
+	newLayerID = sim.nextLayerID
+	return func() {
+		newLayerID = prev
+	}
 }
 
 // managerFor returns the manager for a volume on a node, creating one if needed.
@@ -139,18 +146,6 @@ func (sim *Simulation) managerFor(node *SimNode, volName string) *Manager {
 	}
 	m := sim.newManager(sim.t.TempDir(), node.fs)
 	node.managers[volName] = m
-	sim.allManagers = append(sim.allManagers, m)
-	return m
-}
-
-// anyManager returns any existing manager on the node (for S3-only operations
-// like ListCheckpoints, CloneFromCheckpoint, DeleteVolume). Creates a
-// throwaway one if the node has no managers.
-func (sim *Simulation) anyManager(node *SimNode) *Manager {
-	for _, m := range node.managers {
-		return m
-	}
-	m := sim.newManager(sim.t.TempDir(), node.fs)
 	sim.allManagers = append(sim.allManagers, m)
 	return m
 }
@@ -1019,7 +1014,7 @@ func (sim *Simulation) opDeleteVolume(ctx context.Context, node *SimNode) {
 	// Use a temporary manager for the delete (volume is not open on any node).
 	dm := sim.newManager(sim.t.TempDir(), node.fs)
 	sim.allManagers = append(sim.allManagers, dm)
-	if err := dm.DeleteVolume(ctx, name); err != nil {
+	if err := DeleteVolume(ctx, dm.Store(), name); err != nil {
 		return
 	}
 
@@ -1275,7 +1270,7 @@ func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
 }
 
 // opCloneFromCheckpoint picks a volume with checkpoints, lists them, picks one,
-// and clones from it using Manager.CloneFromCheckpoint.
+// and clones from it through the shared object store.
 func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode) {
 	// Find a volume with checkpoints. Try all known volumes in deterministic order.
 	volNames := make([]string, 0, len(sim.volumeTimelines))
@@ -1286,8 +1281,9 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 
 	var srcVolName string
 	var checkpoints []CheckpointInfo
+	store := sim.store.Store()
 	for _, name := range volNames {
-		cps, err := sim.anyManager(node).ListCheckpoints(ctx, name)
+		cps, err := ListCheckpoints(ctx, store, name)
 		if err != nil || len(cps) == 0 {
 			continue
 		}
@@ -1307,13 +1303,13 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 
 	// Read the checkpoint ref to get the parent layer ID for oracle tracking.
 	cpKey := srcVolName + "/checkpoints/" + cp.ID + "/index.json"
-	volRefs := sim.store.Store().At("volumes")
+	volRefs := store.At("volumes")
 	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
 		return
 	}
 
-	if err := sim.anyManager(node).CloneFromCheckpoint(ctx, srcVolName, cp.ID, cloneName); err != nil {
+	if err := CloneFromCheckpoint(ctx, store, srcVolName, cp.ID, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -1845,6 +1841,7 @@ func runSimulation(t *testing.T, seed uint64, config SimConfig) []string {
 	var events []string
 	synctest.Test(t, func(t *testing.T) {
 		sim := NewSimulation(t, seed, config)
+		defer sim.useDeterministicLayerIDs()()
 		defer func() {
 			for _, m := range sim.allManagers {
 				m.Close()
@@ -1898,6 +1895,7 @@ func TestSimulation(t *testing.T) {
 				LayersJsonPhantomPutRate: 0.03,
 			},
 		})
+		defer sim.useDeterministicLayerIDs()()
 		// Defer cleanup so periodic flush goroutines are stopped even if
 		// t.FailNow()/t.Fatalf() exits the goroutine via runtime.Goexit().
 		// Without this, synctest detects leaked goroutines and panics with
@@ -1985,6 +1983,7 @@ func TestSimulationSharedLayerReadExercise(t *testing.T) {
 			CrashRate:      0,
 			FlushThreshold: 8 * PageSize,
 		})
+		defer sim.useDeterministicLayerIDs()()
 		defer func() {
 			for _, m := range sim.allManagers {
 				m.Close()

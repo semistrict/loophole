@@ -53,7 +53,7 @@ type leaseFile struct {
 // LeaseHandler handles an incoming RPC request.
 type LeaseHandler func(ctx context.Context, params json.RawMessage) (any, error)
 
-// LeaseManager manages a single process-wide lease token stored in S3.
+// LeaseSession manages a single process-wide lease token stored in S3.
 // The lease file is created lazily on the first EnsureStarted call.
 // A background goroutine GET-polls the lease file every 10s to check
 // for inbox messages and dispatch them to registered handlers.
@@ -61,7 +61,7 @@ type LeaseHandler func(ctx context.Context, params json.RawMessage) (any, error)
 //
 // This design minimizes S3 costs: GET is ~12x cheaper than PUT, so
 // polling with GET replaces expensive periodic PUT-based renewal.
-type LeaseManager struct {
+type LeaseSession struct {
 	token  string
 	leases ObjectStore // base.At("leases")
 
@@ -74,10 +74,10 @@ type LeaseManager struct {
 	done    chan struct{}
 }
 
-// NewLeaseManager creates a manager with a fresh token. No S3 writes
+// NewLeaseSession creates a session with a fresh token. No S3 writes
 // happen until EnsureStarted is called.
-func NewLeaseManager(leases ObjectStore) *LeaseManager {
-	lm := &LeaseManager{
+func NewLeaseSession(leases ObjectStore) *LeaseSession {
+	lm := &LeaseSession{
 		token:    uuid.NewString(),
 		leases:   leases,
 		handlers: make(map[string]LeaseHandler),
@@ -89,18 +89,24 @@ func NewLeaseManager(leases ObjectStore) *LeaseManager {
 	return lm
 }
 
+type LeaseManager = LeaseSession
+
+func NewLeaseManager(leases ObjectStore) *LeaseSession {
+	return NewLeaseSession(leases)
+}
+
 // Token returns the process-wide lease token.
-func (lm *LeaseManager) Token() string { return lm.token }
+func (lm *LeaseSession) Token() string { return lm.token }
 
 // Handle registers a handler for the given RPC method.
 // Must be called before EnsureStarted.
-func (lm *LeaseManager) Handle(method string, fn LeaseHandler) {
+func (lm *LeaseSession) Handle(method string, fn LeaseHandler) {
 	lm.handlers[method] = fn
 }
 
 // EnsureStarted creates the lease file and starts the background
 // poll loop on first call. Subsequent calls are no-ops.
-func (lm *LeaseManager) EnsureStarted(ctx context.Context) error {
+func (lm *LeaseSession) EnsureStarted(ctx context.Context) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 	if lm.started {
@@ -121,7 +127,7 @@ func (lm *LeaseManager) EnsureStarted(ctx context.Context) error {
 // or belongs to us. If the lease file exists, sends a check_alive RPC
 // and waits up to 20s. If the holder responds, returns an error (lease
 // is actively held). If no response, auto-breaks the lease and returns nil.
-func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string) error {
+func (lm *LeaseSession) CheckAvailable(ctx context.Context, existingToken string) error {
 	if existingToken == "" || existingToken == lm.token {
 		return nil
 	}
@@ -160,7 +166,7 @@ func (lm *LeaseManager) CheckAvailable(ctx context.Context, existingToken string
 }
 
 // forceBreakLease clears a lease token and deletes the lease file.
-func (lm *LeaseManager) forceBreakLease(ctx context.Context, token string) error {
+func (lm *LeaseSession) forceBreakLease(ctx context.Context, token string) error {
 	// Delete the stale lease file (best-effort).
 	_ = lm.leases.DeleteObject(ctx, token+".json")
 	return nil
@@ -168,7 +174,7 @@ func (lm *LeaseManager) forceBreakLease(ctx context.Context, token string) error
 
 // Call sends an RPC request to another token's inbox and waits for a
 // response in the outbox. Returns the result or an error on timeout.
-func (lm *LeaseManager) Call(ctx context.Context, token, method string, params any) (json.RawMessage, error) {
+func (lm *LeaseSession) Call(ctx context.Context, token, method string, params any) (json.RawMessage, error) {
 	key := token + ".json"
 	reqID := uuid.NewString()
 
@@ -225,7 +231,7 @@ func (lm *LeaseManager) Call(ctx context.Context, token, method string, params a
 }
 
 // Close stops the background poller and deletes the lease file.
-func (lm *LeaseManager) Close(ctx context.Context) error {
+func (lm *LeaseSession) Close(ctx context.Context) error {
 	lm.mu.Lock()
 	started := lm.started
 	if lm.stop != nil {
@@ -242,7 +248,7 @@ func (lm *LeaseManager) Close(ctx context.Context) error {
 
 // --- internal ---
 
-func (lm *LeaseManager) createLease(ctx context.Context) error {
+func (lm *LeaseSession) createLease(ctx context.Context) error {
 	data, _ := json.Marshal(leaseFile{})
 	if err := lm.leases.PutIfNotExists(ctx, lm.token+".json", data); err != nil {
 		if errors.Is(err, ErrExists) {
@@ -265,7 +271,7 @@ func (lm *LeaseManager) createLease(ctx context.Context) error {
 // pollLoop GET-polls the lease file to check for inbox messages.
 // After handling an RPC, poll frequency increases to 1s for 20s,
 // then decays back to the default 10s interval.
-func (lm *LeaseManager) pollLoop(ctx context.Context) {
+func (lm *LeaseSession) pollLoop(ctx context.Context) {
 	defer close(lm.done)
 	ticker := time.NewTicker(leasePollInterval)
 	defer ticker.Stop()
@@ -289,7 +295,7 @@ func (lm *LeaseManager) pollLoop(ctx context.Context) {
 
 // checkInbox reads the lease file and dispatches any inbox message.
 // Returns true if a new RPC was handled.
-func (lm *LeaseManager) checkInbox(ctx context.Context) bool {
+func (lm *LeaseSession) checkInbox(ctx context.Context) bool {
 	lf, _, err := ReadJSON[leaseFile](ctx, lm.leases, lm.token+".json")
 	if err != nil {
 		return false

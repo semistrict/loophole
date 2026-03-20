@@ -26,7 +26,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, layerParams{store: store, id: "seq-reuse", config: cfg, workDir: t.TempDir()})
+	ly, err := openLayer(ctx, layerParams{store: store, id: "seq-reuse", config: cfg})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -127,7 +127,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, layerParams{store: store, id: "snap-atomic", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
+	ly, err := openLayer(ctx, layerParams{store: store, id: "snap-atomic", config: cfg, safepoint: safepoint.New()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -187,7 +187,7 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, layerParams{store: store, id: "flush-race", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
+	ly, err := openLayer(ctx, layerParams{store: store, id: "flush-race", config: cfg, safepoint: safepoint.New()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -247,7 +247,7 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, layerParams{store: store, id: "cleanup-read", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
+	ly, err := openLayer(ctx, layerParams{store: store, id: "cleanup-read", config: cfg, safepoint: safepoint.New()})
 	require.NoError(t, err)
 	defer ly.Close()
 

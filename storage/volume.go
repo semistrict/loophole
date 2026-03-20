@@ -2,11 +2,14 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
+
+	"github.com/semistrict/loophole/objstore"
 )
 
 type Volume struct {
@@ -18,8 +21,11 @@ type Volume struct {
 	mu    sync.RWMutex
 	layer *layer
 
-	directRefs int
-	manager    *Manager
+	directRefs      int
+	manager         *Manager
+	lease           *objstore.LeaseSession
+	leaseCloseOnce  sync.Once
+	onRemoteRelease func(ctx context.Context)
 }
 
 func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) *Volume {
@@ -32,7 +38,9 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 		volType: volType,
 		layer:   ly,
 		manager: m,
+		lease:   objstore.NewLeaseSession(m.store.At("leases")),
 	}
+	v.lease.Handle("release", v.handleLeaseRelease)
 	v.refs.Store(1)
 	return v
 }
@@ -129,7 +137,7 @@ func (v *Volume) branch() (string, error) {
 		return "", fmt.Errorf("flush for branch: %w", err)
 	}
 
-	childID := v.manager.idGen()
+	childID := newLayerID()
 	if err := v.layer.Snapshot(childID); err != nil {
 		return "", fmt.Errorf("snapshot: %w", err)
 	}
@@ -148,7 +156,7 @@ func (v *Volume) relayer() error {
 	ctx := context.Background()
 	oldLayer := v.layer
 
-	newID := v.manager.idGen()
+	newID := newLayerID()
 	if err := oldLayer.Snapshot(newID); err != nil {
 		return fmt.Errorf("create new parent layer: %w", err)
 	}
@@ -160,7 +168,7 @@ func (v *Volume) relayer() error {
 	idx.L2 = oldLayer.l2Map.Ranges()
 	oldLayer.mu.RUnlock()
 
-	seq, err := v.manager.relayerVolume(ctx, v.name, newID)
+	seq, err := relayerVolumeRef(ctx, v.manager.volRefs, v.name, newID)
 	if err != nil {
 		return fmt.Errorf("update volume ref: %w", err)
 	}
@@ -171,7 +179,6 @@ func (v *Volume) relayer() error {
 		config:    v.manager.config,
 		diskCache: v.manager.diskCache,
 		safepoint: v.manager.safepoint,
-		workDir:   filepath.Join(v.manager.workDir, "layers", newID),
 	}, idx)
 	if err != nil {
 		return fmt.Errorf("init new layer: %w", err)
@@ -199,7 +206,7 @@ func (v *Volume) Checkpoint() (string, error) {
 		return "", err
 	}
 
-	ts, err := v.manager.putCheckpoint(context.Background(), v.name, childID)
+	ts, err := putCheckpoint(context.Background(), v.manager.volRefs, v.name, childID)
 	if err != nil {
 		return "", fmt.Errorf("create checkpoint: %w", err)
 	}
@@ -219,7 +226,7 @@ func (v *Volume) Clone(cloneName string) error {
 	}
 
 	ref := volumeRef{LayerID: childID, Size: v.size, Type: v.volType}
-	if err := v.manager.putVolumeRef(context.Background(), cloneName, ref); err != nil {
+	if err := putVolumeRef(context.Background(), v.manager.volRefs, cloneName, ref); err != nil {
 		return fmt.Errorf("create clone ref: %w", err)
 	}
 
@@ -283,14 +290,98 @@ func (v *Volume) destroy() error {
 	if err := v.layer.Flush(); err != nil {
 		slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
 	}
-	v.manager.releaseVolumeLease(context.Background(), v.name)
+	v.releaseLease(context.Background())
 	v.manager.closeVolume(v.name)
 	v.layer.Close()
+	v.closeLeaseSession(context.Background())
 	return nil
 }
 
 func (v *Volume) flush() error { return v.layer.Flush() }
-func (v *Volume) close()       { v.layer.Close() }
+func (v *Volume) close() {
+	v.layer.Close()
+	v.closeLeaseSession(context.Background())
+}
+
+func (v *Volume) SetOnRemoteRelease(fn func(ctx context.Context)) {
+	v.onRemoteRelease = fn
+}
+
+func (v *Volume) leaseToken() string {
+	return v.lease.Token()
+}
+
+func (v *Volume) acquireLease(ctx context.Context) (uint64, error) {
+	if err := v.lease.EnsureStarted(ctx); err != nil {
+		return 0, fmt.Errorf("start lease: %w", err)
+	}
+	key, err := volumeIndexKey(v.name)
+	if err != nil {
+		return 0, err
+	}
+	var seq uint64
+	err = objstore.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
+		if err := v.lease.CheckAvailable(ctx, ref.LeaseToken); err != nil {
+			return fmt.Errorf("volume %s: %w", v.name, err)
+		}
+		ref.LeaseToken = v.lease.Token()
+		ref.WriteLeaseSeq++
+		seq = ref.WriteLeaseSeq
+		return nil
+	})
+	return seq, err
+}
+
+func (v *Volume) releaseLease(ctx context.Context) {
+	key, err := volumeIndexKey(v.name)
+	if err != nil {
+		slog.Warn("release volume lease", "volume", v.name, "error", err)
+		return
+	}
+	if err := objstore.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
+		if ref.LeaseToken == v.lease.Token() {
+			ref.LeaseToken = ""
+		}
+		return nil
+	}); err != nil {
+		if errors.Is(err, objstore.ErrNotFound) {
+			return
+		}
+		slog.Warn("release volume lease", "volume", v.name, "error", err)
+	}
+}
+
+func (v *Volume) closeLeaseSession(ctx context.Context) {
+	v.leaseCloseOnce.Do(func() {
+		if err := v.lease.Close(ctx); err != nil {
+			slog.Warn("close lease session", "volume", v.name, "error", err)
+		}
+	})
+}
+
+func (v *Volume) handleLeaseRelease(ctx context.Context, params json.RawMessage) (any, error) {
+	var req struct {
+		Volume string `json:"volume"`
+	}
+	if err := json.Unmarshal(params, &req); err != nil {
+		return nil, fmt.Errorf("decode release params: %w", err)
+	}
+	if req.Volume != "" && req.Volume != v.name {
+		return nil, fmt.Errorf("release requested for %q on volume %q", req.Volume, v.name)
+	}
+
+	slog.Info("release: releasing volume", "volume", v.name)
+	if v.onRemoteRelease != nil {
+		v.onRemoteRelease(ctx)
+	}
+	v.manager.closeVolume(v.name)
+	if err := v.flush(); err != nil {
+		slog.Warn("release: flush failed", "volume", v.name, "error", err)
+	}
+	v.releaseLease(ctx)
+	v.close()
+	return map[string]string{"status": "ok"}, nil
+}
 
 func (v *Volume) EnableDirectWriteback() error {
 	v.mu.Lock()
@@ -355,16 +446,16 @@ func (v *Volume) DebugInfo() VolumeDebugInfo {
 
 // ListCheckpoints lists checkpoints for this volume (convenience for Manager.ListCheckpoints).
 func (v *Volume) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
-	return v.manager.ListCheckpoints(ctx, v.name)
+	return ListCheckpoints(ctx, v.manager.Store(), v.name)
 }
 
 // CloneFromCheckpoint creates a clone from a checkpoint of this volume
 // (convenience for Manager.CloneFromCheckpoint).
 func (v *Volume) CloneFromCheckpoint(ctx context.Context, checkpointID, cloneName string) error {
-	return v.manager.CloneFromCheckpoint(ctx, v.name, checkpointID, cloneName)
+	return CloneFromCheckpoint(ctx, v.manager.Store(), v.name, checkpointID, cloneName)
 }
 
-// Info returns metadata for this volume (convenience for Manager.VolumeInfo).
+// Info returns metadata for this volume.
 func (v *Volume) Info(ctx context.Context) (VolumeInfo, error) {
-	return v.manager.VolumeInfo(ctx, v.name)
+	return GetVolumeInfo(ctx, v.manager.Store(), v.name)
 }

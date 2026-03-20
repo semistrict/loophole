@@ -658,7 +658,7 @@ func TestCloneFromCheckpoint(t *testing.T) {
 	}
 
 	// Clone from checkpoint on a separate manager.
-	if err := m.CloneFromCheckpoint(ctx, "parent", cpID, "clone1"); err != nil {
+	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cpID, "clone1"); err != nil {
 		t.Fatal(err)
 	}
 	m2 := &Manager{ObjectStore: store, config: testConfig}
@@ -1028,7 +1028,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 	if _, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024}); err != nil {
 		t.Fatal(err)
 	}
-	err := m.DeleteVolume(ctx, "vol")
+	err := DeleteVolume(ctx, m.Store(), "vol")
 	if err == nil || !strings.Contains(err.Error(), "is open") {
 		t.Fatalf("expected 'is open' error, got: %v", err)
 	}
@@ -1051,7 +1051,7 @@ func TestDeleteVolumeThenList(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := m.DeleteVolume(ctx, "vol"); err != nil {
+	if err := DeleteVolume(ctx, m.Store(), "vol"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1359,14 +1359,14 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 	store.SetFault(objstore.OpDeleteObject, "", objstore.Fault{
 		Err: fmt.Errorf("simulated delete failure"),
 	})
-	err = m.DeleteVolume(ctx, "vol")
+	err = DeleteVolume(ctx, m.Store(), "vol")
 	if err == nil || !strings.Contains(err.Error(), "simulated delete failure") {
 		t.Fatalf("expected delete failure, got: %v", err)
 	}
 
 	// Clear fault — delete should work.
 	store.ClearAllFaults()
-	if err := m.DeleteVolume(ctx, "vol"); err != nil {
+	if err := DeleteVolume(ctx, m.Store(), "vol"); err != nil {
 		t.Fatalf("retry delete failed: %v", err)
 	}
 }
@@ -2755,7 +2755,7 @@ func TestRefreshFollowMode(t *testing.T) {
 
 	// Reader opens the same layer directly (simulating read-only follower).
 	writerVol := wv
-	readerLayer, err := openLayer(ctx, layerParams{store: store, id: writerVol.layer.id, config: cfg, workDir: t.TempDir()})
+	readerLayer, err := openLayer(ctx, layerParams{store: store, id: writerVol.layer.id, config: cfg})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -32,6 +32,24 @@ func NewBackend(vm *storage.Manager, driver *FUSEDriver) *Backend {
 	}
 }
 
+func (b *Backend) installRemoteReleaseHook(vol *storage.Volume) {
+	vol.SetOnRemoteRelease(func(ctx context.Context) {
+		volume := vol.Name()
+		if mp := b.MountpointForVolume(volume); mp != "" {
+			slog.Info("release: unmounting", "volume", volume, "mountpoint", mp)
+			if err := b.Unmount(ctx, mp); err != nil {
+				slog.Warn("release: unmount failed", "volume", volume, "error", err)
+			}
+		}
+		if b.vm.GetVolume(volume) != nil {
+			slog.Info("release: detaching device", "volume", volume)
+			if err := b.DeviceDetach(ctx, volume); err != nil {
+				slog.Warn("release: device detach failed", "volume", volume, "error", err)
+			}
+		}
+	})
+}
+
 // driverFor returns the single surviving driver.
 func (b *Backend) driverFor() (*FUSEDriver, error) {
 	if b.driver == nil {
@@ -110,6 +128,7 @@ func (b *Backend) Mount(ctx context.Context, volume string, mountpoint string) e
 	if err != nil {
 		return err
 	}
+	b.installRemoteReleaseHook(vol)
 	return b.mountVolume(ctx, vol, mountpoint)
 }
 
@@ -152,7 +171,7 @@ func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, er
 
 // CloneFromCheckpoint creates an unmounted clone from a volume checkpoint.
 func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
-	return b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, cloneName)
+	return storage.CloneFromCheckpoint(ctx, b.vm.Store(), volume, checkpointID, cloneName)
 }
 
 // Clone freezes the filesystem, creates the clone, and thaws without mounting it.
@@ -247,6 +266,7 @@ func (b *Backend) DeviceAttach(ctx context.Context, volume string) (string, erro
 	if err != nil {
 		return "", err
 	}
+	b.installRemoteReleaseHook(vol)
 	if err := vol.AcquireRef(); err != nil {
 		return "", fmt.Errorf("acquire ref for device attach: %w", err)
 	}
@@ -284,7 +304,7 @@ func (b *Backend) DeviceCheckpoint(ctx context.Context, volume string) (string, 
 // DeviceClone creates an unattached clone.
 func (b *Backend) DeviceClone(ctx context.Context, volume, checkpointID, clone string) error {
 	if checkpointID != "" {
-		return b.vm.CloneFromCheckpoint(ctx, volume, checkpointID, clone)
+		return storage.CloneFromCheckpoint(ctx, b.vm.Store(), volume, checkpointID, clone)
 	}
 	vol := b.vm.GetVolume(volume)
 	if vol == nil {

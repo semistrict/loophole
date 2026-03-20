@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -73,6 +74,8 @@ func (b BlockIdx) PageIdx(pageOffset uint16) PageIdx {
 // zeroPage is a shared read-only zero page returned for tombstones and
 // never-written pages. Callers must not modify the returned slice.
 var zeroPage [PageSize]byte
+
+var newLayerID = uuid.NewString
 
 // zstd encoder/decoder pools.
 var zstdDecoderPool = sync.Pool{
