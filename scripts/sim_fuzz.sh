@@ -5,12 +5,13 @@ set -euo pipefail
 # Uses make test (never direct go test) so repo test flags stay consistent.
 
 RUN_TEST="${RUN_TEST:-^TestSimulation$}"
+TEST_PKGS="${SIM_FUZZ_TEST_PKGS:-github.com/semistrict/loophole/storage}"
 SIM_PAGES_FIXED="${SIM_PAGES_FIXED:-256}"
 
 LOG_DIR="${SIM_FUZZ_LOG_DIR:-/tmp/sim-fuzz-storage}"
 START_RUN="${SIM_FUZZ_START_RUN:-1}"
 MAX_RUNS="${SIM_FUZZ_MAX_RUNS:-0}" # 0 means run forever
-PARALLELISM="${SIM_FUZZ_PARALLELISM:-4}"
+PARALLELISM="${SIM_FUZZ_PARALLELISM:-2}"
 
 NODES_STR="${SIM_FUZZ_NODES_VALUES:-3 5 7 9}"
 CRASH_STR="${SIM_FUZZ_CRASH_VALUES:-0.01 0.02 0.05 0.10 0.15}"
@@ -96,7 +97,7 @@ worker_loop() {
       SIM_LINEAGES="$lineages"
     )
 
-    if env "${sim_env[@]}" make test RUN="$RUN_TEST" >"$log" 2>&1; then
+    if env "${sim_env[@]}" make test UNIT_PKGS="$TEST_PKGS" RUN="$RUN_TEST" >"$log" 2>&1; then
       echo "PASS $run worker=$worker"
     else
       if [[ ! -f "$FAIL_FLAG" ]]; then
@@ -105,7 +106,7 @@ worker_loop() {
           echo "Log: $log"
           echo
           echo "Repro:"
-          echo "SIM_SEED=$seed SIM_OPS=$ops SIM_PAGES=$SIM_PAGES_FIXED SIM_NODES=$nodes SIM_CRASH_RATE=$crash SIM_FAULT_RATE=$fault SIM_LINEAGES=$lineages make test RUN='$RUN_TEST'"
+          echo "SIM_SEED=$seed SIM_OPS=$ops SIM_PAGES=$SIM_PAGES_FIXED SIM_NODES=$nodes SIM_CRASH_RATE=$crash SIM_FAULT_RATE=$fault SIM_LINEAGES=$lineages make test UNIT_PKGS='$TEST_PKGS' RUN='$RUN_TEST'"
         } > "$FAIL_SUMMARY"
         touch "$FAIL_FLAG"
       fi
