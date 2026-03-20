@@ -32,7 +32,7 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	skipWithoutFuse(t)
 
 	store := objstore.NewMemStore()
-	vm := storage.NewManager(store, t.TempDir(), storage.Config{}, nil, nil)
+	vm := &storage.Manager{ObjectStore: store}
 	t.Cleanup(func() { vm.Close() })
 
 	vol, err := vm.NewVolume(storage.CreateParams{Volume: "testvol", Size: 4096})
@@ -155,7 +155,7 @@ func TestFuseReaddir(t *testing.T) {
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	vm2 := &storage.Manager{ObjectStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	newvol, err := vm2.NewVolume(storage.CreateParams{Volume: "newvol", Size: 4096})
@@ -183,7 +183,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
-	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	vm2 := &storage.Manager{ObjectStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	cloneVol, err := vm2.NewVolume(storage.CreateParams{Volume: "clone", Size: 4096})
@@ -214,7 +214,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush())
 
-	vm2 := storage.NewManager(env.store, t.TempDir(), storage.Config{}, nil, nil)
+	vm2 := &storage.Manager{ObjectStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	dstVol, err := vm2.NewVolume(storage.CreateParams{Volume: "refclone", Size: 4096})

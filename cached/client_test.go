@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/semistrict/loophole/internal/safepoint"
 )
 
 // --- Mock server ---
@@ -66,8 +68,8 @@ func (s *mockServer) handle(msg ClientMsg) {
 			s.nextSl++
 			s.index[k] = slot
 		}
-		off := slot * slotSize
-		copy(s.arena[off:off+slotSize], msg.Data)
+		off := slot * SlotSize
+		copy(s.arena[off:off+SlotSize], msg.Data)
 		s.enc.Encode(DaemonMsg{Slot: slot})
 	case OpDelete:
 		k := s.key(msg.LayerID, msg.PageIdx)
@@ -121,43 +123,60 @@ func (s *drainServer) sendResume() {
 
 // --- Helpers ---
 
-func makeArena(slots int) []byte { return make([]byte, slots*slotSize) }
+func makeArena(slots int) []byte { return make([]byte, slots*SlotSize) }
 
-func makePage(b byte) []byte { return bytes.Repeat([]byte{b}, slotSize) }
+func makePage(b byte) []byte { return bytes.Repeat([]byte{b}, SlotSize) }
 
-func setup(t *testing.T, arenaSlots int) (*PageCache, *mockServer) {
+func setup(t *testing.T, arenaSlots int) (*PageCache, *mockServer, *safepoint.Safepoint) {
 	t.Helper()
+	sp := safepoint.New()
 	arena := makeArena(arenaSlots)
 	clientConn, serverConn := net.Pipe()
-	client := newPageCacheForTest(newConnForTest(clientConn, arena))
+	client := newPageCacheForTest(newConnForTest(clientConn, arena, sp))
 	server := newMockServer(serverConn, arena)
 	go server.serve()
 	t.Cleanup(func() {
 		client.Close()
 		serverConn.Close()
 	})
-	return client, server
+	return client, server, sp
 }
 
-func setupDrain(t *testing.T, arenaSlots int) (*PageCache, *drainServer) {
+func setupDrain(t *testing.T, arenaSlots int) (*PageCache, *drainServer, *safepoint.Safepoint) {
 	t.Helper()
+	sp := safepoint.New()
 	arena := makeArena(arenaSlots)
 	clientConn, serverConn := net.Pipe()
-	client := newPageCacheForTest(newConnForTest(clientConn, arena))
+	client := newPageCacheForTest(newConnForTest(clientConn, arena, sp))
 	server := newDrainServer(serverConn, arena)
 	go server.serve()
 	t.Cleanup(func() {
 		client.Close()
 		serverConn.Close()
 	})
-	return client, server
+	return client, server, sp
+}
+
+func setupDrainNoSynctest(t *testing.T, arenaSlots int) (*PageCache, *drainServer, *safepoint.Safepoint) {
+	t.Helper()
+	sp := safepoint.New()
+	arena := makeArena(arenaSlots)
+	clientConn, serverConn := net.Pipe()
+	client := newPageCacheForTest(newConnForTest(clientConn, arena, sp))
+	server := newDrainServer(serverConn, arena)
+	go server.serve()
+	t.Cleanup(func() {
+		client.Close()
+		serverConn.Close()
+	})
+	return client, server, sp
 }
 
 // --- Tests ---
 
 func TestClient_PutGetDelete(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, _ := setup(t, 64)
+		client, _, _ := setup(t, 64)
 
 		page := makePage(0xAB)
 		client.PutPage("layer1", 1, page)
@@ -176,23 +195,28 @@ func TestClient_PutGetDelete(t *testing.T) {
 
 func TestClient_GetPageRef(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, _ := setup(t, 64)
+		client, _, sp := setup(t, 64)
 
 		page := makePage(0xCD)
 		client.PutPage("ref", 1, page)
 
-		data, unpin := client.GetPageRef("ref", 1)
+		g := sp.Enter()
+		data := client.GetPageRef(g, "ref", 1)
 		if data == nil {
+			g.Exit()
 			t.Fatal("expected hit")
 		}
 		if !bytes.Equal(data, page) {
+			g.Exit()
 			t.Fatal("data mismatch")
 		}
-		unpin()
+		g.Exit()
 
-		// Miss returns nil, nil.
-		data, unpin = client.GetPageRef("missing", 0)
-		if data != nil || unpin != nil {
+		// Miss returns nil.
+		g = sp.Enter()
+		data = client.GetPageRef(g, "missing", 0)
+		g.Exit()
+		if data != nil {
 			t.Fatal("expected nil for miss")
 		}
 	})
@@ -200,7 +224,7 @@ func TestClient_GetPageRef(t *testing.T) {
 
 func TestClient_LocalCacheHit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, srv := setup(t, 64)
+		client, srv, _ := setup(t, 64)
 
 		page := makePage(0x11)
 		client.PutPage("lc", 1, page)
@@ -224,7 +248,7 @@ func TestClient_LocalCacheHit(t *testing.T) {
 
 func TestClient_Count(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, _ := setup(t, 64)
+		client, _, _ := setup(t, 64)
 
 		for i := range 5 {
 			client.PutPage("t", uint64(i), makePage(byte(i)))
@@ -241,7 +265,7 @@ func TestClient_Count(t *testing.T) {
 
 func TestClient_ConcurrentAccess(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, _ := setup(t, 256)
+		client, _, _ := setup(t, 256)
 
 		var wg sync.WaitGroup
 		for i := range 16 {
@@ -262,7 +286,7 @@ func TestClient_ConcurrentAccess(t *testing.T) {
 
 func TestClient_DrainClearsLocalCache(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		client, srv := setupDrain(t, 64)
+		client, srv, _ := setupDrain(t, 64)
 
 		page := makePage(0xAA)
 		client.PutPage("d", 1, page)
@@ -277,11 +301,6 @@ func TestClient_DrainClearsLocalCache(t *testing.T) {
 		srv.sendDrain()
 		<-srv.drainedCh
 
-		// During drain, lookups return nil.
-		if got := client.GetPage("d", 1); got != nil {
-			t.Fatal("expected nil during drain")
-		}
-
 		srv.sendResume()
 		time.Sleep(time.Millisecond) // let client process resume
 
@@ -294,42 +313,42 @@ func TestClient_DrainClearsLocalCache(t *testing.T) {
 	})
 }
 
-func TestClient_DrainWaitsForPins(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		client, srv := setupDrain(t, 64)
+func TestClient_DrainWaitsForReaders(t *testing.T) {
+	// No synctest — mutex ops are not durably blocking so synctest
+	// can't advance time past a Lock blocked on an RLock.
+	client, srv, sp := setupDrainNoSynctest(t, 64)
 
-		page := makePage(0xBB)
-		client.PutPage("pin", 1, page)
+	page := makePage(0xBB)
+	client.PutPage("pin", 1, page)
 
-		// Hold a pin via GetPageRef.
-		data, unpin := client.GetPageRef("pin", 1)
-		if data == nil {
-			t.Fatal("expected ref hit")
-		}
+	// Hold the safepoint.
+	g := sp.Enter()
 
-		// Trigger drain — should block until pin is released.
-		srv.sendDrain()
+	// Trigger drain — should block until reader releases.
+	srv.sendDrain()
 
-		drained := false
-		go func() {
-			<-srv.drainedCh
-			drained = true
-		}()
+	drained := make(chan struct{})
+	go func() {
+		<-srv.drainedCh
+		close(drained)
+	}()
 
-		time.Sleep(time.Millisecond)
-		if drained {
-			t.Fatal("drain should not complete while pin is held")
-		}
+	select {
+	case <-drained:
+		t.Fatal("drain should not complete while read is held")
+	case <-time.After(10 * time.Millisecond):
+	}
 
-		// Release the pin.
-		unpin()
-		time.Sleep(time.Millisecond)
-		if !drained {
-			t.Fatal("drain should complete after pin release")
-		}
+	// Release the guard.
+	g.Exit()
 
-		srv.sendResume()
-	})
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("drain should complete after read release")
+	}
+
+	srv.sendResume()
 }
 
 func TestClient_MultipleClientsDrain(t *testing.T) {
@@ -337,8 +356,6 @@ func TestClient_MultipleClientsDrain(t *testing.T) {
 		arena := makeArena(64)
 		const nClients = 4
 
-		// Create a server conn per client. Each client talks to the
-		// same mock server goroutine via its own pipe.
 		type pair struct {
 			client *PageCache
 			srv    *drainServer
@@ -346,7 +363,7 @@ func TestClient_MultipleClientsDrain(t *testing.T) {
 		pairs := make([]pair, nClients)
 		for i := range nClients {
 			cc, sc := net.Pipe()
-			cl := newPageCacheForTest(newConnForTest(cc, arena))
+			cl := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 			sv := newDrainServer(sc, arena)
 			go sv.serve()
 			t.Cleanup(func() { cl.Close(); sc.Close() })
@@ -354,12 +371,10 @@ func TestClient_MultipleClientsDrain(t *testing.T) {
 		}
 
 		page := makePage(0xCC)
-		// Populate through each client's own server.
 		for _, p := range pairs {
 			p.client.PutPage("m", 1, page)
 		}
 
-		// All clients read to populate local caches.
 		for _, p := range pairs {
 			got := p.client.GetPage("m", 1)
 			if !bytes.Equal(got, page) {
@@ -367,30 +382,15 @@ func TestClient_MultipleClientsDrain(t *testing.T) {
 			}
 		}
 
-		// Drain all clients concurrently.
+		// Drain and resume each client sequentially — with a global
+		// safepoint, EnterExclusive serializes across clients.
 		for _, p := range pairs {
 			p.srv.sendDrain()
-		}
-
-		// Wait for all to drain.
-		for _, p := range pairs {
 			<-p.srv.drainedCh
-		}
-
-		// All clients should return nil during drain.
-		for i, p := range pairs {
-			if got := p.client.GetPage("m", 1); got != nil {
-				t.Fatalf("client %d: expected nil during drain", i)
-			}
-		}
-
-		// Resume all.
-		for _, p := range pairs {
 			p.srv.sendResume()
+			time.Sleep(time.Millisecond)
 		}
-		time.Sleep(time.Millisecond)
 
-		// All clients should work again after resume.
 		for i, p := range pairs {
 			got := p.client.GetPage("m", 1)
 			if !bytes.Equal(got, page) {
@@ -404,7 +404,7 @@ func TestClient_ClosedClientReturnsNil(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -417,8 +417,10 @@ func TestClient_ClosedClientReturnsNil(t *testing.T) {
 		if got := client.GetPage("cl", 1); got != nil {
 			t.Fatal("expected nil from closed client")
 		}
-		data, unpin := client.GetPageRef("cl", 1)
-		if data != nil || unpin != nil {
+		g := safepoint.New().Enter()
+		data := client.GetPageRef(g, "cl", 1)
+		g.Exit()
+		if data != nil {
 			t.Fatal("expected nil ref from closed client")
 		}
 	})
@@ -430,7 +432,7 @@ func TestClient_DaemonDiesWhileIdle(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -442,7 +444,6 @@ func TestClient_DaemonDiesWhileIdle(t *testing.T) {
 			t.Fatal("pre-crash read mismatch")
 		}
 
-		// Daemon crashes — close the server side of the pipe.
 		sc.Close()
 		time.Sleep(time.Millisecond)
 
@@ -450,35 +451,28 @@ func TestClient_DaemonDiesWhileIdle(t *testing.T) {
 			t.Fatal("client should report dead after daemon crash")
 		}
 
-		// Local cache hit still works (arena bytes are valid).
-		// But new IPC requests must not hang.
 		client.PutPage("d", 2, makePage(0x22))
-		// Should not hang or panic.
 	})
 }
 
 func TestClient_DaemonDiesDuringRequest(t *testing.T) {
-	// The server reads the request but crashes before responding.
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 		defer client.Close()
 
-		// Server: read one populate, respond. Then read next request and crash.
 		go func() {
 			dec := json.NewDecoder(sc)
 			enc := json.NewEncoder(sc)
 
-			// First request: populate — respond normally.
 			var msg ClientMsg
 			if err := dec.Decode(&msg); err != nil {
 				return
 			}
-			copy(arena[0:slotSize], msg.Data)
+			copy(arena[0:SlotSize], msg.Data)
 			enc.Encode(DaemonMsg{Slot: 0})
 
-			// Second request: read it but crash (close conn) before responding.
 			dec.Decode(&msg)
 			sc.Close()
 		}()
@@ -486,9 +480,6 @@ func TestClient_DaemonDiesDuringRequest(t *testing.T) {
 		page := makePage(0xAA)
 		client.PutPage("crash", 1, page)
 
-		// Request a different key so it must go through IPC (no local cache).
-		// The server reads this request but crashes before responding.
-		// doRequest sees closed respCh, returns error → GetPage returns nil.
 		got := client.GetPage("crash", 2)
 		if got != nil {
 			t.Fatal("expected nil when daemon died during request")
@@ -500,24 +491,20 @@ func TestClient_DaemonDiesDuringDrain(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 		srv := newDrainServer(sc, arena)
 		go srv.serve()
 
 		page := makePage(0xBB)
 		client.PutPage("dd", 1, page)
-		client.GetPage("dd", 1) // populate local cache
+		client.GetPage("dd", 1)
 
-		// Send drain.
 		srv.sendDrain()
 		<-srv.drainedCh
 
-		// Daemon crashes during drain (after receiving drained, before resume).
 		sc.Close()
 		time.Sleep(time.Millisecond)
 
-		// readLoop exits → draining is cleared, respCh is closed.
-		// Local cache was cleared by drain, conn is dead → GetPage returns nil.
 		got := client.GetPage("dd", 1)
 		if got != nil {
 			t.Fatal("expected nil after daemon death during drain")
@@ -530,50 +517,37 @@ func TestClient_DaemonDiesDuringDrain(t *testing.T) {
 }
 
 func TestClient_ClientDiesDuringDrain(t *testing.T) {
-	// Simulate a client dying mid-drain: the server sends drain,
-	// then the client conn closes before sending drained.
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 
-		// Manual server: populate, then drain, then expect client death.
 		enc := json.NewEncoder(sc)
 		dec := json.NewDecoder(sc)
 
-		// Handle populate.
 		go func() {
 			var msg ClientMsg
 			dec.Decode(&msg)
-			copy(arena[0:slotSize], msg.Data)
+			copy(arena[0:SlotSize], msg.Data)
 			enc.Encode(DaemonMsg{Slot: 0})
 
-			// Handle lookup (populates local cache).
 			dec.Decode(&msg)
 			enc.Encode(DaemonMsg{Hit: true, Slot: 0})
 
-			// Send drain.
 			enc.Encode(DaemonMsg{Op: OpDrain})
-
-			// Client will process drain inline (set draining, clear cache, send drained).
-			// But we close the client before it can finish.
 		}()
 
 		page := makePage(0xCC)
 		client.PutPage("cd", 1, page)
 		client.GetPage("cd", 1)
-		time.Sleep(time.Millisecond) // let drain message arrive
+		time.Sleep(time.Millisecond)
 
-		// Client dies.
 		client.Close()
 
-		// Server should see the conn close (read error).
 		var msg ClientMsg
 		err := dec.Decode(&msg)
-		// Either we get OpDrained (client finished drain before close)
-		// or an error (client died mid-drain). Both are acceptable.
 		if err != nil {
-			return // client died before sending drained — expected
+			return
 		}
 		if msg.Op != OpDrained {
 			t.Fatalf("expected OpDrained or error, got op=%d", msg.Op)
@@ -582,14 +556,11 @@ func TestClient_ClientDiesDuringDrain(t *testing.T) {
 }
 
 func TestClient_DaemonDiesThenReconnect(t *testing.T) {
-	// After daemon dies, a new daemon starts. The client should be
-	// able to create a new Client and resume operations.
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 
-		// First daemon.
 		cc1, sc1 := net.Pipe()
-		client1 := newPageCacheForTest(newConnForTest(cc1, arena))
+		client1 := newPageCacheForTest(newConnForTest(cc1, arena, safepoint.New()))
 		srv1 := newMockServer(sc1, arena)
 		go srv1.serve()
 
@@ -600,15 +571,12 @@ func TestClient_DaemonDiesThenReconnect(t *testing.T) {
 			t.Fatal("first daemon read mismatch")
 		}
 
-		// Daemon dies.
 		sc1.Close()
 		client1.Close()
 
-		// Second daemon starts (same arena — simulates SQLite reload).
 		cc2, sc2 := net.Pipe()
-		client2 := newPageCacheForTest(newConnForTest(cc2, arena))
+		client2 := newPageCacheForTest(newConnForTest(cc2, arena, safepoint.New()))
 		srv2 := newMockServer(sc2, arena)
-		// Manually restore index (simulates loading from SQLite).
 		srv2.index["r:1"] = 0
 		go srv2.serve()
 
@@ -623,7 +591,6 @@ func TestClient_DaemonDiesThenReconnect(t *testing.T) {
 }
 
 func TestClient_MultipleClientsSomeDisconnect(t *testing.T) {
-	// Some clients disconnect while others continue operating.
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		const nClients = 4
@@ -637,25 +604,22 @@ func TestClient_MultipleClientsSomeDisconnect(t *testing.T) {
 		pairs := make([]pair, nClients)
 		for i := range nClients {
 			cc, sc := net.Pipe()
-			cl := newPageCacheForTest(newConnForTest(cc, arena))
+			cl := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 			sv := newMockServer(sc, arena)
 			go sv.serve()
 			pairs[i] = pair{cl, cc, sc, sv}
 		}
 
 		page := makePage(0xFF)
-		// All clients populate.
 		for _, p := range pairs {
 			p.client.PutPage("mc", 1, page)
 		}
 
-		// Kill clients 0 and 2.
 		pairs[0].client.Close()
 		pairs[0].sc.Close()
 		pairs[2].client.Close()
 		pairs[2].sc.Close()
 
-		// Surviving clients should still work.
 		for _, i := range []int{1, 3} {
 			got := pairs[i].client.GetPage("mc", 1)
 			if !bytes.Equal(got, page) {
@@ -663,7 +627,6 @@ func TestClient_MultipleClientsSomeDisconnect(t *testing.T) {
 			}
 		}
 
-		// Cleanup survivors.
 		for _, i := range []int{1, 3} {
 			pairs[i].client.Close()
 			pairs[i].sc.Close()
@@ -675,7 +638,7 @@ func TestClient_Dead(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		arena := makeArena(64)
 		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
+		client := newPageCacheForTest(newConnForTest(cc, arena, safepoint.New()))
 		srv := newMockServer(sc, arena)
 		go srv.serve()
 
@@ -694,44 +657,25 @@ func TestClient_Dead(t *testing.T) {
 	})
 }
 
-func TestClient_DaemonDiesDuringDrainPinHeld(t *testing.T) {
-	// Client holds a pin, daemon sends drain, then daemon dies
-	// before the client can complete the drain protocol.
-	synctest.Test(t, func(t *testing.T) {
-		arena := makeArena(64)
-		cc, sc := net.Pipe()
-		client := newPageCacheForTest(newConnForTest(cc, arena))
-		defer client.Close()
-		srv := newDrainServer(sc, arena)
-		go srv.serve()
+func TestClient_DaemonDiesDuringDrainReadHeld(t *testing.T) {
+	client, srv, sp := setupDrainNoSynctest(t, 64)
 
-		page := makePage(0x77)
-		client.PutPage("dp", 1, page)
+	page := makePage(0x77)
+	client.PutPage("dp", 1, page)
 
-		// Hold a pin.
-		data, unpin := client.GetPageRef("dp", 1)
-		if data == nil {
-			t.Fatal("expected ref hit")
-		}
+	// Hold the safepoint.
+	g := sp.Enter()
 
-		// Daemon sends drain — client will try to wait for pin release.
-		srv.sendDrain()
-		time.Sleep(time.Microsecond) // let drain message be read
+	srv.sendDrain()
+	time.Sleep(10 * time.Millisecond)
 
-		// Daemon crashes while client is waiting for pin release.
-		sc.Close()
+	// Daemon crashes while waiting for safepoint.
+	srv.conn.Close()
 
-		// Release the pin — handleDrain is trying to spin-wait on this,
-		// but the conn is dead so sendMsg(drained) will fail.
-		unpin()
-		time.Sleep(time.Millisecond)
+	g.Exit()
+	time.Sleep(10 * time.Millisecond)
 
-		// readLoop exited → draining cleared, conn dead.
-		if client.client.draining.Load() {
-			t.Fatal("draining should be cleared after daemon death")
-		}
-		if !client.Dead() {
-			t.Fatal("client should report dead")
-		}
-	})
+	if !client.Dead() {
+		t.Fatal("client should report dead")
+	}
 }

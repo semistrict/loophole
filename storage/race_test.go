@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,7 +26,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "seq-reuse", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "seq-reuse", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -126,7 +127,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "snap-atomic", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "snap-atomic", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -157,15 +158,14 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 			// Try to read from frozen memtables in the snapshot.
 			// With the bug, a frozen memtable may have been cleaned up
 			// between the two lock acquisitions.
-			for i := len(snap.frozen) - 1; i >= 0; i-- {
-				if entry, ok := snap.frozen[i].get(0); ok {
-					data, err := snap.frozen[i].readData(entry)
+			if snap.frozen != nil {
+				if entry, ok := snap.frozen.get(0); ok {
+					data, err := snap.frozen.readData(entry)
 					if err != nil {
-						// errmemtableCleanedUp means we hit the race.
-						t.Logf("readData from frozen[%d] failed: %v", i, err)
-						continue
+						t.Logf("readData from frozen failed: %v", err)
+					} else {
+						assert.Len(t, data, PageSize)
 					}
-					assert.Len(t, data, PageSize)
 				}
 			}
 		}
@@ -187,7 +187,7 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "flush-race", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "flush-race", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -247,7 +247,7 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "cleanup-read", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "cleanup-read", config: cfg, safepoint: safepoint.New(), workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 

@@ -120,16 +120,14 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 		// for flush/write race conditions.
 		flushInterval = 500 * time.Millisecond
 	}
-	m := NewManager(
-		sim.store.Store(),
-		cacheDir,
-		Config{
+	m := &Manager{
+		ObjectStore: sim.store.Store(),
+		config: Config{
 			FlushThreshold: sim.config.FlushThreshold,
 			FlushInterval:  flushInterval,
 		},
-		fs,
-		nil,
-	)
+		fs: fs,
+	}
 	m.idGen = sim.nextLayerID
 	return m
 }

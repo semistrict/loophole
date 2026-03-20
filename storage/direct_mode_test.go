@@ -39,7 +39,7 @@ func TestDirectFlush(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-direct-flush", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-direct-flush", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -87,7 +87,7 @@ func TestDirectFlushMultipleFlushes(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-direct-multi", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-direct-multi", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -119,7 +119,7 @@ func TestDirectFlushL2Promotion(t *testing.T) {
 		MaxMemtableSlots: L1PromoteThreshold,
 	}
 
-	ly, err := openLayer(ctx, store, "test-direct-promote", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-direct-promote", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 

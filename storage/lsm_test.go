@@ -18,6 +18,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/objstore"
+	"github.com/stretchr/testify/require"
 )
 
 func promCounterValue(c prometheus.Counter) float64 {
@@ -177,14 +178,14 @@ func TestWriteFlushRead(t *testing.T) {
 
 func TestWriteFlushReopenRead(t *testing.T) {
 	store := objstore.NewMemStore()
-	cacheDir := t.TempDir()
+
 	config := Config{
 		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := NewManager(store, cacheDir, config, nil, nil)
+	m1 := &Manager{ObjectStore: store, config: config}
 	t.Cleanup(func() { m1.Close() })
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
@@ -617,6 +618,81 @@ func TestClone(t *testing.T) {
 	}
 	if buf[0] != 0xDD {
 		t.Fatalf("clone: expected 0xDD, got 0x%02x", buf[0])
+	}
+}
+
+func TestCloneFromCheckpoint(t *testing.T) {
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, testConfig)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "parent", Size: 1024 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write two pages and flush so they land in L1/L2.
+	page0 := make([]byte, PageSize)
+	page0[0] = 0xAA
+	if err := v.Write(page0, 0); err != nil {
+		t.Fatal(err)
+	}
+	page1 := make([]byte, PageSize)
+	page1[0] = 0xBB
+	if err := v.Write(page1, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Checkpoint, then write more to the parent (clone should not see this).
+	cpID, err := v.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page0[0] = 0xFF
+	if err := v.Write(page0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Clone from checkpoint on a separate manager.
+	if err := m.CloneFromCheckpoint(ctx, "parent", cpID, "clone1"); err != nil {
+		t.Fatal(err)
+	}
+	m2 := &Manager{ObjectStore: store, config: testConfig}
+	t.Cleanup(func() { _ = m2.Close() })
+	clone, err := m2.OpenVolume("clone1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Clone sees the checkpoint data, not the post-checkpoint write.
+	buf := make([]byte, PageSize)
+	if _, err := clone.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xAA {
+		t.Fatalf("clone page 0: expected 0xAA, got 0x%02x", buf[0])
+	}
+	if _, err := clone.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xBB {
+		t.Fatalf("clone page 1: expected 0xBB, got 0x%02x", buf[0])
+	}
+
+	// Clone is independently writable.
+	page0[0] = 0xCC
+	if err := clone.Write(page0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := clone.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xCC {
+		t.Fatalf("clone after write: expected 0xCC, got 0x%02x", buf[0])
 	}
 }
 
@@ -1989,14 +2065,14 @@ func TestMemLayerOverwriteReusesSlot(t *testing.T) {
 // write data, punch holes over some of it, flush, reopen from S3, read back.
 func TestPunchHoleFlushReopenRead(t *testing.T) {
 	store := objstore.NewMemStore()
-	cacheDir := t.TempDir()
+
 	config := Config{
 		FlushThreshold: 16 * PageSize,
 	}
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := NewManager(store, cacheDir, config, nil, nil)
+	m1 := &Manager{ObjectStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -2064,13 +2140,13 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 // with interleaved flushes, then reopens and verifies data.
 func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	store := objstore.NewMemStore()
-	cacheDir := t.TempDir()
+
 	config := Config{
 		FlushThreshold: 8 * PageSize, // small threshold to force frequent flushes
 	}
 	ctx := t.Context()
 
-	m1 := NewManager(store, cacheDir, config, nil, nil)
+	m1 := &Manager{ObjectStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
@@ -2158,7 +2234,6 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 // backpressure when the memtable is full.
 func TestMemLayerFullBackpressure(t *testing.T) {
 	store := objstore.NewMemStore()
-	cacheDir := t.TempDir()
 
 	// Use a small memtable slot cap so the test fills it quickly and
 	// exercises the backpressure path without writing 65K+ pages.
@@ -2169,7 +2244,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	m := NewManager(store, cacheDir, config, nil, nil)
+	m := &Manager{ObjectStore: store, config: config}
 	defer m.Close()
 
 	const numPages = testSlotCap + 100
@@ -2284,14 +2359,14 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 	wg.Wait()
 }
 
-// TestAsyncFlushWriteDoesNotBlockOnS3 verifies that writes succeed even when
-// S3 is failing, as long as frozen layer capacity is not exhausted. The
-// background flush loop handles uploads asynchronously.
-func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
+// TestBackpressureBlocksWriteOnS3Failure verifies that writes return an
+// error when S3 is down and the frozen memtable cannot be flushed. This
+// prevents unbounded memory growth — at most one active + one frozen memtable.
+func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize, // freeze after every page
-		FlushInterval:  50 * time.Millisecond,
+		FlushInterval:  -1,       // no background flush
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2301,37 +2376,29 @@ func TestAsyncFlushWriteDoesNotBlockOnS3(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// First write succeeds (goes into memtable).
+	page := make([]byte, PageSize)
+	page[0] = 1
+	require.NoError(t, v.Write(page, 0))
+
 	// Make S3 uploads fail.
 	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
-	// Write several pages — should all succeed because async flush doesn't
-	// block the write path, and we have room for frozen layers.
-	page := make([]byte, PageSize)
-	for i := range 5 {
-		page[0] = byte(i + 1)
-		err := v.Write(page, uint64(i)*PageSize)
-		if err != nil {
-			t.Fatalf("write %d failed (should not block on S3): %v", i, err)
-		}
-	}
+	// Second write triggers freeze → flush fails → backpressure error.
+	page[0] = 2
+	err = v.Write(page, PageSize)
+	require.Error(t, err, "write should fail when S3 is down and frozen is full")
 
-	// Verify data is readable from frozen layers + memlayer.
+	// First page should still be readable.
 	buf := make([]byte, PageSize)
-	for i := range 5 {
-		if _, err := v.Read(ctx, buf, uint64(i)*PageSize); err != nil {
-			t.Fatalf("read page %d: %v", i, err)
-		}
-		if buf[0] != byte(i+1) {
-			t.Fatalf("page %d: expected %d, got %d", i, i+1, buf[0])
-		}
-	}
+	_, err = v.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, byte(1), buf[0])
 
-	// Clear fault — background flush loop should drain frozen layers.
+	// Clear fault and flush — data should be recoverable.
 	store.ClearAllFaults()
-	// Give the flush loop time to run.
-	time.Sleep(200 * time.Millisecond)
 
 	// Verify data survives after flush by closing and reopening.
 	if err := v.Flush(); err != nil {
@@ -2375,19 +2442,19 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		vol.layer.frozenMu.RLock()
-		n := len(vol.layer.frozenTables)
+		hasFrozen := vol.layer.frozen != nil
 		vol.layer.frozenMu.RUnlock()
-		if n == 0 {
+		if !hasFrozen {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
 	vol.layer.frozenMu.RLock()
-	n := len(vol.layer.frozenTables)
+	hasFrozen := vol.layer.frozen != nil
 	vol.layer.frozenMu.RUnlock()
-	if n != 0 {
-		t.Fatalf("expected 0 frozen layers after notify, got %d", n)
+	if hasFrozen {
+		t.Fatalf("expected no frozen memtable after notify")
 	}
 
 	vol.layer.mu.RLock()
@@ -2688,7 +2755,7 @@ func TestRefreshFollowMode(t *testing.T) {
 
 	// Reader opens the same layer directly (simulating read-only follower).
 	writerVol := wv
-	readerLayer, err := openLayer(ctx, store, writerVol.layer.id, cfg, nil, t.TempDir())
+	readerLayer, err := openLayer(ctx, layerParams{store: store, id: writerVol.layer.id, config: cfg, workDir: t.TempDir()})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -21,8 +21,7 @@ func randomPage(rng *rand.Rand, buf []byte) {
 
 func newBenchManager(b *testing.B, store *objstore.MemStore, config Config) *Manager {
 	b.Helper()
-	cacheDir := b.TempDir()
-	m := NewManager(store, cacheDir, config, NewSimLocalFS(), nil)
+	m := &Manager{ObjectStore: store, config: config, fs: NewSimLocalFS()}
 	b.Cleanup(func() {
 		_ = m.Close()
 	})

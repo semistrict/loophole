@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,8 +54,7 @@ func TestReadPagesMatchesRead(t *testing.T) {
 			require.Equal(t, tc.length, n)
 
 			// Read via zero-copy path.
-			var slices [][]byte
-			cleanup, err := v.ReadPages(ctx, tc.offset, tc.length, &slices)
+			slices, cleanup, err := v.ReadPages(ctx, tc.offset, tc.length)
 			require.NoError(t, err)
 			defer cleanup()
 
@@ -91,21 +91,20 @@ func TestReadPagesMatchesReadFlushed(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, volSize, n)
 
-	var slices [][]byte
-	cleanup, err := v.ReadPages(ctx, 0, volSize, &slices)
+	slices, cleanup, err := v.ReadPages(ctx, 0, volSize)
 	require.NoError(t, err)
-	defer cleanup()
 
 	var got []byte
 	for _, s := range slices {
 		got = append(got, s...)
 	}
+	cleanup()
 	assert.Equal(t, buf, got)
 }
 
-// TestReadPagesCleanupReleasesLock verifies that the cleanup function releases
-// the volume RLock, allowing subsequent writes to proceed.
-func TestReadPagesCleanupReleasesLock(t *testing.T) {
+// TestReadPagesGuardExitReleasesLock verifies that Guard.Exit allows
+// subsequent writes to proceed.
+func TestReadPagesGuardExitReleasesLock(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
 	m := newTestManager(t, store, testConfig)
@@ -116,11 +115,10 @@ func TestReadPagesCleanupReleasesLock(t *testing.T) {
 	data := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, v.Write(data, 0))
 
-	var slices [][]byte
-	cleanup, err := v.ReadPages(ctx, 0, PageSize, &slices)
+	_, cleanup, err := v.ReadPages(ctx, 0, PageSize)
 	require.NoError(t, err)
 
-	// Cleanup releases the lock; a write should succeed after.
+	// Cleanup releases the safepoint + volume lock; a write should succeed after.
 	cleanup()
 
 	newData := bytes.Repeat([]byte{0xBB}, PageSize)
@@ -134,9 +132,9 @@ func TestReadPagesCleanupReleasesLock(t *testing.T) {
 	assert.Equal(t, newData, buf)
 }
 
-// TestReadDataRefPinBlocksCleanup verifies that readDataRef's pin prevents
-// memtable cleanup (munmap) until unpin is called.
-func TestReadDataRefPinBlocksCleanup(t *testing.T) {
+// TestSafepointBlocksCleanup verifies that holding the safepoint
+// prevents memtable cleanup until the reader releases.
+func TestSafepointBlocksCleanup(t *testing.T) {
 	memDir := filepath.Join(t.TempDir(), "mem")
 	require.NoError(t, os.MkdirAll(memDir, 0o755))
 	mt, err := newMemtable(memDir, 4, 1)
@@ -149,31 +147,33 @@ func TestReadDataRefPinBlocksCleanup(t *testing.T) {
 	slot, ok := mt.get(pageIdx)
 	require.True(t, ok)
 
-	// Get a zero-copy ref — holds a pin.
-	ref, unpin, err := mt.readDataRef(slot)
+	// Get a zero-copy ref while holding the safepoint.
+	sp := safepoint.New()
+	g := sp.Enter()
+	ref, err := mt.readDataRef(g, slot)
 	require.NoError(t, err)
 	require.Equal(t, data, ref)
 
-	// Start cleanup in background — should block on pin.
+	// Start cleanup in background — should block on sp.Do.
 	cleanupDone := make(chan struct{})
 	go func() {
-		mt.cleanup()
+		sp.Do(func() { mt.cleanup() })
 		close(cleanupDone)
 	}()
 
-	// Give cleanup a moment to spin on the pin.
+	// Give cleanup a moment to block on the exclusive lock.
 	// It should NOT complete yet.
 	select {
 	case <-cleanupDone:
-		t.Fatal("cleanup completed while pin was held")
+		t.Fatal("cleanup completed while safepoint was held")
 	default:
 	}
 
 	// Data should still be readable through the ref.
 	assert.Equal(t, data, ref)
 
-	// Release the pin — cleanup should now complete.
-	unpin()
+	// Release the safepoint — cleanup should now complete.
+	g.Exit()
 	<-cleanupDone
 }
 
@@ -205,9 +205,8 @@ func TestReadPagesPinSurvivesEviction(t *testing.T) {
 	_, err = v.Read(ctx, warmBuf, 0)
 	require.NoError(t, err)
 
-	// Get zero-copy refs — pins held.
-	var slices [][]byte
-	cleanup, err := v.ReadPages(ctx, 0, volSize, &slices)
+	// Get zero-copy refs.
+	slices, cleanup, err := v.ReadPages(ctx, 0, volSize)
 	require.NoError(t, err)
 
 	// Snapshot expected data before any eviction.
@@ -219,7 +218,6 @@ func TestReadPagesPinSurvivesEviction(t *testing.T) {
 	// Verify data matches what we wrote.
 	assert.Equal(t, warmBuf, expected)
 
-	// Release pins.
 	cleanup()
 }
 
@@ -258,8 +256,7 @@ func TestReadPagesConcurrent(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			var slices [][]byte
-			cleanup, err := v.ReadPages(ctx, 0, volSize, &slices)
+			slices, cleanup, err := v.ReadPages(ctx, 0, volSize)
 			assert.NoError(t, err)
 			var got []byte
 			for _, s := range slices {

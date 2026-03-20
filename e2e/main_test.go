@@ -99,6 +99,21 @@ log_level = %q
 		log.Fatal(err)
 	}
 
+	// Build loophole-cached so page cache tests can spawn it.
+	if os.Getenv("LOOPHOLE_CACHED_BIN") == "" {
+		repoRoot := filepath.Clean(filepath.Join(cwd, ".."))
+		binName := "loophole-cached-" + runtime.GOOS + "-" + runtime.GOARCH
+		binPath := filepath.Join(repoRoot, "bin", binName)
+		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/loophole-cached")
+		cmd.Dir = repoRoot
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			log.Fatalf("build loophole-cached: %v", err)
+		}
+		os.Setenv("LOOPHOLE_CACHED_BIN", binPath)
+	}
+
 	code := m.Run()
 	os.Exit(code)
 }

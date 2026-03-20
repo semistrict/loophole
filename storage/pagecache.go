@@ -1,6 +1,10 @@
 package storage
 
-import "io"
+import (
+	"io"
+
+	"github.com/semistrict/loophole/internal/safepoint"
+)
 
 // PageCache is the interface used by the storage layer to cache immutable
 // pages. The canonical implementation is cached.PageCache (backed by the
@@ -8,6 +12,6 @@ import "io"
 type PageCache interface {
 	io.Closer
 	GetPage(layerID string, pageIdx uint64) []byte
-	GetPageRef(layerID string, pageIdx uint64) ([]byte, func())
+	GetPageRef(g safepoint.Guard, layerID string, pageIdx uint64) []byte
 	PutPage(layerID string, pageIdx uint64, data []byte)
 }

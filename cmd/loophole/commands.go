@@ -779,7 +779,7 @@ func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	vm, err := storage.OpenManagerForProfile(ctx, inst, dir, nil)
+	vm, err := storage.OpenManagerForProfile(ctx, inst, dir)
 	if err != nil {
 		return nil, nil, err
 	}

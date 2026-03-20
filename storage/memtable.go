@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
 
+	"github.com/semistrict/loophole/internal/safepoint"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,7 +28,6 @@ type sortedEntry struct {
 // index maps page addresses to slots.
 type memtable struct {
 	mu       sync.RWMutex
-	pins     atomic.Int32
 	file     *os.File
 	path     string
 	mmap     []byte
@@ -39,7 +38,7 @@ type memtable struct {
 	endSeq   uint64
 	size     atomic.Int64
 	frozen   bool
-	closed   atomic.Bool
+	closed   bool // protected by mu
 }
 
 var errmemtableCleanedUp = fmt.Errorf("memtable cleaned up")
@@ -126,10 +125,8 @@ func (mt *memtable) get(pageIdx PageIdx) (int, bool) {
 func (mt *memtable) readData(slot int) ([]byte, error) {
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
-	mt.pins.Add(1)
-	defer mt.pins.Add(-1)
 
-	if mt.closed.Load() {
+	if mt.closed {
 		return nil, errmemtableCleanedUp
 	}
 
@@ -140,20 +137,20 @@ func (mt *memtable) readData(slot int) ([]byte, error) {
 }
 
 // readDataRef returns a slice pointing directly into the mmap without copying.
-// The caller MUST call the returned unpin function when done with the slice.
-// The pin prevents cleanup() from unmapping the memory while the slice is in use.
-func (mt *memtable) readDataRef(slot int) ([]byte, func(), error) {
+// The caller must hold a safepoint Guard for the duration of the returned
+// slice's use. The Guard prevents cleanup() from unmapping the memory.
+func (mt *memtable) readDataRef(g safepoint.Guard, slot int) ([]byte, error) {
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
-	mt.pins.Add(1)
 
-	if mt.closed.Load() {
-		mt.pins.Add(-1)
-		return nil, nil, errmemtableCleanedUp
+	if mt.closed {
+		return nil, errmemtableCleanedUp
 	}
 
 	off := slot * PageSize
-	return mt.mmap[off : off+PageSize], func() { mt.pins.Add(-1) }, nil
+	ref := mt.mmap[off : off+PageSize]
+	g.Register(ref)
+	return ref, nil
 }
 
 func (mt *memtable) freeze(endSeq uint64) {
@@ -177,19 +174,17 @@ func (mt *memtable) entries() []sortedEntry {
 	return out
 }
 
+// cleanup unmaps and removes the backing file. Waits for any in-flight
+// readData calls to complete before unmapping.
 func (mt *memtable) cleanup() {
-	mt.closed.Store(true)
+	mt.mu.Lock()
+	mt.closed = true
+	mmap := mt.mmap
+	mt.mmap = nil
+	mt.mu.Unlock()
 
-	for i := 0; mt.pins.Load() > 0; i++ {
-		runtime.Gosched()
-		if i > 1_000_000 {
-			panic(fmt.Sprintf("memtable cleanup: %d pins still held after spin limit", mt.pins.Load()))
-		}
-	}
-
-	if mt.mmap != nil {
-		_ = unix.Munmap(mt.mmap)
-		mt.mmap = nil
+	if mmap != nil {
+		_ = unix.Munmap(mmap)
 	}
 	if mt.file != nil {
 		_ = mt.file.Close()

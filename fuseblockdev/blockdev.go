@@ -379,8 +379,7 @@ func (fs *blockDevFS) Read(_ <-chan struct{}, in *fuse.ReadIn, buf []byte) (fuse
 		size = int(vol.Size() - off)
 	}
 
-	slices := make([][]byte, 0, (size+storage.PageSize-1)/storage.PageSize)
-	cleanup, err := vol.ReadPages(context.Background(), off, size, &slices)
+	slices, cleanup, err := vol.ReadPages(context.Background(), off, size)
 	if err != nil {
 		slog.Warn("blockdev: read error", "off", off, "len", size, "error", err)
 		done(fuse.Status(syscall.EIO))

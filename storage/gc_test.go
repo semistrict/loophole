@@ -102,7 +102,7 @@ func TestGarbageCollectWithCheckpoints(t *testing.T) {
 	require.NoError(t, v.Clone("cp-clone"))
 
 	// Close and delete the clone but keep the original volume.
-	m2 := NewManager(store, m.cacheDir, m.config, m.fs, m.diskCache)
+	m2 := &Manager{ObjectStore: store, CacheDir: m.CacheDir, config: m.config, fs: m.fs}
 	t.Cleanup(func() { _ = m2.Close() })
 	require.NoError(t, m2.DeleteVolume(ctx, "cp-clone"))
 

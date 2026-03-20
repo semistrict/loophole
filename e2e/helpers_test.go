@@ -566,7 +566,7 @@ func removeTracked(values []string, value string) []string {
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
-	vm, err := storage.OpenManagerForProfile(ctx, testInst, testDir, nil)
+	vm, err := storage.OpenManagerForProfile(ctx, testInst, testDir)
 	if err != nil {
 		return nil, nil, err
 	}

@@ -13,16 +13,16 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"time"
 
+	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
 	"golang.org/x/sys/unix"
 )
 
-// slotSize is the arena slot size — must match the daemon's page size.
+// SlotSize is the arena slot size — must match the daemon's page size.
 // Defined here (not imported from storage) to avoid a circular dependency.
-const slotSize = 4096
+const SlotSize = 4096
 
 // conn is a single connection to the page cache daemon. It provides
 // zero-copy reads via a shared read-only mmap of the arena.
@@ -40,8 +40,7 @@ type conn struct {
 	localCache map[localKey]int
 	localMu    sync.Mutex
 
-	draining atomic.Bool
-	pins     atomic.Int32
+	safepoint *safepoint.Safepoint
 
 	respCh   chan DaemonMsg
 	readDone chan struct{}
@@ -56,7 +55,7 @@ type localKey struct {
 
 // dial connects to the cache daemon at dir/cached.sock and mmaps
 // the arena file read-only.
-func dial(dir string) (*conn, error) {
+func dial(dir string, sp *safepoint.Safepoint) (*conn, error) {
 	sockPath := SocketPath(dir)
 	nc, err := net.Dial("unix", sockPath)
 	if err != nil {
@@ -98,8 +97,9 @@ func dial(dir string) (*conn, error) {
 		cancel:     cancel,
 		arenaFile:  arenaFile,
 		arena:      arena,
-		arenaSlots: int(arenaSize / slotSize),
+		arenaSlots: int(arenaSize / SlotSize),
 		localCache: make(map[localKey]int),
+		safepoint:  sp,
 		respCh:     make(chan DaemonMsg, 1),
 		readDone:   make(chan struct{}),
 	}
@@ -110,8 +110,7 @@ func dial(dir string) (*conn, error) {
 
 func (c *conn) readLoop(ctx context.Context) {
 	defer close(c.readDone)
-	defer close(c.respCh)         // unblock doRequest on conn death
-	defer c.draining.Store(false) // unstick drain state on conn death
+	defer close(c.respCh) // unblock doRequest on conn death
 	decoder := json.NewDecoder(c.nc)
 	for {
 		var resp DaemonMsg
@@ -134,21 +133,16 @@ func (c *conn) readLoop(ctx context.Context) {
 }
 
 func (c *conn) handleDrain() {
-	c.draining.Store(true)
-	// Wait for all pins to be released (~1µs per pin).
-	for c.pins.Load() > 0 {
-		time.Sleep(time.Microsecond)
-	}
-	// Clear local cache — all prior slot numbers are invalid after eviction.
+	c.safepoint.Lock() // blocks until all readers exit
 	c.localMu.Lock()
 	clear(c.localCache)
 	c.localMu.Unlock()
-	// Notify daemon.
 	util.SafeRun(func() error { return c.sendMsg(ClientMsg{Op: OpDrained}) }, "send drained")
+	// safepoint stays locked until handleResume
 }
 
 func (c *conn) handleResume() {
-	c.draining.Store(false)
+	c.safepoint.Unlock()
 }
 
 func (c *conn) sendMsg(msg any) error {
@@ -182,48 +176,31 @@ func (c *conn) getPage(layerID string, pageIdx uint64) []byte {
 	}
 	key := localKey{layerID, pageIdx}
 
-	// Fast path: local cache.
 	c.localMu.Lock()
 	slot, ok := c.localCache[key]
 	c.localMu.Unlock()
 
 	if ok {
-		c.pins.Add(1)
-		if c.draining.Load() {
-			c.pins.Add(-1)
-			metrics.CacheDrainSkips.Inc()
-			return nil
-		}
+		g := c.safepoint.Enter()
 		metrics.CacheLocalHits.Inc()
-		buf := make([]byte, slotSize)
-		off := slot * slotSize
-		copy(buf, c.arena[off:off+slotSize])
-		c.pins.Add(-1)
+		buf := make([]byte, SlotSize)
+		off := slot * SlotSize
+		copy(buf, c.arena[off:off+SlotSize])
+		g.Exit()
 		return buf
 	}
 
-	if c.draining.Load() {
-		metrics.CacheDrainSkips.Inc()
-		return nil
-	}
-
-	// Slow path: IPC to daemon.
 	metrics.CacheIPCLookups.Inc()
 	resp, err := c.doRequest(ClientMsg{Op: OpLookup, LayerID: layerID, PageIdx: pageIdx})
 	if err != nil || !resp.Hit {
 		return nil
 	}
 
-	c.pins.Add(1)
-	if c.draining.Load() {
-		c.pins.Add(-1)
-		metrics.CacheDrainSkips.Inc()
-		return nil
-	}
-	buf := make([]byte, slotSize)
-	off := resp.Slot * slotSize
-	copy(buf, c.arena[off:off+slotSize])
-	c.pins.Add(-1)
+	g := c.safepoint.Enter()
+	buf := make([]byte, SlotSize)
+	off := resp.Slot * SlotSize
+	copy(buf, c.arena[off:off+SlotSize])
+	g.Exit()
 
 	c.localMu.Lock()
 	c.localCache[key] = resp.Slot
@@ -232,9 +209,11 @@ func (c *conn) getPage(layerID string, pageIdx uint64) []byte {
 	return buf
 }
 
-func (c *conn) getPageRef(layerID string, pageIdx uint64) ([]byte, func()) {
+// getPageRef returns a zero-copy slice into the arena. The caller must
+// already hold the safepoint via the provided Guard.
+func (c *conn) getPageRef(g safepoint.Guard, layerID string, pageIdx uint64) []byte {
 	if c.closed.Load() {
-		return nil, nil
+		return nil
 	}
 	key := localKey{layerID, pageIdx}
 
@@ -243,44 +222,31 @@ func (c *conn) getPageRef(layerID string, pageIdx uint64) ([]byte, func()) {
 	c.localMu.Unlock()
 
 	if ok {
-		c.pins.Add(1)
-		if c.draining.Load() {
-			c.pins.Add(-1)
-			metrics.CacheDrainSkips.Inc()
-			return nil, nil
-		}
 		metrics.CacheLocalHits.Inc()
-		off := slot * slotSize
-		return c.arena[off : off+slotSize], func() { c.pins.Add(-1) }
-	}
-
-	if c.draining.Load() {
-		metrics.CacheDrainSkips.Inc()
-		return nil, nil
+		off := slot * SlotSize
+		ref := c.arena[off : off+SlotSize]
+		g.Register(ref)
+		return ref
 	}
 
 	metrics.CacheIPCLookups.Inc()
 	resp, err := c.doRequest(ClientMsg{Op: OpLookup, LayerID: layerID, PageIdx: pageIdx})
 	if err != nil || !resp.Hit {
-		return nil, nil
+		return nil
 	}
-	slot = resp.Slot
+
 	c.localMu.Lock()
-	c.localCache[key] = slot
+	c.localCache[localKey{layerID, pageIdx}] = resp.Slot
 	c.localMu.Unlock()
 
-	c.pins.Add(1)
-	if c.draining.Load() {
-		c.pins.Add(-1)
-		metrics.CacheDrainSkips.Inc()
-		return nil, nil
-	}
-	off := slot * slotSize
-	return c.arena[off : off+slotSize], func() { c.pins.Add(-1) }
+	off := resp.Slot * SlotSize
+	ref := c.arena[off : off+SlotSize]
+	g.Register(ref)
+	return ref
 }
 
 func (c *conn) putPage(layerID string, pageIdx uint64, data []byte) {
-	if c.closed.Load() || c.draining.Load() {
+	if c.closed.Load() {
 		return
 	}
 	resp, err := c.doRequest(ClientMsg{Op: OpPopulate, LayerID: layerID, PageIdx: pageIdx, Data: data})
@@ -310,7 +276,6 @@ func (c *conn) count() (int, error) {
 	return resp.Count, nil
 }
 
-// dead reports whether the connection to the daemon is dead.
 func (c *conn) dead() bool {
 	select {
 	case <-c.readDone:
@@ -323,8 +288,8 @@ func (c *conn) dead() bool {
 func (c *conn) close() error {
 	c.closed.Store(true)
 	c.cancel()
-	_ = c.nc.Close() // unblocks readLoop
-	<-c.readDone     // wait for readLoop to finish
+	_ = c.nc.Close()
+	<-c.readDone
 
 	var errs []error
 	if c.arena != nil {
@@ -341,31 +306,26 @@ func (c *conn) close() error {
 
 // PageCache connects to the page cache daemon (loophole-cached) and
 // provides zero-copy page reads via a shared mmap arena.
-//
-// If the daemon dies, the PageCache detects the dead connection and
-// automatically respawns the daemon and reconnects.
 type PageCache struct {
-	dir    string
-	mu     sync.Mutex
-	client *conn
-	closed bool
+	dir       string
+	safepoint *safepoint.Safepoint
+	mu        sync.Mutex
+	client    *conn
+	closed    bool
 }
 
 // NewPageCache connects to the page cache daemon for dir.
-// If no daemon is running, one is spawned as a detached subprocess.
-func NewPageCache(dir string) (*PageCache, error) {
+func NewPageCache(dir string, sp *safepoint.Safepoint) (*PageCache, error) {
 	if err := EnsureDaemon(dir); err != nil {
 		return nil, err
 	}
-	client, err := dial(dir)
+	client, err := dial(dir, sp)
 	if err != nil {
 		return nil, err
 	}
-	return &PageCache{dir: dir, client: client}, nil
+	return &PageCache{dir: dir, safepoint: sp, client: client}, nil
 }
 
-// getConn returns a live connection, reconnecting if the previous one died.
-// Returns nil if reconnection fails (operations degrade gracefully).
 func (c *PageCache) getConn() *conn {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -378,18 +338,16 @@ func (c *PageCache) getConn() *conn {
 		return c.client
 	}
 
-	// Clean up dead connection.
 	if c.client != nil {
 		util.SafeRun(func() error { return c.client.close() }, "close dead pagecache conn")
 		c.client = nil
 	}
 
-	// Spawn daemon if needed, reconnect.
 	if err := EnsureDaemon(c.dir); err != nil {
 		slog.Warn("pagecache: reconnect failed", "error", err)
 		return nil
 	}
-	client, err := dial(c.dir)
+	client, err := dial(c.dir, c.safepoint)
 	if err != nil {
 		slog.Warn("pagecache: reconnect failed", "error", err)
 		return nil
@@ -398,7 +356,6 @@ func (c *PageCache) getConn() *conn {
 	return c.client
 }
 
-// GetPage returns a copy of the cached page, or nil on miss.
 func (c *PageCache) GetPage(layerID string, pageIdx uint64) []byte {
 	cn := c.getConn()
 	if cn == nil {
@@ -408,17 +365,15 @@ func (c *PageCache) GetPage(layerID string, pageIdx uint64) []byte {
 }
 
 // GetPageRef returns a zero-copy reference into the mmap'd arena.
-// The caller MUST call the returned unpin function when done.
-// Returns (nil, nil) on miss.
-func (c *PageCache) GetPageRef(layerID string, pageIdx uint64) ([]byte, func()) {
+// The caller must hold a Guard from the safepoint.
+func (c *PageCache) GetPageRef(g safepoint.Guard, layerID string, pageIdx uint64) []byte {
 	cn := c.getConn()
 	if cn == nil {
-		return nil, nil
+		return nil
 	}
-	return cn.getPageRef(layerID, pageIdx)
+	return cn.getPageRef(g, layerID, pageIdx)
 }
 
-// PutPage inserts a page into the cache.
 func (c *PageCache) PutPage(layerID string, pageIdx uint64, data []byte) {
 	cn := c.getConn()
 	if cn == nil {
@@ -427,7 +382,6 @@ func (c *PageCache) PutPage(layerID string, pageIdx uint64, data []byte) {
 	cn.putPage(layerID, pageIdx, data)
 }
 
-// InvalidatePage invalidates a page in the cache.
 func (c *PageCache) InvalidatePage(layerID string, pageIdx uint64) {
 	cn := c.getConn()
 	if cn == nil {
@@ -436,7 +390,6 @@ func (c *PageCache) InvalidatePage(layerID string, pageIdx uint64) {
 	cn.invalidatePage(layerID, pageIdx)
 }
 
-// Count returns the number of pages in the cache.
 func (c *PageCache) Count() (int, error) {
 	cn := c.getConn()
 	if cn == nil {
@@ -445,14 +398,12 @@ func (c *PageCache) Count() (int, error) {
 	return cn.count()
 }
 
-// Dead reports whether the connection to the daemon is dead.
 func (c *PageCache) Dead() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.client == nil || c.client.dead()
 }
 
-// Close closes the client connection. Safe to call multiple times.
 func (c *PageCache) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -468,17 +419,16 @@ func (c *PageCache) Close() error {
 	return nil
 }
 
-// newConnForTest creates a conn from an already-connected net.Conn and
-// a shared arena byte slice. No files, mmap, or flock — safe for synctest.
-func newConnForTest(nc net.Conn, arena []byte) *conn {
+func newConnForTest(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *conn {
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &conn{
 		nc:         nc,
 		encoder:    json.NewEncoder(nc),
 		cancel:     cancel,
 		arena:      arena,
-		arenaSlots: len(arena) / slotSize,
+		arenaSlots: len(arena) / SlotSize,
 		localCache: make(map[localKey]int),
+		safepoint:  sp,
 		respCh:     make(chan DaemonMsg, 1),
 		readDone:   make(chan struct{}),
 	}
@@ -486,9 +436,8 @@ func newConnForTest(nc net.Conn, arena []byte) *conn {
 	return c
 }
 
-// newPageCacheForTest wraps a test conn in a PageCache.
 func newPageCacheForTest(c *conn) *PageCache {
-	return &PageCache{client: c}
+	return &PageCache{client: c, safepoint: c.safepoint}
 }
 
 func safeClose(c interface{ Close() error }) {

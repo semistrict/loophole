@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 )
@@ -36,8 +37,9 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 	return v
 }
 
-func (v *Volume) Name() string       { return v.name }
-func (v *Volume) Size() uint64       { return v.size }
+func (v *Volume) Name() string { return v.name }
+func (v *Volume) Size() uint64 { return v.size }
+
 func (v *Volume) VolumeType() string { return v.volType }
 
 func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
@@ -47,29 +49,20 @@ func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 }
 
 // ReadPages collects per-page zero-copy slices for the given byte range.
-// Each element of *slices is a sub-slice pointing directly into mmap'd memory.
-// The returned cleanup function MUST be called when the caller is done with all
-// slices (e.g. after writev completes). The caller must not modify the slices.
-func (v *Volume) ReadPages(ctx context.Context, offset uint64, length int, slices *[][]byte) (cleanup func(), err error) {
+// Each slice points directly into mmap'd memory. The returned cleanup
+// function MUST be called when the caller is done with all slices
+// (e.g. after writev completes). The caller must not modify the slices.
+func (v *Volume) ReadPages(ctx context.Context, offset uint64, length int) ([][]byte, func(), error) {
 	v.mu.RLock()
-	var unpins []func()
-	err = v.layer.ReadPages(ctx, offset, length, slices, &unpins)
+	g := v.manager.safepoint.Enter()
+	slices, err := v.layer.ReadPages(ctx, g, offset, length)
 	if err != nil {
-		// Release all pins acquired so far.
-		for _, f := range unpins {
-			if f != nil {
-				f()
-			}
-		}
+		g.Exit()
 		v.mu.RUnlock()
-		return nil, err
+		return nil, nil, err
 	}
-	return func() {
-		for _, f := range unpins {
-			if f != nil {
-				f()
-			}
-		}
+	return slices, func() {
+		g.Exit()
 		v.mu.RUnlock()
 	}, nil
 }
@@ -172,8 +165,14 @@ func (v *Volume) relayer() error {
 		return fmt.Errorf("update volume ref: %w", err)
 	}
 
-	cacheDir := v.manager.cacheDir + "/layers/" + newID
-	newLayer, err := initLayerFromIndex(v.manager.store, newID, v.manager.config, v.manager.diskCache, cacheDir, idx)
+	newLayer, err := initLayerFromIndex(layerParams{
+		store:     v.manager.store,
+		id:        newID,
+		config:    v.manager.config,
+		diskCache: v.manager.diskCache,
+		safepoint: v.manager.safepoint,
+		workDir:   filepath.Join(v.manager.workDir, "layers", newID),
+	}, idx)
 	if err != nil {
 		return fmt.Errorf("init new layer: %w", err)
 	}

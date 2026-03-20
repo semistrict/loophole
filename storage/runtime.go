@@ -3,10 +3,8 @@ package storage
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"strconv"
 
-	"github.com/semistrict/loophole/cached"
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/objstore"
 )
@@ -23,26 +21,29 @@ func ConfigFromEnv() Config {
 	return cfg
 }
 
-// CacheDir returns the profile-scoped storage cache directory.
-func CacheDir(dir env.Dir, inst env.ResolvedProfile) string {
+// ProfileCacheDir returns the profile-scoped cache directory.
+func ProfileCacheDir(dir env.Dir, inst env.ResolvedProfile) string {
 	return dir.Cache(inst.ProfileName)
 }
 
-// OpenPageCacheForProfile opens the profile-scoped shared page cache.
-func OpenPageCacheForProfile(dir env.Dir, inst env.ResolvedProfile) (*cached.PageCache, error) {
-	return cached.NewPageCache(filepath.Join(CacheDir(dir, inst), "diskcache"))
-}
-
 // NewManagerForProfile constructs a storage manager using the shared runtime defaults.
-func NewManagerForProfile(inst env.ResolvedProfile, dir env.Dir, store objstore.ObjectStore, diskCache PageCache) *Manager {
-	return NewManager(store, CacheDir(dir, inst), ConfigFromEnv(), nil, diskCache)
+func NewManagerForProfile(inst env.ResolvedProfile, dir env.Dir, store objstore.ObjectStore) *Manager {
+	return &Manager{
+		ObjectStore: store,
+		CacheDir:    ProfileCacheDir(dir, inst),
+		config:      ConfigFromEnv(),
+	}
 }
 
 // OpenManagerForProfile resolves the object store and constructs a storage manager.
-func OpenManagerForProfile(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, diskCache PageCache) (*Manager, error) {
+func OpenManagerForProfile(ctx context.Context, inst env.ResolvedProfile, dir env.Dir) (*Manager, error) {
 	store, err := objstore.OpenForProfile(ctx, inst)
 	if err != nil {
 		return nil, err
 	}
-	return NewManagerForProfile(inst, dir, store, diskCache), nil
+	m := NewManagerForProfile(inst, dir, store)
+	if err := m.init(); err != nil {
+		return nil, err
+	}
+	return m, nil
 }

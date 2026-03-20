@@ -38,8 +38,7 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	ly.mu.RUnlock()
 
 	ly.frozenMu.RLock()
-	frozen := make([]*memtable, len(ly.frozenTables))
-	copy(frozen, ly.frozenTables)
+	frozen := ly.frozen
 	ly.frozenMu.RUnlock()
 
 	// 1. Active memtable.
@@ -56,14 +55,14 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 		}
 	}
 
-	// 2. Frozen memtables (newest first).
-	for i := len(frozen) - 1; i >= 0; i-- {
-		if slot, ok := frozen[i].get(pageIdx); ok {
-			data, err := frozen[i].readData(slot)
+	// 2. Frozen memtable.
+	if frozen != nil {
+		if slot, ok := frozen.get(pageIdx); ok {
+			data, err := frozen.readData(slot)
 			if err != nil {
-				add("  [2] frozen[%d]: err=%v", i, err)
+				add("  [2] frozen: err=%v", err)
 			} else {
-				add("  [2] frozen[%d]: zero=%v hash=%s", i, isZero(data), hash(data))
+				add("  [2] frozen: zero=%v hash=%s", isZero(data), hash(data))
 			}
 		}
 	}

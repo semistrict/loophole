@@ -3,9 +3,6 @@ package storage
 import (
 	"log/slog"
 	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -30,31 +27,7 @@ func TestMain(m *testing.M) {
 		}
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
-
-	// Build loophole-cached so page cache tests can spawn it.
-	if os.Getenv("LOOPHOLE_CACHED_BIN") == "" {
-		repoRoot := filepath.Clean(filepath.Join(must(os.Getwd()), ".."))
-		binName := "loophole-cached-" + runtime.GOOS + "-" + runtime.GOARCH
-		binPath := filepath.Join(repoRoot, "bin", binName)
-		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/loophole-cached")
-		cmd.Dir = repoRoot
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			slog.Error("build loophole-cached for tests", "error", err)
-			os.Exit(1)
-		}
-		os.Setenv("LOOPHOLE_CACHED_BIN", binPath)
-	}
-
 	os.Exit(m.Run())
-}
-
-func must[T any](v T, err error) T {
-	if err != nil {
-		panic(err)
-	}
-	return v
 }
 
 func debugCountersEnabled() bool {
@@ -75,7 +48,12 @@ func cloneOpen(t testing.TB, v *Volume, name string) *Volume {
 		t.Fatalf("clone %q: %v", name, err)
 	}
 	m := v.manager
-	m2 := NewManager(m.store, m.cacheDir, m.config, m.fs, m.diskCache)
+	m2 := &Manager{
+		ObjectStore: m.ObjectStore,
+		CacheDir:    m.CacheDir,
+		config:      m.config,
+		fs:          m.fs,
+	}
 	t.Cleanup(func() { _ = m2.Close() })
 	clone, err := m2.OpenVolume(name)
 	if err != nil {

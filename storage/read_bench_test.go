@@ -81,8 +81,7 @@ func BenchmarkFuseSeqRead1MiB(b *testing.B) {
 				b.ResetTimer()
 				for i := range b.N {
 					off := uint64(i*fuseMaxWrite) % uint64(maxOff)
-					slices := make([][]byte, 0, 256)
-					cleanup, err := v.ReadPages(ctx, off, fuseMaxWrite, &slices)
+					_, cleanup, err := v.ReadPages(ctx, off, fuseMaxWrite)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -128,8 +127,7 @@ func BenchmarkFuseRandRead4K(b *testing.B) {
 				b.ResetTimer()
 				for range b.N {
 					off := (rng.Uint64() % totalPages) * PageSize
-					slices := make([][]byte, 0, 1)
-					cleanup, err := v.ReadPages(ctx, off, PageSize, &slices)
+					_, cleanup, err := v.ReadPages(ctx, off, PageSize)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -238,8 +236,7 @@ func BenchmarkFuseMixed(b *testing.B) {
 					switch {
 					case r < 70:
 						off := (rng.Uint64() % totalPages) * PageSize
-						slices := make([][]byte, 0, 1)
-						cleanup, err := v.ReadPages(ctx, off, PageSize, &slices)
+						_, cleanup, err := v.ReadPages(ctx, off, PageSize)
 						if err != nil {
 							b.Fatal(err)
 						}
@@ -253,8 +250,7 @@ func BenchmarkFuseMixed(b *testing.B) {
 					default:
 						off := rng.Uint64() % maxOff128K
 						off = off &^ (PageSize - 1)
-						slices := make([][]byte, 0, 32)
-						cleanup, err := v.ReadPages(ctx, off, 128*1024, &slices)
+						_, cleanup, err := v.ReadPages(ctx, off, 128*1024)
 						if err != nil {
 							b.Fatal(err)
 						}

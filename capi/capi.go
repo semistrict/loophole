@@ -41,7 +41,6 @@ import (
 type handle struct {
 	vol       *storage.Volume
 	manager   *storage.Manager
-	diskCache storage.PageCache
 	srv       *volserver.Server
 	srvCancel context.CancelFunc
 }
@@ -103,16 +102,9 @@ func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C
 
 	ctx := context.Background()
 
-	diskCache, err := storage.OpenPageCacheForProfile(dir, inst)
-	if err != nil {
-		slog.Error("loophole_open: open page cache", "error", err)
-		return -3
-	}
-
-	manager, err := storage.OpenManagerForProfile(ctx, inst, dir, diskCache)
+	manager, err := storage.OpenManagerForProfile(ctx, inst, dir)
 	if err != nil {
 		slog.Error("loophole_open: open manager", "error", err)
-		util.SafeClose(diskCache, "close page cache after manager failure")
 		return -4
 	}
 
@@ -121,14 +113,12 @@ func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C
 	if err != nil {
 		slog.Error("loophole_open: open volume", "volume", goName, "error", err)
 		util.SafeClose(manager, "close manager after open volume failure")
-		util.SafeClose(diskCache, "close page cache after open volume failure")
 		return -5
 	}
 
 	if err := vol.AcquireRef(); err != nil {
 		slog.Error("loophole_open: acquire ref", "volume", goName, "error", err)
 		util.SafeClose(manager, "close manager after acquire ref failure")
-		util.SafeClose(diskCache, "close page cache after acquire ref failure")
 		return -6
 	}
 
@@ -153,7 +143,7 @@ func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C
 		slog.Info("loophole_open: volserver started", "volume", goName, "socket", socketPath)
 	}
 
-	h := &handle{vol: vol, manager: manager, diskCache: diskCache, srv: srv, srvCancel: srvCancel}
+	h := &handle{vol: vol, manager: manager, srv: srv, srvCancel: srvCancel}
 
 	aliveMu.Lock()
 	alive[uintptr(unsafe.Pointer(h))] = h
@@ -255,12 +245,6 @@ func loophole_close(id C.int64_t) C.int32_t {
 	if err := h.manager.Close(); err != nil {
 		slog.Error("loophole_close: close manager", "error", err)
 		ret = -3
-	}
-	if err := h.diskCache.Close(); err != nil {
-		slog.Error("loophole_close: close page cache", "error", err)
-		if ret == 0 {
-			ret = -4
-		}
 	}
 	return ret
 }

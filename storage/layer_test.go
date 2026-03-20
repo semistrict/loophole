@@ -24,8 +24,11 @@ func newTestManagerWithCache(t *testing.T, store objstore.ObjectStore, config Co
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
 	}
-	cacheDir := t.TempDir()
-	m := NewManager(store, cacheDir, config, nil, dc)
+	m := &Manager{
+		ObjectStore: store,
+		config:      config,
+		diskCache:   dc,
+	}
 	t.Cleanup(func() {
 		_ = m.Close()
 	})
@@ -41,7 +44,7 @@ func TestLayerReadWrite(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -72,7 +75,7 @@ func TestLayerFlushAndRead(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -101,7 +104,7 @@ func TestLayerPunchHole(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -133,7 +136,7 @@ func TestLayerFlushAndReadPages(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -171,7 +174,7 @@ func TestLayerSnapshot(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	parent, err := openLayer(ctx, store, "parent", cfg, nil, t.TempDir())
+	parent, err := openLayer(ctx, layerParams{store: store, id: "parent", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer parent.Close()
 
@@ -186,7 +189,7 @@ func TestLayerSnapshot(t *testing.T) {
 	require.NoError(t, parent.Snapshot("child"))
 
 	// Open child layer and verify it can read the data.
-	child, err := openLayer(ctx, store, "child", cfg, nil, t.TempDir())
+	child, err := openLayer(ctx, layerParams{store: store, id: "child", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer child.Close()
 
@@ -201,7 +204,7 @@ func TestLayerSnapshot(t *testing.T) {
 	require.NoError(t, child.Write(newPage, 0))
 
 	// Reopen parent to verify data persisted.
-	parent2, err := openLayer(ctx, store, "parent", cfg, nil, t.TempDir())
+	parent2, err := openLayer(ctx, layerParams{store: store, id: "parent", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer parent2.Close()
 
@@ -219,7 +222,7 @@ func TestLayerDirectL2Write(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -282,7 +285,7 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 
@@ -325,7 +328,7 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	ly, err := openLayer(ctx, store, "test-layer", cfg, nil, t.TempDir())
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg, workDir: t.TempDir()})
 	require.NoError(t, err)
 	defer ly.Close()
 

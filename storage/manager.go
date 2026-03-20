@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +16,9 @@ import (
 	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/internal/safepoint"
+	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/objstore"
 )
 
@@ -36,20 +41,30 @@ type volumeRef struct {
 
 // Manager manages a single volume backed by a storage layer.
 // Each process manages at most one open volume at a time.
+//
+// Set exported fields before calling any methods. Internal state is
+// lazily initialized on first use.
 type Manager struct {
-	store     objstore.ObjectStore
-	cacheDir  string
-	config    Config
-	diskCache PageCache
-	lease     *objstore.LeaseManager
-	fs        localFS
-	idGen     func() string
+	ObjectStore objstore.ObjectStore
+	CacheDir    string // page cache daemon directory; empty = no persistent cache
+	config      Config
+	fs          localFS
 
-	volRefs objstore.ObjectStore // store.At("volumes")
+	// lazily initialized
+	workDir       string
+	store         objstore.ObjectStore // retry-wrapped ObjectStore
+	diskCache     PageCache
+	ownsDiskCache bool
+	safepoint     *safepoint.Safepoint
+	lease         *objstore.LeaseManager
+	idGen         func() string
+	volRefs       objstore.ObjectStore
+	initOnce      sync.Once
+	initErr       error
 
 	mu        sync.Mutex
-	cond      *sync.Cond // broadcast on volume close
-	volume    *Volume    // the single open volume, or nil
+	cond      *sync.Cond
+	volume    *Volume
 	onRelease func(ctx context.Context, volumeName string)
 }
 
@@ -65,27 +80,41 @@ func (osLocalFS) MkdirAll(path string, perm uint32) error {
 	return ensureMemDir(path)
 }
 
-// NewManager creates a Manager.
-func NewManager(store objstore.ObjectStore, cacheDir string, config Config, fs localFS, diskCache PageCache) *Manager {
-	store = objstore.NewRetryStore(store)
-	config.setDefaults()
-	if fs == nil {
-		fs = osLocalFS{}
-	}
-	lease := objstore.NewLeaseManager(store.At("leases"))
-	m := &Manager{
-		store:     store,
-		cacheDir:  cacheDir,
-		config:    config,
-		diskCache: diskCache,
-		lease:     lease,
-		fs:        fs,
-		idGen:     uuid.NewString,
-		volRefs:   store.At("volumes"),
-	}
-	m.cond = sync.NewCond(&m.mu)
-	lease.Handle("release", m.handleRelease)
-	return m
+func (m *Manager) init() error {
+	m.initOnce.Do(func() {
+		m.config.setDefaults()
+		m.store = objstore.NewRetryStore(m.ObjectStore)
+		if m.fs == nil {
+			m.fs = osLocalFS{}
+		}
+		if m.idGen == nil {
+			m.idGen = uuid.NewString
+		}
+		m.volRefs = m.store.At("volumes")
+		m.lease = objstore.NewLeaseManager(m.store.At("leases"))
+		m.cond = sync.NewCond(&m.mu)
+		m.lease.Handle("release", m.handleRelease)
+
+		m.safepoint = safepoint.New()
+
+		workDir, err := os.MkdirTemp("", "loophole-work-*")
+		if err != nil {
+			m.initErr = fmt.Errorf("create work dir: %w", err)
+			return
+		}
+		m.workDir = workDir
+
+		if m.diskCache == nil && m.CacheDir != "" {
+			pc, err := cached.NewPageCache(filepath.Join(m.CacheDir, "diskcache"), m.safepoint)
+			if err != nil {
+				m.initErr = fmt.Errorf("open page cache: %w", err)
+				return
+			}
+			m.diskCache = pc
+			m.ownsDiskCache = true
+		}
+	})
+	return m.initErr
 }
 
 // SetOnRelease sets a callback invoked when a remote break-lease request
@@ -95,6 +124,9 @@ func (m *Manager) SetOnRelease(fn func(ctx context.Context, volumeName string)) 
 }
 
 func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
+	if err := m.init(); err != nil {
+		return nil, err
+	}
 	ctx := context.Background()
 	name := p.Volume
 	size := p.Size
@@ -137,6 +169,9 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 }
 
 func (m *Manager) OpenVolume(name string) (*Volume, error) {
+	if err := m.init(); err != nil {
+		return nil, err
+	}
 	if err := ValidateVolumeName(name); err != nil {
 		return nil, err
 	}
@@ -205,6 +240,9 @@ func ListAllVolumes(ctx context.Context, store objstore.ObjectStore) ([]string, 
 }
 
 func (m *Manager) VolumeInfo(ctx context.Context, name string) (VolumeInfo, error) {
+	if err := m.init(); err != nil {
+		return VolumeInfo{}, err
+	}
 	if err := ValidateVolumeName(name); err != nil {
 		return VolumeInfo{}, err
 	}
@@ -222,6 +260,9 @@ func (m *Manager) VolumeInfo(ctx context.Context, name string) (VolumeInfo, erro
 }
 
 func (m *Manager) UpdateLabels(ctx context.Context, name string, labels map[string]string) error {
+	if err := m.init(); err != nil {
+		return err
+	}
 	key, err := volumeIndexKey(name)
 	if err != nil {
 		return err
@@ -278,6 +319,9 @@ func (m *Manager) CloseVolume(name string) error {
 }
 
 func (m *Manager) DeleteVolume(ctx context.Context, name string) error {
+	if err := m.init(); err != nil {
+		return err
+	}
 	if err := ValidateVolumeName(name); err != nil {
 		return err
 	}
@@ -319,10 +363,17 @@ func (m *Manager) PageSize() int {
 
 // Store returns the underlying object store.
 func (m *Manager) Store() objstore.ObjectStore {
+	if err := m.init(); err != nil {
+		slog.Error("manager: init for store failed", "error", err)
+		return nil
+	}
 	return m.store
 }
 
 func (m *Manager) Close() error {
+	if err := m.init(); err != nil {
+		return err
+	}
 	ctx := context.Background()
 
 	m.mu.Lock()
@@ -345,11 +396,24 @@ func (m *Manager) Close() error {
 	if err := m.lease.Close(ctx); err != nil {
 		return err
 	}
+	if m.ownsDiskCache && m.diskCache != nil {
+		util.SafeClose(m.diskCache, "close manager disk cache")
+		m.diskCache = nil
+	}
+	if m.workDir != "" {
+		if err := os.RemoveAll(m.workDir); err != nil {
+			return fmt.Errorf("remove manager work dir: %w", err)
+		}
+		m.workDir = ""
+	}
 	return nil
 }
 
 // BreakLease requests the remote holder to release a volume.
 func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool) (bool, error) {
+	if err := m.init(); err != nil {
+		return false, err
+	}
 	key, err := volumeIndexKey(volumeName)
 	if err != nil {
 		return false, err
@@ -401,6 +465,9 @@ func (m *Manager) BreakLease(ctx context.Context, volumeName string, force bool)
 // ForceClearLease clears a volume's lease token without contacting the holder.
 // Use this only when the caller has already determined the holder is dead.
 func (m *Manager) ForceClearLease(ctx context.Context, volumeName string) error {
+	if err := m.init(); err != nil {
+		return err
+	}
 	key, err := volumeIndexKey(volumeName)
 	if err != nil {
 		return err
@@ -457,8 +524,14 @@ func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
 		writeLeaseSeq = seq
 	}
 
-	cacheDir := m.cacheDir + "/layers/" + ref.LayerID
-	ly, err := openLayer(ctx, m.store, ref.LayerID, m.config, m.diskCache, cacheDir)
+	ly, err := openLayer(ctx, layerParams{
+		store:     m.store,
+		id:        ref.LayerID,
+		config:    m.config,
+		diskCache: m.diskCache,
+		safepoint: m.safepoint,
+		workDir:   filepath.Join(m.workDir, "layers", ref.LayerID),
+	})
 	if err != nil {
 		if writeLeaseSeq > 0 {
 			m.releaseVolumeLease(ctx, name)
@@ -683,6 +756,9 @@ func (m *Manager) putCheckpoint(ctx context.Context, volumeName string, layerID 
 
 // ListCheckpoints returns all checkpoints for a volume, sorted by ID (oldest first).
 func (m *Manager) ListCheckpoints(ctx context.Context, volumeName string) ([]CheckpointInfo, error) {
+	if err := m.init(); err != nil {
+		return nil, err
+	}
 	prefix, err := checkpointPrefix(volumeName)
 	if err != nil {
 		return nil, err
@@ -716,11 +792,15 @@ func (m *Manager) ListCheckpoints(ctx context.Context, volumeName string) ([]Che
 }
 
 // CloneFromCheckpoint creates a new volume by cloning from a checkpoint's frozen layer.
+// This is a metadata-only operation: it reads the checkpoint's layer index and writes
+// a new layer index + volume ref that reference the same block ranges.
 func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpointID, cloneName string) error {
+	if err := m.init(); err != nil {
+		return err
+	}
 	if err := ValidateVolumeName(cloneName); err != nil {
 		return err
 	}
-	// Read checkpoint ref.
 	cpKey, err := checkpointIndexKey(volumeName, checkpointID)
 	if err != nil {
 		return err
@@ -730,29 +810,18 @@ func (m *Manager) CloneFromCheckpoint(ctx context.Context, volumeName, checkpoin
 		return fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)
 	}
 
-	// Open the checkpoint's frozen layer.
-	ly, err := openFrozenLayer(ctx, m.store, cpRef.LayerID, m.config, m.diskCache)
-	if err != nil {
-		return fmt.Errorf("open checkpoint layer %q: %w", cpRef.LayerID, err)
-	}
-
 	volRef, err := m.getVolumeRef(ctx, volumeName)
 	if err != nil {
-		ly.Close()
 		return fmt.Errorf("read volume ref %q: %w", volumeName, err)
 	}
-	defer ly.Close()
 
-	return m.cloneFrozenLayer(ctx, ly, cloneName, volRef.Size, volRef.Type)
-}
+	// Read the checkpoint layer's index — this is all we need to create the clone.
+	idx, _, err := objstore.ReadJSON[layerIndex](ctx, m.store.At("layers/"+cpRef.LayerID), "index.json")
+	if err != nil {
+		return fmt.Errorf("read checkpoint layer index %q: %w", cpRef.LayerID, err)
+	}
 
-func (m *Manager) cloneFrozenLayer(ctx context.Context, ly *layer, cloneName string, size uint64, volType string) error {
 	childID := m.idGen()
-
-	idx := ly.index
-	idx.NextSeq = ly.nextSeq.Load()
-	idx.L1 = ly.l1Map.Ranges()
-	idx.L2 = ly.l2Map.Ranges()
 	idxData, err := json.Marshal(idx)
 	if err != nil {
 		return fmt.Errorf("marshal index for clone: %w", err)
@@ -760,8 +829,8 @@ func (m *Manager) cloneFrozenLayer(ctx context.Context, ly *layer, cloneName str
 
 	ref := volumeRef{
 		LayerID: childID,
-		Size:    size,
-		Type:    volType,
+		Size:    volRef.Size,
+		Type:    volRef.Type,
 	}
 	refData, err := json.Marshal(ref)
 	if err != nil {
@@ -770,7 +839,7 @@ func (m *Manager) cloneFrozenLayer(ctx context.Context, ly *layer, cloneName str
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		if err := ly.store.At("layers/"+childID).PutIfNotExists(gctx, "index.json", idxData, map[string]string{
+		if err := m.store.At("layers/"+childID).PutIfNotExists(gctx, "index.json", idxData, map[string]string{
 			"created_at": time.Now().UTC().Format(time.RFC3339),
 		}); err != nil {
 			return fmt.Errorf("create clone index: %w", err)

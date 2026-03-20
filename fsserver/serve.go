@@ -132,15 +132,11 @@ func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume st
 		slog.Warn("using local file store -- data is NOT replicated to S3")
 	}
 
-	diskCache, err := storage.OpenPageCacheForProfile(dir, inst)
-	if err != nil {
-		return nil, fmt.Errorf("create page cache: %w", err)
-	}
-	vm := storage.NewManagerForProfile(inst, dir, store, diskCache)
+	vm := storage.NewManagerForProfile(inst, dir, store)
 
 	backend, err := createBackend(vm, inst, dir)
 	if err != nil {
-		util.SafeClose(diskCache, "close disk cache after backend init failure")
+		util.SafeClose(vm, "close manager after backend init failure")
 		return nil, err
 	}
 
@@ -162,7 +158,7 @@ func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume st
 
 	ln, err := listen(opts)
 	if err != nil {
-		util.SafeClose(diskCache, "close disk cache after listen failure")
+		util.SafeClose(vm, "close manager after listen failure")
 		if closeErr := backend.Close(context.Background()); closeErr != nil {
 			slog.Warn("close backend after listen failure", "error", closeErr)
 		}
@@ -174,7 +170,6 @@ func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume st
 		dir:        dir,
 		socket:     opts.SocketPath,
 		backend:    backend,
-		diskCache:  diskCache,
 		ln:         ln,
 		logPath:    logPath,
 		axiomClose: axiomClose,

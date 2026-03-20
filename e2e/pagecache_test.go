@@ -1,4 +1,4 @@
-package storage
+package e2e
 
 import (
 	"bytes"
@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/internal/safepoint"
 )
 
 // shortTempDir creates a temp dir with a short path to avoid
@@ -21,21 +22,22 @@ func shortTempDir(t *testing.T) string {
 	return dir
 }
 
-func newTestPageCache(t *testing.T) *cached.PageCache {
+func newTestPageCache(t *testing.T) (*cached.PageCache, *safepoint.Safepoint) {
 	t.Helper()
 	dir := shortTempDir(t)
-	cache, err := cached.NewPageCache(dir)
+	sp := safepoint.New()
+	cache, err := cached.NewPageCache(dir, sp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cache.Close() })
-	return cache
+	return cache, sp
 }
 
 func TestDiskCachePageRoundTrip(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
-	page := bytes.Repeat([]byte{0xAB}, PageSize)
+	page := bytes.Repeat([]byte{0xAB}, cached.SlotSize)
 	cache.PutPage("tl", 1, page)
 
 	got := cache.GetPage("tl", 1)
@@ -50,9 +52,9 @@ func TestDiskCachePageRoundTrip(t *testing.T) {
 }
 
 func TestGetPageRoundTrip(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
-	page := bytes.Repeat([]byte{0xCD}, PageSize)
+	page := bytes.Repeat([]byte{0xCD}, cached.SlotSize)
 	cache.PutPage("p", 1, page)
 
 	data := cache.GetPage("p", 1)
@@ -69,9 +71,9 @@ func TestGetPageRoundTrip(t *testing.T) {
 }
 
 func TestGetPageReturnsCopy(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
-	page := bytes.Repeat([]byte{0x11}, PageSize)
+	page := bytes.Repeat([]byte{0x11}, cached.SlotSize)
 	cache.PutPage("t", 1, page)
 
 	data := cache.GetPage("t", 1)
@@ -92,14 +94,14 @@ func TestGetPageReturnsCopy(t *testing.T) {
 }
 
 func TestDiskCacheConcurrentAccess(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
 	var wg sync.WaitGroup
 	for i := range 32 {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			page := bytes.Repeat([]byte{byte(i)}, PageSize)
+			page := bytes.Repeat([]byte{byte(i)}, cached.SlotSize)
 			cache.PutPage("t", uint64(i), page)
 			got := cache.GetPage("t", uint64(i))
 			if !bytes.Equal(got, page) {
@@ -112,21 +114,21 @@ func TestDiskCacheConcurrentAccess(t *testing.T) {
 
 func TestPageCachePersistence(t *testing.T) {
 	dir := shortTempDir(t)
+	sp := safepoint.New()
 
-	cache, err := cached.NewPageCache(dir)
+	cache, err := cached.NewPageCache(dir, sp)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	page := bytes.Repeat([]byte{0xAB}, PageSize)
+	page := bytes.Repeat([]byte{0xAB}, cached.SlotSize)
 	cache.PutPage("tl", 1, page)
 
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Reopen — data should still be there (persisted via SQLite).
-	cache2, err := cached.NewPageCache(dir)
+	cache2, err := cached.NewPageCache(dir, sp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,22 +142,21 @@ func TestPageCachePersistence(t *testing.T) {
 
 func TestPageCacheMultiClient(t *testing.T) {
 	dir := shortTempDir(t)
+	sp := safepoint.New()
 
-	cache1, err := cached.NewPageCache(dir)
+	cache1, err := cached.NewPageCache(dir, sp)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cache1.Close() })
 
-	page := bytes.Repeat([]byte{0xCD}, PageSize)
+	page := bytes.Repeat([]byte{0xCD}, cached.SlotSize)
 	cache1.PutPage("shared", 1, page)
 
-	// Second client connects to the same daemon.
-	cache2, err := cached.NewPageCache(dir)
+	cache2, err := cached.NewPageCache(dir, sp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Close cache2 before cache1 (cache1 owns the daemon).
 	t.Cleanup(func() { _ = cache2.Close() })
 
 	got := cache2.GetPage("shared", 1)
@@ -165,55 +166,58 @@ func TestPageCacheMultiClient(t *testing.T) {
 }
 
 func TestPageCacheCloseIsIdempotent(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
-	page := bytes.Repeat([]byte{0xEE}, PageSize)
+	page := bytes.Repeat([]byte{0xEE}, cached.SlotSize)
 	cache.PutPage("t", 1, page)
 
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Writes/reads after close are silently ignored.
 	cache.PutPage("t", 2, page)
 	if got := cache.GetPage("t", 1); got != nil {
 		t.Fatalf("expected nil after close")
 	}
 
-	// Double close should not panic.
 	if err := cache.Close(); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestPageCacheGetPageRef(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, sp := newTestPageCache(t)
 
-	page := bytes.Repeat([]byte{0xDD}, PageSize)
+	page := bytes.Repeat([]byte{0xDD}, cached.SlotSize)
 	cache.PutPage("ref", 1, page)
 
-	data, unpin := cache.GetPageRef("ref", 1)
+	g := sp.Enter()
+	data := cache.GetPageRef(g, "ref", 1)
 	if data == nil {
+		g.Exit()
 		t.Fatal("expected hit")
 	}
-	defer unpin()
 
 	if !bytes.Equal(data, page) {
+		g.Exit()
 		t.Fatal("ref data mismatch")
 	}
+	g.Exit()
 
-	// Miss should return (nil, nil).
-	data, unpin = cache.GetPageRef("missing", 0)
-	if data != nil || unpin != nil {
+	// Miss should return nil.
+	g = sp.Enter()
+	data = cache.GetPageRef(g, "missing", 0)
+	g.Exit()
+	if data != nil {
 		t.Fatal("expected nil for cache miss")
 	}
 }
 
 func TestPageCacheCountPages(t *testing.T) {
-	cache := newTestPageCache(t)
+	cache, _ := newTestPageCache(t)
 
 	for i := range 5 {
-		cache.PutPage("t", uint64(i), bytes.Repeat([]byte{byte(i)}, PageSize))
+		cache.PutPage("t", uint64(i), bytes.Repeat([]byte{byte(i)}, cached.SlotSize))
 	}
 
 	count, err := cache.Count()
