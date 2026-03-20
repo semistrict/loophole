@@ -20,3 +20,5 @@ cmd/wasm/web/public/loophole.wasm
 /loophole-guest-agent
 .gocache/
 .wrangler/
+/.artifacts/
+/.tmp/
