@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/semistrict/loophole/cached/cachedserver"
 )
 
 func main() {
@@ -24,7 +26,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := startServer(*d); err != nil {
+	if err := cachedserver.StartServer(*d); err != nil {
 		slog.Error("start daemon", "error", err)
 		os.Exit(1)
 	}
@@ -36,7 +38,7 @@ func main() {
 	<-sigCh
 
 	slog.Info("shutting down")
-	if err := shutdown(); err != nil {
+	if err := cachedserver.Shutdown(); err != nil {
 		slog.Error("close daemon", "error", err)
 		os.Exit(1)
 	}

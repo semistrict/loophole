@@ -1,4 +1,4 @@
-package main
+package cachedserver
 
 import (
 	"database/sql"
@@ -54,6 +54,23 @@ var (
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
 )
+
+// InitInMemory sets up the daemon with a pure in-memory arena and index.
+// No files, no SQLite, no mmap. For use in tests and synctest bubbles.
+func InitInMemory(slots int) {
+	arena = make([]byte, slots*pageSize)
+	arenaSlots = slots
+	index = make(map[cacheKey]int)
+	slotOwner = make(map[int]cacheKey)
+	atime = make(map[cacheKey]int64)
+	conns = make(map[*conn]struct{})
+	stopCh = make(chan struct{})
+	budget = int64(slots) * pageSize
+	freeSlots = make([]int, slots)
+	for i := range slots {
+		freeSlots[i] = slots - 1 - i
+	}
+}
 
 func initDaemon(d string) error {
 	dir = d
@@ -267,17 +284,19 @@ func populateLocked(key cacheKey, data []byte) (int, error) {
 	atime[key] = time.Now().UnixNano()
 	usedBytes += pageSize
 
-	_, err := db.Exec(
-		`INSERT INTO pages (layer_id, page_idx, slot) VALUES (?, ?, ?)
-		 ON CONFLICT(layer_id, page_idx) DO UPDATE SET slot=excluded.slot`,
-		key.layerID, int64(key.pageIdx), slot)
-	if err != nil {
-		delete(index, key)
-		delete(slotOwner, slot)
-		delete(atime, key)
-		freeSlots = append(freeSlots, slot)
-		usedBytes -= pageSize
-		return 0, err
+	if db != nil {
+		_, err := db.Exec(
+			`INSERT INTO pages (layer_id, page_idx, slot) VALUES (?, ?, ?)
+			 ON CONFLICT(layer_id, page_idx) DO UPDATE SET slot=excluded.slot`,
+			key.layerID, int64(key.pageIdx), slot)
+		if err != nil {
+			delete(index, key)
+			delete(slotOwner, slot)
+			delete(atime, key)
+			freeSlots = append(freeSlots, slot)
+			usedBytes -= pageSize
+			return 0, err
+		}
 	}
 
 	return slot, nil
@@ -295,8 +314,10 @@ func deletePageLocked(key cacheKey) {
 	freeSlots = append(freeSlots, slot)
 	usedBytes -= pageSize
 
-	_, _ = db.Exec(`DELETE FROM pages WHERE layer_id=? AND page_idx=?`,
-		key.layerID, int64(key.pageIdx))
+	if db != nil {
+		_, _ = db.Exec(`DELETE FROM pages WHERE layer_id=? AND page_idx=?`,
+			key.layerID, int64(key.pageIdx))
+	}
 }
 
 func allocSlotLocked() (int, bool) {
@@ -340,13 +361,15 @@ func evictLRULocked(count int) []int {
 	}
 	metrics.CacheDaemonEvictions.Add(float64(count))
 
-	tx, err := db.Begin()
-	if err == nil {
-		for i := range count {
-			_, _ = tx.Exec(`DELETE FROM pages WHERE layer_id=? AND page_idx=?`,
-				items[i].key.layerID, int64(items[i].key.pageIdx))
+	if db != nil {
+		tx, err := db.Begin()
+		if err == nil {
+			for i := range count {
+				_, _ = tx.Exec(`DELETE FROM pages WHERE layer_id=? AND page_idx=?`,
+					items[i].key.layerID, int64(items[i].key.pageIdx))
+			}
+			_ = tx.Commit()
 		}
-		_ = tx.Commit()
 	}
 
 	return freed
@@ -450,7 +473,10 @@ func drainEvictResume() {
 
 // --- Lifecycle ---
 
-func shutdown() error {
+// Arena returns the shared arena byte slice. Only valid after StartServer.
+func Arena() []byte { return arena }
+
+func Shutdown() error {
 	close(stopCh)
 
 	mu.Lock()
@@ -461,7 +487,11 @@ func shutdown() error {
 
 	wg.Wait()
 
-	closeArena()
+	if arenaFile != nil {
+		closeArena()
+	} else {
+		arena = nil
+	}
 	var errs []error
 	if db != nil {
 		errs = append(errs, db.Close())
@@ -471,10 +501,10 @@ func shutdown() error {
 		errs = append(errs, lockFile.Close())
 	}
 
-	_ = os.Remove(cached.SocketPath(dir))
-
-	// Clean shutdown — remove dirty marker.
-	util.SafeRun(func() error { return os.Remove(filepath.Join(dir, "dirty")) }, "remove dirty marker")
+	if dir != "" {
+		_ = os.Remove(cached.SocketPath(dir))
+		util.SafeRun(func() error { return os.Remove(filepath.Join(dir, "dirty")) }, "remove dirty marker")
+	}
 
 	return errors.Join(errs...)
 }

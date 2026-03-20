@@ -1,4 +1,4 @@
-package main
+package cachedserver
 
 import (
 	"encoding/json"
@@ -153,26 +153,47 @@ func finishDrain() {
 	drainMu.Unlock()
 }
 
-func startServer(d string) error {
+// StartServer initializes the daemon state from dir and starts accepting
+// connections on a Unix socket at dir/cached.sock.
+func StartServer(d string) error {
+	return StartServerWithListener(d, nil)
+}
+
+// StartServerWithListener initializes the daemon and starts accepting on ln.
+// If ln is nil, a Unix socket listener is created at dir/cached.sock.
+func StartServerWithListener(d string, ln net.Listener) error {
 	if err := initDaemon(d); err != nil {
 		return err
 	}
 
-	sockPath := cached.SocketPath(d)
-	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		_ = shutdown()
-		return err
-	}
-
-	ln, err := net.Listen("unix", sockPath)
-	if err != nil {
-		_ = shutdown()
-		return err
+	if ln == nil {
+		sockPath := cached.SocketPath(d)
+		if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
+			_ = Shutdown()
+			return err
+		}
+		var err error
+		ln, err = net.Listen("unix", sockPath)
+		if err != nil {
+			_ = Shutdown()
+			return err
+		}
 	}
 
 	wg.Add(1)
 	go acceptLoop(ln)
 	return nil
+}
+
+// Accept returns the listener's accept channel so tests can inject
+// pre-connected net.Conns. Only valid after StartServerWithListener.
+func Accept(nc net.Conn) {
+	c := newConn(nc)
+	mu.Lock()
+	conns[c] = struct{}{}
+	mu.Unlock()
+	wg.Add(1)
+	go handleConn(c)
 }
 
 func acceptLoop(ln net.Listener) {
