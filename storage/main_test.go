@@ -3,6 +3,9 @@ package storage
 import (
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -13,6 +16,11 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
+	if err := ensureCachedBinaryForTests(); err != nil {
+		slog.Error("build loophole-cached for tests failed", "error", err)
+		os.Exit(1)
+	}
+
 	level := slog.Level(100)
 	if lvl := os.Getenv("LOG_LEVEL"); lvl != "" {
 		switch strings.ToLower(lvl) {
@@ -28,6 +36,29 @@ func TestMain(m *testing.M) {
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
 	os.Exit(m.Run())
+}
+
+func ensureCachedBinaryForTests() error {
+	if os.Getenv("LOOPHOLE_CACHED_BIN") != "" {
+		return nil
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	root := filepath.Dir(wd)
+	binPath := filepath.Join(root, "bin", "loophole-cached-"+runtime.GOOS+"-"+runtime.GOARCH)
+	if _, err := os.Stat(binPath); err != nil {
+		cmd := exec.Command("make", "loophole-cached")
+		cmd.Dir = root
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			return err
+		}
+	}
+	return os.Setenv("LOOPHOLE_CACHED_BIN", binPath)
 }
 
 func debugCountersEnabled() bool {

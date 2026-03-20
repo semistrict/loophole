@@ -27,13 +27,12 @@ type Manager struct {
 	fs          localFS
 
 	// lazily initialized
-	store         objstore.ObjectStore // retry-wrapped ObjectStore
-	diskCache     PageCache
-	ownsDiskCache bool
-	safepoint     *safepoint.Safepoint
-	volRefs       objstore.ObjectStore
-	initOnce      sync.Once
-	initErr       error
+	store     objstore.ObjectStore
+	diskCache PageCache
+	safepoint *safepoint.Safepoint
+	volRefs   objstore.ObjectStore
+	initOnce  sync.Once
+	initErr   error
 
 	mu     sync.Mutex
 	cond   *sync.Cond
@@ -55,7 +54,7 @@ func (osLocalFS) MkdirAll(path string, perm uint32) error {
 func (m *Manager) init() error {
 	m.initOnce.Do(func() {
 		m.config.setDefaults()
-		m.store = objstore.NewRetryStore(m.ObjectStore)
+		m.store = m.ObjectStore
 		if m.fs == nil {
 			m.fs = osLocalFS{}
 		}
@@ -71,7 +70,6 @@ func (m *Manager) init() error {
 				return
 			}
 			m.diskCache = pc
-			m.ownsDiskCache = true
 		}
 	})
 	return m.initErr
@@ -249,7 +247,7 @@ func (m *Manager) Close() error {
 		v.close()
 		slog.Info("manager close: volume closed", "volume", v.Name())
 	}
-	if m.ownsDiskCache && m.diskCache != nil {
+	if m.diskCache != nil {
 		util.SafeClose(m.diskCache, "close manager disk cache")
 		m.diskCache = nil
 	}

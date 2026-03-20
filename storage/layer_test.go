@@ -16,18 +16,12 @@ var testConfig = Config{
 
 func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Manager {
 	t.Helper()
-	return newTestManagerWithCache(t, store, config, nil)
-}
-
-func newTestManagerWithCache(t *testing.T, store objstore.ObjectStore, config Config, dc PageCache) *Manager {
-	t.Helper()
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
 	}
 	m := &Manager{
 		ObjectStore: store,
 		config:      config,
-		diskCache:   dc,
 	}
 	t.Cleanup(func() {
 		_ = m.Close()

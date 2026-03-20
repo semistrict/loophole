@@ -2,20 +2,41 @@ package storage
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/require"
 )
 
+func newTestCacheDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "pc")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func openObservedCache(t *testing.T, dir string) *cached.PageCache {
+	t.Helper()
+	cache, err := cached.NewPageCache(filepath.Join(dir, "diskcache"), safepoint.New())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = cache.Close() })
+	return cache
+}
+
 func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
-	cache := newMemPageCache()
+	cacheDir := newTestCacheDir(t)
+	cache := openObservedCache(t, cacheDir)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
-	m := &Manager{ObjectStore: objstore.NewMemStore(), config: cfg, diskCache: cache}
+	m := &Manager{ObjectStore: objstore.NewMemStore(), CacheDir: cacheDir, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{
@@ -36,18 +57,21 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 	_, err = v.Read(t.Context(), buf, 5*PageSize)
 	require.NoError(t, err)
 
-	require.Equal(t, 0, cache.Count())
+	count, err := cache.Count()
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
 }
 
 func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
-	cache := newMemPageCache()
+	cacheDir := newTestCacheDir(t)
+	cache := openObservedCache(t, cacheDir)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
 	store := objstore.NewMemStore()
-	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -61,8 +85,8 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 
 	v.layer.blockCache.clear()
 
-	// Open child on a separate manager (same store, same cache).
-	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	// Open child on a separate manager (same store, same cache dir).
+	m2 := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")
@@ -72,23 +96,28 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	buf := make([]byte, PageSize)
 	_, err = v.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	require.Equal(t, 1, cache.Count())
+	count, err := cache.Count()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
 	// Both volumes share the same page in the cache.
-	require.Equal(t, 1, cache.Count())
+	count, err = cache.Count()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }
 
 func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T) {
-	cache := newMemPageCache()
+	cacheDir := newTestCacheDir(t)
+	cache := openObservedCache(t, cacheDir)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
 	}
 
 	store := objstore.NewMemStore()
-	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	parent, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -99,8 +128,8 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, parent.Flush())
 	require.NoError(t, parent.Clone("child"))
 
-	// Open child on a separate manager (same store).
-	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	// Open child on a separate manager (same store, same cache dir).
+	m2 := &Manager{ObjectStore: store, CacheDir: cacheDir, config: cfg}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")
@@ -109,7 +138,9 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	buf := make([]byte, PageSize)
 	_, err = child.Read(t.Context(), buf, 0)
 	require.NoError(t, err)
-	require.Equal(t, 1, cache.Count())
+	count, err := cache.Count()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 
 	override := bytes.Repeat([]byte{0xBB}, PageSize)
 	require.NoError(t, child.Write(override, 0))
@@ -120,5 +151,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, override, buf)
 
-	require.Equal(t, 1, cache.Count())
+	count, err = cache.Count()
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
 }

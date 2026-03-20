@@ -2,6 +2,9 @@ package objstore
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -246,4 +249,68 @@ func TestS3OverwriteIsAtomicForConcurrentReaders(t *testing.T) {
 	got, err := io.ReadAll(body)
 	require.NoError(t, err)
 	require.Equal(t, replacement, got)
+}
+
+func TestS3GetWithRetryRetriesTransientReadErrors(t *testing.T) {
+	store := &S3Store{
+		bucket:           "bucket",
+		prefix:           "root/",
+		readRetries:      2,
+		readBaseDelay:    time.Millisecond,
+		sleepWithContext: func(context.Context, time.Duration) error { return nil },
+	}
+
+	var attempts int
+	body, etag, err := store.getWithRetry(t.Context(), "Get", "key", func(context.Context) (io.ReadCloser, string, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, "", errors.New("transient read failure")
+		}
+		return io.NopCloser(strings.NewReader("ok")), "etag-3", nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, attempts)
+	require.Equal(t, "etag-3", etag)
+	defer body.Close()
+	got, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("ok"), got)
+}
+
+func TestS3GetWithRetryDoesNotRetryNotFound(t *testing.T) {
+	store := &S3Store{
+		readRetries:      2,
+		readBaseDelay:    time.Millisecond,
+		sleepWithContext: func(context.Context, time.Duration) error { return nil },
+	}
+
+	var attempts int
+	_, _, err := store.getWithRetry(t.Context(), "Get", "missing", func(context.Context) (io.ReadCloser, string, error) {
+		attempts++
+		return nil, "", fmt.Errorf("get missing: %w", ErrNotFound)
+	})
+	require.ErrorIs(t, err, ErrNotFound)
+	require.Equal(t, 1, attempts)
+}
+
+func TestS3GetWithRetryStopsOnCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	store := &S3Store{
+		readRetries:   2,
+		readBaseDelay: time.Millisecond,
+		sleepWithContext: func(ctx context.Context, _ time.Duration) error {
+			<-ctx.Done()
+			return ctx.Err()
+		},
+	}
+
+	var attempts int
+	_, _, err := store.getWithRetry(ctx, "Get", "key", func(context.Context) (io.ReadCloser, string, error) {
+		attempts++
+		return nil, "", errors.New("temporary")
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, attempts)
 }

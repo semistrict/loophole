@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -22,10 +24,18 @@ import (
 
 // S3Store implements ObjectStore backed by an S3-compatible service.
 type S3Store struct {
-	client *s3.Client
-	bucket string
-	prefix string // includes trailing slash if non-empty
+	client           *s3.Client
+	bucket           string
+	prefix           string // includes trailing slash if non-empty
+	readRetries      int
+	readBaseDelay    time.Duration
+	sleepWithContext func(context.Context, time.Duration) error
 }
+
+const (
+	s3ReadRetries   = 2
+	s3ReadBaseDelay = 100 * time.Millisecond
+)
 
 // optOrEnv returns val if non-empty, otherwise falls back to the
 // environment variable, then to fallback.
@@ -100,7 +110,14 @@ func NewS3Store(ctx context.Context, inst env.ResolvedProfile) (*S3Store, error)
 	if inst.Prefix != "" {
 		prefix = inst.Prefix + "/"
 	}
-	return &S3Store{client: client, bucket: inst.Bucket, prefix: prefix}, nil
+	return &S3Store{
+		client:           client,
+		bucket:           inst.Bucket,
+		prefix:           prefix,
+		readRetries:      s3ReadRetries,
+		readBaseDelay:    s3ReadBaseDelay,
+		sleepWithContext: sleepWithContext,
+	}, nil
 }
 
 func (s *S3Store) fullKey(key string) string {
@@ -115,56 +132,104 @@ func (s *S3Store) At(path string) ObjectStore {
 	if s.prefix != "" {
 		p = s.prefix + p
 	}
-	return &S3Store{client: s.client, bucket: s.bucket, prefix: p}
+	return &S3Store{
+		client:           s.client,
+		bucket:           s.bucket,
+		prefix:           p,
+		readRetries:      s.readRetries,
+		readBaseDelay:    s.readBaseDelay,
+		sleepWithContext: s.sleepWithContext,
+	}
 }
 
 func (s *S3Store) Get(ctx context.Context, key string) (io.ReadCloser, string, error) {
-	done := metrics.S3Op("get")
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.fullKey(key)),
-	})
-	done(err)
-	if err != nil {
-		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
-			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+	return s.getWithRetry(ctx, "Get", key, func(ctx context.Context) (io.ReadCloser, string, error) {
+		done := metrics.S3Op("get")
+		out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(s.fullKey(key)),
+		})
+		done(err)
+		if err != nil {
+			var nsk *types.NoSuchKey
+			if errors.As(err, &nsk) {
+				return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+			}
+			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
 		}
-		return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
-	}
-	if out.ContentLength != nil {
-		metrics.S3Transfer("get", "rx", *out.ContentLength)
-	}
-	etag := ""
-	if out.ETag != nil {
-		etag = *out.ETag
-	}
-	return out.Body, etag, nil
+		if out.ContentLength != nil {
+			metrics.S3Transfer("get", "rx", *out.ContentLength)
+		}
+		etag := ""
+		if out.ETag != nil {
+			etag = *out.ETag
+		}
+		return out.Body, etag, nil
+	})
 }
 
 func (s *S3Store) GetRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, string, error) {
-	done := metrics.S3Op("get")
-	out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.fullKey(key)),
-		Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
-	})
-	done(err)
-	if err != nil {
-		var nsk *types.NoSuchKey
-		if errors.As(err, &nsk) {
-			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+	return s.getWithRetry(ctx, "GetRange", key, func(ctx context.Context) (io.ReadCloser, string, error) {
+		done := metrics.S3Op("get")
+		out, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.bucket),
+			Key:    aws.String(s.fullKey(key)),
+			Range:  aws.String(fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)),
+		})
+		done(err)
+		if err != nil {
+			var nsk *types.NoSuchKey
+			if errors.As(err, &nsk) {
+				return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), ErrNotFound)
+			}
+			return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
 		}
-		return nil, "", fmt.Errorf("get %s: %w", s.fullKey(key), err)
+		if out.ContentLength != nil {
+			metrics.S3Transfer("get", "rx", *out.ContentLength)
+		}
+		etag := ""
+		if out.ETag != nil {
+			etag = *out.ETag
+		}
+		return out.Body, etag, nil
+	})
+}
+
+func (s *S3Store) getWithRetry(ctx context.Context, op, key string, get func(context.Context) (io.ReadCloser, string, error)) (io.ReadCloser, string, error) {
+	var lastErr error
+	for attempt := range s.readRetries + 1 {
+		body, etag, err := get(ctx)
+		if err == nil {
+			return body, etag, nil
+		}
+		if !s.retriableRead(err) {
+			return nil, "", err
+		}
+		lastErr = err
+		if attempt == s.readRetries {
+			return nil, "", lastErr
+		}
+		slog.Warn("retrying S3 read", "op", op, "key", s.fullKey(key), "attempt", attempt+1, "error", err)
+		if err := s.sleepWithContext(ctx, s.readBaseDelay<<attempt); err != nil {
+			return nil, "", lastErr
+		}
 	}
-	if out.ContentLength != nil {
-		metrics.S3Transfer("get", "rx", *out.ContentLength)
+	panic("unreachable")
+}
+
+func (s *S3Store) retriableRead(err error) bool {
+	return !errors.Is(err, ErrNotFound)
+}
+
+func sleepWithContext(ctx context.Context, delay time.Duration) error {
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
 	}
-	etag := ""
-	if out.ETag != nil {
-		etag = *out.ETag
-	}
-	return out.Body, etag, nil
 }
 
 func (s *S3Store) PutBytes(ctx context.Context, key string, data []byte) error {
