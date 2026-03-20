@@ -39,6 +39,7 @@ type layer struct {
 
 	mu       sync.RWMutex
 	index    layerIndex
+	indexNew bool // true if index.json has never been saved to S3
 	memtable *memtable
 
 	nextSeq atomic.Uint64
@@ -164,6 +165,7 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 	if err != nil {
 		// No index.json yet — start fresh.
 		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1}
+		ly.indexNew = true
 		ly.nextSeq.Store(1)
 		ly.l1Map = newBlockRangeMap(nil)
 		ly.l2Map = newBlockRangeMap(nil)
@@ -219,7 +221,22 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 		return fmt.Errorf("marshal index: %w", err)
 	}
 
-	return ly.layerStore.PutReader(ctx, "index.json", bytes.NewReader(data))
+	if ly.indexNew {
+		if err := ly.layerStore.PutIfNotExists(ctx, "index.json", data); err != nil {
+			return fmt.Errorf("put new index: %w", err)
+		}
+		ly.indexNew = false
+		return nil
+	}
+
+	_, etag, err := objstore.ReadBytes(ctx, ly.layerStore, "index.json")
+	if err != nil {
+		return fmt.Errorf("read index etag: %w", err)
+	}
+	if _, err := ly.layerStore.PutBytesCAS(ctx, "index.json", data, etag); err != nil {
+		return fmt.Errorf("cas index: %w", err)
+	}
+	return nil
 }
 
 // snapshotLayers captures current layer state under both read locks
@@ -597,8 +614,13 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 		return fmt.Errorf("build direct L2 block %d: %w", blockIdx, err)
 	}
 
+	ly.mu.RLock()
+	existingLayer, existingSeq := ly.l2Map.Find(blockIdx)
+	outputSeq := ly.outputSeq(existingLayer, existingSeq, ly.writeLeaseSeq)
+	ly.mu.RUnlock()
+
 	// Upload.
-	key := blockKey(ly.id, "l2", ly.writeLeaseSeq, blockIdx)
+	key := blockKey(ly.id, "l2", outputSeq, blockIdx)
 	ctx := context.Background()
 	if err := ly.store.PutReader(ctx, key, bytes.NewReader(blob)); err != nil {
 		return fmt.Errorf("upload direct L2 block %d: %w", blockIdx, err)
@@ -607,7 +629,7 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	// Update the L2 map and persist the index so the entries survive
 	// a volume close/reopen cycle.
 	ly.mu.Lock()
-	ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, ly.writeLeaseSeq)
+	ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, outputSeq)
 	ly.mu.Unlock()
 
 	if err := ly.saveIndex(ctx); err != nil {
@@ -798,6 +820,10 @@ func (ly *layer) freezememtable() error {
 	old.freeze(freezeSeq)
 
 	ly.frozenMu.Lock()
+	if ly.frozen != nil {
+		ly.frozenMu.Unlock()
+		panic("freezememtable: frozen slot occupied — backpressure failed")
+	}
 	ly.frozen = old
 	metrics.FrozenTableCount.Set(1)
 	ly.frozenMu.Unlock()
@@ -1430,8 +1456,13 @@ func (ly *layer) waitRefreshForLayoutChange(ctx context.Context, prevGen uint64)
 }
 
 func (ly *layer) outputSeq(existingLayer string, existingSeq, fallback uint64) uint64 {
+	// Never overwrite an already-published blob for the current layer.
+	// Failed flush attempts may upload some blocks before aborting; if those
+	// uploads reuse the live key, readers can observe partial state even though
+	// the index was never committed. Rewrites therefore get a fresh versioned
+	// key, and the index swap publishes the new blob atomically.
 	if existingLayer == ly.id && existingSeq != 0 {
-		return existingSeq
+		return ly.nextSeq.Add(1)
 	}
 	return fallback
 }
