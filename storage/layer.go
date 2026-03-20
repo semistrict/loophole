@@ -573,7 +573,7 @@ func (ly *layer) Write(data []byte, offset uint64) error {
 func (ly *layer) canDirectL2() bool {
 	ly.mu.RLock()
 	defer ly.mu.RUnlock()
-	return ly.l1Map.Len() == 0 && ly.memtable.size.Load() == 0
+	return ly.l1Map.Len() == 0 && ly.memtable.isEmpty()
 }
 
 // writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,

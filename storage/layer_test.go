@@ -351,6 +351,43 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 	assert.Equal(t, data, buf)
 }
 
+func TestLayerPunchHoleDisablesDirectL2(t *testing.T) {
+	ctx := t.Context()
+	store := objstore.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
+	}
+
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg})
+	require.NoError(t, err)
+	defer ly.Close()
+
+	require.True(t, ly.canDirectL2())
+	require.NoError(t, ly.PunchHole(0, PageSize))
+	require.False(t, ly.canDirectL2(), "pending tombstones must block direct L2 writes")
+
+	blockData := make([]byte, BlockSize)
+	for i := range blockData {
+		blockData[i] = byte((i * 11) % 251)
+	}
+	require.NoError(t, ly.Write(blockData, 0))
+
+	buf := make([]byte, BlockSize)
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, BlockSize, n)
+	assert.Equal(t, blockData, buf, "pending tombstone must not shadow the later full-block write")
+
+	require.NoError(t, ly.Flush())
+
+	n, err = ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, BlockSize, n)
+	assert.Equal(t, blockData, buf, "flush must preserve the later full-block write over the tombstone")
+}
+
 func TestBlockRoundTrip(t *testing.T) {
 	ctx := t.Context()
 
