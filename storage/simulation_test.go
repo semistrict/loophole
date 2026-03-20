@@ -25,12 +25,12 @@ import (
 type SimConfig struct {
 	NumNodes       int
 	DevicePages    int // number of 4KB pages per volume
-	MaxTimelines   int
+	MaxLineages    int
 	OpsPerNode     int
 	CrashRate      float64 // probability of crash per tick
 	S3Faults       FaultConfig
 	FlushThreshold int64
-	FlushInterval  time.Duration // periodic auto-flush interval; 0 = default (500ms under synctest)
+	FlushInterval  time.Duration // periodic auto-flush interval; 0 disables it in the main simulation
 }
 
 // Simulation runs a multi-node deterministic simulation.
@@ -116,12 +116,10 @@ func (sim *Simulation) nextLayerID() string {
 func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 	flushInterval := sim.config.FlushInterval
 	if flushInterval == 0 {
-		// The main loop sleeps 0-5ms per tick. A 500ms timer fires every
-		// ~200 ticks rather than every tick, keeping synctest scheduling
-		// cost O(nodes) per tick instead of O(volumes). Still gives ~200+
-		// flush fires per volume over a 5000-op run — plenty of coverage
-		// for flush/write race conditions.
-		flushInterval = 500 * time.Millisecond
+		// The simulation already drives explicit flushes heavily. Leave
+		// periodic auto-flush disabled by default so long high-fanout runs
+		// don't spend most of their time in background flush contention.
+		flushInterval = -1
 	}
 	m := &Manager{
 		ObjectStore: sim.store.Store(),
@@ -167,6 +165,13 @@ func (sim *Simulation) fillRandomBytes(dst []byte) {
 	for i := range dst {
 		dst[i] = byte(sim.rng.IntN(256))
 	}
+}
+
+func (sim *Simulation) canAddLineages(n int) bool {
+	if sim.config.MaxLineages <= 0 {
+		return true
+	}
+	return len(sim.timelineIDs)+n <= sim.config.MaxLineages
 }
 
 // Run executes the simulation for OpsPerNode ticks per node.
@@ -301,16 +306,30 @@ func (sim *Simulation) opWrite(ctx context.Context, node *SimNode) {
 
 		err := v.Write(data, pageIdx.ByteOffset())
 
-		// Always record: for full-page writes, data enters the memLayer
-		// before auto-flush runs. If Write returns an error it's from
-		// auto-flush, not from the put — the data is in a frozen layer
-		// and will be persisted by the next successful Flush.
-		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
-		wrote = true
-
-		if err != nil {
-			break
+		if err == nil {
+			if traceLayerEnabled(timelineID) && tracePageEnabled(pageIdx) {
+				sim.t.Logf("TRACE opWrite success tl=%s page=%d", timelineID, pageIdx)
+			}
+			sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
+			wrote = true
+			continue
 		}
+
+		// Full-page writes can fail before the retry put runs under
+		// backpressure, so only record the write if we can confirm the page
+		// is now visible on the live volume.
+		verify := make([]byte, PageSize)
+		readN, readErr := v.Read(ctx, verify, pageIdx.ByteOffset())
+		if traceLayerEnabled(timelineID) && tracePageEnabled(pageIdx) {
+			sim.t.Logf("TRACE opWrite err tl=%s page=%d err=%v readErr=%v readN=%d verifyEq=%v gotZero=%v",
+				timelineID, pageIdx, err, readErr, readN, readErr == nil && bytes.Equal(verify, data), bytes.Equal(verify, zeroPage[:]))
+		}
+		if readErr == nil && bytes.Equal(verify, data) {
+			sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
+			wrote = true
+		}
+
+		break
 	}
 
 	if !wrote {
@@ -363,14 +382,18 @@ func (sim *Simulation) opPartialWrite(ctx context.Context, node *SimNode) {
 	offset := pageIdx.ByteOffset() + uint64(writeOff)
 	err := v.Write(data, offset)
 
-	// Always record: writePage puts the full-page result into the memLayer
-	// before auto-flush runs. The data persists even if Write returns an
-	// error from auto-flush. We use the actual base page (read above), not
-	// the oracle's expected value, so the expected result is correct.
-	sim.oracle.RecordWrite(node.id, timelineID, pageIdx, expected)
-
-	if err != nil {
-		return
+	if err == nil {
+		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, expected)
+	} else {
+		// Partial writes can also fail before the merged page is staged under
+		// backpressure, so only record the write if the live page now matches
+		// the expected read-modify-write result.
+		verify := make([]byte, PageSize)
+		if _, readErr := v.Read(ctx, verify, pageIdx.ByteOffset()); readErr == nil && bytes.Equal(verify, expected) {
+			sim.oracle.RecordWrite(node.id, timelineID, pageIdx, expected)
+		} else {
+			return
+		}
 	}
 	if err := v.Flush(); err != nil {
 		return
@@ -415,6 +438,7 @@ func (sim *Simulation) reportMismatch(ctx context.Context, vol *Volume, volName,
 
 	// Oracle history: full lifecycle of this page.
 	sim.t.Log(sim.oracle.PageHistory(timelineID, pageIdx))
+	sim.t.Log(sim.oracle.TimelineHistory(timelineID))
 
 	// Count ALL oracle events for this timeline (not just this page).
 	var writeCount, flushCount, branchCount int
@@ -500,6 +524,9 @@ func (sim *Simulation) opFlush(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -565,6 +592,9 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -635,6 +665,9 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -724,6 +757,23 @@ func (sim *Simulation) opPunchHole(ctx context.Context, node *SimNode) {
 	offset := startPage.ByteOffset()
 	length := uint64(numPages) * PageSize
 	if err := v.PunchHole(offset, length); err != nil {
+		// PunchHole can fail after staging some tombstones under backpressure.
+		// Reconcile against the live volume so the oracle tracks any pages that
+		// are already observably zero on this node.
+		reconciled := false
+		verify := make([]byte, PageSize)
+		for pg := startPage; pg < startPage+numPages; pg++ {
+			if _, readErr := v.Read(ctx, verify, pg.ByteOffset()); readErr != nil {
+				continue
+			}
+			if bytes.Equal(verify, zeroPage[:]) {
+				sim.oracle.RecordPunchHole(node.id, timelineID, pg)
+				reconciled = true
+			}
+		}
+		if reconciled {
+			return
+		}
 		return
 	}
 
@@ -802,8 +852,8 @@ func (sim *Simulation) opVerifySharedVolume(ctx context.Context, node *SimNode) 
 }
 
 func (sim *Simulation) opCreateVolume(ctx context.Context, node *SimNode) {
-	// Limit total volumes to keep the simulation tractable.
-	if len(sim.volumeTimelines) >= sim.config.MaxTimelines {
+	// Limit total timeline creation to keep the simulation tractable.
+	if !sim.canAddLineages(1) {
 		return
 	}
 	name := fmt.Sprintf("vol-%d", sim.nextVolID)
@@ -871,6 +921,9 @@ func (sim *Simulation) opCopyFrom(ctx context.Context, node *SimNode) {
 	pagesCopied := PageIdx(copied / PageSize)
 	for pg := PageIdx(0); pg < pagesCopied; pg++ {
 		expected := sim.oracle.ExpectedRead(node.id, srcTL, srcStart+pg)
+		if traceLayerEnabled(dstTL) && tracePageEnabled(dstStart+pg) {
+			sim.t.Logf("TRACE opCopyFrom record tl=%s page=%d gotZero=%v", dstTL, dstStart+pg, bytes.Equal(expected, zeroPage[:]))
+		}
 		sim.oracle.RecordWrite(node.id, dstTL, dstStart+pg, expected)
 	}
 
@@ -951,6 +1004,9 @@ func (sim *Simulation) opConcurrentWrite(ctx context.Context, node *SimNode) {
 		if _, err := v.Read(ctx, buf, pageIdx.ByteOffset()); err != nil {
 			continue
 		}
+		if traceLayerEnabled(timelineID) && tracePageEnabled(pageIdx) {
+			sim.t.Logf("TRACE opConcurrentWrite record tl=%s page=%d gotZero=%v", timelineID, pageIdx, bytes.Equal(buf, zeroPage[:]))
+		}
 		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, buf)
 	}
 
@@ -979,10 +1035,26 @@ func (sim *Simulation) opWriteAllPages(ctx context.Context, node *SimNode) {
 		sim.fillRandomBytes(data)
 
 		err := v.Write(data, pageIdx.ByteOffset())
-		sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
+		if err == nil {
+			if traceLayerEnabled(timelineID) && tracePageEnabled(pageIdx) {
+				sim.t.Logf("TRACE opWriteAllPages success tl=%s page=%d", timelineID, pageIdx)
+			}
+			sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
+		} else {
+			verify := make([]byte, PageSize)
+			readN, readErr := v.Read(ctx, verify, pageIdx.ByteOffset())
+			if traceLayerEnabled(timelineID) && tracePageEnabled(pageIdx) {
+				sim.t.Logf("TRACE opWriteAllPages err tl=%s page=%d err=%v readErr=%v readN=%d verifyEq=%v gotZero=%v",
+					timelineID, pageIdx, err, readErr, readN, readErr == nil && bytes.Equal(verify, data), bytes.Equal(verify, zeroPage[:]))
+			}
+			if readErr == nil && bytes.Equal(verify, data) {
+				sim.oracle.RecordWrite(node.id, timelineID, pageIdx, data)
+			} else {
+				return
+			}
+		}
 
 		if err != nil {
-			// Auto-flush error — data is in frozen layer, try to flush.
 			if fErr := v.Flush(); fErr != nil {
 				return
 			}
@@ -1060,6 +1132,9 @@ func (sim *Simulation) opCloseVolume(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	// Clone from the most recently cloned volume (if this node owns it),
 	// creating deeper ancestor chains (3-5+).
 	if sim.lastClonedVolume == "" {
@@ -1130,6 +1205,9 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 }
 
 func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(1) {
+		return
+	}
 	// Find a frozen volume that isn't leased.
 	var snapName string
 	volNames := make([]string, 0, len(sim.volumeTimelines))
@@ -1221,6 +1299,9 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 // creates a separate named volume, a checkpoint is stored under the volume's own
 // key namespace (volumes/{name}/checkpoints/{ts}/index.json).
 func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -1276,6 +1357,9 @@ func (sim *Simulation) opCheckpoint(ctx context.Context, node *SimNode) {
 // opCloneFromCheckpoint picks a volume with checkpoints, lists them, picks one,
 // and clones from it through the shared object store.
 func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(1) {
+		return
+	}
 	// Find a volume with checkpoints. Try all known volumes in deterministic order.
 	volNames := make([]string, 0, len(sim.volumeTimelines))
 	for name := range sim.volumeTimelines {
@@ -1379,6 +1463,9 @@ func (sim *Simulation) opVerify(ctx context.Context, node *SimNode) {
 //  3. Read the same pages from the child and assert they still have
 //     the pre-clone values.
 func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
+	if !sim.canAddLineages(2) {
+		return
+	}
 	volName := sim.pickOwnedVolume(node)
 	if volName == "" {
 		return
@@ -1451,6 +1538,9 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 		data := make([]byte, PageSize)
 		sim.fillRandomBytes(data)
 		if err := v.Write(data, pg.ByteOffset()); err == nil {
+			if traceLayerEnabled(parentTL) && tracePageEnabled(pg) {
+				sim.t.Logf("TRACE opCloneIsolationParentWrite record tl=%s page=%d", parentTL, pg)
+			}
 			sim.oracle.RecordWrite(node.id, parentTL, pg, data)
 			writtenPages[pg] = struct{}{}
 		}
@@ -1658,7 +1748,7 @@ func (sim *Simulation) FullScan() {
 		vm := sim.newManager(sim.t.TempDir(), NewSimLocalFS())
 		sim.allManagers = append(sim.allManagers, vm)
 
-		v, err := vm.OpenVolume(volName)
+		v, err := vm.OpenVolumeReadOnly(volName)
 		if err != nil {
 			// Volume may have been created during a fault window and
 			// partially written. Skip unloadable volumes.
@@ -1875,18 +1965,18 @@ func TestSimulation(t *testing.T) {
 	nodes := simEnvInt(t, "SIM_NODES", 3)
 	ops := simEnvInt(t, "SIM_OPS", 300)
 	pages := simEnvInt(t, "SIM_PAGES", 256)
-	timelines := simEnvInt(t, "SIM_TIMELINES", 20)
+	lineages := simEnvInt(t, "SIM_LINEAGES", 20)
 	crashRate := simEnvFloat(t, "SIM_CRASH_RATE", 0.02)
 	faultRate := simEnvFloat(t, "SIM_FAULT_RATE", 0.02)
 
-	t.Logf("seed: %d  nodes: %d  ops: %d  pages: %d  timelines: %d  crash: %.2f  faults: %.2f",
-		seed, nodes, ops, pages, timelines, crashRate, faultRate)
+	t.Logf("seed: %d  nodes: %d  ops: %d  pages: %d  lineages: %d  crash: %.2f  faults: %.2f",
+		seed, nodes, ops, pages, lineages, crashRate, faultRate)
 
 	synctest.Test(t, func(t *testing.T) {
 		sim := NewSimulation(t, seed, SimConfig{
 			NumNodes:       nodes,
 			DevicePages:    pages,
-			MaxTimelines:   timelines,
+			MaxLineages:    lineages,
 			OpsPerNode:     ops,
 			CrashRate:      crashRate,
 			FlushThreshold: 8 * PageSize,
@@ -1931,7 +2021,7 @@ func TestSimulationDeterminism(t *testing.T) {
 	config := SimConfig{
 		NumNodes:       3,
 		DevicePages:    64,
-		MaxTimelines:   15,
+		MaxLineages:    15,
 		OpsPerNode:     100,
 		CrashRate:      0.02,
 		FlushThreshold: 8 * PageSize,
@@ -1982,7 +2072,7 @@ func TestSimulationSharedLayerReadExercise(t *testing.T) {
 		sim := NewSimulation(t, 1, SimConfig{
 			NumNodes:       2,
 			DevicePages:    64,
-			MaxTimelines:   10,
+			MaxLineages:    10,
 			OpsPerNode:     1,
 			CrashRate:      0,
 			FlushThreshold: 8 * PageSize,
@@ -2014,5 +2104,124 @@ func TestSimulationSharedLayerReadExercise(t *testing.T) {
 
 		sim.opVerifySharedVolume(ctx, sim.nodes[1])
 		sim.FullScan()
+	})
+}
+
+func TestSimulationReproRelayeredSingleBlockPageDisappears(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, 4981481962547272448, SimConfig{
+			NumNodes:       3,
+			DevicePages:    256,
+			MaxLineages:    120,
+			OpsPerNode:     2000,
+			CrashRate:      0.15,
+			FlushThreshold: 8 * PageSize,
+			S3Faults: FaultConfig{
+				PutFailRate:              0.20,
+				GetFailRate:              0.20,
+				ListFailRate:             0.10,
+				DeleteFailRate:           0.10,
+				PhantomPutRate:           0.02,
+				LayersJsonPhantomPutRate: 0.03,
+			},
+		})
+		defer sim.useDeterministicLayerIDs()()
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close()
+			}
+		}()
+
+		sim.Run()
+		sim.FullScan()
+	})
+}
+
+func TestSimulationLineageCapBlocksCloneAndRelayer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, 1, SimConfig{
+			NumNodes:       1,
+			DevicePages:    32,
+			MaxLineages:    2,
+			OpsPerNode:     1,
+			CrashRate:      0,
+			FlushThreshold: 8 * PageSize,
+		})
+		defer sim.useDeterministicLayerIDs()()
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close()
+			}
+		}()
+
+		ctx := t.Context()
+		sim.createVolume(ctx, sim.nodes[0], "vol-0")
+
+		require.Len(t, sim.timelineIDs, 1)
+		require.Len(t, sim.volumeTimelines, 1)
+
+		sim.opClone(ctx, sim.nodes[0])
+
+		require.Len(t, sim.timelineIDs, 1)
+		require.Len(t, sim.volumeTimelines, 1)
+		require.Equal(t, "vol-0", sim.nodes[0].volumes[0])
+	})
+}
+
+func TestSimulationLineageCapBlocksCheckpoint(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, 1, SimConfig{
+			NumNodes:       1,
+			DevicePages:    32,
+			MaxLineages:    2,
+			OpsPerNode:     1,
+			CrashRate:      0,
+			FlushThreshold: 8 * PageSize,
+		})
+		defer sim.useDeterministicLayerIDs()()
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close()
+			}
+		}()
+
+		ctx := t.Context()
+		sim.createVolume(ctx, sim.nodes[0], "vol-0")
+
+		require.Len(t, sim.timelineIDs, 1)
+
+		sim.opCheckpoint(ctx, sim.nodes[0])
+
+		require.Len(t, sim.timelineIDs, 1)
+		cps, err := ListCheckpoints(ctx, sim.store.Store(), "vol-0")
+		require.NoError(t, err)
+		require.Empty(t, cps)
+	})
+}
+
+func TestSimulationLineageCapBlocksCreateVolume(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		sim := NewSimulation(t, 1, SimConfig{
+			NumNodes:       1,
+			DevicePages:    32,
+			MaxLineages:    1,
+			OpsPerNode:     1,
+			CrashRate:      0,
+			FlushThreshold: 8 * PageSize,
+		})
+		defer sim.useDeterministicLayerIDs()()
+		defer func() {
+			for _, m := range sim.allManagers {
+				m.Close()
+			}
+		}()
+
+		ctx := t.Context()
+		sim.createVolume(ctx, sim.nodes[0], "vol-0")
+
+		sim.opCreateVolume(ctx, sim.nodes[0])
+
+		require.Len(t, sim.timelineIDs, 1)
+		require.Len(t, sim.volumeTimelines, 1)
 	})
 }

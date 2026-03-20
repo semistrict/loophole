@@ -427,6 +427,46 @@ func (o *Oracle) PageHistory(timelineID string, pageIdx PageIdx) string {
 	return sb.String()
 }
 
+// TimelineHistory returns all events involving the given timeline and its
+// ancestor chain. Used when a page mismatch needs broader timeline context.
+func (o *Oracle) TimelineHistory(timelineID string) string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "=== Oracle timeline history for tl=%s ===\n", timelineID[:8])
+
+	ancestors := map[string]bool{timelineID: true}
+	cur := timelineID
+	for {
+		ref, ok := o.ancestors[cur]
+		if !ok {
+			break
+		}
+		ancestors[ref.ParentID] = true
+		cur = ref.ParentID
+	}
+
+	for _, e := range o.events {
+		relevant := false
+		switch e.Kind {
+		case EventWrite, EventPunchHole, EventFlush, EventRead:
+			relevant = ancestors[e.LayerID]
+		case EventBranch:
+			relevant = ancestors[e.LayerID] || ancestors[e.ParentID]
+		case EventCrash:
+			relevant = true
+		}
+		if relevant {
+			sb.WriteString("  ")
+			sb.WriteString(e.String())
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
 // EventLog returns all oracle events as a deterministic string sequence.
 // Used to verify simulation determinism: two runs with the same seed must
 // produce identical event logs.

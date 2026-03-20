@@ -117,10 +117,21 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 		return nil, err
 	}
 
-	return m.openVolume(name, ref)
+	return m.openVolume(name, ref, false)
 }
 
 func (m *Manager) OpenVolume(name string) (*Volume, error) {
+	return m.openVolumeByName(name, false)
+}
+
+// OpenVolumeReadOnly opens a volume for reads only. It does not acquire a
+// write lease or start background flush loops, so it can safely follow an
+// actively written volume.
+func (m *Manager) OpenVolumeReadOnly(name string) (*Volume, error) {
+	return m.openVolumeByName(name, true)
+}
+
+func (m *Manager) openVolumeByName(name string, readOnly bool) (*Volume, error) {
 	if err := m.init(); err != nil {
 		return nil, err
 	}
@@ -139,7 +150,7 @@ func (m *Manager) OpenVolume(name string) (*Volume, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve volume %q: %w", name, err)
 	}
-	return m.openVolume(name, ref)
+	return m.openVolume(name, ref, readOnly)
 }
 
 func (m *Manager) GetVolume(name string) *Volume {
@@ -256,7 +267,7 @@ func (m *Manager) Close() error {
 
 // --- internal ---
 
-func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
+func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume, error) {
 	// Check object metadata on index.json (HEAD, no body) to see if frozen.
 	ctx := context.Background()
 	layerStore := m.store.At("layers/" + ref.LayerID)
@@ -266,11 +277,12 @@ func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
 	}
 
 	v := newVolume(name, ref.Size, ref.Type, nil, m)
+	v.readOnly = readOnly
 
 	// Acquire write lease before opening the layer so we have the
 	// writeLeaseSeq for file naming.
 	var writeLeaseSeq uint64
-	if ref.LeaseToken != v.leaseToken() {
+	if !readOnly && ref.LeaseToken != v.leaseToken() {
 		seq, err := v.acquireLease(ctx)
 		if err != nil {
 			v.closeLeaseSession(ctx)
@@ -296,7 +308,7 @@ func (m *Manager) openVolume(name string, ref volumeRef) (*Volume, error) {
 	ly.writeLeaseSeq = writeLeaseSeq
 	v.layer = ly
 
-	if m.config.FlushInterval > 0 {
+	if !readOnly && m.config.FlushInterval > 0 {
 		// Use a background context — ctx may be a short-lived HTTP request
 		// context that gets cancelled when the handler returns.
 		ly.startPeriodicFlush(context.Background())

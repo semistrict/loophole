@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,10 +14,11 @@ import (
 )
 
 type Volume struct {
-	name    string
-	size    uint64
-	volType string
-	refs    atomic.Int32
+	name     string
+	size     uint64
+	volType  string
+	refs     atomic.Int32
+	readOnly bool
 
 	mu    sync.RWMutex
 	layer *layer
@@ -89,6 +91,9 @@ func (v *Volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, erro
 func (v *Volume) Write(data []byte, offset uint64) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.readOnly {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
 	if v.directRefs > 0 {
 		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
 	}
@@ -98,6 +103,9 @@ func (v *Volume) Write(data []byte, offset uint64) error {
 func (v *Volume) PunchHole(offset, length uint64) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.readOnly {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
 	if v.directRefs > 0 {
 		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
 	}
@@ -111,6 +119,9 @@ func (v *Volume) ZeroRange(offset, length uint64) error {
 func (v *Volume) Flush() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.readOnly {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
 	return v.layer.Flush()
 }
 
@@ -120,6 +131,9 @@ func (v *Volume) Flush() error {
 func (v *Volume) FlushLocal() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.readOnly {
+		return nil
+	}
 	if v.directRefs > 0 {
 		return nil
 	}
@@ -133,6 +147,9 @@ func (v *Volume) FlushLocal() error {
 }
 
 func (v *Volume) branch() (string, error) {
+	if v.readOnly {
+		return "", fmt.Errorf("volume %q is read-only", v.name)
+	}
 	if err := v.layer.Flush(); err != nil {
 		return "", fmt.Errorf("flush for branch: %w", err)
 	}
@@ -235,6 +252,9 @@ func (v *Volume) Clone(cloneName string) error {
 }
 
 func (v *Volume) CopyFrom(src *Volume, srcOff, dstOff, length uint64) (uint64, error) {
+	if v.readOnly {
+		return 0, fmt.Errorf("volume %q is read-only", v.name)
+	}
 	ctx := context.Background()
 	var copied uint64
 	buf := make([]byte, PageSize)
@@ -245,7 +265,11 @@ func (v *Volume) CopyFrom(src *Volume, srcOff, dstOff, length uint64) (uint64, e
 			return copied, err
 		}
 		if err := v.Write(buf[:n], dstOff+copied); err != nil {
-			return copied + uint64(n), err
+			verify, readErr := v.ReadAt(ctx, dstOff+copied, n)
+			if readErr == nil && len(verify) == n && bytes.Equal(verify, buf[:n]) {
+				return copied + uint64(n), err
+			}
+			return copied, err
 		}
 		copied += uint64(n)
 	}
@@ -386,6 +410,9 @@ func (v *Volume) handleLeaseRelease(ctx context.Context, params json.RawMessage)
 func (v *Volume) EnableDirectWriteback() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.readOnly {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
 
 	if v.directRefs == 0 {
 		if err := v.layer.Flush(); err != nil {
@@ -414,6 +441,9 @@ func (v *Volume) DisableDirectWriteback() error {
 func (v *Volume) WritePagesDirect(pages []DirectPage) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.readOnly {
+		return fmt.Errorf("volume %q is read-only", v.name)
+	}
 	if v.directRefs == 0 {
 		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
 	}

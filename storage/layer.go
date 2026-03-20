@@ -663,6 +663,15 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 	mt := ly.memtable
 	err := mt.put(pageIdx, page[:])
 	ly.mu.RUnlock()
+	if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
+		slog.Info("trace write page",
+			"layer", ly.id,
+			"page", pageIdx,
+			"page_offset", pageOff,
+			"chunk_len", len(chunk),
+			"memtable_err", err,
+		)
+	}
 
 	pageLock.Unlock()
 
@@ -678,6 +687,13 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 		mt = ly.memtable
 		err = mt.put(pageIdx, page[:])
 		ly.mu.RUnlock()
+		if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
+			slog.Info("trace write page retry",
+				"layer", ly.id,
+				"page", pageIdx,
+				"memtable_err", err,
+			)
+		}
 		metrics.BackpressureWaits.Inc()
 		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
 	}
@@ -818,6 +834,31 @@ func (ly *layer) freezememtable() error {
 
 	old := ly.memtable
 	old.freeze(freezeSeq)
+	if traceLayerEnabled(ly.id) {
+		entries := old.entries()
+		blockZeroOffsets := make([]uint16, 0, len(entries))
+		blockZeroTombstones := 0
+		tracedPages := make([]PageIdx, 0, len(entries))
+		for _, e := range entries {
+			if e.pageIdx.Block() == 0 {
+				blockZeroOffsets = append(blockZeroOffsets, uint16(uint64(e.pageIdx)%BlockPages))
+				if e.slot == tombstoneSlot {
+					blockZeroTombstones++
+				}
+			}
+			if tracePageEnabled(e.pageIdx) {
+				tracedPages = append(tracedPages, e.pageIdx)
+			}
+		}
+		slog.Info("trace freeze memtable",
+			"layer", ly.id,
+			"freeze_seq", freezeSeq,
+			"entries", len(entries),
+			"block0_offsets", blockZeroOffsets,
+			"block0_tombstones", blockZeroTombstones,
+			"traced_pages", tracedPages,
+		)
+	}
 
 	ly.frozenMu.Lock()
 	if ly.frozen != nil {
@@ -1047,6 +1088,38 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 				}
 			}
 
+			if traceLayerEnabled(ly.id) && blockAddr == 0 {
+				existingOffsets := make([]uint16, 0, len(existing))
+				existingTombstones := 0
+				for _, e := range existing {
+					existingOffsets = append(existingOffsets, e.offset)
+					if len(e.compressed) == 0 {
+						existingTombstones++
+					}
+				}
+				newOffsetsList := make([]uint16, 0, len(newPages))
+				newTombstones := 0
+				for _, p := range newPages {
+					newOffsetsList = append(newOffsetsList, p.offset)
+					if p.data == nil {
+						newTombstones++
+					}
+				}
+				slog.Info("trace block rebuild",
+					"layer", ly.id,
+					"block", blockAddr,
+					"promote", promote,
+					"existing_l1_layer", existingL1Layer,
+					"existing_l1_seq", existingL1Seq,
+					"existing_l2_layer", existingL2Layer,
+					"existing_l2_seq", existingL2Seq,
+					"existing_offsets", existingOffsets,
+					"existing_tombstones", existingTombstones,
+					"new_offsets", newOffsetsList,
+					"new_tombstones", newTombstones,
+				)
+			}
+
 			blockData, err := patchBlock(blockAddr, existing, newPages, !ly.config.DisableCompression)
 			if err != nil {
 				return fmt.Errorf("build block %d: %w", blockAddr, err)
@@ -1061,6 +1134,15 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 			} else {
 				outputSeq = ly.outputSeq(existingL1Layer, existingL1Seq, ly.writeLeaseSeq)
 				key = blockKey(ly.id, "l1", outputSeq, blockAddr)
+			}
+			if traceLayerEnabled(ly.id) && blockAddr == 0 {
+				slog.Info("trace block upload target",
+					"layer", ly.id,
+					"block", blockAddr,
+					"promote", promote,
+					"output_seq", outputSeq,
+					"key", key,
+				)
 			}
 
 			uploadStart := time.Now()

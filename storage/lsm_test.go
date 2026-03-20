@@ -1166,6 +1166,111 @@ func TestFlushPutReaderFail(t *testing.T) {
 	}
 }
 
+func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	m := newTestManager(t, store, cfg)
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	// Build an initial sparse block with an ancestor page we want preserved.
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xAA}, PageSize), 37*PageSize))
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xBB}, PageSize), 68*PageSize))
+	require.NoError(t, v.Flush())
+
+	clone := cloneOpen(t, v, "clone")
+	defer func() { _ = clone.ReleaseRef() }()
+
+	// Establish a visible child-owned block first.
+	require.NoError(t, clone.Write(bytes.Repeat([]byte{0xCC}, PageSize), 228*PageSize))
+	require.NoError(t, clone.Flush())
+
+	// Now attempt to rewrite that same child-owned block. The object write lands,
+	// but the flush reports an error after upload. Readers must still observe the
+	// previously committed block, not the failed rewrite payload.
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		PostErr: fmt.Errorf("phantom put failure"),
+	})
+	require.NoError(t, clone.Write(bytes.Repeat([]byte{0xDD}, PageSize), 0))
+	err = clone.Flush()
+	require.Error(t, err)
+	store.ClearAllFaults()
+
+	buf := make([]byte, PageSize)
+	_, err = clone.Read(ctx, buf, 37*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0xAA}, PageSize), buf)
+
+	_, err = clone.Read(ctx, buf, 228*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), buf)
+
+	// After clearing the fault, the pending rewrite should flush cleanly.
+	require.NoError(t, clone.Flush())
+	_, err = clone.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0xDD}, PageSize), buf)
+}
+
+func TestPhantomAutoFlushRetryPreservesLaterPages(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+	writePage := func(t *testing.T, v *Volume, page int, b byte) error {
+		t.Helper()
+		return v.Write(pageWithByte(b), uint64(page)*PageSize)
+	}
+
+	m := newTestManager(t, store, cfg)
+	root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+	require.NoError(t, writePage(t, root, 61, 0x61))
+	require.NoError(t, root.Flush())
+
+	child := cloneOpen(t, root, "child")
+	defer func() { _ = child.ReleaseRef() }()
+
+	// Make block 0 child-owned first.
+	require.NoError(t, writePage(t, child, 5, 0x05))
+	require.NoError(t, child.Flush())
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		PostErr: fmt.Errorf("phantom auto-flush failure"),
+	})
+
+	var writeErr error
+	for _, page := range []int{236, 241, 187, 21, 185, 80, 26, 12} {
+		writeErr = writePage(t, child, page, byte(page))
+		if writeErr != nil {
+			break
+		}
+	}
+	require.Error(t, writeErr)
+	store.ClearAllFaults()
+
+	for _, page := range []int{119, 77, 78, 146, 196, 61} {
+		require.NoError(t, writePage(t, child, page, byte(page)))
+	}
+	require.NoError(t, child.Flush())
+
+	buf := make([]byte, PageSize)
+	_, err = child.Read(ctx, buf, 61*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(byte(61)), buf)
+}
+
 func TestLoadLayerMapFromListing(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
@@ -1658,13 +1763,11 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	}
 }
 
-// TestCopyFromAutoFlushFault verifies that CopyFrom data is readable even
-// when an auto-flush fails mid-copy due to an S3 fault.
+// TestCopyFromAutoFlushFault verifies that CopyFrom reports bytes based on
+// what actually became visible in the destination when an auto-flush fails.
 //
-// This reproduces a bug where CopyFrom's Write succeeds (data enters the
-// memLayer) but auto-flush fails and returns an error. CopyFrom returns
-// `copied` without counting the last page, so callers (and the simulation
-// oracle) miss it. But the data IS in the memLayer and survives a later Flush.
+// A destination write can fail after staging data locally or before staging
+// it at all. CopyFrom must count the faulting page only in the former case.
 func TestCopyFromAutoFlushFault(t *testing.T) {
 	store := objstore.NewMemStore()
 
@@ -1706,21 +1809,12 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 
 	// CopyFrom 4 pages. The first 1-2 writes go into memLayer without
 	// triggering flush. When the memLayer crosses FlushThreshold, the
-	// auto-flush fires and hits the PUT fault. CopyFrom returns an error
-	// with `copied` not counting the page whose Write triggered the flush.
+	// synchronous flush fails on the page that overflowed the memtable.
 	copied, err := dst.CopyFrom(src, 0, 0, 4*PageSize)
 	if err == nil {
 		t.Fatal("expected CopyFrom to fail due to S3 fault")
 	}
 
-	// BUG: CopyFrom reports fewer bytes than actually written to memLayer.
-	// The Write that triggered auto-flush DID put the page in the memLayer
-	// (the put() call succeeds before the flush), but copied doesn't count it.
-	//
-	// We expect copied to be at least 2*PageSize (the first 2 pages fit
-	// without triggering flush), but the 3rd page's Write succeeds in the
-	// memLayer, then auto-flush fails. copied should include the 3rd page
-	// but currently doesn't.
 	pagesReported := copied / PageSize
 	t.Logf("CopyFrom reported %d bytes copied (%d pages), err: %v", copied, pagesReported, err)
 
@@ -1731,8 +1825,8 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read ALL pages from dst. Pages that were actually written to the
-	// memLayer should be readable even if CopyFrom's `copied` didn't count them.
+	// Read ALL pages from dst. The number of readable pages must match what
+	// CopyFrom reported.
 	var pagesActuallyWritten uint64
 	buf := make([]byte, PageSize)
 	for i := 0; i < 4; i++ {
@@ -1746,11 +1840,8 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 
 	t.Logf("pages reported by CopyFrom: %d, pages actually written: %d", pagesReported, pagesActuallyWritten)
 
-	// The bug: pagesActuallyWritten > pagesReported.
-	// CopyFrom wrote more pages than it reported, which causes the
-	// simulation oracle to miss tracking those pages.
-	if pagesActuallyWritten > pagesReported {
-		t.Fatalf("CopyFrom under-reported: reported %d pages but %d were actually written to memLayer",
+	if pagesActuallyWritten != pagesReported {
+		t.Fatalf("CopyFrom reported %d pages but %d became readable after flush",
 			pagesReported, pagesActuallyWritten)
 	}
 }
@@ -1856,7 +1947,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	// Oracle: branch dst from parent.
 	oracle.RecordBranch(dstTL, parentTL, 0)
 
-	// Oracle: record only the pages CopyFrom reported (the bug).
+	// Oracle: record only the pages CopyFrom reported.
 	zeroPage := make([]byte, PageSize)
 	for pg := uint64(0); pg < pagesReported; pg++ {
 		oracle.RecordWrite("node", dstTL, PageIdx(pg), zeroPage)
@@ -2412,6 +2503,111 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	if l1Count == 0 {
 		t.Fatal("expected L1 entries after flush")
 	}
+}
+
+func TestBackpressureWriteErrorCanStillStageCurrentPage(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: PageSize,
+		FlushInterval:  -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x11}, PageSize)
+	require.NoError(t, v.Write(first, 0))
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		Err: fmt.Errorf("simulated S3 outage"),
+	})
+
+	second := bytes.Repeat([]byte{0x22}, PageSize)
+	err = v.Write(second, PageSize)
+	require.Error(t, err)
+
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, PageSize)
+	require.NoError(t, err)
+	require.Equal(t, second, buf)
+
+	third := bytes.Repeat([]byte{0x33}, PageSize)
+	err = v.Write(third, 2*PageSize)
+	require.Error(t, err)
+
+	_, err = v.Read(ctx, buf, 2*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, third, buf)
+}
+
+func TestBackpressurePartialWriteErrorCanStillStageMergedPage(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: PageSize,
+		FlushInterval:  -1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	seedPage := bytes.Repeat([]byte{0x11}, PageSize)
+	require.NoError(t, v.Write(seedPage, 0))
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		Err: fmt.Errorf("simulated S3 outage"),
+	})
+
+	partial := bytes.Repeat([]byte{0x22}, 256)
+	err = v.Write(partial, PageSize+700)
+	require.Error(t, err)
+
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, PageSize)
+	require.NoError(t, err)
+	expected := make([]byte, PageSize)
+	copy(expected[700:], partial)
+	require.Equal(t, expected, buf)
+}
+
+func TestBackpressurePunchHoleErrorCanStillStageTombstones(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold:   1 << 20,
+		FlushInterval:    -1,
+		MaxMemtableSlots: 1,
+	}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	first := bytes.Repeat([]byte{0x11}, PageSize)
+	second := bytes.Repeat([]byte{0x22}, PageSize)
+	require.NoError(t, v.Write(first, 0))
+	require.NoError(t, v.Flush())
+	require.NoError(t, v.Write(second, PageSize))
+	require.NoError(t, v.Flush())
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		Err: fmt.Errorf("simulated S3 outage"),
+	})
+
+	err = v.PunchHole(0, 2*PageSize)
+	require.Error(t, err)
+
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, make([]byte, PageSize), buf)
+
+	_, err = v.Read(ctx, buf, PageSize)
+	require.NoError(t, err)
+	require.Equal(t, second, buf)
 }
 
 // TestAsyncFlushNotifyWakesLoop verifies that the flush loop wakes up
@@ -3351,6 +3547,586 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 				pg, pg, idx, buf[4])
 		}
 	}
+}
+
+func TestSparseAncestorPagePreservedAcrossChildSparseFlush(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	m1 := newTestManager(t, store, cfg)
+	parent, err := m1.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ancestorPage := bytes.Repeat([]byte{0x5c}, PageSize)
+	if err := parent.Write(ancestorPage, 37*PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	child1 := cloneOpen(t, parent, "child-1")
+	defer func() { _ = child1.ReleaseRef() }()
+	child2 := cloneOpen(t, child1, "child-2")
+	defer func() { _ = child2.ReleaseRef() }()
+	child3 := cloneOpen(t, child2, "child-3")
+	defer func() { _ = child3.ReleaseRef() }()
+
+	page0 := bytes.Repeat([]byte{0xa0}, PageSize)
+	page1 := bytes.Repeat([]byte{0xa1}, PageSize)
+	require.NoError(t, child3.Write(page0, 0))
+	require.NoError(t, child3.Flush())
+	require.NoError(t, child3.Write(page1, PageSize))
+	require.NoError(t, child3.Flush())
+
+	buf := make([]byte, PageSize)
+	_, err = child3.Read(ctx, buf, 37*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, ancestorPage, buf)
+}
+
+func TestSingleBlockCloneChainPreservesUntouchedAncestorPages(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 16 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+
+	writePage := func(t *testing.T, v *Volume, page int, b byte) {
+		t.Helper()
+		require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+	}
+
+	punchPage := func(t *testing.T, v *Volume, page int) {
+		t.Helper()
+		require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+	}
+
+	m := newTestManager(t, store, cfg)
+	root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	// Recreate the relevant single-block shape from the simulation.
+	writePage(t, root, 37, 0x5c)
+	for page, b := range map[int]byte{
+		38: 0x38, 39: 0x39, 40: 0x40, 41: 0x41, 42: 0x42, 43: 0x43, 44: 0x44,
+		45: 0x45, 46: 0x46, 68: 0x68, 69: 0x69, 107: 0x6b, 111: 0x6f, 124: 0x7c,
+		127: 0x7f, 129: 0x81, 134: 0x86, 136: 0x88, 177: 0xb1, 188: 0xbc, 209: 0xd1,
+		213: 0xd5, 220: 0xdc, 230: 0xe6,
+	} {
+		writePage(t, root, page, b)
+	}
+	punchPage(t, root, 19)
+	require.NoError(t, root.Flush())
+
+	child1 := cloneOpen(t, root, "child-1")
+	defer func() { _ = child1.ReleaseRef() }()
+	for page, b := range map[int]byte{
+		14: 0x14, 68: 0x68, 93: 0x93, 115: 0x73, 167: 0xa7, 188: 0xbc,
+	} {
+		writePage(t, child1, page, b)
+	}
+	punchPage(t, child1, 212)
+	punchPage(t, child1, 213)
+	punchPage(t, child1, 214)
+	require.NoError(t, child1.Flush())
+
+	child2 := cloneOpen(t, child1, "child-2")
+	defer func() { _ = child2.ReleaseRef() }()
+
+	for page, b := range map[int]byte{
+		28: 0x28, 102: 0x66, 115: 0x73, 193: 0xc1, 198: 0xc6,
+	} {
+		writePage(t, child2, page, b)
+	}
+	require.NoError(t, child2.Flush())
+
+	writePage(t, child2, 174, 0x00)
+	require.NoError(t, child2.Flush())
+
+	for page, b := range map[int]byte{
+		19: 0x19, 26: 0x1a, 38: 0x26, 132: 0x84, 151: 0x97, 234: 0xea,
+	} {
+		writePage(t, child2, page, b)
+	}
+	require.NoError(t, child2.Flush())
+
+	buf := make([]byte, PageSize)
+	_, err = child2.Read(ctx, buf, 37*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(0x5c), buf)
+}
+
+func TestSimulationSingleBlockSequenceWithoutFaults(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+	writePage := func(t *testing.T, v *Volume, page int, b byte) {
+		t.Helper()
+		require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+	}
+	punchPage := func(t *testing.T, v *Volume, page int) {
+		t.Helper()
+		require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+	}
+
+	m := newTestManager(t, store, cfg)
+	root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	for page, b := range map[int]byte{
+		37: 0x5c, 38: 0x38, 39: 0x39, 40: 0x40, 41: 0x41, 42: 0x42, 43: 0x43,
+		44: 0x44, 45: 0x45, 46: 0x46, 68: 0x68, 69: 0x69, 107: 0x6b, 111: 0x6f,
+		124: 0x7c, 127: 0x7f, 129: 0x81, 134: 0x86, 136: 0x88, 177: 0xb1,
+		188: 0xbc, 209: 0xd1, 213: 0xd5, 220: 0xdc, 230: 0xe6,
+	} {
+		writePage(t, root, page, b)
+	}
+	punchPage(t, root, 19)
+	require.NoError(t, root.Flush())
+
+	child1 := cloneOpen(t, root, "child-1")
+	defer func() { _ = child1.ReleaseRef() }()
+	for page, b := range map[int]byte{
+		14: 0x14, 68: 0x68, 93: 0x93, 115: 0x73, 167: 0xa7, 188: 0xbc,
+	} {
+		writePage(t, child1, page, b)
+	}
+	punchPage(t, child1, 212)
+	punchPage(t, child1, 213)
+	punchPage(t, child1, 214)
+	require.NoError(t, child1.Flush())
+
+	child2 := cloneOpen(t, child1, "child-2")
+	defer func() { _ = child2.ReleaseRef() }()
+	for _, page := range []int{228, 229, 230, 231, 232} {
+		punchPage(t, child2, page)
+	}
+	require.NoError(t, child2.Flush())
+
+	for page, b := range map[int]byte{
+		0: 0x10, 43: 0x43, 55: 0x55, 93: 0x93, 99: 0x99, 181: 0xb5, 192: 0xc0, 201: 0xc9,
+	} {
+		writePage(t, child2, page, b)
+	}
+	require.NoError(t, child2.Flush())
+
+	child3 := cloneOpen(t, child2, "child-3")
+	defer func() { _ = child3.ReleaseRef() }()
+	writePage(t, child3, 52, 0x52)
+	punchPage(t, child3, 173)
+	punchPage(t, child3, 174)
+	require.NoError(t, child3.Flush())
+	writePage(t, child3, 131, 0x83)
+	require.NoError(t, child3.Flush())
+
+	buf := make([]byte, PageSize)
+	_, err = child3.Read(ctx, buf, 37*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(0x5c), buf)
+}
+
+func TestDirectReproRelayeredSingleBlockPreservesEarlierChildPages(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+	writePage := func(t *testing.T, v *Volume, page int, b byte) {
+		t.Helper()
+		require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+	}
+	punchPage := func(t *testing.T, v *Volume, page int) {
+		t.Helper()
+		require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+	}
+	flushPages := func(t *testing.T, v *Volume, writes map[int]byte, punches ...int) {
+		t.Helper()
+		for _, page := range punches {
+			punchPage(t, v, page)
+		}
+		pages := make([]int, 0, len(writes))
+		for page := range writes {
+			pages = append(pages, page)
+		}
+		sort.Ints(pages)
+		for _, page := range pages {
+			writePage(t, v, page, writes[page])
+		}
+		require.NoError(t, v.Flush())
+	}
+
+	m := newTestManager(t, store, cfg)
+	root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	flushPages(t, root, map[int]byte{
+		48: 0x48, 64: 0x64, 112: 0x70, 192: 0xc0, 234: 0xea,
+	})
+	flushPages(t, root, map[int]byte{}, 131)
+	flushPages(t, root, map[int]byte{}, 56, 57)
+	flushPages(t, root, map[int]byte{}, 72, 73)
+	flushPages(t, root, map[int]byte{}, 189)
+	flushPages(t, root, map[int]byte{
+		3: 0x03, 35: 0x23, 61: 0x3d, 182: 0xb6, 210: 0xd2, 242: 0xf2,
+	})
+	flushPages(t, root, map[int]byte{
+		2: 0x02, 25: 0x19, 40: 0x28, 54: 0x36, 204: 0xcc, 216: 0xd8, 221: 0xdd,
+	})
+
+	branchA := cloneOpen(t, root, "branch-a")
+	defer func() { _ = branchA.ReleaseRef() }()
+
+	branchB := cloneOpen(t, root, "branch-b")
+	defer func() { _ = branchB.ReleaseRef() }()
+
+	flushPages(t, root, map[int]byte{}, 31)
+	flushPages(t, root, map[int]byte{
+		13: 0x13, 14: 0x14, 27: 0x27, 70: 0x46, 103: 0x67, 117: 0x75,
+		164: 0xa4, 166: 0xa6, 183: 0xb7, 241: 0xf1, 251: 0xfb,
+	}, 100, 101, 172, 173, 174)
+	flushPages(t, root, map[int]byte{
+		13: 0x8d, 19: 0x19, 65: 0x41, 111: 0x6f, 120: 0x78,
+		134: 0x86, 144: 0x90, 158: 0x9e, 163: 0xa3, 235: 0xeb,
+	})
+	flushPages(t, root, map[int]byte{
+		63: 0x3f, 207: 0xcf, 223: 0xdf, 239: 0xef, 244: 0xf4,
+	})
+	flushPages(t, root, map[int]byte{
+		17: 0x11, 60: 0x3c, 63: 0x40, 119: 0x77, 123: 0x7b,
+		148: 0x94, 173: 0xad, 195: 0xc3,
+	})
+	flushPages(t, root, map[int]byte{}, 91)
+	flushPages(t, root, map[int]byte{
+		5: 0x05, 45: 0x2d, 74: 0x4a, 131: 0x83, 144: 0x91,
+		194: 0xc2, 205: 0xcd, 246: 0xf6, 251: 0xfc, 255: 0xff,
+	})
+	flushPages(t, root, map[int]byte{
+		28: 0x1c, 49: 0x31, 67: 0x43, 118: 0x76, 125: 0x7d,
+		152: 0x98, 153: 0x99, 159: 0x9f, 229: 0xe5, 248: 0xf8,
+	})
+	flushPages(t, root, map[int]byte{
+		61: 0x3d, 68: 0x44, 86: 0x56, 94: 0x5e, 99: 0x63, 101: 0x65,
+		123: 0x7c, 127: 0x7f, 182: 0xb6, 221: 0xdd, 230: 0xe6, 255: 0xfe,
+	})
+	flushPages(t, root, map[int]byte{
+		58: 0x3a, 78: 0x4e, 81: 0x51, 86: 0x57, 102: 0x66, 107: 0x6b,
+		119: 0x78, 122: 0x7a, 123: 0x7d, 126: 0x7e, 146: 0x92, 175: 0xaf,
+		183: 0xb9, 209: 0xd1, 223: 0xe0, 244: 0xf5, 250: 0xfa,
+	})
+	flushPages(t, root, map[int]byte{
+		31: 0x9f, 36: 0x24, 108: 0x6c, 160: 0xa0, 212: 0xd4,
+	})
+	flushPages(t, root, map[int]byte{
+		11: 0x0b, 27: 0x2a, 41: 0x29, 60: 0x3d, 72: 0x48, 139: 0x8b,
+		150: 0x96, 157: 0x9d, 175: 0xb0, 178: 0xb2, 187: 0xbb, 202: 0xca,
+		212: 0xd5, 225: 0xe1, 226: 0xe2,
+	}, 253)
+	flushPages(t, root, map[int]byte{
+		83: 0x53, 179: 0xb3, 199: 0xc7, 242: 0xf2,
+	})
+	flushPages(t, root, map[int]byte{
+		2: 0x12, 76: 0x4c, 88: 0x58, 90: 0x5a, 113: 0x71,
+		123: 0x7e, 129: 0x81, 133: 0x85, 204: 0xcc,
+	})
+
+	buf := make([]byte, PageSize)
+	_, err = root.Read(ctx, buf, 14*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(0x14), buf)
+}
+
+func TestFailedCloneAfterSnapshotDoesNotDropEarlierPages(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+	writePage := func(t *testing.T, v *Volume, page int, b byte) {
+		t.Helper()
+		require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+	}
+	punchPage := func(t *testing.T, v *Volume, page int) {
+		t.Helper()
+		require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+	}
+	flushPages := func(t *testing.T, v *Volume, writes map[int]byte, punches ...int) {
+		t.Helper()
+		for _, page := range punches {
+			punchPage(t, v, page)
+		}
+		pages := make([]int, 0, len(writes))
+		for page := range writes {
+			pages = append(pages, page)
+		}
+		sort.Ints(pages)
+		for _, page := range pages {
+			writePage(t, v, page, writes[page])
+		}
+		require.NoError(t, v.Flush())
+	}
+
+	m := newTestManager(t, store, cfg)
+	root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	flushPages(t, root, map[int]byte{
+		2: 0x02, 3: 0x03, 25: 0x19, 35: 0x23, 40: 0x28, 48: 0x30,
+		54: 0x36, 61: 0x3d, 64: 0x40, 112: 0x70, 182: 0xb6, 192: 0xc0,
+		204: 0xcc, 210: 0xd2, 216: 0xd8, 221: 0xdd, 234: 0xea, 242: 0xf2,
+	}, 56, 57, 72, 73, 131, 189)
+
+	branch := cloneOpen(t, root, "branch-a")
+	defer func() { _ = branch.ReleaseRef() }()
+
+	flushPages(t, root, map[int]byte{}, 31)
+	flushPages(t, root, map[int]byte{
+		13: 0x13, 14: 0x14, 27: 0x27, 70: 0x46, 103: 0x67, 117: 0x75,
+		164: 0xa4, 166: 0xa6, 183: 0xb7, 241: 0xf1, 251: 0xfb,
+	}, 100, 101, 172, 173, 174)
+
+	store.SetFault(objstore.OpGet, "volumes/root/index.json", objstore.Fault{
+		Err: fmt.Errorf("simulated relayer volume-ref GET failure"),
+	})
+	err = root.Clone("failed-clone")
+	require.ErrorContains(t, err, "re-layer parent: update volume ref")
+	store.ClearAllFaults()
+
+	flushPages(t, root, map[int]byte{
+		13: 0x8d, 19: 0x19, 65: 0x41, 111: 0x6f, 120: 0x78,
+		134: 0x86, 144: 0x90, 158: 0x9e, 163: 0xa3, 235: 0xeb,
+	})
+	flushPages(t, root, map[int]byte{
+		63: 0x3f, 207: 0xcf, 223: 0xdf, 239: 0xef, 244: 0xf4,
+	})
+	flushPages(t, root, map[int]byte{
+		17: 0x11, 60: 0x3c, 63: 0x40, 119: 0x77, 123: 0x7b,
+		148: 0x94, 173: 0xad, 195: 0xc3,
+	})
+	flushPages(t, root, map[int]byte{}, 91)
+	flushPages(t, root, map[int]byte{
+		5: 0x05, 45: 0x2d, 74: 0x4a, 131: 0x83, 144: 0x91,
+		194: 0xc2, 205: 0xcd, 246: 0xf6, 251: 0xfc, 255: 0xff,
+	})
+
+	buf := make([]byte, PageSize)
+	_, err = root.Read(ctx, buf, 14*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(0x14), buf)
+}
+
+func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
+	type flushBatch struct {
+		writes  map[int]byte
+		punches []int
+	}
+
+	runScenario := func(t *testing.T, faultBatch int, faultMode string, phantom bool) {
+		t.Helper()
+
+		store := objstore.NewMemStore()
+		cfg := Config{
+			FlushThreshold: 256 * PageSize,
+			FlushInterval:  -1,
+		}
+		ctx := t.Context()
+
+		pageWithByte := func(b byte) []byte {
+			return bytes.Repeat([]byte{b}, PageSize)
+		}
+		writePage := func(t *testing.T, v *Volume, page int, b byte) {
+			t.Helper()
+			require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+		}
+		punchPage := func(t *testing.T, v *Volume, page int) {
+			t.Helper()
+			require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+		}
+		flushBatchFn := func(t *testing.T, v *Volume, batch flushBatch) error {
+			t.Helper()
+			for _, page := range batch.punches {
+				punchPage(t, v, page)
+			}
+			pages := make([]int, 0, len(batch.writes))
+			for page := range batch.writes {
+				pages = append(pages, page)
+			}
+			sort.Ints(pages)
+			for _, page := range pages {
+				writePage(t, v, page, batch.writes[page])
+			}
+			return v.Flush()
+		}
+
+		m := newTestManager(t, store, cfg)
+		root, err := m.NewVolume(CreateParams{Volume: "root", Size: 256 * PageSize, NoFormat: true})
+		require.NoError(t, err)
+
+		require.NoError(t, flushBatchFn(t, root, flushBatch{
+			writes: map[int]byte{
+				2: 0x02, 3: 0x03, 25: 0x19, 35: 0x23, 40: 0x28, 48: 0x30,
+				54: 0x36, 61: 0x3d, 64: 0x40, 112: 0x70, 182: 0xb6, 192: 0xc0,
+				204: 0xcc, 210: 0xd2, 216: 0xd8, 221: 0xdd, 234: 0xea, 242: 0xf2,
+			},
+			punches: []int{56, 57, 72, 73, 131, 189},
+		}))
+
+		branch := cloneOpen(t, root, "branch-a")
+		defer func() { _ = branch.ReleaseRef() }()
+
+		require.NoError(t, flushBatchFn(t, root, flushBatch{punches: []int{31}}))
+		require.NoError(t, flushBatchFn(t, root, flushBatch{
+			writes: map[int]byte{
+				13: 0x13, 14: 0x14, 27: 0x27, 70: 0x46, 103: 0x67, 117: 0x75,
+				164: 0xa4, 166: 0xa6, 183: 0xb7, 241: 0xf1, 251: 0xfb,
+			},
+			punches: []int{100, 101, 172, 173, 174},
+		}))
+
+		batches := []flushBatch{
+			{writes: map[int]byte{13: 0x8d, 19: 0x19, 65: 0x41, 111: 0x6f, 120: 0x78, 134: 0x86, 144: 0x90, 158: 0x9e, 163: 0xa3, 235: 0xeb}},
+			{writes: map[int]byte{63: 0x3f, 207: 0xcf, 223: 0xdf, 239: 0xef, 244: 0xf4}},
+			{writes: map[int]byte{17: 0x11, 60: 0x3c, 63: 0x40, 119: 0x77, 123: 0x7b, 148: 0x94, 173: 0xad, 195: 0xc3}},
+			{punches: []int{91}},
+			{writes: map[int]byte{5: 0x05, 45: 0x2d, 74: 0x4a, 131: 0x83, 144: 0x91, 194: 0xc2, 205: 0xcd, 246: 0xf6, 251: 0xfc, 255: 0xff}},
+			{writes: map[int]byte{28: 0x1c, 49: 0x31, 67: 0x43, 118: 0x76, 125: 0x7d, 152: 0x98, 153: 0x99, 159: 0x9f, 229: 0xe5, 248: 0xf8}},
+			{writes: map[int]byte{61: 0x3d, 68: 0x44, 86: 0x56, 94: 0x5e, 99: 0x63, 101: 0x65, 123: 0x7c, 127: 0x7f, 182: 0xb6, 221: 0xdd, 230: 0xe6, 255: 0xfe}},
+			{writes: map[int]byte{58: 0x3a, 78: 0x4e, 81: 0x51, 86: 0x57, 102: 0x66, 107: 0x6b, 119: 0x78, 122: 0x7a, 123: 0x7d, 126: 0x7e, 146: 0x92, 175: 0xaf, 183: 0xb9, 209: 0xd1, 223: 0xe0, 244: 0xf5, 250: 0xfa}},
+			{writes: map[int]byte{31: 0x9f, 36: 0x24, 108: 0x6c, 160: 0xa0, 212: 0xd4}},
+			{writes: map[int]byte{11: 0x0b, 27: 0x2a, 41: 0x29, 60: 0x3d, 72: 0x48, 139: 0x8b, 150: 0x96, 157: 0x9d, 175: 0xb0, 178: 0xb2, 187: 0xbb, 202: 0xca, 212: 0xd5, 225: 0xe1, 226: 0xe2}, punches: []int{253}},
+			{writes: map[int]byte{83: 0x53, 179: 0xb3, 199: 0xc7, 242: 0xf2}},
+			{writes: map[int]byte{2: 0x12, 76: 0x4c, 88: 0x58, 90: 0x5a, 113: 0x71, 123: 0x7e, 129: 0x81, 133: 0x85, 204: 0xcc}},
+		}
+
+		for i, batch := range batches {
+			if i == faultBatch {
+				switch faultMode {
+				case "put":
+					fault := objstore.Fault{Err: fmt.Errorf("simulated block upload failure")}
+					if phantom {
+						fault = objstore.Fault{PostErr: fmt.Errorf("simulated phantom block upload failure")}
+					}
+					store.SetFault(objstore.OpPutReader, "", fault)
+				case "index-get":
+					store.SetFault(objstore.OpGet, "layers/"+root.layer.id+"/index.json", objstore.Fault{
+						Err: fmt.Errorf("simulated index get failure"),
+					})
+				default:
+					t.Fatalf("unknown fault mode %q", faultMode)
+				}
+				err := flushBatchFn(t, root, batch)
+				require.Error(t, err)
+				store.ClearAllFaults()
+				continue
+			}
+			require.NoError(t, flushBatchFn(t, root, batch))
+		}
+
+		buf := make([]byte, PageSize)
+		_, err = root.Read(ctx, buf, 14*PageSize)
+		require.NoError(t, err)
+		require.Equal(t, pageWithByte(0x14), buf)
+	}
+
+	for i := 0; i < 12; i++ {
+		t.Run(fmt.Sprintf("puterr-batch-%02d", i), func(t *testing.T) {
+			runScenario(t, i, "put", false)
+		})
+		t.Run(fmt.Sprintf("phantom-batch-%02d", i), func(t *testing.T) {
+			runScenario(t, i, "put", true)
+		})
+		t.Run(fmt.Sprintf("indexget-batch-%02d", i), func(t *testing.T) {
+			runScenario(t, i, "index-get", false)
+		})
+	}
+}
+
+func TestSingleLayerManySparseFlushesPreserveEarlierPages(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: 8 * PageSize,
+		FlushInterval:  -1,
+	}
+	ctx := t.Context()
+
+	pageWithByte := func(b byte) []byte {
+		return bytes.Repeat([]byte{b}, PageSize)
+	}
+	writePage := func(t *testing.T, v *Volume, page int, b byte) {
+		t.Helper()
+		require.NoError(t, v.Write(pageWithByte(b), uint64(page)*PageSize))
+	}
+
+	m := newTestManager(t, store, cfg)
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize, NoFormat: true})
+	require.NoError(t, err)
+
+	writePage(t, v, 31, 0x31)
+	require.NoError(t, v.Flush())
+
+	for _, page := range []int{100, 101, 172, 173, 174} {
+		require.NoError(t, v.PunchHole(uint64(page)*PageSize, PageSize))
+	}
+	for page, b := range map[int]byte{
+		13: 0x13, 14: 0x14, 27: 0x27, 70: 0x70, 103: 0x67, 117: 0x75,
+		164: 0xa4, 166: 0xa6, 183: 0xb7, 241: 0xf1, 251: 0xfb,
+	} {
+		writePage(t, v, page, b)
+	}
+	require.NoError(t, v.Flush())
+
+	for _, batch := range []map[int]byte{
+		{19: 0x19, 63: 0x3f, 65: 0x41, 111: 0x6f, 120: 0x78, 134: 0x86, 144: 0x90, 158: 0x9e, 163: 0xa3, 235: 0xeb},
+		{207: 0xcf, 223: 0xdf, 239: 0xef, 244: 0xf4},
+		{17: 0x11, 60: 0x3c, 63: 0x40, 119: 0x77, 123: 0x7b, 148: 0x94, 173: 0xad, 195: 0xc3},
+		{91: 0x00},
+		{5: 0x05, 45: 0x45, 74: 0x4a, 131: 0x83, 144: 0x91, 194: 0xc2, 205: 0xcd, 246: 0xf6, 251: 0xfa, 255: 0xff},
+		{28: 0x1c, 49: 0x31, 67: 0x43, 118: 0x76, 125: 0x7d, 152: 0x98, 153: 0x99, 159: 0x9f, 229: 0xe5, 248: 0xf8},
+		{61: 0x3d, 68: 0x44, 86: 0x56, 94: 0x5e, 99: 0x63, 101: 0x65, 123: 0x7c, 127: 0x7f, 182: 0xb6, 221: 0xdd, 230: 0xe6, 255: 0xfe},
+		{58: 0x3a, 78: 0x4e, 81: 0x51, 86: 0x57, 102: 0x66, 107: 0x6b, 119: 0x78, 122: 0x7a, 123: 0x7d, 126: 0x7e, 146: 0x92, 175: 0xaf, 183: 0xb8, 209: 0xd1, 223: 0xe0, 244: 0xf5, 250: 0xfa},
+		{31: 0x32, 36: 0x24, 108: 0x6c, 160: 0xa0, 212: 0xd4},
+		{11: 0x0b, 27: 0x28, 41: 0x29, 60: 0x3d, 72: 0x48, 139: 0x8b, 150: 0x96, 157: 0x9d, 175: 0xb0, 178: 0xb2, 187: 0xbb, 202: 0xca, 212: 0xd5, 225: 0xe1, 226: 0xe2, 253: 0x00},
+		{83: 0x53, 179: 0xb3, 199: 0xc7, 242: 0xf2},
+		{2: 0x02, 76: 0x4c, 88: 0x58, 90: 0x5a, 113: 0x71, 123: 0x7e, 129: 0x81, 133: 0x85, 204: 0xcc},
+	} {
+		for page, b := range batch {
+			writePage(t, v, page, b)
+		}
+		require.NoError(t, v.Flush())
+	}
+
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, 14*PageSize)
+	require.NoError(t, err)
+	require.Equal(t, pageWithByte(0x14), buf)
 }
 
 func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
