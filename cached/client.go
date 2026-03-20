@@ -439,7 +439,7 @@ func newConnForTest(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *conn {
 // NewInProcess creates a PageCache connected to an in-process server via
 // the given net.Conn and shared arena. No daemon binary, no mmap, no files.
 // Use with cachedserver.StartServerWithListener + net.Pipe for testing.
-func NewInProcess(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *PageCache {
+func TestOnlyNewInProcess(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *PageCache {
 	c := newConnForTest(nc, arena, sp)
 	return &PageCache{safepoint: sp, client: c}
 }

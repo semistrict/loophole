@@ -47,7 +47,7 @@ func (l *PipeListener) Addr() net.Addr { return pipeAddr{} }
 func (l *PipeListener) Dial(sp *safepoint.Safepoint) *cached.PageCache {
 	clientConn, serverConn := net.Pipe()
 	l.ch <- serverConn
-	return cached.NewInProcess(clientConn, Arena(), sp)
+	return cached.TestOnlyNewInProcess(clientConn, Arena(), sp)
 }
 
 type pipeAddr struct{}
