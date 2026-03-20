@@ -99,3 +99,30 @@ func TestPatchBlockWithTombstones(t *testing.T) {
 	assert.True(t, found)
 	assert.Equal(t, bytes.Repeat([]byte{0x44}, PageSize), data)
 }
+
+func TestPatchBlockDeduplicatesOffsetsPreferringNewPages(t *testing.T) {
+	oldData := bytes.Repeat([]byte{0x11}, PageSize)
+	newData := bytes.Repeat([]byte{0x22}, PageSize)
+
+	initial, err := buildBlock(0, []blockPage{{offset: 37, data: oldData}}, true)
+	require.NoError(t, err)
+	pb, err := parseBlock(initial, true)
+	require.NoError(t, err)
+
+	// Simulate a buggy caller supplying the same page offset from both the
+	// copied existing entries and the newly written pages. patchBlock must
+	// emit a canonical block with a single entry for the latest page.
+	existing := pb.compressedEntriesExcluding(map[uint16]struct{}{})
+	patched, err := patchBlock(0, existing, []blockPage{{offset: 37, data: newData}}, true)
+	require.NoError(t, err)
+
+	pb2, err := parseBlock(patched, true)
+	require.NoError(t, err)
+	require.Len(t, pb2.index, 1)
+	require.Equal(t, uint16(37), pb2.index[0].PageOffset)
+
+	got, found, err := pb2.findPage(t.Context(), PageIdx(37))
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, newData, got)
+}

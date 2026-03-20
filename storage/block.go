@@ -366,8 +366,7 @@ func (pb *parsedBlock) compressedEntriesExcluding2(excludeA, excludeB map[uint16
 // verbatim) and new uncompressed pages (compressed during build). Entries
 // are sorted by page offset for binary search on read.
 func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []blockPage, compress bool) ([]byte, error) {
-	totalEntries := len(existing) + len(newPages)
-	if totalEntries == 0 {
+	if len(existing) == 0 && len(newPages) == 0 {
 		return nil, fmt.Errorf("no pages")
 	}
 
@@ -429,6 +428,31 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		}
 	}
 
+	// Canonicalize by page offset before serializing so rebuilt blocks never
+	// contain duplicate index entries. New pages always win over copied
+	// entries from older blocks.
+	existingByOffset := make(map[uint16]compressedBlockPage, len(existing))
+	for _, e := range existing {
+		existingByOffset[e.offset] = e
+	}
+
+	newByOffset := make(map[uint16]compressedPage, len(newCompressed))
+	for _, cp := range newCompressed {
+		newByOffset[cp.offset] = cp
+		delete(existingByOffset, cp.offset)
+	}
+
+	offsets := make([]uint16, 0, len(existingByOffset)+len(newByOffset))
+	for offset := range existingByOffset {
+		offsets = append(offsets, offset)
+	}
+	for offset := range newByOffset {
+		offsets = append(offsets, offset)
+	}
+	sort.Slice(offsets, func(i, j int) bool {
+		return offsets[i] < offsets[j]
+	})
+
 	var buf bytes.Buffer
 
 	// Reserve space for header.
@@ -437,10 +461,20 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 	dictOffset := uint64(buf.Len())
 	dataOffset := uint64(buf.Len())
 
-	indexEntries := make([]blockIndexEntry, 0, totalEntries)
-
-	// Write pre-compressed entries verbatim.
-	for _, e := range existing {
+	indexEntries := make([]blockIndexEntry, 0, len(offsets))
+	for _, offset := range offsets {
+		if cp, ok := newByOffset[offset]; ok {
+			ie := blockIndexEntry{
+				PageOffset: cp.offset,
+				DataOffset: uint64(buf.Len()),
+				DataLen:    uint32(len(cp.compressed)),
+				CRC32:      cp.crc32,
+			}
+			buf.Write(cp.compressed)
+			indexEntries = append(indexEntries, ie)
+			continue
+		}
+		e := existingByOffset[offset]
 		ie := blockIndexEntry{
 			PageOffset: e.offset,
 			DataOffset: uint64(buf.Len()),
@@ -450,23 +484,6 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		buf.Write(e.compressed)
 		indexEntries = append(indexEntries, ie)
 	}
-
-	// Write newly compressed pages.
-	for _, cp := range newCompressed {
-		ie := blockIndexEntry{
-			PageOffset: cp.offset,
-			DataOffset: uint64(buf.Len()),
-			DataLen:    uint32(len(cp.compressed)),
-			CRC32:      cp.crc32,
-		}
-		buf.Write(cp.compressed)
-		indexEntries = append(indexEntries, ie)
-	}
-
-	// Sort index entries by page offset for binary search on read.
-	sort.Slice(indexEntries, func(i, j int) bool {
-		return indexEntries[i].PageOffset < indexEntries[j].PageOffset
-	})
 
 	// Write index.
 	idxOffset := uint64(buf.Len())

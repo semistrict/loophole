@@ -167,6 +167,11 @@ func (c *Config) maxMemtablePages() int {
 	if n < 1 {
 		n = 1
 	}
+	// Keep one extra slot beyond the flush threshold so the write that crosses
+	// the threshold is staged before auto-flush/backpressure runs.
+	if n < cap {
+		n++
+	}
 	if n > cap {
 		n = cap
 	}

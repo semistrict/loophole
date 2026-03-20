@@ -70,13 +70,14 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	// 3. L1 (sparse blocks).
 	block := pageIdx.Block()
 	if layer, seq := l1map.Find(block); layer != "" {
+		key := blockKey(layer, "l1", seq, block)
 		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
 		if err != nil {
-			add("  [3] L1 block=%d layer=%s: err=%v", block, layer[:8], err)
+			add("  [3] L1 block=%d layer=%s seq=%d key=%s: err=%v", block, layer[:8], seq, key, err)
 		} else if found {
-			add("  [3] L1 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+			add("  [3] L1 block=%d layer=%s seq=%d key=%s: FOUND zero=%v hash=%s", block, layer[:8], seq, key, isZero(data), hash(data))
 		} else {
-			add("  [3] L1 block=%d layer=%s: page not in block", block, layer[:8])
+			add("  [3] L1 block=%d layer=%s seq=%d key=%s: page not in block", block, layer[:8], seq, key)
 		}
 	} else {
 		add("  [3] L1: no block for addr %d", block)
@@ -84,13 +85,14 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 
 	// 4. L2 (dense blocks).
 	if layer, seq := l2map.Find(block); layer != "" {
+		key := blockKey(layer, "l2", seq, block)
 		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
 		if err != nil {
-			add("  [4] L2 block=%d layer=%s: err=%v", block, layer[:8], err)
+			add("  [4] L2 block=%d layer=%s seq=%d key=%s: err=%v", block, layer[:8], seq, key, err)
 		} else if found {
-			add("  [4] L2 block=%d layer=%s: FOUND zero=%v hash=%s", block, layer[:8], isZero(data), hash(data))
+			add("  [4] L2 block=%d layer=%s seq=%d key=%s: FOUND zero=%v hash=%s", block, layer[:8], seq, key, isZero(data), hash(data))
 		} else {
-			add("  [4] L2 block=%d layer=%s: page not in block", block, layer[:8])
+			add("  [4] L2 block=%d layer=%s seq=%d key=%s: page not in block", block, layer[:8], seq, key)
 		}
 	} else {
 		add("  [4] L2: no block for addr %d", block)
