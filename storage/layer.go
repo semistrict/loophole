@@ -717,12 +717,40 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 		}
 	}
 
-	// Write zero pages for fully-covered interior pages.
+	// Write tombstones for fully-covered interior pages.
 	for pageIdx := firstFullPage; pageIdx < lastFullPage; pageIdx++ {
-		if err := ly.Write(zeroPage[:], pageIdx.ByteOffset()); err != nil {
+		pageLock := ly.pageLock(pageIdx)
+		pageLock.Lock()
+
+		ly.mu.RLock()
+		mt := ly.memtable
+		err := mt.putTombstone(pageIdx)
+		ly.mu.RUnlock()
+
+		pageLock.Unlock()
+
+		for errors.Is(err, errMemtableFull) {
+			if fErr := ly.maybeFreezeAndFlush(); fErr != nil {
+				return fErr
+			}
+			ly.mu.RLock()
+			mt = ly.memtable
+			err = mt.putTombstone(pageIdx)
+			ly.mu.RUnlock()
+		}
+		if err != nil {
 			return err
 		}
 	}
+
+	// Notify flush loop.
+	if ly.writeNotify != nil {
+		select {
+		case ly.writeNotify <- struct{}{}:
+		default:
+		}
+	}
+
 	return nil
 }
 
@@ -885,16 +913,23 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 	blockGroups := make(map[BlockIdx][]blockPage, len(entries)/BlockPages+1)
 	totalPages := 0
 	for _, e := range entries {
-		data, err := mt.readData(e.slot)
-		if err != nil {
-			return fmt.Errorf("read memtable slot %d for page %v: %w", e.slot, e.pageIdx, err)
-		}
 		blockAddr := e.pageIdx.Block()
 		offset := uint16(uint64(e.pageIdx) % BlockPages)
-		blockGroups[blockAddr] = append(blockGroups[blockAddr], blockPage{
-			offset: offset,
-			data:   data,
-		})
+		if e.slot == tombstoneSlot {
+			blockGroups[blockAddr] = append(blockGroups[blockAddr], blockPage{
+				offset: offset,
+				data:   nil,
+			})
+		} else {
+			data, err := mt.readData(e.slot)
+			if err != nil {
+				return fmt.Errorf("read memtable slot %d for page %v: %w", e.slot, e.pageIdx, err)
+			}
+			blockGroups[blockAddr] = append(blockGroups[blockAddr], blockPage{
+				offset: offset,
+				data:   data,
+			})
+		}
 		totalPages++
 	}
 
@@ -1085,7 +1120,11 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 		if ly.diskCache != nil {
 			for _, p := range r.newPages {
 				pageIdx := r.blockAddr.PageIdx(p.offset)
-				ly.cachePage(ly.id, pageIdx, p.data)
+				if p.data == nil {
+					ly.cachePage(ly.id, pageIdx, zeroPage[:])
+				} else {
+					ly.cachePage(ly.id, pageIdx, p.data)
+				}
 			}
 		}
 	}

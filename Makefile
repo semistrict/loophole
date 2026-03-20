@@ -44,10 +44,10 @@ clean:
 
 # Run unit tests (excludes e2e/linuxutil which require Linux)
 # Usage: make test [RUN=TestName]
-UNIT_TEST_TIMEOUT := 30s
+UNIT_TEST_TIMEOUT := 120s
 UNIT_PKGS := $(shell go list -tags "$(BUILDTAGS)" ./... | grep -v -E '/e2e$$|/linuxutil$$|/containerstorage$$')
 test:
-	go test -tags "$(BUILDTAGS)" -timeout $(UNIT_TEST_TIMEOUT) $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
+	go test -race -tags "$(BUILDTAGS)" -timeout $(UNIT_TEST_TIMEOUT) $(if $(RUN),-run '$(RUN)') $(UNIT_PKGS)
 
 # Build linux/amd64 binary for Fly test machine
 fly-bin:

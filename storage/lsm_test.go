@@ -1029,8 +1029,8 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 	err := DeleteVolume(ctx, m.Store(), "vol")
-	if err == nil || !strings.Contains(err.Error(), "is open") {
-		t.Fatalf("expected 'is open' error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "lease held by") {
+		t.Fatalf("expected 'lease held by' error, got: %v", err)
 	}
 }
 
@@ -3349,6 +3349,122 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 		if idx != uint32(pg) || buf[4] != 0xAA {
 			t.Fatalf("fresh-node clone-2 clean page %d: expected idx=%d marker=0xAA, got idx=%d marker=0x%02x",
 				pg, pg, idx, buf[4])
+		}
+	}
+}
+
+func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{FlushThreshold: 64 * 1024, FlushInterval: -1}
+
+	ly, err := openLayer(t.Context(), layerParams{store: store, id: "test", config: cfg})
+	require.NoError(t, err)
+	defer ly.Close()
+
+	// Write 2 pages of data first (to have something to punch).
+	data := bytes.Repeat([]byte{0xFF}, 2*PageSize)
+	require.NoError(t, ly.Write(data, 0))
+
+	// Record memtable slot count before punch.
+	ly.mu.RLock()
+	slotsBefore := ly.memtable.nextSlot
+	ly.mu.RUnlock()
+
+	// Punch both pages.
+	require.NoError(t, ly.PunchHole(0, 2*PageSize))
+
+	// Tombstones should NOT have consumed additional slots.
+	ly.mu.RLock()
+	slotsAfter := ly.memtable.nextSlot
+	ly.mu.RUnlock()
+	require.Equal(t, slotsBefore, slotsAfter)
+
+	// But reads should return zeros.
+	buf := make([]byte, 2*PageSize)
+	_, err = ly.Read(t.Context(), buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, make([]byte, 2*PageSize), buf)
+}
+
+func TestPunchHoleTombstoneCloneInheritance(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{FlushThreshold: 64 * 1024, FlushInterval: -1}
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	// Parent writes pages 0-3.
+	parent, err := m.NewVolume(CreateParams{Volume: "parent", Size: 1024 * 1024})
+	require.NoError(t, err)
+	for i := range 4 {
+		page := bytes.Repeat([]byte{byte('A' + i)}, PageSize)
+		require.NoError(t, parent.Write(page, uint64(i)*PageSize))
+	}
+	require.NoError(t, parent.Flush())
+
+	// Clone (opens child on a separate manager, matching production).
+	child := cloneOpen(t, parent, "child")
+
+	// Punch pages 1-2 in child.
+	require.NoError(t, child.PunchHole(PageSize, 2*PageSize))
+	require.NoError(t, child.Flush())
+
+	// Child: page 0 = 'A', pages 1-2 = zeros, page 3 = 'D'.
+	for i := range 4 {
+		buf := make([]byte, PageSize)
+		_, err := child.Read(ctx, buf, uint64(i)*PageSize)
+		require.NoError(t, err)
+		if i == 1 || i == 2 {
+			require.Equal(t, zeroPage[:], buf, "child page %d should be zeros", i)
+		} else {
+			require.Equal(t, bytes.Repeat([]byte{byte('A' + i)}, PageSize), buf,
+				"child page %d should be parent data", i)
+		}
+	}
+
+	// Parent: all 4 pages still have original data.
+	for i := range 4 {
+		buf := make([]byte, PageSize)
+		_, err := parent.Read(ctx, buf, uint64(i)*PageSize)
+		require.NoError(t, err)
+		require.Equal(t, bytes.Repeat([]byte{byte('A' + i)}, PageSize), buf,
+			"parent page %d should be unchanged", i)
+	}
+}
+
+func TestPunchHoleTombstoneFlushReopenRead(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{FlushThreshold: 16 * PageSize}
+	ctx := t.Context()
+
+	m1 := &Manager{ObjectStore: store, config: cfg}
+	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	// Write 8 pages.
+	for i := range 8 {
+		page := bytes.Repeat([]byte{byte('A' + i)}, PageSize)
+		require.NoError(t, v1.Write(page, uint64(i)*PageSize))
+	}
+
+	// Punch pages 2-4.
+	require.NoError(t, v1.PunchHole(2*PageSize, 3*PageSize))
+	require.NoError(t, v1.Flush())
+	require.NoError(t, m1.Close())
+
+	// Reopen.
+	m2 := newTestManager(t, store, cfg)
+	v2, err := m2.OpenVolume("test")
+	require.NoError(t, err)
+
+	for i := range 8 {
+		buf := make([]byte, PageSize)
+		_, err := v2.Read(ctx, buf, uint64(i)*PageSize)
+		require.NoError(t, err)
+		if i >= 2 && i <= 4 {
+			require.Equal(t, zeroPage[:], buf, "page %d should be zeros", i)
+		} else {
+			expected := bytes.Repeat([]byte{byte('A' + i)}, PageSize)
+			require.Equal(t, expected, buf, "page %d", i)
 		}
 	}
 }

@@ -17,6 +17,10 @@ import (
 // errMemtableFull is returned when the memtable is full.
 var errMemtableFull = fmt.Errorf("memtable full")
 
+// tombstoneSlot is the sentinel slot value for punched (tombstoned) pages.
+// It indicates the page is explicitly absent — reads return zeros.
+const tombstoneSlot = -1
+
 // sortedEntry pairs a page address with its mmap slot for iteration.
 type sortedEntry struct {
 	pageIdx PageIdx
@@ -91,7 +95,7 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	}
 
 	var slot int
-	if existing, ok := mt.index[pageIdx]; ok {
+	if existing, ok := mt.index[pageIdx]; ok && existing != tombstoneSlot {
 		slot = existing
 	} else {
 		if mt.nextSlot >= mt.maxPages {
@@ -109,6 +113,21 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	return nil
 }
 
+func (mt *memtable) putTombstone(pageIdx PageIdx) error {
+	mt.mu.Lock()
+	defer mt.mu.Unlock()
+
+	if mt.frozen {
+		return fmt.Errorf("memtable is frozen")
+	}
+	if len(mt.index) >= mt.maxPages {
+		return errMemtableFull
+	}
+
+	mt.index[pageIdx] = tombstoneSlot
+	return nil
+}
+
 func (mt *memtable) isEmpty() bool {
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
@@ -123,6 +142,10 @@ func (mt *memtable) get(pageIdx PageIdx) (int, bool) {
 }
 
 func (mt *memtable) readData(slot int) ([]byte, error) {
+	if slot == tombstoneSlot {
+		return make([]byte, PageSize), nil
+	}
+
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
 
@@ -140,6 +163,10 @@ func (mt *memtable) readData(slot int) ([]byte, error) {
 // The caller must hold a safepoint Guard for the duration of the returned
 // slice's use. The Guard prevents cleanup() from unmapping the memory.
 func (mt *memtable) readDataRef(g safepoint.Guard, slot int) ([]byte, error) {
+	if slot == tombstoneSlot {
+		return zeroPage[:], nil
+	}
+
 	mt.mu.RLock()
 	defer mt.mu.RUnlock()
 

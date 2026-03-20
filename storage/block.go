@@ -80,7 +80,7 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, er
 
 	// Validate page sizes upfront.
 	for _, p := range pages {
-		if len(p.data) != PageSize {
+		if p.data != nil && len(p.data) != PageSize {
 			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
 		}
 	}
@@ -106,6 +106,10 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, er
 				enc := getZstdEncoder()
 				defer putZstdEncoder(enc)
 				for i := range work {
+					if pages[i].data == nil {
+						compressed[i] = compressedPage{offset: pages[i].offset}
+						continue
+					}
 					c := enc.EncodeAll(pages[i].data, nil)
 					compressed[i] = compressedPage{
 						offset:     pages[i].offset,
@@ -118,6 +122,10 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, er
 		wg.Wait()
 	} else {
 		for i, p := range pages {
+			if p.data == nil {
+				compressed[i] = compressedPage{offset: p.offset}
+				continue
+			}
 			compressed[i] = compressedPage{
 				offset:     p.offset,
 				compressed: p.data,
@@ -249,6 +257,9 @@ func (pb *parsedBlock) findPage(ctx context.Context, pageIdx PageIdx) ([]byte, b
 	}
 
 	ie := &pb.index[i]
+	if ie.DataLen == 0 {
+		return zeroPage[:], true, nil
+	}
 	data, err := pb.decompressPage(ctx, ie, pageIdx)
 	if err != nil {
 		return nil, false, err
@@ -362,7 +373,7 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 
 	// Validate page sizes upfront.
 	for _, p := range newPages {
-		if len(p.data) != PageSize {
+		if p.data != nil && len(p.data) != PageSize {
 			return nil, fmt.Errorf("page data must be %d bytes, got %d", PageSize, len(p.data))
 		}
 	}
@@ -389,6 +400,10 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 					enc := getZstdEncoder()
 					defer putZstdEncoder(enc)
 					for i := range work {
+						if newPages[i].data == nil {
+							newCompressed[i] = compressedPage{offset: newPages[i].offset}
+							continue
+						}
 						c := enc.EncodeAll(newPages[i].data, nil)
 						newCompressed[i] = compressedPage{
 							offset:     newPages[i].offset,
@@ -401,6 +416,10 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 			wg.Wait()
 		} else {
 			for i, p := range newPages {
+				if p.data == nil {
+					newCompressed[i] = compressedPage{offset: p.offset}
+					continue
+				}
 				newCompressed[i] = compressedPage{
 					offset:     p.offset,
 					compressed: p.data,

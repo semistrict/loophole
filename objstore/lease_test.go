@@ -3,6 +3,7 @@ package objstore
 import (
 	"context"
 	"encoding/json"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -625,10 +626,10 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 		store := NewMemStore()
 		leases := store.At("leases")
 
-		var callCount int
+		var callCount atomic.Int32
 		holder := NewLeaseManager(leases)
 		holder.Handle("ping", func(_ context.Context, _ json.RawMessage) (any, error) {
-			callCount++
+			callCount.Add(1)
 			return map[string]string{"pong": "ok"}, nil
 		})
 		require.NoError(t, holder.EnsureStarted(t.Context()))
@@ -648,7 +649,7 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 		time.Sleep(leasePollInterval + time.Second)
 		r := <-done
 		require.NoError(t, r.err)
-		assert.Equal(t, 1, callCount)
+		assert.Equal(t, int32(1), callCount.Load())
 
 		// Second call immediately after — should be handled within the
 		// fast poll interval (1s), not the slow one (10s).
@@ -659,7 +660,7 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 		time.Sleep(leasePollFast + time.Second)
 		r = <-done
 		require.NoError(t, r.err)
-		assert.Equal(t, 2, callCount)
+		assert.Equal(t, int32(2), callCount.Load())
 
 		// Wait for decay (20s with no RPCs) then send another call.
 		// It should take the slow interval again.
@@ -667,7 +668,7 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 		// to slow (10s). The next slow tick is at ~31s, well beyond our
 		// 1.5s assertion window.
 		time.Sleep(leasePollDecay + 2*time.Second)
-		beforeSlow := callCount
+		beforeSlow := callCount.Load()
 		go func() {
 			r, err := caller.Call(t.Context(), holder.Token(), "ping", nil)
 			done <- callResult{r, err}
@@ -675,13 +676,13 @@ func TestPollFastAfterRPCThenDecay(t *testing.T) {
 		// After fast interval, the call should NOT be handled yet
 		// (we decayed back to slow).
 		time.Sleep(leasePollFast + 500*time.Millisecond)
-		assert.Equal(t, beforeSlow, callCount, "should not have been handled in fast interval after decay")
+		assert.Equal(t, beforeSlow, callCount.Load(), "should not have been handled in fast interval after decay")
 
 		// But after the full slow interval, it should be handled.
 		time.Sleep(leasePollInterval)
 		r = <-done
 		require.NoError(t, r.err)
-		assert.Equal(t, beforeSlow+1, callCount)
+		assert.Equal(t, beforeSlow+1, callCount.Load())
 
 		require.NoError(t, holder.Close(t.Context()))
 	})

@@ -525,7 +525,9 @@ func TestClient_ClientDiesDuringDrain(t *testing.T) {
 		enc := json.NewEncoder(sc)
 		dec := json.NewDecoder(sc)
 
+		srvDone := make(chan struct{})
 		go func() {
+			defer close(srvDone)
 			var msg ClientMsg
 			dec.Decode(&msg)
 			copy(arena[0:SlotSize], msg.Data)
@@ -543,6 +545,7 @@ func TestClient_ClientDiesDuringDrain(t *testing.T) {
 		time.Sleep(time.Millisecond)
 
 		client.Close()
+		<-srvDone
 
 		var msg ClientMsg
 		err := dec.Decode(&msg)
