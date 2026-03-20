@@ -60,6 +60,8 @@ type Simulation struct {
 	lastClonedVolume string
 	// All managers ever created (for cleanup, including crashed ones).
 	allManagers []*Manager
+	// Shared in-memory page cache for all managers.
+	pageCache *memPageCache
 }
 
 // SimNode represents a single simulated instance.
@@ -88,6 +90,7 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 		deletedVolumes:   make(map[string]bool),
 		timelineChildren: make(map[string]map[string]bool),
 		nextTLID:         1,
+		pageCache:        newMemPageCache(),
 	}
 
 	// Create nodes.
@@ -126,7 +129,8 @@ func (sim *Simulation) newManager(cacheDir string, fs localFS) *Manager {
 			FlushThreshold: sim.config.FlushThreshold,
 			FlushInterval:  flushInterval,
 		},
-		fs: fs,
+		fs:        fs,
+		diskCache: sim.pageCache,
 	}
 	return m
 }
