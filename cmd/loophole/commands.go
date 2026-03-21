@@ -23,6 +23,7 @@ import (
 
 func addCommands(root *cobra.Command) {
 	root.AddCommand(
+		formatCmd(),
 		shutdownCmd(),
 		createCmd(),
 		deleteCmd(),
@@ -38,6 +39,35 @@ func addCommands(root *cobra.Command) {
 		s3testCmd(),
 		gcCmd(),
 	)
+}
+
+func formatCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "format",
+		Short: "Format the backing store by writing the top-level loophole descriptor",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dir := env.DefaultDir()
+			inst, err := resolveProfile(dir)
+			if err != nil {
+				return err
+			}
+			store, err := storage.OpenStoreForProfile(cmd.Context(), inst)
+			if err != nil {
+				return err
+			}
+			desc, created, err := storage.FormatVolumeSet(cmd.Context(), store)
+			if err != nil {
+				return err
+			}
+			if created {
+				fmt.Printf("formatted store volset_id=%s page_size=%d\n", desc.VolsetID, desc.PageSize)
+				return nil
+			}
+			fmt.Printf("store already formatted volset_id=%s page_size=%d\n", desc.VolsetID, desc.PageSize)
+			return nil
+		},
+	}
 }
 
 func shutdownCmd() *cobra.Command {

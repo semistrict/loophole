@@ -21,6 +21,7 @@ import (
 	compute "cloud.google.com/go/compute/apiv1"
 	computepb "cloud.google.com/go/compute/apiv1/computepb"
 	gcsstorage "cloud.google.com/go/storage"
+	"github.com/semistrict/loophole/internal/pagegeom"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/spf13/cobra"
 	"gocloud.dev/blob"
@@ -388,14 +389,15 @@ DEST=$HOME/%s
 if [ -d "$DEST/.git" ]; then
     cd "$DEST"
     git fetch origin
-    git checkout --force %s
 else
     git clone %s "$DEST"
     cd "$DEST"
-    git checkout %s
 fi
+git reset --hard %s
+git clean -fdx
+git checkout --force %s
 echo "==> Remote at $(git rev-parse --short HEAD)"
-`, remoteSrcDir, headRef, remoteURL, headRef)
+`, remoteSrcDir, remoteURL, headRef, headRef)
 
 	if err := c.sshExecWithAgent(ctx, cloneScript); err != nil {
 		return fmt.Errorf("clone/checkout: %w", err)
@@ -479,7 +481,7 @@ func parseDirtyFiles(porcelain string) []string {
 func (c *benchConfig) tarCopyFiles(ctx context.Context, repoRoot string, files []string) error {
 	// Build tar command with explicit file list.
 	// Use --no-recursion for files, but directories need recursion.
-	tarArgs := []string{"-C", repoRoot, "-czf", "-"}
+	tarArgs := []string{"--disable-copyfile", "--no-mac-metadata", "-C", repoRoot, "-czf", "-"}
 	tarArgs = append(tarArgs, files...)
 
 	extractCmd := fmt.Sprintf("cd $HOME/%s && tar xzf -", remoteSrcDir)
@@ -494,6 +496,10 @@ func (c *benchConfig) tarCopyFiles(ctx context.Context, repoRoot string, files [
 	tarCmd := exec.CommandContext(ctx, "tar", tarArgs...)
 	tarCmd.Dir = repoRoot
 	tarCmd.Stderr = os.Stderr
+	tarCmd.Env = append(os.Environ(),
+		"COPYFILE_DISABLE=1",
+		"COPY_EXTENDED_ATTRIBUTES_DISABLE=1",
+	)
 
 	tarOut, err := tarCmd.StdoutPipe()
 	if err != nil {
@@ -637,6 +643,9 @@ type BenchResult struct {
 	Mountpoint   string         `json:"mountpoint"`
 	VolSize      string         `json:"vol_size"`
 	FioRuntime   string         `json:"fio_runtime"`
+	PageSize     int            `json:"page_size"`
+	BlockSize    int            `json:"block_size"`
+	BlockPages   int            `json:"block_pages"`
 	Fio          []FioResult    `json:"fio,omitempty"`
 	RunConfig    BenchRunConfig `json:"run_config"`
 	Repro        BenchRepro     `json:"repro"`
@@ -726,6 +735,9 @@ func (c *benchConfig) collectResults(ctx context.Context, opts runOpts) error {
 		Mountpoint:   "/mnt/loophole-bench",
 		VolSize:      opts.volSize,
 		FioRuntime:   opts.fioRuntime,
+		PageSize:     pagegeom.PageSize,
+		BlockSize:    pagegeom.BlockSize,
+		BlockPages:   pagegeom.BlockPages,
 		RunConfig: BenchRunConfig{
 			Debug:   opts.debug,
 			FioOnly: opts.fioOnly,
@@ -873,6 +885,8 @@ if [ ! -f $HOME/.loophole/config.toml ]; then
     exit 1
 fi
 
+sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE format >/dev/null
+
 cleanup() {
     echo "==> Cleaning up..."
     {{if .Debug}}
@@ -898,7 +912,8 @@ sudo chown $(id -u):$(id -g) $MOUNTPOINT
 sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE delete -y bench-vol 2>/dev/null || true
 
 echo "==> Creating volume (size={{.VolSize}})..."
-sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE create --size {{.VolSize}} --mount $MOUNTPOINT bench-vol &
+nohup sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE create --size {{.VolSize}} --mount $MOUNTPOINT bench-vol \
+    >$RESULTS_DIR/owner-create.log 2>&1 </dev/null &
 LOOPHOLE_PID=$!
 
 for i in $(seq 1 60); do

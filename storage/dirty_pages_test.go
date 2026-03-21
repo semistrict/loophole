@@ -10,7 +10,7 @@ import (
 
 func testDirtyBatch(maxEntries int) *dirtyBatch {
 	return newDirtyBatch(Config{
-		FlushThreshold:    1 << 20,
+		FlushThreshold:    int64(maxEntries+1) * PageSize,
 		FlushInterval:     -1,
 		MaxDirtyPageSlots: maxEntries,
 	})

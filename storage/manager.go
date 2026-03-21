@@ -55,6 +55,10 @@ func (m *Manager) init() error {
 	m.initOnce.Do(func() {
 		m.config.setDefaults()
 		m.store = m.ObjectStore
+		if _, err := CheckVolumeSet(context.Background(), m.store); err != nil {
+			m.initErr = err
+			return
+		}
 		if m.fs == nil {
 			m.fs = osLocalFS{}
 		}

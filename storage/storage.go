@@ -17,34 +17,35 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/klauspost/compress/zstd"
+	"github.com/semistrict/loophole/internal/pagegeom"
 )
 
 const (
-	PageSize = 4096 // 4KB
+	PageSize = pagegeom.PageSize
 
-	// BlockPages is the number of 4KB pages in one 4MB block (L1/L2).
-	BlockPages = 1024
+	// BlockPages is the number of logical pages in one 4MB block (L1/L2).
+	BlockPages = pagegeom.BlockPages
 
 	// BlockSize is the uncompressed size of a full block.
-	BlockSize = BlockPages * PageSize // 4MB
+	BlockSize = pagegeom.BlockSize
 
 	DefaultFlushThreshold = 512 * 1024 * 1024      // 512MB
 	DefaultVolumeSize     = 8 * 1024 * 1024 * 1024 // 8GB
 	DefaultFlushInterval  = 30 * time.Second
 
 	// L1PromoteThreshold is the fraction of pages in an L1 block that
-	// triggers promotion to L2. 25% = 256 out of 1024 pages.
+	// triggers promotion to L2. 25% = 16 out of 64 pages.
 	L1PromoteThreshold = BlockPages / 4
 
-	// maxDirtyPageSlots caps the number of unique page slots in one active dirty batch.
-	maxDirtyPageSlots = 131072 // 512MB at 4KB/slot
+	// maxDirtyPageBytes caps the total staged dirty data in one active batch.
+	maxDirtyPageBytes = 512 * 1024 * 1024
 )
 
-// Page is a single 4 KiB filesystem page.
+// Page is a single logical filesystem page.
 type Page [PageSize]byte
 
 // PageIdx is a page index into the virtual disk.
-// Page 0 starts at byte offset 0, page 1 at byte offset 4096, etc.
+// Page 0 starts at byte offset 0, page 1 at byte offset PageSize, etc.
 type PageIdx uint64
 
 func (p PageIdx) String() string { return fmt.Sprintf("page#%d", uint64(p)) }
@@ -136,7 +137,7 @@ type Config struct {
 	MaxCacheEntries int
 
 	// MaxDirtyPageSlots caps the number of unique page slots in one active dirty batch.
-	// 0 = default (65536). Only useful for tests.
+	// 0 = default (512MiB / PageSize). Only useful for tests.
 	MaxDirtyPageSlots int
 
 	// DisableCompression stores pages uncompressed in blocks. This is used
@@ -162,7 +163,7 @@ func (c *Config) setDefaults() {
 
 // maxDirtyPageSlots returns the number of page slots for a new active dirty batch.
 func (c *Config) maxDirtyPageSlots() int {
-	cap := maxDirtyPageSlots
+	cap := maxDirtyPageBytes / PageSize
 	if c.MaxDirtyPageSlots > 0 {
 		cap = c.MaxDirtyPageSlots
 	}

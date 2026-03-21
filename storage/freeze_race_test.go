@@ -25,6 +25,7 @@ import (
 // enabled and slow object-store uploads to keep the pending slot occupied longer.
 func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize, // very low: 2 pages triggers freeze
@@ -70,6 +71,7 @@ func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 // back and verify the contents.
 func TestFreezeRaceDataIntegrity(t *testing.T) {
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -121,6 +123,7 @@ func TestFreezeRaceDataIntegrity(t *testing.T) {
 // freeze+flush cycles that stress the lock handoff.
 func TestConcurrentFreezeDirtyPages(t *testing.T) {
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,

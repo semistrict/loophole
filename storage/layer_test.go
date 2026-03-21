@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/semistrict/loophole/objstore"
@@ -14,8 +15,15 @@ var testConfig = Config{
 	FlushInterval:  -1,
 }
 
+func formatTestStore(t *testing.T, store objstore.ObjectStore) {
+	t.Helper()
+	_, _, err := FormatVolumeSet(context.Background(), store)
+	require.NoError(t, err)
+}
+
 func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Manager {
 	t.Helper()
+	formatTestStore(t, store)
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
 	}
@@ -34,7 +42,9 @@ func TestLayerReadWrite(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		// Keep the mixed-write test focused on direct-L2 eligibility rather than
+		// per-page background flush interleavings.
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 
@@ -65,7 +75,7 @@ func TestLayerFlushAndRead(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 
@@ -94,7 +104,7 @@ func TestLayerPunchHole(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 
@@ -212,7 +222,7 @@ func TestLayerDirectL2Write(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 
@@ -275,7 +285,7 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 
@@ -328,14 +338,15 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 
 	// Write data that spans: partial block + full block + partial block.
 	// The full block in the middle should NOT go through direct L2 because
-	// the leading partial write will populate the dirty pages first, making
-	// canDirectL2() return false.
+	// the leading partial write populates dirty pages first, making
+	// canDirectL2() return false for the follow-on write.
 	leadingBytes := PageSize / 2 // half a page
 	data := make([]byte, leadingBytes+BlockSize+PageSize)
 	for i := range data {
 		data[i] = byte((i * 13) % 256)
 	}
-	require.NoError(t, ly.Write(data, 0))
+	require.NoError(t, ly.Write(data[:leadingBytes], 0))
+	require.NoError(t, ly.Write(data[leadingBytes:], uint64(leadingBytes)))
 
 	// Read it all back.
 	buf := make([]byte, len(data))
@@ -350,7 +361,7 @@ func TestLayerPunchHoleDisablesDirectL2(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold: 64 * 1024,
+		FlushThreshold: 2 * BlockSize,
 		FlushInterval:  -1,
 	}
 

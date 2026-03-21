@@ -119,11 +119,11 @@ func CloneFromCheckpoint(ctx context.Context, store objstore.ObjectStore, volume
 		return err
 	}
 
-	volRefs := store.At("volumes")
 	cpKey, err := checkpointIndexKey(volumeName, checkpointID)
 	if err != nil {
 		return err
 	}
+	volRefs := store.At("volumes")
 	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
 		return fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)

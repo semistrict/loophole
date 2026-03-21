@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/semistrict/loophole/internal/pagegeom"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
@@ -21,8 +22,7 @@ import (
 )
 
 // SlotSize is the arena slot size — must match the daemon's page size.
-// Defined here (not imported from storage) to avoid a circular dependency.
-const SlotSize = 4096
+const SlotSize = pagegeom.PageSize
 
 // conn is a single connection to the page cache daemon. It provides
 // zero-copy reads via a shared read-only mmap of the arena.

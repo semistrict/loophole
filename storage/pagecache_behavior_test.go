@@ -35,7 +35,9 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	m := &Manager{ObjectStore: objstore.NewMemStore(), config: cfg, diskCache: cache}
+	store := objstore.NewMemStore()
+	formatTestStore(t, store)
+	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{
@@ -69,6 +71,7 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	}
 
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
@@ -113,6 +116,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	}
 
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 

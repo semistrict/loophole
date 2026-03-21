@@ -50,6 +50,11 @@ func TestOpenManagerForProfile(t *testing.T) {
 
 	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
 
+	store, err := OpenStoreForProfile(context.Background(), inst)
+	require.NoError(t, err)
+	_, _, err = FormatVolumeSet(context.Background(), store)
+	require.NoError(t, err)
+
 	m, err := OpenManagerForProfile(context.Background(), inst, dir)
 	require.NoError(t, err)
 	t.Cleanup(func() {

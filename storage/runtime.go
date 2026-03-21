@@ -35,9 +35,13 @@ func NewManagerForProfile(inst env.ResolvedProfile, dir env.Dir, store objstore.
 	}
 }
 
+func OpenStoreForProfile(ctx context.Context, inst env.ResolvedProfile) (objstore.ObjectStore, error) {
+	return objstore.OpenForProfile(ctx, inst)
+}
+
 // OpenManagerForProfile resolves the object store and constructs a storage manager.
 func OpenManagerForProfile(ctx context.Context, inst env.ResolvedProfile, dir env.Dir) (*Manager, error) {
-	store, err := objstore.OpenForProfile(ctx, inst)
+	store, err := OpenStoreForProfile(ctx, inst)
 	if err != nil {
 		return nil, err
 	}

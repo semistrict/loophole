@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/semistrict/loophole/internal/pagegeom"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,7 @@ func TestE2E_CloneMountStaysReadableDuringAggressiveFlush(t *testing.T) {
 	skipE2E(t)
 
 	b, parentMP := setupBusyboxVolume(t, "cln-stress-parent")
-	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
+	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", fmt.Sprintf("%d", pagegeom.PageSize))
 
 	ctx := t.Context()
 	cloneMP := mountpoint(t, "cln-stress-clone")

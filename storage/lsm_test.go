@@ -153,6 +153,7 @@ func TestWriteFlushRead(t *testing.T) {
 
 func TestWriteFlushReopenRead(t *testing.T) {
 	store := objstore.NewMemStore()
+	formatTestStore(t, store)
 
 	config := Config{
 		FlushThreshold: 16 * PageSize,
@@ -1684,8 +1685,9 @@ func TestClonePutVolumeRefFail(t *testing.T) {
 func TestWriteBackpressurePreservesData(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
-		FlushThreshold: PageSize, // freeze after every write
-		FlushInterval:  -1,       // disable periodic flush
+		FlushThreshold:    PageSize, // freeze after every write
+		FlushInterval:     -1,       // disable periodic flush
+		MaxDirtyPageSlots: 1,        // no extra slot; the next unique page must block
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -1724,21 +1726,31 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 		return v.layer.pending != nil
 	}, time.Second, 10*time.Millisecond)
 
-	// Step 3: Write page 2. With one page already pending and the active batch
-	// full, the write should block until S3 recovers instead of failing.
+	// Step 3: Write page 2. This fills the active batch but should still return
+	// successfully because the batch had one free slot.
 	page2 := make([]byte, PageSize)
 	for i := range page2 {
 		page2[i] = 0xCC
 	}
+	if err := v.Write(page2, 2*PageSize); err != nil {
+		t.Fatalf("write page 2: %v", err)
+	}
+
+	// Step 4: Write page 3. With one page pending and the active batch already
+	// full, this write should block until S3 recovers instead of failing.
+	page3 := make([]byte, PageSize)
+	for i := range page3 {
+		page3[i] = 0xDD
+	}
 	writeDone := make(chan error, 1)
 	go func() {
-		writeDone <- v.Write(page2, 2*PageSize)
+		writeDone <- v.Write(page3, 3*PageSize)
 	}()
 	buf := make([]byte, PageSize)
 
 	select {
 	case err := <-writeDone:
-		t.Fatalf("write page 2 returned early under backpressure: %v", err)
+		t.Fatalf("write page 3 returned early under backpressure: %v", err)
 	case <-time.After(200 * time.Millisecond):
 	}
 
@@ -1749,21 +1761,21 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 		t.Fatalf("page 1 while blocked: expected 0xBB, got %x...", buf[:4])
 	}
 
-	// Step 4: Clear faults and flush everything.
+	// Step 5: Clear faults and flush everything.
 	store.ClearAllFaults()
 	select {
 	case err := <-writeDone:
 		if err != nil {
-			t.Fatalf("write page 2 after recovery: %v", err)
+			t.Fatalf("write page 3 after recovery: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("write page 2 did not complete after clearing S3 fault")
+		t.Fatal("write page 3 did not complete after clearing S3 fault")
 	}
 	if err := v.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// Step 5: Verify all three pages are readable with correct data.
+	// Step 6: Verify all four pages are readable with correct data.
 	if n, err := v.Read(ctx, buf, 0); err != nil || n != PageSize {
 		t.Fatalf("read page 0: n=%d err=%v", n, err)
 	}
@@ -1783,6 +1795,13 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	}
 	if !bytes.Equal(buf, page2) {
 		t.Fatalf("page 2: expected 0xCC, got %x...", buf[:4])
+	}
+
+	if _, err := v.Read(ctx, buf, 3*PageSize); err != nil {
+		t.Fatalf("read page 3: %v", err)
+	}
+	if !bytes.Equal(buf, page3) {
+		t.Fatalf("page 3: expected 0xDD, got %x...", buf[:4])
 	}
 }
 
@@ -2141,6 +2160,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
+	formatTestStore(t, store)
 	m1 := &Manager{ObjectStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
@@ -2215,6 +2235,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	}
 	ctx := t.Context()
 
+	formatTestStore(t, store)
 	m1 := &Manager{ObjectStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
@@ -2313,6 +2334,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	}
 	ctx := t.Context()
 
+	formatTestStore(t, store)
 	m := &Manager{ObjectStore: store, config: config}
 	defer m.Close()
 
@@ -4208,7 +4230,7 @@ func TestSingleLayerManySparseFlushesPreserveEarlierPages(t *testing.T) {
 
 func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
 	store := objstore.NewMemStore()
-	cfg := Config{FlushThreshold: 64 * 1024, FlushInterval: -1}
+	cfg := Config{FlushThreshold: 4 * PageSize, FlushInterval: -1}
 
 	ly, err := openLayer(t.Context(), layerParams{store: store, id: "test", config: cfg})
 	require.NoError(t, err)
@@ -4241,7 +4263,7 @@ func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
 
 func TestPunchHoleTombstoneCloneInheritance(t *testing.T) {
 	store := objstore.NewMemStore()
-	cfg := Config{FlushThreshold: 64 * 1024, FlushInterval: -1}
+	cfg := Config{FlushThreshold: 4 * PageSize, FlushInterval: -1}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
@@ -4289,6 +4311,7 @@ func TestPunchHoleTombstoneFlushReopenRead(t *testing.T) {
 	cfg := Config{FlushThreshold: 16 * PageSize}
 	ctx := t.Context()
 
+	formatTestStore(t, store)
 	m1 := &Manager{ObjectStore: store, config: cfg}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	require.NoError(t, err)

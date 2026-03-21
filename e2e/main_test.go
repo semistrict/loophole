@@ -1,6 +1,7 @@
 package e2e
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/storage"
 )
 
 var (
@@ -87,6 +89,14 @@ secret_key = %q
 region = %q
 log_level = %q
 `, testInst.Endpoint, testInst.Bucket, testInst.Prefix, testInst.AccessKey, testInst.SecretKey, testInst.Region, testInst.LogLevel)), 0o644); err != nil {
+		log.Fatal(err)
+	}
+
+	store, err := storage.OpenStoreForProfile(context.Background(), testInst)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, _, err := storage.FormatVolumeSet(context.Background(), store); err != nil {
 		log.Fatal(err)
 	}
 

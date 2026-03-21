@@ -17,6 +17,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/semistrict/loophole/internal/pagegeom"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/storage"
 )
@@ -35,7 +36,7 @@ func TestE2E_MetadataChurnDuringFlush(t *testing.T) {
 	// Keep flush aggressive without making the one-off create/format owner
 	// path pay the full cost. The mounted owner below is the one this test
 	// actually stresses.
-	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
+	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", fmt.Sprintf("%d", pagegeom.PageSize))
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	owner := b.ownerByMountpoint(mp)

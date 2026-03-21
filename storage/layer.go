@@ -417,6 +417,10 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 	snap := ly.snapshotLayers()
 	total, err := ly.readWithSnapshot(ctx, buf, offset, &snap)
 	if err == nil {
+		if total > 0 && allZero(buf[:total]) && ly.snapshotChanged(&snap) {
+			fresh := ly.snapshotLayers()
+			return ly.readWithSnapshot(ctx, buf, offset, &fresh)
+		}
 		return total, nil
 	}
 	if !ly.shouldRetryAfterLayoutError(err) {
@@ -427,6 +431,28 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 		return total, err
 	}
 	return ly.Read(ctx, buf, offset)
+}
+
+func (ly *layer) snapshotChanged(snap *layerSnapshot) bool {
+	ly.dirtyMu.Lock()
+	active := ly.active
+	pending := ly.pending
+	ly.dirtyMu.Unlock()
+
+	ly.mu.RLock()
+	layoutGen := ly.index.LayoutGen
+	ly.mu.RUnlock()
+
+	return active != snap.active || pending != snap.pending || layoutGen != snap.layoutGen
+}
+
+func allZero(data []byte) bool {
+	for _, b := range data {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func (ly *layer) readWithSnapshot(ctx context.Context, buf []byte, offset uint64, snap *layerSnapshot) (int, error) {
@@ -817,12 +843,9 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	// If partial page write, read-modify-write.
 	if uint64(len(chunk)) < PageSize {
-		snap := ly.snapshotLayers()
-		existing, err := ly.readPageWith(ctx, &snap, pageIdx)
-		if err != nil {
+		if err := ly.readPageForWrite(ctx, pageIdx, &page); err != nil {
 			return err
 		}
-		copy(page[:], existing)
 	}
 
 	copy(page[pageOff:], chunk)
@@ -860,6 +883,52 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 			return err
 		}
 	}
+}
+
+func (ly *layer) readPageForWrite(ctx context.Context, pageIdx PageIdx, dst *Page) error {
+	for attempt := 0; attempt < 8; attempt++ {
+		snap := ly.snapshotLayers()
+		dirtyVisible := false
+		if snap.active != nil {
+			if _, ok := snap.active.lookup(pageIdx); ok {
+				dirtyVisible = true
+			}
+		}
+		if !dirtyVisible && snap.pending != nil {
+			if _, ok := snap.pending.lookup(pageIdx); ok {
+				dirtyVisible = true
+			}
+		}
+
+		existing, err := ly.readPageWith(ctx, &snap, pageIdx)
+		if err != nil {
+			if !ly.shouldRetryAfterLayoutError(err) {
+				return err
+			}
+			refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+			if refreshErr != nil {
+				return refreshErr
+			}
+			if !refreshed {
+				return err
+			}
+			continue
+		}
+
+		if !dirtyVisible {
+			ly.mu.RLock()
+			layoutChanged := ly.index.LayoutGen != snap.layoutGen
+			ly.mu.RUnlock()
+			if layoutChanged {
+				continue
+			}
+		}
+
+		copy(dst[:], existing)
+		return nil
+	}
+
+	return fmt.Errorf("read page %s for write: layout kept changing", pageIdx)
 }
 
 // PunchHole zeroes all pages fully or partially covered by the range.
@@ -1607,7 +1676,7 @@ func (ly *layer) outputSeq(existingLayer string, existingSeq, fallback uint64) u
 	// uploads reuse the live key, readers can observe partial state even though
 	// the index was never committed. Rewrites therefore get a fresh versioned
 	// key, and the index swap publishes the new blob atomically.
-	if existingLayer == ly.id && existingSeq != 0 {
+	if existingLayer == ly.id {
 		return ly.nextSeq.Add(1)
 	}
 	return fallback

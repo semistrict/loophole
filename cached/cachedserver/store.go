@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/internal/pagegeom"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
 	"golang.org/x/sys/unix"
@@ -21,7 +22,7 @@ import (
 )
 
 const (
-	pageSize       = 4096
+	pageSize       = pagegeom.PageSize
 	maxBudget      = 2 << 30 // 2 GiB
 	fallbackBudget = 256 << 20
 	budgetInterval = 30 * time.Second

@@ -638,8 +638,8 @@ func (fs *blockDevFS) ReleaseDir(in *fuse.ReleaseIn) {}
 
 func (fs *blockDevFS) StatFs(_ <-chan struct{}, in *fuse.InHeader, out *fuse.StatfsOut) fuse.Status {
 	out.NameLen = 255
-	out.Frsize = 4096
-	out.Bsize = 4096
+	out.Frsize = storage.PageSize
+	out.Bsize = storage.PageSize
 	out.Blocks = 1
 	out.Bfree = 0
 	out.Bavail = 0
