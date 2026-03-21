@@ -88,6 +88,10 @@ type benchConfig struct {
 	bucket   string
 }
 
+func (c *benchConfig) storeURL() string {
+	return fmt.Sprintf("https://storage.googleapis.com/%s", c.bucket)
+}
+
 func envOrDefault(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -177,8 +181,7 @@ func (c *benchConfig) doInit(ctx context.Context) error {
 		return fmt.Errorf("install packages: %w", err)
 	}
 
-	// Write loophole config (native GCS client uses ADC, no HMAC keys needed).
-	return c.writeRemoteConfig(ctx)
+	return nil
 }
 
 func (c *benchConfig) ensureBucket(ctx context.Context) error {
@@ -567,21 +570,6 @@ type runOpts struct {
 	debug      bool
 }
 
-// writeRemoteConfig writes ~/.loophole/config.toml on the remote.
-// The native GCS backend uses application default credentials (GCE metadata),
-// so no HMAC keys are needed.
-func (c *benchConfig) writeRemoteConfig(ctx context.Context) error {
-	fmt.Println("==> Writing loophole config...")
-	script, err := renderTemplate(configTmpl, map[string]any{
-		"Bucket": c.bucket,
-		"Region": region(c.zone),
-	})
-	if err != nil {
-		return err
-	}
-	return c.sshExec(ctx, script)
-}
-
 func (c *benchConfig) doRun(ctx context.Context, opts runOpts) error {
 	runAll := !opts.fioOnly && !opts.fsxOnly && !opts.e2eOnly
 
@@ -594,7 +582,7 @@ func (c *benchConfig) doRun(ctx context.Context, opts runOpts) error {
 		"RunE2E":     runAll || opts.e2eOnly,
 		"FioRuntime": opts.fioRuntime,
 		"FioJobs":    fioJobs,
-		"Bucket":     c.bucket,
+		"StoreURL":   c.storeURL(),
 	})
 	if err != nil {
 		return err
@@ -637,7 +625,7 @@ type BenchResult struct {
 	Region       string         `json:"region"`
 	Bucket       string         `json:"bucket"`
 	Endpoint     string         `json:"endpoint"`
-	Profile      string         `json:"profile"`
+	StoreURL     string         `json:"store_url"`
 	RemoteSrcDir string         `json:"remote_src_dir"`
 	VolumeName   string         `json:"volume_name"`
 	Mountpoint   string         `json:"mountpoint"`
@@ -729,7 +717,7 @@ func (c *benchConfig) collectResults(ctx context.Context, opts runOpts) error {
 		Region:       region(c.zone),
 		Bucket:       c.bucket,
 		Endpoint:     "https://storage.googleapis.com",
-		Profile:      "gcs",
+		StoreURL:     c.storeURL(),
 		RemoteSrcDir: remoteSrcDir,
 		VolumeName:   "bench-vol",
 		Mountpoint:   "/mnt/loophole-bench",
@@ -857,35 +845,17 @@ func renderTemplate(tmpl string, data any) (string, error) {
 	return buf.String(), nil
 }
 
-const configTmpl = `set -eux
-mkdir -p $HOME/.loophole
-cat > $HOME/.loophole/config.toml << 'TOML'
-default_profile = "gcs"
-
-[profiles.gcs]
-endpoint = "https://storage.googleapis.com"
-bucket = "{{.Bucket}}"
-region = "{{.Region}}"
-TOML
-echo "==> Config written"
-`
-
 const benchTmpl = `set -eux
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 {{if .Debug}}export LOOPHOLE_LOG_LEVEL=debug{{end}}
 LOOPHOLE=$HOME/{{.SrcDir}}/bin/loophole-linux-amd64
-PROFILE=gcs
+STORE_URL='{{.StoreURL}}'
 RESULTS_DIR=$HOME/bench-results
 MOUNTPOINT=/mnt/loophole-bench
 
 mkdir -p $RESULTS_DIR
 
-if [ ! -f $HOME/.loophole/config.toml ]; then
-    echo "FATAL: config.toml not found. Run 'init' first."
-    exit 1
-fi
-
-sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE format >/dev/null
+sudo -E HOME=$HOME $LOOPHOLE format "$STORE_URL" >/dev/null
 
 cleanup() {
     echo "==> Cleaning up..."
@@ -899,7 +869,7 @@ cleanup() {
     echo "==> dmesg (last 30 lines):"
     sudo dmesg | tail -30
     {{end}}
-    sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE shutdown bench-vol 2>/dev/null || true
+    sudo -E HOME=$HOME $LOOPHOLE shutdown "$STORE_URL" bench-vol 2>/dev/null || true
     sleep 2
     sudo umount -l $MOUNTPOINT 2>/dev/null || true
     sudo rm -rf $MOUNTPOINT
@@ -909,10 +879,10 @@ trap cleanup EXIT
 sudo dmesg -C
 sudo mkdir -p $MOUNTPOINT
 sudo chown $(id -u):$(id -g) $MOUNTPOINT
-sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE delete -y bench-vol 2>/dev/null || true
+sudo -E HOME=$HOME $LOOPHOLE delete "$STORE_URL" -y bench-vol 2>/dev/null || true
 
 echo "==> Creating volume (size={{.VolSize}})..."
-nohup sudo -E HOME=$HOME $LOOPHOLE -p $PROFILE create --size {{.VolSize}} --mount $MOUNTPOINT bench-vol \
+nohup sudo -E HOME=$HOME $LOOPHOLE create --size {{.VolSize}} --mount $MOUNTPOINT "$STORE_URL" bench-vol \
     >$RESULTS_DIR/owner-create.log 2>&1 </dev/null &
 LOOPHOLE_PID=$!
 

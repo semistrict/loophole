@@ -14,7 +14,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
 	"github.com/aws/aws-sdk-go-v2/config"
-	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
@@ -49,20 +48,14 @@ func optOrEnv(val, envKey, fallback string) string {
 	return fallback
 }
 
-// NewS3Store creates an S3Store from a resolved profile.
-func NewS3Store(ctx context.Context, inst env.ResolvedProfile) (*S3Store, error) {
+// NewS3Store creates an S3Store from a resolved store URL.
+func NewS3Store(ctx context.Context, inst env.ResolvedStore) (*S3Store, error) {
 	endpoint := optOrEnv(inst.Endpoint, "S3_ENDPOINT", "")
-	accessKey := optOrEnv(inst.AccessKey, "AWS_ACCESS_KEY_ID", "")
-	secretKey := optOrEnv(inst.SecretKey, "AWS_SECRET_ACCESS_KEY", "")
-	region := optOrEnv(inst.Region, "AWS_REGION", "")
+	region := os.Getenv("AWS_REGION")
 
 	var cfgOpts []func(*config.LoadOptions) error
 	if region != "" {
 		cfgOpts = append(cfgOpts, config.WithRegion(region))
-	}
-	if accessKey != "" || secretKey != "" {
-		cfgOpts = append(cfgOpts, config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(accessKey, secretKey, "")))
 	}
 
 	cfgOpts = append(cfgOpts, config.WithRetryer(func() aws.Retryer {

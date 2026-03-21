@@ -13,7 +13,6 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/objstore"
 )
 
@@ -21,23 +20,22 @@ func s3testCmd() *cobra.Command {
 	var count int
 	var parallelOnly bool
 	cmd := &cobra.Command{
-		Use:   "s3test",
-		Short: "Benchmark S3 latency and throughput",
-		Args:  cobra.NoArgs,
+		Use:   "storetest <store-url>",
+		Short: "Benchmark object-store latency and throughput",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			dir := env.DefaultDir()
-			inst, err := resolveProfile(dir)
+			inst, err := resolveStore(args[0])
 			if err != nil {
 				return err
 			}
 			ctx := cmd.Context()
-			store, err := objstore.NewS3Store(ctx, inst)
+			store, err := objstore.Open(ctx, inst)
 			if err != nil {
 				return err
 			}
 			s := store.At("_s3test")
 
-			fmt.Printf("S3 benchmark: %s (bucket=%s, profile=%s)\n", inst.Endpoint, inst.Bucket, inst.ProfileName)
+			fmt.Printf("Store benchmark: %s\n", inst.URL())
 			fmt.Printf("Iterations per test: %d\n\n", count)
 
 			if !parallelOnly {

@@ -9,7 +9,7 @@
 //
 // API:
 //
-//	int64_t loophole_open(config_dir, profile, name, name_len) — open a volume
+//	int64_t loophole_open(home_dir, store_url, name, name_len) — open a volume
 //	int32_t loophole_read(handle, buf, offset, count)          — read bytes
 //	int32_t loophole_write(handle, buf, offset, count)         — write bytes
 //	int32_t loophole_flush(handle)                             — flush to store
@@ -66,43 +66,38 @@ func int64ToPtr(id C.int64_t) *handle {
 // A volserver is started on a UDS socket so the CLI can discover and
 // interact with the volume (status, checkpoint, clone, etc.).
 //
-// config_dir: path to the config directory (e.g. ~/.loophole), or NULL to
+// home_dir: path to the loophole runtime directory (e.g. ~/.loophole), or NULL to
 // use the default. The LOOPHOLE_HOME env var overrides the default.
 //
-// profile: profile name, or NULL to use the default profile.
+// store_url: parsed backing-store URL.
 //
 // name / name_len: volume name (required).
 //
 // Returns a handle (>0) on success, negative on error.
 //
 //export loophole_open
-func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C.uint32_t) C.int64_t {
+func loophole_open(home_dir *C.char, store_url *C.char, name *C.char, name_len C.uint32_t) C.int64_t {
 	var dir env.Dir
-	if config_dir != nil {
-		dir = env.Dir(C.GoString(config_dir))
+	if home_dir != nil {
+		dir = env.Dir(C.GoString(home_dir))
 	} else {
 		dir = env.DefaultDir()
 	}
 
-	var profileName string
-	if profile != nil {
-		profileName = C.GoString(profile)
+	var rawStoreURL string
+	if store_url != nil {
+		rawStoreURL = C.GoString(store_url)
 	}
 
-	cfg, err := env.LoadConfig(dir)
+	inst, err := env.ResolveStore(rawStoreURL, os.Getenv("LOOPHOLE_LOG_LEVEL"))
 	if err != nil {
-		slog.Error("loophole_open: load config", "error", err)
+		slog.Error("loophole_open: resolve store", "error", err)
 		return -1
-	}
-	inst, err := cfg.Resolve(profileName)
-	if err != nil {
-		slog.Error("loophole_open: resolve profile", "error", err)
-		return -2
 	}
 
 	ctx := context.Background()
 
-	manager, err := storage.OpenManagerForProfile(ctx, inst, dir)
+	manager, err := storage.OpenManagerForStore(ctx, inst, dir)
 	if err != nil {
 		slog.Error("loophole_open: open manager", "error", err)
 		return -4
@@ -123,7 +118,13 @@ func loophole_open(config_dir *C.char, profile *C.char, name *C.char, name_len C
 	}
 
 	// Start a volserver so the CLI can interact with this volume.
-	socketPath := dir.VolumeSocket(goName)
+	inst, _, err = storage.ResolveFormattedStore(ctx, inst)
+	if err != nil {
+		slog.Error("loophole_open: resolve volset", "error", err)
+		util.SafeClose(manager, "close manager after volset resolve failure")
+		return -3
+	}
+	socketPath := dir.VolumeSocket(inst.VolsetID, goName)
 	srv, err := volserver.Start(vol, socketPath)
 	if err != nil {
 		slog.Error("loophole_open: start volserver", "volume", goName, "error", err)

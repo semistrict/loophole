@@ -12,25 +12,32 @@ capture immutable restore points that clones can be created from later.
 ## Quick Start
 
 ```bash
-# Build
-make loophole
+# Install
+go install ./cmd/loophole
+
+STORE_URL=https://storage.googleapis.com/my-bucket/my-prefix
+
+# Format the backing store once
+loophole format "$STORE_URL"
 
 # Create and mount a volume
-bin/loophole-darwin-arm64 -p r2 create myvolume
-sudo bin/loophole-darwin-arm64 -p r2 mount myvolume /mnt/myvolume
+loophole create "$STORE_URL" myvolume
+sudo loophole mount "$STORE_URL" myvolume /mnt/myvolume
 
 # Use it like a normal filesystem
 echo "hello" | sudo tee /mnt/myvolume/greeting.txt
 
 # Create a checkpoint
-bin/loophole-darwin-arm64 -p r2 checkpoint /mnt/myvolume
+loophole checkpoint /mnt/myvolume
 
 # List checkpoints
-bin/loophole-darwin-arm64 -p r2 checkpoints myvolume
+loophole checkpoints /mnt/myvolume
 
 # Clone either a live mount or a checkpoint
-bin/loophole-darwin-arm64 -p r2 clone /mnt/myvolume myclone /mnt/myclone
-bin/loophole-darwin-arm64 -p r2 clone --from-checkpoint <checkpoint_id> myvolume myclone2 /mnt/myclone2
+loophole clone /mnt/myvolume myclone
+loophole clone --from-checkpoint <checkpoint_id> "$STORE_URL" myvolume myclone2
+sudo loophole mount "$STORE_URL" myclone /mnt/myclone
+sudo loophole mount "$STORE_URL" myclone2 /mnt/myclone2
 ```
 
 ## Development

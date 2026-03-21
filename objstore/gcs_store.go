@@ -27,9 +27,9 @@ type GCSStore struct {
 	sleepWithContext func(context.Context, time.Duration) error
 }
 
-// NewGCSStore creates a GCSStore from a resolved profile.
+// NewGCSStore creates a GCSStore from a resolved store URL.
 // Uses application default credentials from the environment (GCE metadata, ADC, etc.).
-func NewGCSStore(ctx context.Context, inst env.ResolvedProfile) (*GCSStore, error) {
+func NewGCSStore(ctx context.Context, inst env.ResolvedStore) (*GCSStore, error) {
 	var opts []option.ClientOption
 
 	// On GCE, ADC is available automatically. No explicit credentials needed.

@@ -27,7 +27,7 @@ import (
 // It embeds a volserver.Server for volume-level endpoints and adds
 // filesystem-specific routes (freeze/thaw checkpoint/clone).
 type server struct {
-	inst      env.ResolvedProfile
+	inst      env.ResolvedStore
 	dir       env.Dir
 	socket    string
 	backend   *Backend

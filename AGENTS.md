@@ -38,24 +38,24 @@ Third-party C/Go deps live in `third_party/` and are committed directly to the r
 
 ## Running locally
 
-Config lives in `~/.loophole/config.toml`. Each `[profiles.<name>]` section defines an S3/R2 backend. Use `-p <profile>` to select one (e.g. `bin/loophole-darwin-arm64 -p r2 ...`).
+Pass the backing store as a positional URL argument on commands that need one, for example `https://storage.googleapis.com/<bucket>/<prefix>`. Authentication comes from the platform SDK defaults and standard env vars. Use `--log-level` or `LOOPHOLE_LOG_LEVEL` for daemon verbosity.
 
 - `make loophole` — build macOS binary to `bin/loophole-darwin-arm64`
-- `bin/loophole-darwin-arm64 -p r2 create myvol` — create, mount, and keep the owner process in the foreground
-- `bin/loophole-darwin-arm64 -p r2 status myvol` — check the owner process for a mounted/attached volume
-- `bin/loophole-darwin-arm64 -p r2 shutdown myvol` — gracefully stop the owner process
+- `bin/loophole-darwin-arm64 create <store-url> myvol` — create, mount, and keep the owner process in the foreground
+- `bin/loophole-darwin-arm64 status <store-url> myvol` — check the owner process for a mounted/attached volume
+- `bin/loophole-darwin-arm64 shutdown <store-url> myvol` — gracefully stop the owner process
 
 ### Daemon log file
 
-Each per-volume owner process logs to `~/.loophole/volumes/<hash>.log` (the hash is derived from the volume name, matching the socket path pattern). C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file. The exact log path is shown in the daemon's `/status` response.
+Each per-volume owner process logs to `~/.loophole/volumes/<hash>.log` (the hash is derived from the volset UUID plus volume name, matching the socket path pattern). C library output, Go panics, and `net/http` panic recovery messages all appear there. Go's `log` package is also redirected to this file. The exact log path is shown in the daemon's `/status` response.
 
-Set `log_level = "debug"` in the profile config for debug output.
+Set `LOOPHOLE_LOG_LEVEL=debug` or pass `--log-level debug` for debug output.
 
 ### Debugging with goroutine dumps
 
 The daemon exposes pprof endpoints on its Unix socket:
 ```
-curl --unix-socket ~/.loophole/<profile>.sock 'http://localhost/debug/pprof/goroutine?debug=2'
+curl --unix-socket <owner-socket> 'http://localhost/debug/pprof/goroutine?debug=2'
 ```
 Use this to diagnose stuck operations (e.g. freeze blocked on S3 upload).
 
@@ -63,16 +63,16 @@ Use this to diagnose stuck operations (e.g. freeze blocked on S3 upload).
 
 When debugging the daemon on a remote Linux machine (e.g. Fly), these techniques work well:
 
-**Grep structured logs from the log file.** The daemon writes JSON-structured logs to `~/.loophole/<profile>.log`. Use `grep "checkpoint"` or other subsystem strings to filter for specific operations. This is much more reliable than trying to read interleaved console output.
+**Grep structured logs from the owner log file.** The daemon writes JSON-structured logs to the per-volume log path from `/status`. Use `grep "checkpoint"` or other subsystem strings to filter for specific operations. This is much more reliable than trying to read interleaved console output.
 
 **Use `fly ssh console -C` for clean output.** When the daemon runs in the foreground with debug logging, its output floods the terminal. Use a separate SSH connection to run commands with clean stdout:
 ```
-fly ssh console -a loophole-test -C 'bin/loophole-linux-amd64 -p tigris status'
+fly ssh console -a loophole-test -C 'bin/loophole-linux-amd64 status https://storage.googleapis.com/<bucket>/<prefix> <volume>'
 ```
 
 **Goroutine dumps for stuck operations.** When something hangs, grab a goroutine dump via pprof to see exactly where it's blocked:
 ```
-fly ssh console -a loophole-test -C 'curl --unix-socket /root/.loophole/tigris.sock "http://localhost/debug/pprof/goroutine?debug=2"'
+fly ssh console -a loophole-test -C 'curl --unix-socket <owner-socket> "http://localhost/debug/pprof/goroutine?debug=2"'
 ```
 Grep for your subsystem (e.g. `WaitClosed`, `checkpoint`, `grpc`) to find the stuck goroutine. This is how the FUSE Lookup ref leak was diagnosed — the dump showed `WaitClosed` blocked in `sync.Cond.Wait` because `OnForget` (kernel inode eviction) was indefinitely delayed.
 

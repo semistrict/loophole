@@ -21,31 +21,54 @@ func ConfigFromEnv() Config {
 	return cfg
 }
 
-// ProfileCacheDir returns the profile-scoped cache directory.
-func ProfileCacheDir(dir env.Dir, inst env.ResolvedProfile) string {
-	return dir.Cache(inst.ProfileName)
+// StoreCacheDir returns the volset-scoped cache directory.
+func StoreCacheDir(dir env.Dir, inst env.ResolvedStore) string {
+	return dir.Cache(inst.VolsetID)
 }
 
-// NewManagerForProfile constructs a storage manager using the shared runtime defaults.
-func NewManagerForProfile(inst env.ResolvedProfile, dir env.Dir, store objstore.ObjectStore) *Manager {
+// NewManagerForStore constructs a storage manager using the shared runtime defaults.
+func NewManagerForStore(inst env.ResolvedStore, dir env.Dir, store objstore.ObjectStore) *Manager {
 	return &Manager{
 		ObjectStore: store,
-		CacheDir:    ProfileCacheDir(dir, inst),
+		CacheDir:    StoreCacheDir(dir, inst),
 		config:      ConfigFromEnv(),
 	}
 }
 
-func OpenStoreForProfile(ctx context.Context, inst env.ResolvedProfile) (objstore.ObjectStore, error) {
-	return objstore.OpenForProfile(ctx, inst)
+// ResolveFormattedStore opens the store and reads the volset descriptor.
+func ResolveFormattedStore(ctx context.Context, inst env.ResolvedStore) (env.ResolvedStore, objstore.ObjectStore, error) {
+	store, err := objstore.Open(ctx, inst)
+	if err != nil {
+		return env.ResolvedStore{}, nil, err
+	}
+	desc, err := CheckVolumeSet(ctx, store)
+	if err != nil {
+		return env.ResolvedStore{}, nil, err
+	}
+	inst.VolsetID = desc.VolsetID
+	return inst, store, nil
 }
 
-// OpenManagerForProfile resolves the object store and constructs a storage manager.
-func OpenManagerForProfile(ctx context.Context, inst env.ResolvedProfile, dir env.Dir) (*Manager, error) {
-	store, err := OpenStoreForProfile(ctx, inst)
+// OpenManagerForStore resolves the object store and constructs a storage manager.
+func OpenManagerForStore(ctx context.Context, inst env.ResolvedStore, dir env.Dir) (*Manager, error) {
+	if inst.VolsetID == "" {
+		var store objstore.ObjectStore
+		var err error
+		inst, store, err = ResolveFormattedStore(ctx, inst)
+		if err != nil {
+			return nil, err
+		}
+		m := NewManagerForStore(inst, dir, store)
+		if err := m.init(); err != nil {
+			return nil, err
+		}
+		return m, nil
+	}
+	store, err := objstore.Open(ctx, inst)
 	if err != nil {
 		return nil, err
 	}
-	m := NewManagerForProfile(inst, dir, store)
+	m := NewManagerForStore(inst, dir, store)
 	if err := m.init(); err != nil {
 		return nil, err
 	}

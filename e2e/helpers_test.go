@@ -385,22 +385,16 @@ func (f testFS) ReadDir(t *testing.T, name string) []string {
 
 // ---------- Shared helpers ----------
 
-func uniqueInstance(t testing.TB) env.ResolvedProfile {
+func uniqueInstance(t testing.TB) env.ResolvedStore {
 	t.Helper()
 	bucket := os.Getenv("BUCKET")
 	if bucket == "" {
 		bucket = "testbucket"
 	}
 	prefix := fmt.Sprintf("test-%s", uuid.NewString()[:8])
-	return env.ResolvedProfile{
-		ProfileName: "test",
-		Bucket:      bucket,
-		Prefix:      prefix,
-		Endpoint:    defaultEndpoint(),
-		AccessKey:   envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
-		SecretKey:   envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
-		Region:      envOrDefault("AWS_REGION", ""),
-	}
+	inst, err := env.ResolveStore(fmt.Sprintf("%s/%s/%s", defaultEndpoint(), bucket, prefix), os.Getenv("LOG_LEVEL"))
+	require.NoError(t, err)
+	return inst
 }
 
 // writeTestFiles writes a standard set of test files.
@@ -566,7 +560,7 @@ func removeTracked(values []string, value string) []string {
 }
 
 func openDirectManager(ctx context.Context) (*storage.Manager, func(), error) {
-	vm, err := storage.OpenManagerForProfile(ctx, testInst, testDir)
+	vm, err := storage.OpenManagerForStore(ctx, testInst, testDir)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -616,7 +610,7 @@ func startAttachedOwner(ctx context.Context, volume string) (*testOwner, error) 
 }
 
 func startOwnerProcess(ctx context.Context, volume string, args ...string) (*testOwner, error) {
-	socketPath := testDir.VolumeSocket(volume)
+	socketPath := testDir.VolumeSocket(testInst.VolsetID, volume)
 	c := client.NewFromSocket(socketPath)
 	timeoutCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
@@ -630,7 +624,8 @@ func startOwnerProcess(ctx context.Context, volume string, args ...string) (*tes
 		return nil, err
 	}
 
-	cmd := exec.Command(testBin, append([]string{"-p", testInst.ProfileName}, args...)...)
+	cmdArgs := injectTestStoreURL(args)
+	cmd := exec.Command(testBin, cmdArgs...)
 	cmd.Env = append(os.Environ(), "LOOPHOLE_HOME="+string(testDir))
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -674,6 +669,22 @@ func startOwnerProcess(ctx context.Context, volume string, args ...string) (*tes
 			return nil, fmt.Errorf("owner for %s did not become ready: %w\n%s", volume, waitCtx.Err(), tailFile(logPath, 80))
 		}
 	}
+}
+
+func injectTestStoreURL(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	storeURL := testInst.URL()
+	switch args[0] {
+	case "create", "mount", "delete", "ls", "checkpoints", "break-lease", "gc", "format":
+		return append([]string{args[0], storeURL}, args[1:]...)
+	case "device":
+		if len(args) >= 2 && (args[1] == "create" || args[1] == "attach") {
+			return append([]string{"device", args[1], storeURL}, args[2:]...)
+		}
+	}
+	return append([]string{}, args...)
 }
 
 func shutdownOwner(ctx context.Context, owner *testOwner) error {

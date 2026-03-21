@@ -21,12 +21,13 @@ import (
 
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/metrics"
+	"github.com/semistrict/loophole/objstore"
 	"github.com/semistrict/loophole/storage"
 )
 
 var (
 	testDir  env.Dir
-	testInst env.ResolvedProfile
+	testInst env.ResolvedStore
 	testBin  string
 )
 
@@ -67,38 +68,21 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(tmpDir)
 
 	testDir = env.Dir(tmpDir)
-	testInst = env.ResolvedProfile{
-		ProfileName: "test",
-		Bucket:      envOrDefault("BUCKET", "testbucket"),
-		Prefix:      fmt.Sprintf("test-%s", uuid.NewString()[:8]),
-		Endpoint:    defaultEndpoint(),
-		AccessKey:   envOrDefault("AWS_ACCESS_KEY_ID", "rustfsadmin"),
-		SecretKey:   envOrDefault("AWS_SECRET_ACCESS_KEY", "rustfsadmin"),
-		Region:      envOrDefault("AWS_REGION", "us-east-1"),
-		LogLevel:    os.Getenv("LOG_LEVEL"),
-	}
-
-	if err := os.WriteFile(filepath.Join(string(testDir), "config.toml"), []byte(fmt.Sprintf(`default_profile = "test"
-
-[profiles.test]
-endpoint = %q
-bucket = %q
-prefix = %q
-access_key = %q
-secret_key = %q
-region = %q
-log_level = %q
-`, testInst.Endpoint, testInst.Bucket, testInst.Prefix, testInst.AccessKey, testInst.SecretKey, testInst.Region, testInst.LogLevel)), 0o644); err != nil {
-		log.Fatal(err)
-	}
-
-	store, err := storage.OpenStoreForProfile(context.Background(), testInst)
+	rawURL := fmt.Sprintf("%s/%s/%s", defaultEndpoint(), envOrDefault("BUCKET", "testbucket"), fmt.Sprintf("test-%s", uuid.NewString()[:8]))
+	testInst, err = env.ResolveStore(rawURL, os.Getenv("LOG_LEVEL"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	if _, _, err := storage.FormatVolumeSet(context.Background(), store); err != nil {
+
+	store, err := objstore.Open(context.Background(), testInst)
+	if err != nil {
 		log.Fatal(err)
 	}
+	desc, _, err := storage.FormatVolumeSet(context.Background(), store)
+	if err != nil {
+		log.Fatal(err)
+	}
+	testInst.VolsetID = desc.VolsetID
 
 	cwd, err := os.Getwd()
 	if err != nil {

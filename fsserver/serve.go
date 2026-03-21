@@ -27,7 +27,7 @@ type ServerOptions struct {
 }
 
 // CreateFSAndServe creates a new volume, formats ext4, mounts it, and serves.
-func CreateFSAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, p storage.CreateParams, mountpoint string, opts ServerOptions) error {
+func CreateFSAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, p storage.CreateParams, mountpoint string, opts ServerOptions) error {
 	s, err := setup(ctx, inst, dir, p.Volume, opts)
 	if err != nil {
 		return err
@@ -51,7 +51,7 @@ func CreateFSAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir
 }
 
 // MountFSAndServe mounts an existing volume and serves.
-func MountFSAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume, mountpoint string, opts ServerOptions) error {
+func MountFSAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume, mountpoint string, opts ServerOptions) error {
 	s, err := setup(ctx, inst, dir, volume, opts)
 	if err != nil {
 		return err
@@ -71,7 +71,7 @@ func MountFSAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir,
 }
 
 // CreateBlockDeviceAndServe creates a new raw volume, attaches it as a block device, and serves.
-func CreateBlockDeviceAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, p storage.CreateParams, opts ServerOptions) error {
+func CreateBlockDeviceAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, p storage.CreateParams, opts ServerOptions) error {
 	s, err := setup(ctx, inst, dir, p.Volume, opts)
 	if err != nil {
 		return err
@@ -94,7 +94,7 @@ func CreateBlockDeviceAndServe(ctx context.Context, inst env.ResolvedProfile, di
 }
 
 // AttachBlockDeviceAndServe attaches an existing volume as a raw block device and serves.
-func AttachBlockDeviceAndServe(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume string, opts ServerOptions) error {
+func AttachBlockDeviceAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume string, opts ServerOptions) error {
 	s, err := setup(ctx, inst, dir, volume, opts)
 	if err != nil {
 		return err
@@ -113,26 +113,35 @@ func AttachBlockDeviceAndServe(ctx context.Context, inst env.ResolvedProfile, di
 
 // setup creates all the infrastructure for a server: logging, process tuning,
 // object store, page cache, volume manager, backend, and network listener.
-func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume string, opts ServerOptions) (*server, error) {
+func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume string, opts ServerOptions) (*server, error) {
+	var store objstore.ObjectStore
+	var err error
+	if inst.VolsetID == "" {
+		inst, store, err = storage.ResolveFormattedStore(ctx, inst)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		store, err = objstore.Open(ctx, inst)
+		if err != nil {
+			if inst.IsLocal() {
+				return nil, fmt.Errorf("create file store: %w", err)
+			}
+			return nil, fmt.Errorf("create object store: %w", err)
+		}
+	}
+
 	logPath, axiomClose, err := setupLogging(inst, dir, volume, opts.Foreground)
 	if err != nil {
 		return nil, err
 	}
 
 	tuneProcess()
-
-	store, err := objstore.OpenForProfile(ctx, inst)
-	if err != nil {
-		if inst.LocalDir != "" {
-			return nil, fmt.Errorf("create file store: %w", err)
-		}
-		return nil, fmt.Errorf("create S3 store: %w", err)
-	}
-	if inst.LocalDir != "" {
+	if inst.IsLocal() {
 		slog.Warn("using local file store -- data is NOT replicated to S3")
 	}
 
-	vm := storage.NewManagerForProfile(inst, dir, store)
+	vm := storage.NewManagerForStore(inst, dir, store)
 
 	backend, err := createBackend(vm, inst, dir)
 	if err != nil {
@@ -164,8 +173,8 @@ func setup(ctx context.Context, inst env.ResolvedProfile, dir env.Dir, volume st
 }
 
 // setupLogging configures structured logging to a file (and optionally console/axiom).
-func setupLogging(inst env.ResolvedProfile, dir env.Dir, volume string, foreground bool) (logPath string, axiomClose func(), err error) {
-	logPath = dir.VolumeLog(volume)
+func setupLogging(inst env.ResolvedStore, dir env.Dir, volume string, foreground bool) (logPath string, axiomClose func(), err error) {
+	logPath = dir.VolumeLog(inst.VolsetID, volume)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return "", nil, err
 	}

@@ -10,8 +10,8 @@ import (
 	"github.com/semistrict/loophole/env"
 )
 
-var globalProfile string
 var globalPID int
+var globalLogLevel string
 
 func main() {
 	root := rootCmd()
@@ -40,19 +40,14 @@ func rootCmd() *cobra.Command {
 		SilenceErrors: true,
 	}
 
-	root.PersistentFlags().StringVarP(&globalProfile, "profile", "p", "", "Named profile (default: default_profile from config, or first defined)")
 	root.PersistentFlags().IntVar(&globalPID, "pid", 0, "Connect to an embedded loophole daemon in the process with this PID")
+	root.PersistentFlags().StringVar(&globalLogLevel, "log-level", "", "Set runtime log level (default: LOOPHOLE_LOG_LEVEL or info)")
 
 	addCommands(root)
 
 	return root
 }
 
-// resolveProfile loads the config and resolves the current profile.
-func resolveProfile(dir env.Dir) (env.ResolvedProfile, error) {
-	cfg, err := env.LoadConfig(dir)
-	if err != nil {
-		return env.ResolvedProfile{}, err
-	}
-	return cfg.Resolve(globalProfile)
+func resolveStore(rawURL string) (env.ResolvedStore, error) {
+	return env.ResolveStore(rawURL, globalLogLevel)
 }

@@ -10,8 +10,8 @@ import (
 	"github.com/semistrict/loophole/storage"
 )
 
-func createBackend(vm *storage.Manager, inst env.ResolvedProfile, dir env.Dir) (*Backend, error) {
-	fuse, err := NewFUSEDriver(dir.Fuse(inst.ProfileName), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug", EnableWriteback: true})
+func createBackend(vm *storage.Manager, inst env.ResolvedStore, dir env.Dir) (*Backend, error) {
+	fuse, err := NewFUSEDriver(dir.Fuse(inst.VolsetID), vm, &fuseblockdev.Options{Debug: inst.LogLevel == "debug", EnableWriteback: true})
 	if err != nil {
 		return nil, fmt.Errorf("start FUSE backend: %w", err)
 	}

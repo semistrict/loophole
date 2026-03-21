@@ -33,7 +33,8 @@ func newS3TestStore(t *testing.T) *S3Store {
 	if bucket == "" {
 		bucket = "testbucket"
 	}
-	store, err := NewS3Store(t.Context(), env.ResolvedProfile{
+	store, err := NewS3Store(t.Context(), env.ResolvedStore{
+		StoreURL: os.Getenv("S3_ENDPOINT") + "/" + bucket,
 		Bucket:   bucket,
 		Endpoint: os.Getenv("S3_ENDPOINT"),
 	})

@@ -24,44 +24,46 @@ func TestConfigFromEnv(t *testing.T) {
 	require.Zero(t, cfg.FlushThreshold)
 }
 
-func TestProfileRuntimeHelpers(t *testing.T) {
+func TestStoreRuntimeHelpers(t *testing.T) {
 	dir := env.Dir(t.TempDir())
-	inst := env.ResolvedProfile{
-		ProfileName: "test-profile",
-		LocalDir:    filepath.Join(t.TempDir(), "store"),
+	inst := env.ResolvedStore{
+		StoreURL: "file:///tmp/store",
+		LocalDir: filepath.Join(t.TempDir(), "store"),
+		VolsetID: "volset-123",
 	}
 
-	cacheDir := ProfileCacheDir(dir, inst)
-	require.Equal(t, filepath.Join(string(dir), "cache", inst.ProfileName), cacheDir)
+	cacheDir := StoreCacheDir(dir, inst)
+	require.Equal(t, filepath.Join(string(dir), "cache", inst.VolsetID), cacheDir)
 
 	store := objstore.NewMemStore()
-	m := NewManagerForProfile(inst, dir, store)
+	m := NewManagerForStore(inst, dir, store)
 	require.Equal(t, store, m.ObjectStore)
 	require.Equal(t, cacheDir, m.CacheDir)
 	require.Equal(t, ConfigFromEnv(), m.config)
 }
 
-func TestOpenManagerForProfile(t *testing.T) {
+func TestOpenManagerForStore(t *testing.T) {
 	dir := env.Dir(t.TempDir())
-	inst := env.ResolvedProfile{
-		ProfileName: "local",
-		LocalDir:    filepath.Join(t.TempDir(), "store"),
+	inst := env.ResolvedStore{
+		StoreURL: "file://" + filepath.Join(t.TempDir(), "store"),
+		LocalDir: filepath.Join(t.TempDir(), "store"),
 	}
 
 	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
 
-	store, err := OpenStoreForProfile(context.Background(), inst)
+	store, err := objstore.Open(context.Background(), inst)
 	require.NoError(t, err)
-	_, _, err = FormatVolumeSet(context.Background(), store)
+	desc, _, err := FormatVolumeSet(context.Background(), store)
 	require.NoError(t, err)
+	inst.VolsetID = desc.VolsetID
 
-	m, err := OpenManagerForProfile(context.Background(), inst, dir)
+	m, err := OpenManagerForStore(context.Background(), inst, dir)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		require.NoError(t, m.Close())
 	})
 
 	require.NotNil(t, m.Store())
-	require.Equal(t, filepath.Join(string(dir), "cache", inst.ProfileName), m.CacheDir)
+	require.Equal(t, filepath.Join(string(dir), "cache", inst.VolsetID), m.CacheDir)
 	require.Equal(t, int64(16384), m.config.FlushThreshold)
 }

@@ -274,7 +274,8 @@ func (c *Client) ShutdownWait(ctx context.Context) error {
 
 // StatusResponse holds the daemon status JSON.
 type StatusResponse struct {
-	S3         string            `json:"s3"`
+	StoreURL   string            `json:"store_url"`
+	VolsetID   string            `json:"volset_id"`
 	Mode       string            `json:"mode"`
 	Socket     string            `json:"socket"`
 	Fuse       string            `json:"fuse"`

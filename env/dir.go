@@ -24,37 +24,47 @@ func DefaultDir() Dir {
 	return Dir(filepath.Join(home, ".loophole"))
 }
 
-// VolumeSocket returns the Unix socket path for a single-volume owner process.
-func (d Dir) VolumeSocket(volume string) string {
-	h := sha256.Sum256([]byte(volume))
-	return filepath.Join(string(d), "volumes", fmt.Sprintf("%x.sock", h[:6]))
+func shortHash(parts ...string) string {
+	h := sha256.New()
+	for _, part := range parts {
+		_, _ = h.Write([]byte(part))
+		_, _ = h.Write([]byte{0})
+	}
+	sum := h.Sum(nil)
+	return fmt.Sprintf("%x", sum[:6])
 }
 
-// Fuse returns the internal FUSE mount directory for the given profile.
-func (d Dir) Fuse(profile string) string {
-	return filepath.Join(string(d), "fuse", profile)
+// VolumeSocket returns the Unix socket path for a single-volume owner process.
+func (d Dir) VolumeSocket(volsetID, volume string) string {
+	h := shortHash(volsetID, volume)
+	return filepath.Join(string(d), "volumes", h+".sock")
+}
+
+// Fuse returns the internal FUSE mount directory for the given store.
+func (d Dir) Fuse(volsetID string) string {
+	return filepath.Join(string(d), "fuse", volsetID)
 }
 
 // VolumeLog returns the daemon log file path for a volume, co-located with
 // the volume socket under ~/.loophole/volumes/.
-func (d Dir) VolumeLog(volume string) string {
-	h := sha256.Sum256([]byte(volume))
-	return filepath.Join(string(d), "volumes", fmt.Sprintf("%x.log", h[:6]))
+func (d Dir) VolumeLog(volsetID, volume string) string {
+	h := shortHash(volsetID, volume)
+	return filepath.Join(string(d), "volumes", fmt.Sprintf("%s.log", h))
 }
 
-// Cache returns the block cache directory for the given profile.
-func (d Dir) Cache(profile string) string {
-	return filepath.Join(string(d), "cache", profile)
+// Cache returns the block cache directory for the given store.
+func (d Dir) Cache(volsetID string) string {
+	return filepath.Join(string(d), "cache", volsetID)
 }
 
-// CachedSocket returns the page cache daemon socket path for the given profile.
-func (d Dir) CachedSocket(profile string) string {
-	return filepath.Join(string(d), "cache", profile, "cached.sock")
+// CachedSocket returns the page cache daemon socket path for the given store.
+func (d Dir) CachedSocket(volsetID string) string {
+	return filepath.Join(string(d), "cache", volsetID, "cached.sock")
 }
 
-// CachedLog returns the page cache daemon log file path for the given profile.
-func (d Dir) CachedLog(profile string) string {
-	return filepath.Join(string(d), "cache", profile, "cached.log")
+// CachedLog returns the page cache daemon log file path for the given store.
+func (d Dir) CachedLog(volsetID string) string {
+	return filepath.Join(string(d), "cache", volsetID, "cached.log")
 }
 
 // SandboxdSocket returns the Unix socket path for the sandbox daemon.

@@ -2,11 +2,11 @@ package env
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
-	"sort"
-
-	"github.com/BurntSushi/toml"
+	"strings"
 )
 
 // firstNonEmpty returns the first non-empty string.
@@ -19,84 +19,81 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// Config is the top-level ~/.loophole/config.toml structure.
-type Config struct {
-	DefaultProfile string             `toml:"default_profile"`
-	Profiles       map[string]Profile `toml:"profiles"`
-}
-
-// Profile is a named set of connection parameters.
-type Profile struct {
-	Endpoint  string `toml:"endpoint"`
-	Bucket    string `toml:"bucket"`
-	Prefix    string `toml:"prefix"`
-	AccessKey string `toml:"access_key"`
-	SecretKey string `toml:"secret_key"`
-	Region    string `toml:"region"`
-	LogLevel  string `toml:"log_level"`
-	LocalDir  string `toml:"local_dir"`
-	DaemonURL string `toml:"daemon_url"` // remote daemon base URL
-}
-
-// LoadConfig reads ~/.loophole/config.toml. Returns an empty Config (not an
-// error) if the file doesn't exist.
-func LoadConfig(dir Dir) (*Config, error) {
-	path := filepath.Join(string(dir), "config.toml")
-	data, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return &Config{}, nil
+// ResolveStore parses a user-supplied store URL and applies runtime defaults.
+func ResolveStore(rawURL, logLevel string) (ResolvedStore, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return ResolvedStore{}, fmt.Errorf("store URL is required")
 	}
+
+	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return ResolvedStore{}, fmt.Errorf("parse store URL: %w", err)
 	}
-	var cfg Config
-	if err := toml.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+	if u.RawQuery != "" || u.Fragment != "" {
+		return ResolvedStore{}, fmt.Errorf("store URL must not contain query params or fragments")
 	}
-	return &cfg, nil
+
+	inst := ResolvedStore{
+		StoreURL: rawURL,
+		LogLevel: firstNonEmpty(logLevel, os.Getenv("LOOPHOLE_LOG_LEVEL")),
+	}
+
+	switch u.Scheme {
+	case "file":
+		if u.Host != "" && u.Host != "localhost" {
+			return ResolvedStore{}, fmt.Errorf("file URL host must be empty or localhost")
+		}
+		if u.Path == "" {
+			return ResolvedStore{}, fmt.Errorf("file URL path is required")
+		}
+		if !filepath.IsAbs(u.Path) {
+			return ResolvedStore{}, fmt.Errorf("file URL path must be absolute")
+		}
+		inst.LocalDir = filepath.Clean(u.Path)
+		inst.StoreURL = (&url.URL{Scheme: "file", Path: inst.LocalDir}).String()
+		return inst, nil
+	case "http", "https":
+		if u.Host == "" {
+			return ResolvedStore{}, fmt.Errorf("store URL host is required")
+		}
+		parts := strings.Split(strings.Trim(u.EscapedPath(), "/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			return ResolvedStore{}, fmt.Errorf("store URL path must start with /<bucket>")
+		}
+		bucket, err := url.PathUnescape(parts[0])
+		if err != nil {
+			return ResolvedStore{}, fmt.Errorf("decode bucket: %w", err)
+		}
+		inst.Endpoint = (&url.URL{Scheme: u.Scheme, Host: u.Host}).String()
+		inst.Bucket = bucket
+		if len(parts) > 1 {
+			prefixParts := make([]string, 0, len(parts)-1)
+			for _, part := range parts[1:] {
+				decoded, err := url.PathUnescape(part)
+				if err != nil {
+					return ResolvedStore{}, fmt.Errorf("decode prefix: %w", err)
+				}
+				prefixParts = append(prefixParts, decoded)
+			}
+			inst.Prefix = path.Clean(strings.Join(prefixParts, "/"))
+			if inst.Prefix == "." {
+				inst.Prefix = ""
+			}
+		}
+		inst.StoreURL = canonicalHTTPSURL(u.Scheme, u.Host, inst.Bucket, inst.Prefix)
+		return inst, nil
+	default:
+		return ResolvedStore{}, fmt.Errorf("unsupported store URL scheme %q", u.Scheme)
+	}
 }
 
-// Resolve looks up a profile by name and returns the ResolvedProfile.
-// If name is empty, it uses DefaultProfile from the config, or falls back
-// to the first profile (sorted alphabetically).
-func (c *Config) Resolve(name string) (ResolvedProfile, error) {
-	if len(c.Profiles) == 0 {
-		return ResolvedProfile{}, fmt.Errorf("no profiles defined in config")
-	}
-	if name == "" {
-		name = c.DefaultProfile
-	}
-	if name == "" {
-		// Fall back to first profile alphabetically.
-		var names []string
-		for k := range c.Profiles {
-			names = append(names, k)
+func canonicalHTTPSURL(scheme, host, bucket, prefix string) string {
+	u := &url.URL{Scheme: scheme, Host: host, Path: "/" + url.PathEscape(bucket)}
+	if prefix != "" {
+		for _, part := range strings.Split(prefix, "/") {
+			u.Path += "/" + url.PathEscape(part)
 		}
-		sort.Strings(names)
-		name = names[0]
 	}
-	p, ok := c.Profiles[name]
-	if !ok {
-		var names []string
-		for k := range c.Profiles {
-			names = append(names, k)
-		}
-		sort.Strings(names)
-		return ResolvedProfile{}, fmt.Errorf("unknown profile %q (available: %v)", name, names)
-	}
-	if p.Bucket == "" && p.LocalDir == "" && p.DaemonURL == "" {
-		return ResolvedProfile{}, fmt.Errorf("profile %q: bucket, local_dir, or daemon_url is required", name)
-	}
-	return ResolvedProfile{
-		ProfileName: name,
-		Bucket:      p.Bucket,
-		Prefix:      p.Prefix,
-		Endpoint:    p.Endpoint,
-		LocalDir:    p.LocalDir,
-		AccessKey:   p.AccessKey,
-		SecretKey:   p.SecretKey,
-		Region:      p.Region,
-		LogLevel:    firstNonEmpty(p.LogLevel, os.Getenv("LOOPHOLE_LOG_LEVEL")),
-		DaemonURL:   p.DaemonURL,
-	}, nil
+	return u.String()
 }

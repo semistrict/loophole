@@ -12,18 +12,21 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 	"github.com/spf13/cobra"
+
+	"github.com/semistrict/loophole/client"
 )
 
 func statsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "stats <mountpoint|volume|device>",
+		Use:   "stats <mountpoint|device> | stats <store-url> <volume>",
 		Short: "Show owner process metrics",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := resolveOwnerClient(args[0])
+			target, err := resolveRunningTargetArgs(cmd.Context(), args)
 			if err != nil {
 				return err
 			}
+			c := client.NewFromSocket(target.Socket)
 			raw, err := c.Metrics(cmd.Context())
 			if err != nil {
 				return err

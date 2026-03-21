@@ -16,12 +16,13 @@ func (d *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	status := map[string]any{
-		"state":  state,
-		"s3":     d.inst.URL(),
-		"mode":   "fuse",
-		"socket": d.socket,
-		"cache":  d.dir.Cache(d.inst.ProfileName),
-		"log":    d.logPath,
+		"state":     state,
+		"store_url": d.inst.URL(),
+		"volset_id": d.inst.VolsetID,
+		"mode":      "fuse",
+		"socket":    d.socket,
+		"cache":     d.dir.Cache(d.inst.VolsetID),
+		"log":       d.logPath,
 	}
 	if d.backend != nil {
 		status["volumes"] = d.backend.VM().Volumes()
