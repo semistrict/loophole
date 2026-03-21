@@ -37,7 +37,7 @@ type ObjectStore interface {
 	// Optional metadata is stored as S3 user-defined metadata (x-amz-meta-*).
 	PutIfNotExists(ctx context.Context, key string, data []byte, meta ...map[string]string) error
 
-	DeleteObject(ctx context.Context, key string) error
+	DeleteObjects(ctx context.Context, keys []string) error
 	ListKeys(ctx context.Context, prefix string) ([]ObjectInfo, error)
 
 	// HeadMeta returns the user-defined metadata for an object without

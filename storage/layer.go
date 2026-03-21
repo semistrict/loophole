@@ -34,6 +34,10 @@ type layer struct {
 	// during this lease session embed this value in their key names.
 	writeLeaseSeq uint64
 
+	// readOnlyFollower is true when this layer was opened in read-only
+	// mode. A follower never writes; its layout comes from polling S3.
+	readOnlyFollower bool
+
 	// mu protects the durable layout that readers snapshot and publishers
 	// replace: the in-memory layer index and the L1/L2 range maps.
 	mu       sync.RWMutex
@@ -63,6 +67,13 @@ type layer struct {
 	// index.json. This keeps the current layer's direct-L2 fast path and the
 	// background drain worker from publishing overlapping layout updates.
 	publishMu sync.Mutex
+
+	// pendingDeletes accumulates S3 keys of superseded block blobs. Keys are
+	// collected at the end of flush N and deleted at the start of flush N+1.
+	// By that point the in-memory layout has been pointing to the new keys
+	// for the entire interval, so no reader or writer can reference the old
+	// keys. Protected by publishMu.
+	pendingDeletes []string
 
 	nextSeq atomic.Uint64
 
@@ -300,6 +311,21 @@ func openLayer(ctx context.Context, p layerParams) (*layer, error) {
 	return ly, nil
 }
 
+// openLayerReadOnly loads a layer for read-only follower use. It loads the
+// index from S3 but does not create dirty batches or start the flush loop.
+func openLayerReadOnly(ctx context.Context, p layerParams) (*layer, error) {
+	ly, err := newLayer(p)
+	if err != nil {
+		return nil, err
+	}
+	ly.readOnlyFollower = true
+	if err := ly.loadIndex(ctx); err != nil {
+		ly.Close()
+		return nil, fmt.Errorf("load index: %w", err)
+	}
+	return ly, nil
+}
+
 // initLayerFromIndex creates a mutable layer from a pre-loaded index.
 // No S3 reads — the caller already has the index.
 func initLayerFromIndex(p layerParams, idx layerIndex) (*layer, error) {
@@ -417,20 +443,49 @@ func (ly *layer) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 	snap := ly.snapshotLayers()
 	total, err := ly.readWithSnapshot(ctx, buf, offset, &snap)
 	if err == nil {
-		if total > 0 && allZero(buf[:total]) && ly.snapshotChanged(&snap) {
-			fresh := ly.snapshotLayers()
-			return ly.readWithSnapshot(ctx, buf, offset, &fresh)
+		if total == 0 || !allZero(buf[:total]) || !ly.snapshotChanged(&snap) {
+			return total, nil
 		}
-		return total, nil
+		// Got all zeros but the snapshot advanced — a concurrent flush may
+		// have drained the dirty batch. Re-snapshot and retry once.
+		snap = ly.snapshotLayers()
+		total, err = ly.readWithSnapshot(ctx, buf, offset, &snap)
+		if err == nil {
+			if !allZero(buf[:total]) {
+				return total, nil
+			}
+			// Still zeros after re-read. This is genuinely zero data;
+			// the flush completed and L1 now has zeros (e.g. punch-hole).
+			return total, nil
+		}
+		// Error on re-read — fall through to error retry below.
 	}
-	if !ly.shouldRetryAfterLayoutError(err) {
-		return total, err
+	for retry := range 32 {
+		if !ly.shouldRetryAfterLayoutError(err) {
+			return total, err
+		}
+		if traceLayerEnabled(ly.id) {
+			slog.Info("trace read retry",
+				"layer", ly.id,
+				"follower", ly.readOnlyFollower,
+				"retry", retry,
+				"snapGen", snap.layoutGen,
+				"error", err,
+			)
+		}
+		if ly.readOnlyFollower {
+			refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+			if refreshErr != nil || !refreshed {
+				return total, err
+			}
+		}
+		snap = ly.snapshotLayers()
+		total, err = ly.readWithSnapshot(ctx, buf, offset, &snap)
+		if err == nil {
+			return total, nil
+		}
 	}
-	refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
-	if refreshErr != nil || !refreshed {
-		return total, err
-	}
-	return ly.Read(ctx, buf, offset)
+	return total, err
 }
 
 func (ly *layer) snapshotChanged(snap *layerSnapshot) bool {
@@ -480,17 +535,23 @@ func (ly *layer) readWithSnapshot(ctx context.Context, buf []byte, offset uint64
 func (ly *layer) ReadPages(ctx context.Context, g safepoint.Guard, offset uint64, length int) ([][]byte, error) {
 	snap := ly.snapshotLayers()
 	slices, err := ly.readPagesWithSnapshot(ctx, g, offset, length, &snap)
-	if err == nil {
-		return slices, nil
+	for range 32 {
+		if err == nil {
+			return slices, nil
+		}
+		if !ly.shouldRetryAfterLayoutError(err) {
+			return nil, err
+		}
+		if ly.readOnlyFollower {
+			refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+			if refreshErr != nil || !refreshed {
+				return nil, err
+			}
+		}
+		snap = ly.snapshotLayers()
+		slices, err = ly.readPagesWithSnapshot(ctx, g, offset, length, &snap)
 	}
-	if !ly.shouldRetryAfterLayoutError(err) {
-		return nil, err
-	}
-	refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
-	if refreshErr != nil || !refreshed {
-		return nil, err
-	}
-	return ly.ReadPages(ctx, g, offset, length)
+	return slices, err
 }
 
 func (ly *layer) readPagesWithSnapshot(ctx context.Context, g safepoint.Guard, offset uint64, length int, snap *layerSnapshot) ([][]byte, error) {
@@ -905,12 +966,14 @@ func (ly *layer) readPageForWrite(ctx context.Context, pageIdx PageIdx, dst *Pag
 			if !ly.shouldRetryAfterLayoutError(err) {
 				return err
 			}
-			refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
-			if refreshErr != nil {
-				return refreshErr
-			}
-			if !refreshed {
-				return err
+			if ly.readOnlyFollower {
+				refreshed, refreshErr := ly.waitRefreshForLayoutChange(ctx, snap.layoutGen)
+				if refreshErr != nil {
+					return refreshErr
+				}
+				if !refreshed {
+					return err
+				}
 			}
 			continue
 		}
@@ -1026,6 +1089,16 @@ func (ly *layer) Flush() error {
 	}
 }
 
+// directBlockResult holds the outcome of uploading a single rebuilt block.
+type directBlockResult struct {
+	blockAddr BlockIdx
+	key       string
+	pb        *parsedBlock
+	promote   bool
+	seq       uint64
+	newPages  []blockPage // retained for cache population
+}
+
 // flushDirtyBatchDirectLocked writes a single dirty batch directly to
 // L1/L2 blocks. Pages are merged into existing blocks via read-modify-write.
 // The caller is responsible for cleanup of mt on success.
@@ -1035,6 +1108,12 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 	flushCycleStart := time.Now()
 	ly.publishMu.Lock()
 	defer ly.publishMu.Unlock()
+
+	// Delete superseded blocks from the previous flush cycle. By now the
+	// in-memory layout has been pointing to the new keys for the entire
+	// interval since the last flush, so no reader or writer can reference
+	// these old keys.
+	ly.flushPendingDeletes()
 
 	// Hold the pending batch RLock for the full flush so block assembly may
 	// borrow dirty page buffers without copying. Batch teardown returns pooled
@@ -1075,15 +1154,6 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 	ly.mu.RUnlock()
 
 	// Phase 2 — Build + upload blocks in parallel.
-	type directBlockResult struct {
-		blockAddr BlockIdx
-		key       string
-		pb        *parsedBlock
-		promote   bool
-		seq       uint64
-		newPages  []blockPage // retained for cache population
-	}
-
 	ctx := context.Background()
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxFlushWorkers)
@@ -1305,6 +1375,9 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 		}
 	}
 
+	// Delete superseded block blobs (fire-and-forget).
+	ly.deleteSupersededBlocks(snapL1Map, snapL2Map, results)
+
 	metrics.FlushPages.Add(float64(totalPages))
 	metrics.FlushDuration.Observe(time.Since(flushCycleStart).Seconds())
 
@@ -1312,6 +1385,70 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 		"pages", totalPages, "blocks", len(results), "dur", time.Since(flushCycleStart))
 
 	return nil
+}
+
+// deleteSupersededBlocks removes block blobs that were replaced by a
+// successful flush commit. Only blobs owned by this layer are deleted;
+// parent-layer blobs are never touched. Deletes are fire-and-forget:
+// failures are logged but do not block the caller.
+func (ly *layer) deleteSupersededBlocks(
+	snapL1Map, snapL2Map *blockRangeMap,
+	results []directBlockResult,
+) {
+	var staleKeys []string
+	for _, r := range results {
+		// L1 rewrite: old L1 key is garbage if it belonged to this layer.
+		if oldLayer, oldSeq := snapL1Map.Find(r.blockAddr); oldLayer == ly.id {
+			oldKey := blockKey(ly.id, "l1", oldSeq, r.blockAddr)
+			if oldKey != r.key {
+				staleKeys = append(staleKeys, oldKey)
+			}
+		}
+		// L2 promotion: old L2 key is also garbage if it belonged to this layer.
+		if r.promote {
+			if oldLayer, oldSeq := snapL2Map.Find(r.blockAddr); oldLayer == ly.id {
+				oldKey := blockKey(ly.id, "l2", oldSeq, r.blockAddr)
+				if oldKey != r.key {
+					staleKeys = append(staleKeys, oldKey)
+				}
+			}
+		}
+	}
+	if len(staleKeys) == 0 {
+		return
+	}
+
+	if traceLayerEnabled(ly.id) {
+		slog.Info("trace delete superseded blocks",
+			"layer", ly.id,
+			"count", len(staleKeys),
+			"keys", staleKeys,
+		)
+	}
+
+	// Defer deletion to the start of the next flush cycle. The caller holds
+	// publishMu, so pendingDeletes is safe to append.
+	ly.pendingDeletes = append(ly.pendingDeletes, staleKeys...)
+}
+
+// flushPendingDeletes deletes superseded block blobs that were queued by
+// a previous flush cycle. Must be called under publishMu.
+func (ly *layer) flushPendingDeletes() {
+	keys := ly.pendingDeletes
+	ly.pendingDeletes = nil
+	if len(keys) == 0 {
+		return
+	}
+	for _, key := range keys {
+		ly.blockCache.delete(key)
+	}
+	go func() {
+		if err := ly.store.DeleteObjects(context.Background(), keys); err != nil {
+			slog.Warn("delete superseded blocks", "layer", ly.id, "count", len(keys), "error", err)
+		} else {
+			metrics.FlushSupersededDeletes.Add(float64(len(keys)))
+		}
+	}()
 }
 
 // Snapshot freezes this layer and creates a child layer that inherits all

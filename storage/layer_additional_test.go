@@ -167,7 +167,7 @@ func TestLayerPunchHolePartialPages(t *testing.T) {
 func TestLayerReadRetriesAfterLayoutRefresh(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
-	ly, err := openLayer(ctx, layerParams{
+	ly, err := openLayerReadOnly(ctx, layerParams{
 		store:  store,
 		id:     "retry-read",
 		config: Config{FlushThreshold: 4 * PageSize, FlushInterval: -1},
@@ -211,7 +211,7 @@ func TestLayerReadPagesRetriesAfterLayoutRefresh(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
 	sp := safepoint.New()
-	ly, err := openLayer(ctx, layerParams{
+	ly, err := openLayerReadOnly(ctx, layerParams{
 		store:     store,
 		id:        "retry-readpages",
 		config:    Config{FlushThreshold: 4 * PageSize, FlushInterval: -1},

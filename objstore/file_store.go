@@ -183,16 +183,17 @@ func (f *FileStore) PutIfNotExists(_ context.Context, key string, data []byte, m
 	return nil
 }
 
-func (f *FileStore) DeleteObject(_ context.Context, key string) error {
-	p, err := f.path(key)
-	if err != nil {
-		return err
+func (f *FileStore) DeleteObjects(_ context.Context, keys []string) error {
+	for _, key := range keys {
+		p, err := f.path(key)
+		if err != nil {
+			return err
+		}
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
-	err = os.Remove(p)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	return err
+	return nil
 }
 
 func (f *FileStore) metaPath(key string) (string, error) {

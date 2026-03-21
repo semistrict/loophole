@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -1301,7 +1302,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 	// Find and delete layers.json from the store.
 	tlID := vol.layer.id
 	layersKey := "layers/" + tlID + "/layers.json"
-	if err := store.DeleteObject(ctx, layersKey); err != nil {
+	if err := store.DeleteObjects(ctx, []string{layersKey}); err != nil {
 		t.Fatal(err)
 	}
 	if err := m1.Close(); err != nil {
@@ -4343,4 +4344,65 @@ func TestPunchHoleTombstoneFlushReopenRead(t *testing.T) {
 			require.Equal(t, expected, buf, "page %d", i)
 		}
 	}
+}
+
+// TestSupersededBlockBlobsDeleted verifies that when a flush rewrites a block
+// that this layer already owns, the old blob is eventually deleted from the
+// store. Deletion is deferred: superseded keys from flush N are deleted at the
+// start of flush N+1, so we need three flushes to observe the cleanup.
+func TestSupersededBlockBlobsDeleted(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{FlushThreshold: 16 * PageSize}
+	ctx := t.Context()
+
+	m := newTestManager(t, store, cfg)
+	v, err := m.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	layerID := v.layer.id
+
+	// Flush 1: write page 0 → creates L1 block with seq=A.
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xAA}, PageSize), 0))
+	require.NoError(t, v.Flush())
+	keys1 := listBlockKeys(t, store, layerID)
+	require.Equal(t, 1, len(keys1), "expected 1 L1 block after first flush")
+
+	// Flush 2: overwrite page 0 → creates L1 block with seq=B, queues seq=A for deletion.
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xBB}, PageSize), 0))
+	require.NoError(t, v.Flush())
+	// Both seq=A and seq=B exist; deletion is deferred to next flush.
+	require.Equal(t, 2, len(listBlockKeys(t, store, layerID)), "both old and new blocks should exist after second flush")
+
+	// Flush 3: overwrite page 0 again → deletes seq=A at start, creates seq=C, queues seq=B.
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xCC}, PageSize), 0))
+	require.NoError(t, v.Flush())
+
+	// seq=A was deleted at the start of flush 3. seq=B and seq=C remain
+	// (seq=B is queued for deletion in flush 4).
+	require.Eventually(t, func() bool {
+		return len(listBlockKeys(t, store, layerID)) == 2
+	}, 2*time.Second, 10*time.Millisecond, "seq=A should be deleted after third flush")
+
+	keys3 := listBlockKeys(t, store, layerID)
+	require.NotContains(t, keys3, keys1[0], "original block key should be gone")
+
+	// Data should still be readable (latest write: 0xCC).
+	buf := make([]byte, PageSize)
+	_, err = v.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	require.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), buf)
+}
+
+// listBlockKeys returns all L1/L2 block keys for the given layer (excluding index.json).
+func listBlockKeys(t *testing.T, store objstore.ObjectStore, layerID string) []string {
+	t.Helper()
+	objs, err := store.At("layers/"+layerID).ListKeys(context.Background(), "")
+	require.NoError(t, err)
+	var keys []string
+	for _, obj := range objs {
+		if obj.Key != "index.json" {
+			keys = append(keys, obj.Key)
+		}
+	}
+	return keys
 }

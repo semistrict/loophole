@@ -48,7 +48,7 @@ func BreakLease(ctx context.Context, store objstore.ObjectStore, volumeName stri
 		return graceful, fmt.Errorf("clear lease token: %w", err)
 	}
 
-	if err := leases.DeleteObject(ctx, oldToken+".json"); err != nil {
+	if err := leases.DeleteObjects(ctx, []string{oldToken + ".json"}); err != nil {
 		slog.Warn("delete stale lease file", "token", oldToken, "error", err)
 	}
 

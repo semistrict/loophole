@@ -168,7 +168,7 @@ func (lm *LeaseSession) CheckAvailable(ctx context.Context, existingToken string
 // forceBreakLease clears a lease token and deletes the lease file.
 func (lm *LeaseSession) forceBreakLease(ctx context.Context, token string) error {
 	// Delete the stale lease file (best-effort).
-	_ = lm.leases.DeleteObject(ctx, token+".json")
+	_ = lm.leases.DeleteObjects(ctx, []string{token + ".json"})
 	return nil
 }
 
@@ -241,7 +241,7 @@ func (lm *LeaseSession) Close(ctx context.Context) error {
 
 	if started {
 		<-lm.done
-		return lm.leases.DeleteObject(ctx, lm.token+".json")
+		return lm.leases.DeleteObjects(ctx, []string{lm.token + ".json"})
 	}
 	return nil
 }

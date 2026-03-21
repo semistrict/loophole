@@ -198,11 +198,15 @@ func GarbageCollect(ctx context.Context, store objstore.ObjectStore, dryRun bool
 				slog.Warn("gc: list layer objects", "layer", id, "error", err)
 				return nil
 			}
+			keys := make([]string, len(objects))
+			for i, obj := range objects {
+				keys[i] = obj.Key
+			}
+			if err := store.At("layers/"+id).DeleteObjects(gctx, keys); err != nil {
+				slog.Warn("gc: delete objects", "layer", id, "error", err)
+				return nil
+			}
 			for _, obj := range objects {
-				if err := store.At("layers/"+id).DeleteObject(gctx, obj.Key); err != nil {
-					slog.Warn("gc: delete object", "layer", id, "key", obj.Key, "error", err)
-					continue
-				}
 				deletedObjects.Add(1)
 				deletedBytes.Add(obj.Size)
 			}

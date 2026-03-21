@@ -7,6 +7,7 @@ import (
 )
 
 type traceConfig struct {
+	allLayers     bool
 	layerPrefixes []string
 	pageIndices   []PageIdx
 }
@@ -34,7 +35,11 @@ func parseTraceConfig(spec string) traceConfig {
 		}
 		switch strings.TrimSpace(kind) {
 		case "layer":
-			cfg.layerPrefixes = append(cfg.layerPrefixes, value)
+			if value == "*" {
+				cfg.allLayers = true
+			} else {
+				cfg.layerPrefixes = append(cfg.layerPrefixes, value)
+			}
 		case "page":
 			n, err := strconv.ParseUint(value, 10, 64)
 			if err != nil {
@@ -47,6 +52,9 @@ func parseTraceConfig(spec string) traceConfig {
 }
 
 func traceLayerEnabled(id string) bool {
+	if loopTrace.allLayers {
+		return true
+	}
 	for _, prefix := range loopTrace.layerPrefixes {
 		if strings.HasPrefix(id, prefix) {
 			return true

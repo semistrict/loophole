@@ -113,7 +113,7 @@ func TestS3Delete(t *testing.T) {
 	store := newS3TestStore(t)
 
 	require.NoError(t, store.PutBytes(t.Context(), "del", []byte("gone")))
-	require.NoError(t, store.DeleteObject(t.Context(), "del"))
+	require.NoError(t, store.DeleteObjects(t.Context(), []string{"del"}))
 
 	_, _, err := store.Get(t.Context(), "del")
 	assert.Error(t, err)

@@ -259,16 +259,17 @@ func isPreconditionFailed(err error) bool {
 		strings.Contains(err.Error(), "PreconditionFailed")
 }
 
-func (s *GCSStore) DeleteObject(ctx context.Context, key string) error {
-	done := metrics.S3Op("delete")
-	err := s.obj(key).Delete(ctx)
-	done(err)
-	if err != nil {
-		// Match S3/file/mem backend semantics: delete is idempotent.
-		if errors.Is(err, storage.ErrObjectNotExist) {
-			return nil
+func (s *GCSStore) DeleteObjects(ctx context.Context, keys []string) error {
+	for _, key := range keys {
+		done := metrics.S3Op("delete")
+		err := s.obj(key).Delete(ctx)
+		done(err)
+		if err != nil {
+			if errors.Is(err, storage.ErrObjectNotExist) {
+				continue
+			}
+			return fmt.Errorf("delete %s: %w", s.fullKey(key), err)
 		}
-		return fmt.Errorf("delete %s: %w", s.fullKey(key), err)
 	}
 	return nil
 }

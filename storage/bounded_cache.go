@@ -48,6 +48,12 @@ func (c *boundedCache[T]) put(key string, val T) {
 	c.mu.Unlock()
 }
 
+func (c *boundedCache[T]) delete(key string) {
+	c.mu.Lock()
+	delete(c.entries, key)
+	c.mu.Unlock()
+}
+
 func (c *boundedCache[T]) clear() {
 	c.mu.Lock()
 	c.entries = make(map[string]T)

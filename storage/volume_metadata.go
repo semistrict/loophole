@@ -85,14 +85,18 @@ func DeleteVolume(ctx context.Context, store objstore.ObjectStore, name string) 
 		return err
 	}
 	cpKeys, _ := volRefs.ListKeys(ctx, cpPrefix)
-	for _, obj := range cpKeys {
-		_ = volRefs.DeleteObject(ctx, obj.Key)
+	if len(cpKeys) > 0 {
+		keys := make([]string, len(cpKeys))
+		for i, obj := range cpKeys {
+			keys[i] = obj.Key
+		}
+		_ = volRefs.DeleteObjects(ctx, keys)
 	}
 	key, err := volumeIndexKey(name)
 	if err != nil {
 		return err
 	}
-	if err := volRefs.DeleteObject(ctx, key); err != nil {
+	if err := volRefs.DeleteObjects(ctx, []string{key}); err != nil {
 		return fmt.Errorf("delete volume ref %q: %w", name, err)
 	}
 	return nil

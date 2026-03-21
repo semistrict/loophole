@@ -295,16 +295,17 @@ func (m *MemStore) PutIfNotExists(_ context.Context, key string, data []byte, me
 	return nil
 }
 
-func (m *MemStore) DeleteObject(_ context.Context, key string) error {
-	fk := m.fullKey(key)
+func (m *MemStore) DeleteObjects(_ context.Context, keys []string) error {
 	m.count(OpDeleteObject)
-	if err := m.checkFault(OpDeleteObject, fk); err != nil {
-		return err
-	}
-
 	m.shared.mu.Lock()
 	defer m.shared.mu.Unlock()
-	delete(m.shared.objects, fk)
+	for _, key := range keys {
+		fk := m.fullKey(key)
+		if err := m.checkFault(OpDeleteObject, fk); err != nil {
+			return err
+		}
+		delete(m.shared.objects, fk)
+	}
 	return nil
 }
 

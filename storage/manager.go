@@ -296,13 +296,22 @@ func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume
 		writeLeaseSeq = seq
 	}
 
-	ly, err := openLayer(ctx, layerParams{
+	lp := layerParams{
 		store:     m.store,
 		id:        ref.LayerID,
 		config:    m.config,
 		diskCache: m.diskCache,
 		safepoint: m.safepoint,
-	})
+	}
+	var (
+		ly  *layer
+		err error
+	)
+	if readOnly {
+		ly, err = openLayerReadOnly(ctx, lp)
+	} else {
+		ly, err = openLayer(ctx, lp)
+	}
 	if err != nil {
 		if writeLeaseSeq > 0 {
 			v.releaseLease(ctx)
@@ -311,9 +320,6 @@ func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume
 		return nil, fmt.Errorf("open layer %q: %w", ref.LayerID, err)
 	}
 	ly.writeLeaseSeq = writeLeaseSeq
-	if readOnly {
-		ly.stopPeriodicFlush()
-	}
 	v.layer = ly
 
 	m.mu.Lock()

@@ -112,7 +112,7 @@ func benchSize(ctx context.Context, store objstore.ObjectStore, label string, si
 	}
 
 	// Cleanup
-	if err := store.DeleteObject(ctx, key); err != nil {
+	if err := store.DeleteObjects(ctx, []string{key}); err != nil {
 		return fmt.Errorf("DELETE %s: %w", label, err)
 	}
 
@@ -172,7 +172,7 @@ func benchParallelPut(ctx context.Context, store objstore.ObjectStore, size, wor
 
 	// Cleanup
 	for _, key := range keys {
-		if err := store.DeleteObject(ctx, key); err != nil {
+		if err := store.DeleteObjects(ctx, []string{key}); err != nil {
 			return fmt.Errorf("DELETE %s: %w", key, err)
 		}
 	}

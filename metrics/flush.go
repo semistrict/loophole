@@ -96,4 +96,11 @@ var (
 		Name:      "direct_l2_promotions_total",
 		Help:      "L2 promotions during flush.",
 	}))
+
+	FlushSupersededDeletes = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "superseded_deletes_total",
+		Help:      "Superseded block blobs deleted after flush commit.",
+	}))
 )

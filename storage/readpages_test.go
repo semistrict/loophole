@@ -15,7 +15,9 @@ import (
 func TestReadPagesMatchesRead(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
-	m := newTestManager(t, store, testConfig)
+	// Use a higher threshold than the data we write to avoid an auto-flush
+	// rotation racing with the reads.
+	m := newTestManager(t, store, Config{FlushThreshold: 32 * PageSize})
 
 	const volSize = 16 * PageSize
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: volSize})

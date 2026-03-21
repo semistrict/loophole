@@ -343,15 +343,29 @@ func (s *S3Store) PutIfNotExists(ctx context.Context, key string, data []byte, m
 	return nil
 }
 
-func (s *S3Store) DeleteObject(ctx context.Context, key string) error {
-	done := metrics.S3Op("delete")
-	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(s.fullKey(key)),
-	})
-	done(err)
-	if err != nil {
-		return fmt.Errorf("delete %s: %w", s.fullKey(key), err)
+const deleteObjectsBatchSize = 500
+
+func (s *S3Store) DeleteObjects(ctx context.Context, keys []string) error {
+	for len(keys) > 0 {
+		batch := keys
+		if len(batch) > deleteObjectsBatchSize {
+			batch = batch[:deleteObjectsBatchSize]
+		}
+		keys = keys[len(batch):]
+
+		objects := make([]types.ObjectIdentifier, len(batch))
+		for i, key := range batch {
+			objects[i] = types.ObjectIdentifier{Key: aws.String(s.fullKey(key))}
+		}
+		done := metrics.S3Op("delete")
+		_, err := s.client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+			Bucket: aws.String(s.bucket),
+			Delete: &types.Delete{Objects: objects, Quiet: aws.Bool(true)},
+		})
+		done(err)
+		if err != nil {
+			return fmt.Errorf("delete objects: %w", err)
+		}
 	}
 	return nil
 }
