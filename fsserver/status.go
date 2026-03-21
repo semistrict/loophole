@@ -19,7 +19,7 @@ func (d *server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"state":     state,
 		"store_url": d.inst.URL(),
 		"volset_id": d.inst.VolsetID,
-		"mode":      "fuse",
+		"mode":      d.backend.Mode(),
 		"socket":    d.socket,
 		"cache":     d.dir.Cache(d.inst.VolsetID),
 		"log":       d.logPath,

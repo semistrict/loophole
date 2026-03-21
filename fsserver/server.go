@@ -150,7 +150,7 @@ func (d *server) serve(ctx context.Context) error {
 		}
 	}()
 
-	slog.Info("server ready", "mode", "fuse", "socket", d.socket)
+	slog.Info("server ready", "mode", d.backend.Mode(), "socket", d.socket)
 	err := srv.Serve(d.ln)
 	if err == http.ErrServerClosed {
 		err = nil

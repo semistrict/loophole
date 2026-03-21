@@ -18,10 +18,6 @@ func NewFUSEDriver(_ string, _ *storage.Manager, _ *fuseblockdev.Options) (*FUSE
 	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
 }
 
-func NewFUSE(_ string, _ *storage.Manager, _ *fuseblockdev.Options) (*Backend, error) {
-	return nil, fmt.Errorf("FUSE backend is only supported on Linux")
-}
-
 func (f *FUSEDriver) Format(context.Context, *storage.Volume) error {
 	return fmt.Errorf("FUSE backend is only supported on Linux")
 }

@@ -46,6 +46,22 @@ func unmountFS(mountpoint string) error {
 	return nil
 }
 
+func flushBlockDevice(devicePath string) error {
+	f, err := os.OpenFile(devicePath, os.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", devicePath, err)
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
+	if err := unix.IoctlSetInt(int(f.Fd()), unix.BLKFLSBUF, 0); err != nil {
+		return fmt.Errorf("BLKFLSBUF %s: %w", devicePath, err)
+	}
+	return nil
+}
+
 func findMountSource(mountpoint string) (string, error) {
 	f, err := os.Open("/proc/self/mountinfo")
 	if err != nil {
@@ -73,6 +89,32 @@ func findMountSource(mountpoint string) (string, error) {
 		}
 	}
 	return "", scanner.Err()
+}
+
+func findMountpointBySource(source string) string {
+	f, err := os.Open("/proc/self/mountinfo")
+	if err != nil {
+		return ""
+	}
+	defer func() {
+		if err := f.Close(); err != nil {
+			slog.Warn("close failed", "error", err)
+		}
+	}()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) < 5 {
+			continue
+		}
+		for i, field := range fields {
+			if field == "-" && i+2 < len(fields) && fields[i+2] == source {
+				return fields[4]
+			}
+		}
+	}
+	return ""
 }
 
 const (
@@ -303,7 +345,7 @@ func loopDetachPath(devPath string) error {
 }
 
 func mkfsArgs(device string) (string, []string) {
-	return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
+	return "mkfs.ext4", []string{"-F", "-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
 }
 
 func formatFS(ctx context.Context, devicePath string, optimalIOSize int) error {
@@ -318,6 +360,14 @@ func formatFS(ctx context.Context, devicePath string, optimalIOSize int) error {
 	}()
 
 	cmd, args := mkfsArgs(dev.Path)
+	if err := runHelper(ctx, cmd, args...); err != nil {
+		return fmt.Errorf("%s: %w", cmd, err)
+	}
+	return nil
+}
+
+func formatFSDirect(ctx context.Context, devicePath string) error {
+	cmd, args := mkfsArgs(devicePath)
 	if err := runHelper(ctx, cmd, args...); err != nil {
 		return fmt.Errorf("%s: %w", cmd, err)
 	}
@@ -344,6 +394,13 @@ func mountFS(ctx context.Context, devicePath, mountpoint string, opts loopAttach
 		return "", err
 	}
 	return dev.Path, nil
+}
+
+func mountFSDirect(devicePath, mountpoint string) error {
+	if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+		return err
+	}
+	return mountExt4(mountOpts{Source: devicePath, Mountpoint: mountpoint, NoAtime: true})
 }
 
 func unmountLoop(ctx context.Context, mountpoint string) error {

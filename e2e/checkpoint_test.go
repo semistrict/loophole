@@ -162,6 +162,44 @@ func TestE2E_MultipleCheckpoints(t *testing.T) {
 	require.Equal(t, "version 2\n", string(c2fs.ReadFile(t, "v2.txt")))
 }
 
+// TestE2E_CloneLatestCheckpointAfterUnmount isolates the failing path from
+// TestE2E_MultipleCheckpoints: clone the second checkpoint after the parent
+// has been unmounted, then verify both files are present in the clone.
+func TestE2E_CloneLatestCheckpointAfterUnmount(t *testing.T) {
+	b := newBackend(t)
+	ctx := t.Context()
+	mp := mountpoint(t, "cp-latest")
+
+	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "cp-latest"}))
+	require.NoError(t, b.Mount(ctx, "cp-latest", mp))
+
+	tfs := newTestFS(t, b, mp)
+
+	tfs.WriteFile(t, "v1.txt", []byte("version 1\n"))
+	if needsKernelExt4() {
+		syncFS(t, mp)
+	}
+	_, err := b.Checkpoint(ctx, mp)
+	require.NoError(t, err)
+
+	tfs.WriteFile(t, "v2.txt", []byte("version 2\n"))
+	if needsKernelExt4() {
+		syncFS(t, mp)
+	}
+	cp2, err := b.Checkpoint(ctx, mp)
+	require.NoError(t, err)
+
+	require.NoError(t, b.Unmount(ctx, mp))
+
+	cloneMP := mountpoint(t, "cp-latest-c2")
+	require.NoError(t, b.CloneFromCheckpoint(ctx, "cp-latest", cp2, "cp-latest-c2"))
+	require.NoError(t, b.Mount(ctx, "cp-latest-c2", cloneMP))
+
+	cfs := newTestFS(t, b, cloneMP)
+	require.Equal(t, "version 1\n", string(cfs.ReadFile(t, "v1.txt")))
+	require.Equal(t, "version 2\n", string(cfs.ReadFile(t, "v2.txt")))
+}
+
 // TestE2E_CheckpointCloneFromCheckpointMultipleClones verifies that multiple
 // clones can be created from the same checkpoint.
 func TestE2E_CheckpointMultipleClones(t *testing.T) {

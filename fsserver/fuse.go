@@ -36,15 +36,6 @@ func NewFUSEDriver(fuseDir string, vm *storage.Manager, opts *fuseblockdev.Optio
 	return &FUSEDriver{baseDir: fuseDir, opts: opts, pageSize: vm.PageSize()}, nil
 }
 
-// NewFUSE starts the FUSE block device server and returns a backend.
-func NewFUSE(fuseDir string, vm *storage.Manager, opts *fuseblockdev.Options) (*Backend, error) {
-	d, err := NewFUSEDriver(fuseDir, vm, opts)
-	if err != nil {
-		return nil, err
-	}
-	return NewBackend(vm, d), nil
-}
-
 func (f *FUSEDriver) Format(ctx context.Context, vol *storage.Volume) error {
 	if err := f.ensureServer(vol.Name(), vol); err != nil {
 		return err

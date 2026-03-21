@@ -47,8 +47,9 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 	return v
 }
 
-func (v *Volume) Name() string { return v.name }
-func (v *Volume) Size() uint64 { return v.size }
+func (v *Volume) Name() string   { return v.name }
+func (v *Volume) Size() uint64   { return v.size }
+func (v *Volume) ReadOnly() bool { return v.readOnly }
 
 func (v *Volume) VolumeType() string { return v.volType }
 

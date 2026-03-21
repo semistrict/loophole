@@ -673,6 +673,90 @@ func TestCloneFromCheckpoint(t *testing.T) {
 	}
 }
 
+func TestCloneFromMultipleCheckpoints(t *testing.T) {
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, testConfig)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "parent", Size: 1024 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page0 := make([]byte, PageSize)
+	page0[0] = 0xAA
+	if err := v.Write(page0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	cp1, err := v.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page1 := make([]byte, PageSize)
+	page1[0] = 0xBB
+	if err := v.Write(page1, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	cp2, err := v.Checkpoint()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cp1, "clone1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cp2, "clone2"); err != nil {
+		t.Fatal(err)
+	}
+
+	m1 := newTestManager(t, store, testConfig)
+	clone1, err := m1.OpenVolume("clone1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := newTestManager(t, store, testConfig)
+	clone2, err := m2.OpenVolume("clone2")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, PageSize)
+	if _, err := clone1.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xAA {
+		t.Fatalf("clone1 page0: expected 0xAA, got 0x%02x", buf[0])
+	}
+	if _, err := clone1.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0x00 {
+		t.Fatalf("clone1 page1: expected 0x00, got 0x%02x", buf[0])
+	}
+
+	if _, err := clone2.Read(ctx, buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xAA {
+		t.Fatalf("clone2 page0: expected 0xAA, got 0x%02x", buf[0])
+	}
+	if _, err := clone2.Read(ctx, buf, PageSize); err != nil {
+		t.Fatal(err)
+	}
+	if buf[0] != 0xBB {
+		t.Fatalf("clone2 page1: expected 0xBB, got 0x%02x", buf[0])
+	}
+}
+
 func TestOverwriteAfterFlush(t *testing.T) {
 	m := testManager(t)
 	ctx := t.Context()

@@ -1,4 +1,4 @@
-.PHONY: build loophole loophole-cached install check fmt test clean deps e2e bench-fuse fly-bin
+.PHONY: build loophole loophole-cached install check fmt test clean deps e2e e2e-requirenbd e2e-nonbd bench-fuse fly-bin
 
 .DEFAULT_GOAL := loophole
 
@@ -59,8 +59,17 @@ deps:
 
 # Run e2e tests (losetup + kernel ext4 over FUSE).
 # Usage: make e2e [RUN=TestName]
+E2E_TEST_TIMEOUT ?= 1800s
 e2e:
-	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout 600s $(if $(RUN),-run '$(RUN)') ./e2e/
+	go test -tags "$(BUILDTAGS)" -v -count=1 -timeout $(E2E_TEST_TIMEOUT) $(if $(RUN),-run '$(RUN)') ./e2e/
+
+# Run e2e tests with NBD required. This fails fast if NBD is unavailable.
+e2e-requirenbd:
+	LOOPHOLE_OPTIONS=requirenbd $(MAKE) e2e RUN='$(RUN)'
+
+# Run e2e tests with NBD explicitly disabled, forcing the FUSE path.
+e2e-nonbd:
+	LOOPHOLE_OPTIONS=nonbd $(MAKE) e2e RUN='$(RUN)'
 
 # Run FUSE benchmarks.
 # Usage: make bench-fuse

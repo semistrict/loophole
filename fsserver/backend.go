@@ -10,25 +10,27 @@ import (
 	"github.com/semistrict/loophole/storage"
 )
 
-// Backend owns a Manager and the single FUSE driver. Each Backend manages
-// at most one mounted volume at a time.
+// Backend owns a Manager and a single Linux filesystem backend. On Linux that
+// is either NBD or FUSE, chosen when the server starts.
 type Backend struct {
-	vm     *storage.Manager
-	driver *FUSEDriver
+	vm   *storage.Manager
+	fuse *FUSEDriver
+	nbd  *NBDDriver
 
 	mu            sync.Mutex
 	vol           *storage.Volume
-	handle        fuseMount
+	handle        any
 	mountpoint    string
 	beforeUnmount []func() // fired LIFO before driver.Unmount
 }
 
-// NewBackend creates a Backend with the remaining FUSE driver. The driver may
-// be nil for embedded/raw-volume use cases that never mount filesystems.
-func NewBackend(vm *storage.Manager, driver *FUSEDriver) *Backend {
+// NewBackend creates a Backend with the selected filesystem driver. Both
+// drivers may be nil for platforms without filesystem mounting support.
+func NewBackend(vm *storage.Manager, fuse *FUSEDriver, nbd *NBDDriver) *Backend {
 	return &Backend{
-		vm:     vm,
-		driver: driver,
+		vm:   vm,
+		fuse: fuse,
+		nbd:  nbd,
 	}
 }
 
@@ -50,20 +52,23 @@ func (b *Backend) installRemoteReleaseHook(vol *storage.Volume) {
 	})
 }
 
-// driverFor returns the single surviving driver.
-func (b *Backend) driverFor() (*FUSEDriver, error) {
-	if b.driver == nil {
-		return nil, fmt.Errorf("filesystem backend is not available")
-	}
-	return b.driver, nil
-}
-
 func (b *Backend) SupportsFilesystem() bool {
-	return b.driver != nil
+	return b.fuse != nil || b.nbd != nil
 }
 
 // VM returns the underlying Manager.
 func (b *Backend) VM() *storage.Manager { return b.vm }
+
+func (b *Backend) Mode() string {
+	switch {
+	case b.nbd != nil:
+		return "nbd"
+	case b.fuse != nil:
+		return "fuse"
+	default:
+		return "none"
+	}
+}
 
 // Create creates a new volume and formats it.
 // Size is the volume size in bytes; 0 means use the default.
@@ -99,32 +104,27 @@ func (b *Backend) Create(ctx context.Context, p storage.CreateParams) error {
 		return nil
 	}
 
-	driver, err := b.driverFor()
-	if err != nil {
-		return err
-	}
 	vol, err := b.vm.NewVolume(p)
 	if err != nil {
 		return err
 	}
-	slog.Debug("backend: registering volume", "volume", p.Volume)
-	driver.RegisterVolume(p.Volume, vol)
+	b.registerVolume(p.Volume, vol)
 	slog.Debug("backend: formatting volume", "volume", p.Volume)
-	if err := driver.Format(ctx, vol); err != nil {
-		driver.UnregisterVolume(p.Volume)
+	if err := b.formatVolume(ctx, vol); err != nil {
+		b.unregisterVolume(p.Volume)
 		if releaseErr := vol.ReleaseRef(); releaseErr != nil {
 			slog.Warn("release create ref after format failure", "volume", p.Volume, "error", releaseErr)
 		}
 		return fmt.Errorf("format: %w", err)
 	}
 	if err := vol.Flush(); err != nil {
-		driver.UnregisterVolume(p.Volume)
+		b.unregisterVolume(p.Volume)
 		if releaseErr := vol.ReleaseRef(); releaseErr != nil {
 			slog.Warn("release create ref after flush failure", "volume", p.Volume, "error", releaseErr)
 		}
 		return fmt.Errorf("flush after format: %w", err)
 	}
-	driver.UnregisterVolume(p.Volume)
+	b.unregisterVolume(p.Volume)
 	if err := vol.ReleaseRef(); err != nil {
 		return fmt.Errorf("release create ref: %w", err)
 	}
@@ -167,14 +167,14 @@ func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, er
 		b.mu.Unlock()
 		return "", fmt.Errorf("no volume mounted")
 	}
-	vol, handle, driver := b.vol, b.handle, b.driver
+	vol, handle := b.vol, b.handle
 	b.mu.Unlock()
 
-	if err := driver.Freeze(ctx, handle); err != nil {
+	if err := b.freezeHandle(ctx, handle); err != nil {
 		return "", fmt.Errorf("freeze: %w", err)
 	}
 	cpID, cpErr := vol.Checkpoint()
-	if thawErr := driver.Thaw(ctx, handle); thawErr != nil {
+	if thawErr := b.thawHandle(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after checkpoint", "mountpoint", mountpoint, "error", thawErr)
 		if cpErr == nil {
 			cpErr = thawErr
@@ -196,17 +196,17 @@ func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string
 		b.mu.Unlock()
 		return fmt.Errorf("no volume mounted")
 	}
-	vol, handle, driver := b.vol, b.handle, b.driver
+	vol, handle := b.vol, b.handle
 	b.mu.Unlock()
 
 	slog.Debug("backend: freezing for clone", "mountpoint", mountpoint)
-	if err := driver.Freeze(ctx, handle); err != nil {
+	if err := b.freezeHandle(ctx, handle); err != nil {
 		return fmt.Errorf("freeze: %w", err)
 	}
 	slog.Debug("backend: frozen, cloning volume", "clone", cloneName)
 	err := vol.Clone(cloneName)
 	slog.Debug("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
-	if thawErr := driver.Thaw(ctx, handle); thawErr != nil {
+	if thawErr := b.thawHandle(ctx, handle); thawErr != nil {
 		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
 		if err == nil {
 			err = thawErr
@@ -252,10 +252,10 @@ func (b *Backend) doUnmount(ctx context.Context) {
 	for i := len(callbacks) - 1; i >= 0; i-- {
 		callbacks[i]()
 	}
-	if err := b.driver.Unmount(ctx, handle); err != nil {
+	if err := b.unmountHandle(ctx, handle); err != nil {
 		slog.Warn("unmount failed", "mountpoint", mountpoint, "error", err)
 	}
-	b.driver.UnregisterVolume(volName)
+	b.unregisterVolume(volName)
 }
 
 // Thaw resumes the filesystem after Freeze.
@@ -265,9 +265,9 @@ func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
 		b.mu.Unlock()
 		return fmt.Errorf("no volume mounted")
 	}
-	handle, driver := b.handle, b.driver
+	handle := b.handle
 	b.mu.Unlock()
-	return driver.Thaw(ctx, handle)
+	return b.thawHandle(ctx, handle)
 }
 
 // --- Device-level operations (raw block device access) ---
@@ -284,13 +284,20 @@ func (b *Backend) DeviceAttach(ctx context.Context, volume string) (string, erro
 	if err := vol.AcquireRef(); err != nil {
 		return "", fmt.Errorf("acquire ref for device attach: %w", err)
 	}
-	driver, err := b.driverFor()
-	if err != nil {
-		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
-		return "", err
+	if b.nbd != nil {
+		devicePath, err := b.nbd.ConnectDevice(ctx, vol)
+		if err != nil {
+			util.SafeRun(vol.ReleaseRef, "release ref after NBD attach failure")
+			return "", err
+		}
+		return devicePath, nil
 	}
-	driver.RegisterVolume(volume, vol)
-	return b.DevicePath(volume)
+	if b.fuse != nil {
+		b.fuse.RegisterVolume(volume, vol)
+		return b.DevicePath(volume)
+	}
+	util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
+	return "", fmt.Errorf("filesystem backend is not available")
 }
 
 // DeviceDetach disconnects the block device and closes a volume opened via DeviceAttach.
@@ -299,9 +306,12 @@ func (b *Backend) DeviceDetach(ctx context.Context, volume string) error {
 	if vol == nil {
 		return fmt.Errorf("volume %q not open", volume)
 	}
-	driver, _ := b.driverFor()
-	if driver != nil {
-		driver.UnregisterVolume(volume)
+	if b.nbd != nil {
+		if err := b.nbd.DisconnectDevice(ctx, volume); err != nil {
+			return err
+		}
+	} else if b.fuse != nil {
+		b.fuse.UnregisterVolume(volume)
 	}
 	return vol.ReleaseRef()
 }
@@ -329,10 +339,15 @@ func (b *Backend) DeviceClone(ctx context.Context, volume, checkpointID, clone s
 
 // DevicePath returns the block device path for a volume.
 func (b *Backend) DevicePath(volume string) (string, error) {
-	if b.driver == nil {
+	var dev string
+	switch {
+	case b.nbd != nil:
+		dev = b.nbd.DevicePath(volume)
+	case b.fuse != nil:
+		dev = b.fuse.DevicePath(volume)
+	default:
 		return "", fmt.Errorf("backend does not expose device paths")
 	}
-	dev := b.driver.DevicePath(volume)
 	if dev != "" {
 		return dev, nil
 	}
@@ -401,9 +416,15 @@ func (b *Backend) Close(ctx context.Context) error {
 		slog.Info("backend close: mount closed", "mountpoint", mountpoint, "volume", volume)
 	}
 
-	if b.driver != nil {
+	if b.nbd != nil {
+		slog.Info("backend close: closing NBD driver")
+		if err := b.nbd.Close(ctx); err != nil {
+			slog.Warn("backend close: NBD driver close failed", "error", err)
+		}
+	}
+	if b.fuse != nil {
 		slog.Info("backend close: closing driver")
-		if err := b.driver.Close(ctx); err != nil {
+		if err := b.fuse.Close(ctx); err != nil {
 			slog.Warn("backend close: driver close failed", "error", err)
 		}
 	}
@@ -425,12 +446,11 @@ func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
 	}
 	vol := b.vol
 	handle := b.handle
-	driver := b.driver
 	b.mu.Unlock()
 
 	// 1. Quiesce FS (manual — shutdown doesn't use before_freeze hooks).
 	slog.Info("closeMount: freezing", "mountpoint", mountpoint, "volume", volume)
-	if err := driver.Freeze(ctx, handle); err != nil {
+	if err := b.freezeHandle(ctx, handle); err != nil {
 		slog.Warn("freeze failed during close", "mountpoint", mountpoint, "error", err)
 	}
 
@@ -477,18 +497,12 @@ func (b *Backend) mountVolume(ctx context.Context, vol *storage.Volume, mountpoi
 		return fmt.Errorf("acquire ref for mount: %w", err)
 	}
 
-	driver, err := b.driverFor()
-	if err != nil {
-		util.SafeRun(vol.ReleaseRef, "release ref after driver lookup failure")
-		return err
-	}
-	slog.Debug("backend: registering volume for mount", "volume", vol.Name())
-	driver.RegisterVolume(vol.Name(), vol)
+	b.registerVolume(vol.Name(), vol)
 	slog.Debug("backend: calling driver.Mount", "volume", vol.Name(), "mountpoint", mountpoint)
-	handle, err := driver.Mount(ctx, vol, mountpoint)
+	handle, err := b.mountWithDriver(ctx, vol, mountpoint)
 	if err != nil {
 		slog.Info("backend: driver.Mount failed", "volume", vol.Name(), "error", err)
-		driver.UnregisterVolume(vol.Name())
+		b.unregisterVolume(vol.Name())
 		util.SafeRun(vol.ReleaseRef, "release ref after mount failure")
 		return err
 	}
@@ -501,4 +515,72 @@ func (b *Backend) mountVolume(ctx context.Context, vol *storage.Volume, mountpoi
 	b.mu.Unlock()
 
 	return nil
+}
+
+func (b *Backend) registerVolume(name string, vol *storage.Volume) {
+	if b.fuse != nil {
+		slog.Debug("backend: registering volume", "volume", name, "mode", b.Mode())
+		b.fuse.RegisterVolume(name, vol)
+	}
+}
+
+func (b *Backend) unregisterVolume(name string) {
+	if b.fuse != nil {
+		b.fuse.UnregisterVolume(name)
+	}
+}
+
+func (b *Backend) formatVolume(ctx context.Context, vol *storage.Volume) error {
+	switch {
+	case b.nbd != nil:
+		return b.nbd.Format(ctx, vol)
+	case b.fuse != nil:
+		return b.fuse.Format(ctx, vol)
+	default:
+		return fmt.Errorf("filesystem backend is not available")
+	}
+}
+
+func (b *Backend) mountWithDriver(ctx context.Context, vol *storage.Volume, mountpoint string) (any, error) {
+	switch {
+	case b.nbd != nil:
+		return b.nbd.Mount(ctx, vol, mountpoint)
+	case b.fuse != nil:
+		return b.fuse.Mount(ctx, vol, mountpoint)
+	default:
+		return nil, fmt.Errorf("filesystem backend is not available")
+	}
+}
+
+func (b *Backend) unmountHandle(ctx context.Context, handle any) error {
+	switch {
+	case b.nbd != nil:
+		return b.nbd.Unmount(ctx, handle.(nbdMount))
+	case b.fuse != nil:
+		return b.fuse.Unmount(ctx, handle.(fuseMount))
+	default:
+		return fmt.Errorf("filesystem backend is not available")
+	}
+}
+
+func (b *Backend) freezeHandle(ctx context.Context, handle any) error {
+	switch {
+	case b.nbd != nil:
+		return b.nbd.Freeze(ctx, handle.(nbdMount))
+	case b.fuse != nil:
+		return b.fuse.Freeze(ctx, handle.(fuseMount))
+	default:
+		return fmt.Errorf("filesystem backend is not available")
+	}
+}
+
+func (b *Backend) thawHandle(ctx context.Context, handle any) error {
+	switch {
+	case b.nbd != nil:
+		return b.nbd.Thaw(ctx, handle.(nbdMount))
+	case b.fuse != nil:
+		return b.fuse.Thaw(ctx, handle.(fuseMount))
+	default:
+		return fmt.Errorf("filesystem backend is not available")
+	}
 }

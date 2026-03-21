@@ -48,14 +48,19 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/wire v0.7.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/josharian/native v1.1.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mdlayher/genetlink v1.3.2 // indirect
+	github.com/mdlayher/netlink v1.7.2 // indirect
+	github.com/mdlayher/socket v0.4.1 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
@@ -92,6 +97,7 @@ require (
 require (
 	cloud.google.com/go/compute v1.57.0
 	cloud.google.com/go/storage v1.57.2
+	github.com/Merovius/nbd v0.0.0-20240812113926-fd65a54c9949
 	github.com/axiomhq/axiom-go v0.31.0
 	github.com/fatih/color v1.18.0
 	github.com/gorilla/websocket v1.5.3
@@ -116,3 +122,5 @@ require (
 )
 
 replace github.com/hanwen/go-fuse/v2 => github.com/juicedata/go-fuse/v2 v2.1.1-0.20240920022208-0752e539a2f7
+
+replace github.com/Merovius/nbd => ./third_party/merovius-nbd

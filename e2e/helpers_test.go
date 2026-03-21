@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -663,6 +664,12 @@ func startOwnerProcess(ctx context.Context, volume string, args ...string) (*tes
 		case err := <-done:
 			return nil, fmt.Errorf("owner for %s exited before ready: %w\n%s", volume, err, tailFile(logPath, 80))
 		case <-time.After(25 * time.Millisecond):
+			if startupLogShowsCrash(logPath) {
+				return nil, fmt.Errorf("owner for %s crashed before ready\n%s", volume, tailFile(logPath, 80))
+			}
+			if processGone(cmd) {
+				return nil, fmt.Errorf("owner for %s died before ready\n%s", volume, tailFile(logPath, 80))
+			}
 		case <-waitCtx.Done():
 			_ = cmd.Process.Signal(syscall.SIGTERM)
 			<-done
@@ -732,4 +739,21 @@ func tailFile(path string, maxLines int) string {
 		lines = lines[len(lines)-maxLines:]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func startupLogShowsCrash(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	s := string(data)
+	return strings.Contains(s, "panic:") || strings.Contains(s, "fatal error:")
+}
+
+func processGone(cmd *exec.Cmd) bool {
+	if cmd == nil || cmd.Process == nil {
+		return true
+	}
+	err := cmd.Process.Signal(syscall.Signal(0))
+	return err != nil && !errors.Is(err, os.ErrProcessDone)
 }
