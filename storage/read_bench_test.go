@@ -57,7 +57,7 @@ func BenchmarkFuseSeqRead1MiB(b *testing.B) {
 		name  string
 		flush bool
 	}{
-		{"memtable", false},
+		{"dirtyPages", false},
 		{"flushed", true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
@@ -101,7 +101,7 @@ func BenchmarkFuseRandRead4K(b *testing.B) {
 		name  string
 		flush bool
 	}{
-		{"memtable", false},
+		{"dirtyPages", false},
 		{"flushed", true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {
@@ -141,7 +141,7 @@ func BenchmarkFuseRandRead4K(b *testing.B) {
 // --- Sequential 1 MiB writes ---
 
 func BenchmarkFuseSeqWrite1MiB(b *testing.B) {
-	b.Run("memtable", func(b *testing.B) {
+	b.Run("dirtyPages", func(b *testing.B) {
 		v, _ := setupBenchVolume(b, false)
 		rng := rand.New(rand.NewPCG(77, 0))
 		data := make([]byte, fuseMaxWrite)
@@ -161,7 +161,7 @@ func BenchmarkFuseSeqWrite1MiB(b *testing.B) {
 // --- Random 4K writes ---
 
 func BenchmarkFuseRandWrite4K(b *testing.B) {
-	b.Run("memtable", func(b *testing.B) {
+	b.Run("dirtyPages", func(b *testing.B) {
 		v, _ := setupBenchVolume(b, false)
 		rng := rand.New(rand.NewPCG(88, 0))
 		data := make([]byte, PageSize)
@@ -178,6 +178,32 @@ func BenchmarkFuseRandWrite4K(b *testing.B) {
 	})
 }
 
+// BenchmarkFuseRandOverwriteHotset4K emulates buffered FUSE writes landing on
+// a small hot set of pages. This is the allocator-churn pattern the dirty page
+// pool is meant to improve: each write stages a fresh 4 KiB page while
+// overwriting and retiring a recently written dirty page from the same working
+// set. Throughput may move only slightly; allocs/op is the more important
+// signal here.
+func BenchmarkFuseRandOverwriteHotset4K(b *testing.B) {
+	b.Run("dirtyPages", func(b *testing.B) {
+		v, _ := setupBenchVolume(b, false)
+		rng := rand.New(rand.NewPCG(1234, 0))
+		data := make([]byte, PageSize)
+		const hotPages = 256
+
+		b.ReportAllocs()
+		b.SetBytes(PageSize)
+		b.ResetTimer()
+		for range b.N {
+			randomPage(rng, data)
+			off := (rng.Uint64() % hotPages) * PageSize
+			if err := v.Write(data, off); err != nil {
+				b.Fatal(err)
+			}
+		}
+	})
+}
+
 // --- Mixed workload ---
 
 func BenchmarkFuseMixed(b *testing.B) {
@@ -187,7 +213,7 @@ func BenchmarkFuseMixed(b *testing.B) {
 		name  string
 		flush bool
 	}{
-		{"memtable", false},
+		{"dirtyPages", false},
 		{"flushed", true},
 	} {
 		b.Run(tc.name, func(b *testing.B) {

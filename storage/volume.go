@@ -201,11 +201,6 @@ func (v *Volume) relayer() error {
 		return fmt.Errorf("init new layer: %w", err)
 	}
 	newLayer.writeLeaseSeq = seq
-
-	if v.manager.config.FlushInterval > 0 {
-		newLayer.startPeriodicFlush(ctx)
-	}
-
 	v.layer = newLayer
 	oldLayer.Close()
 
@@ -311,6 +306,7 @@ func (v *Volume) ReleaseRef() error {
 func (v *Volume) destroy() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.layer.beginShutdown()
 	if err := v.layer.Flush(); err != nil {
 		slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
 	}
@@ -399,6 +395,7 @@ func (v *Volume) handleLeaseRelease(ctx context.Context, params json.RawMessage)
 		v.onRemoteRelease(ctx)
 	}
 	v.manager.closeVolume(v.name)
+	v.layer.beginShutdown()
 	if err := v.flush(); err != nil {
 		slog.Warn("release: flush failed", "volume", v.name, "error", err)
 	}
@@ -418,7 +415,6 @@ func (v *Volume) EnableDirectWriteback() error {
 		if err := v.layer.Flush(); err != nil {
 			return fmt.Errorf("flush before direct mode: %w", err)
 		}
-		v.layer.stopPeriodicFlush()
 	}
 	v.directRefs++
 	return nil
@@ -432,9 +428,6 @@ func (v *Volume) DisableDirectWriteback() error {
 		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
 	}
 	v.directRefs--
-	if v.directRefs == 0 && v.manager.config.FlushInterval > 0 {
-		v.layer.startPeriodicFlush(context.Background())
-	}
 	return nil
 }
 

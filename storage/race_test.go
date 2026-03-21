@@ -13,14 +13,14 @@ import (
 )
 
 // TestWritePageSeqReuseOnRetry demonstrates issue #3: when writePage gets
-// errMemtableUnavailable and retries, it reuses the same sequence number. Another
+// backpressured and retries, it reuses the same sequence number. Another
 // writer can grab a higher seq for the same page in between, and the retry
 // overwrites the newer write with stale data.
 func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
 
-	// Use a tiny memtable (2 pages) so it fills up quickly.
+	// Use a tiny dirty batch (2 pages) so it fills up quickly.
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
 		FlushInterval:  -1,
@@ -30,7 +30,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	require.NoError(t, err)
 	defer ly.Close()
 
-	// Fill the memtable to near capacity so the next write triggers errMemtableUnavailable.
+	// Fill the dirty batch to near capacity so the next write hits backpressure.
 	page0 := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, ly.Write(page0, 0))
 
@@ -46,10 +46,10 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		// Writer A writes page 1 to fill the memtable, then writes page 0.
-		// The page 0 write will likely hit errMemtableUnavailable and retry.
+		// Writer A writes page 1 to fill the dirty batch, then writes page 0.
+		// The page 0 write will likely hit backpressure and retry.
 		filler := bytes.Repeat([]byte{0xDD}, PageSize)
-		_ = ly.Write(filler, PageSize) // page 1 — fills memtable
+		_ = ly.Write(filler, PageSize) // page 1 — fills dirty pages
 		err := ly.Write(writerA, 0)    // page 0 — may trigger retry
 		assert.NoError(t, err)
 		writerADone.Store(true)
@@ -115,9 +115,8 @@ func TestBlockRangeMapConcurrentRace(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSnapshotLayersAtomicity demonstrates issue #2: snapshotLayers acquires
-// mu and frozenMu independently. Between releasing mu and acquiring frozenMu,
-// a freeze+flush+cleanup can happen, leaving a dangling memtable pointer.
+// TestSnapshotLayersAtomicity ensures snapshotting active+pending batch
+// pointers and durable layout never produces a torn read view.
 func TestSnapshotLayersAtomicity(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
@@ -138,7 +137,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 	var wg sync.WaitGroup
 	const iterations = 1000
 
-	// Goroutine 1: continuously flush (freeze + flush frozen tables).
+	// Goroutine 1: continuously flush.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -155,17 +154,11 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 		defer wg.Done()
 		for range iterations {
 			snap := ly.snapshotLayers()
-			// Try to read from frozen memtables in the snapshot.
-			// With the bug, a frozen memtable may have been cleaned up
-			// between the two lock acquisitions.
-			if snap.frozen != nil {
-				if entry, ok := snap.frozen.get(0); ok {
-					data, err := snap.frozen.readData(entry)
-					if err != nil {
-						t.Logf("readData from frozen failed: %v", err)
-					} else {
-						assert.Len(t, data, PageSize)
-					}
+			if snap.pending != nil {
+				var page Page
+				if ok, tombstone := snap.pending.copyPage(0, &page); ok {
+					assert.False(t, tombstone)
+					assert.Len(t, page[:], PageSize)
 				}
 			}
 		}
@@ -174,10 +167,8 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 	wg.Wait()
 }
 
-// TestReadDuringFlushReturnsZeros demonstrates issue #11: a read can return
-// zeros for written data when racing with flush. The snapshot captures a stale
-// layer state, the frozen memtable is being cleaned up, and readData returns
-// errmemtableCleanedUp. The read falls through to zeros.
+// TestReadDuringFlushReturnsZeros ensures dirty batch rotation does not let
+// reads fall through to zeros for data that was already written.
 func TestReadDuringFlushReturnsZeros(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
@@ -235,10 +226,11 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 	}
 }
 
-// TestReadPageWithCleanedUpFrozen demonstrates issue #11 deterministically:
-// construct a snapshot with a frozen memtable, then clean it up. readPageWith
-// should still return the correct data (from flushed layers or page cache), not zeros.
-func TestReadPageWithCleanedUpFrozen(t *testing.T) {
+// TestReadAfterFlushWithFreshSnapshot ensures the supported contract: once a
+// flush completes, a fresh read still finds the data through the durable layer
+// state even though the old dirty batch may already have released its pooled
+// page buffers.
+func TestReadAfterFlushWithFreshSnapshot(t *testing.T) {
 	ctx := t.Context()
 	store := objstore.NewMemStore()
 
@@ -255,25 +247,12 @@ func TestReadPageWithCleanedUpFrozen(t *testing.T) {
 	expected := bytes.Repeat([]byte{0x42}, PageSize)
 	require.NoError(t, ly.Write(expected, 0))
 
-	// Take a snapshot that includes the current memtable.
-	snap := ly.snapshotLayers()
-
-	// Verify page 0 is readable through the snapshot.
-	data, err := ly.readPageWith(ctx, &snap, 0)
-	require.NoError(t, err)
-	require.Equal(t, expected, data, "pre-flush read should work")
-
-	// Now flush — this freezes the memtable, uploads to L1, then cleans up
-	// the frozen memtable (munmaps it).
+	// Flush the dirty batch into the durable layer state.
 	require.NoError(t, ly.Flush())
 
-	// The snapshot still holds a reference to the old (now cleaned up) memtable.
-	// readPageWith should handle errmemtableCleanedUp gracefully and find the
-	// data in flushed layers or page cache.
-	data2, err := ly.readPageWith(ctx, &snap, 0)
+	// A fresh snapshot after flush must still read the page correctly.
+	snap := ly.snapshotLayers()
+	data, err := ly.readPageWith(ctx, &snap, 0)
 	require.NoError(t, err)
-
-	// After fix: readPageWith detects the stale snapshot and refreshes
-	// the layer state, finding the flushed data.
-	assert.Equal(t, expected, data2, "data should survive flush even with stale snapshot")
+	assert.Equal(t, expected, data, "data should survive flush")
 }

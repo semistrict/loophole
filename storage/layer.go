@@ -7,8 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,48 +19,76 @@ import (
 )
 
 // layer is a writable storage layer backed by a tiered L1/L2 structure.
-// Data flows: memtable → frozen memtables → L1 → L2 → zeros.
+// Data flows: active dirty batch → pending dirty batch → L1 → L2 → zeros.
 type layer struct {
 	id         string
 	store      objstore.ObjectStore // global root (for reading blobs by full key)
 	layerStore objstore.ObjectStore // rooted at layers/<id>/ (for index.json)
 
-	config     Config
-	diskCache  PageCache
-	safepoint  *safepoint.Safepoint
-	scratchDir string
+	config    Config
+	diskCache PageCache
+	safepoint *safepoint.Safepoint
 
 	// writeLeaseSeq is the monotonically increasing sequence number
 	// assigned when the write lease was acquired. All files written
 	// during this lease session embed this value in their key names.
 	writeLeaseSeq uint64
 
+	// mu protects the durable layout that readers snapshot and publishers
+	// replace: the in-memory layer index and the L1/L2 range maps.
 	mu       sync.RWMutex
 	index    layerIndex
 	indexNew bool // true if index.json has never been saved to S3
-	memtable *memtable
+	l1Map    *blockRangeMap
+	l2Map    *blockRangeMap
+
+	// dirtyMu protects the mutable dirty-batch topology and all writer/drainer
+	// coordination state:
+	//   - active and pending batch pointers
+	//   - whether a drain is already in flight
+	//   - whether a waiter wants an explicit drain
+	//   - whether the worker is shutting down
+	// Writers block on dirtyCond only when pending is occupied and active
+	// cannot accept more records.
+	dirtyMu       sync.Mutex
+	dirtyCond     *sync.Cond
+	active        *dirtyBatch
+	pending       *dirtyBatch
+	drainInFlight bool
+	drainForced   bool
+	stopping      bool
+
+	// publishMu serializes durable publication. Exactly one publisher at a time
+	// may upload rebuilt blocks, update the in-memory durable layout, and write
+	// index.json. This keeps the current layer's direct-L2 fast path and the
+	// background drain worker from publishing overlapping layout updates.
+	publishMu sync.Mutex
 
 	nextSeq atomic.Uint64
-
-	frozenMu sync.RWMutex
-	frozen   *memtable  // nil or a single frozen memtable awaiting flush
-	flushMu  sync.Mutex // serializes flushFrozenTables
-	flushWG  sync.Mutex
-	flushCh  chan struct{}
-	indexMu  sync.Mutex // serializes index.json publication within one process
 
 	// Block header cache: parsed block headers keyed by S3 key (bounded).
 	blockCache  boundedCache[*parsedBlock]
 	blockFlight singleflight[*parsedBlock]
 
-	// L1/L2 range maps (rebuilt from index on load).
-	l1Map *blockRangeMap
-	l2Map *blockRangeMap
+	// retiredMu protects retiredDirtyPages and retiredDrainActive.
+	// Dirty resources removed from batches are queued here and only reclaimed
+	// from a safepoint-exclusive section, reusing the existing global
+	// borrowed-memory lifetime mechanism instead of adding a second local
+	// lifetime protocol for dirty batches.
+	retiredMu           sync.Mutex
+	retiredDirtyPages   []*Page
+	retiredDirtyBatches []*dirtyBatch
+	retiredDrainActive  bool
 
-	// pageLocks serializes read-modify-write cycles for partial page writes.
+	// pageLocks serialize mutating operations per page. They do not protect a
+	// stored field directly; instead they provide the "same page mutates in
+	// program order, different pages may proceed concurrently" guarantee that the
+	// dirty-batch design depends on.
 	pageLocks [256]sync.Mutex
 
-	// Periodic flush goroutine.
+	// The drain worker always exists for writable layers. FlushInterval only
+	// controls whether the worker proactively rotates a stale active batch; it
+	// does not control whether draining exists.
 	flushStop   chan struct{}
 	flushDone   chan struct{}
 	flushNotify chan struct{}
@@ -76,11 +102,158 @@ func (ly *layer) pageLock(idx PageIdx) *sync.Mutex {
 	return &ly.pageLocks[uint64(idx)%uint64(len(ly.pageLocks))]
 }
 
+func (ly *layer) currentDirtyPageBytes() int64 {
+	ly.dirtyMu.Lock()
+	active := ly.active
+	ly.dirtyMu.Unlock()
+	if active == nil {
+		return 0
+	}
+	return active.bytes()
+}
+
+func (ly *layer) requestDrain() {
+	ly.dirtyMu.Lock()
+	ly.drainForced = true
+	ly.dirtyMu.Unlock()
+	ly.notifyDrainWorker()
+}
+
+func (ly *layer) beginShutdown() {
+	ly.dirtyMu.Lock()
+	ly.stopping = true
+	ly.dirtyCond.Broadcast()
+	ly.dirtyMu.Unlock()
+	ly.notifyDrainWorker()
+}
+
+func (ly *layer) notifyDrainWorker() {
+	if ly.flushNotify != nil {
+		select {
+		case ly.flushNotify <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (ly *layer) enqueueRetiredDirtyPages(pages ...*Page) {
+	filtered := make([]*Page, 0, len(pages))
+	for _, page := range pages {
+		if page != nil {
+			filtered = append(filtered, page)
+		}
+	}
+	if len(filtered) == 0 {
+		return
+	}
+
+	ly.retiredMu.Lock()
+	ly.retiredDirtyPages = append(ly.retiredDirtyPages, filtered...)
+	if ly.retiredDrainActive {
+		ly.retiredMu.Unlock()
+		return
+	}
+	ly.retiredDrainActive = true
+	ly.retiredMu.Unlock()
+
+	go ly.drainRetiredDirtyPages()
+}
+
+func (ly *layer) enqueueRetiredDirtyBatch(batch *dirtyBatch) {
+	if batch == nil {
+		return
+	}
+
+	ly.retiredMu.Lock()
+	ly.retiredDirtyBatches = append(ly.retiredDirtyBatches, batch)
+	if ly.retiredDrainActive {
+		ly.retiredMu.Unlock()
+		return
+	}
+	ly.retiredDrainActive = true
+	ly.retiredMu.Unlock()
+
+	go ly.drainRetiredDirtyPages()
+}
+
+func (ly *layer) drainRetiredDirtyPages() {
+	drainOnce := func() (int, int) {
+		var retiredPages []*Page
+		var retiredBatches []*dirtyBatch
+		drain := func() {
+			ly.retiredMu.Lock()
+			retiredPages = ly.retiredDirtyPages
+			ly.retiredDirtyPages = nil
+			retiredBatches = ly.retiredDirtyBatches
+			ly.retiredDirtyBatches = nil
+			if len(retiredPages) == 0 && len(retiredBatches) == 0 {
+				ly.retiredDrainActive = false
+			}
+			ly.retiredMu.Unlock()
+			for _, batch := range retiredBatches {
+				for _, page := range batch.clearAndCollect() {
+					dirtyPagePool.Put(page)
+				}
+			}
+			for _, page := range retiredPages {
+				dirtyPagePool.Put(page)
+			}
+		}
+		if ly.safepoint != nil {
+			ly.safepoint.Do(drain)
+		} else {
+			drain()
+		}
+		return len(retiredPages), len(retiredBatches)
+	}
+
+	for {
+		pageCount, batchCount := drainOnce()
+		if pageCount == 0 && batchCount == 0 {
+			return
+		}
+	}
+}
+
+func (ly *layer) rotateActiveToPendingLocked() bool {
+	if ly.active == nil || ly.active.isEmpty() || ly.pending != nil {
+		return false
+	}
+	ly.active.markClosed()
+	ly.pending = ly.active
+	ly.active = newDirtyBatch(ly.config)
+	metrics.DirtyPageBytes.Set(0)
+	metrics.FrozenTableCount.Set(1)
+	return true
+}
+
+func (ly *layer) waitForWriteCapacity(active *dirtyBatch) {
+	ly.dirtyMu.Lock()
+	defer ly.dirtyMu.Unlock()
+
+	for {
+		if ly.active != active {
+			return
+		}
+		if ly.pending == nil {
+			if ly.rotateActiveToPendingLocked() {
+				ly.drainForced = true
+				ly.notifyDrainWorker()
+			}
+			return
+		}
+		if !ly.drainInFlight {
+			ly.notifyDrainWorker()
+		}
+		ly.dirtyCond.Wait()
+	}
+}
+
 // layerSnapshot captures the layer state for a consistent read.
 type layerSnapshot struct {
 	layoutGen uint64
-	memtable  *memtable
-	frozen    *memtable
+	active    *dirtyBatch
+	pending   *dirtyBatch
 	l1        *blockRangeMap
 	l2        *blockRangeMap
 }
@@ -95,10 +268,6 @@ type layerParams struct {
 
 func newLayer(p layerParams) (*layer, error) {
 	p.config.setDefaults()
-	scratchDir, err := os.MkdirTemp("", "loophole-layer-*")
-	if err != nil {
-		return nil, fmt.Errorf("create layer work dir: %w", err)
-	}
 	ly := &layer{
 		id:         p.id,
 		store:      p.store,
@@ -106,23 +275,14 @@ func newLayer(p layerParams) (*layer, error) {
 		config:     p.config,
 		diskCache:  p.diskCache,
 		safepoint:  p.safepoint,
-		scratchDir: scratchDir,
 	}
+	ly.dirtyCond = sync.NewCond(&ly.dirtyMu)
 	ly.blockCache.init(p.config.MaxCacheEntries)
 	return ly, nil
 }
 
-func (ly *layer) initMemtable() error {
-	memDir := filepath.Join(ly.scratchDir, "mem")
-	if err := ensureDir(memDir); err != nil {
-		return fmt.Errorf("create mem dir: %w", err)
-	}
-	mt, err := newMemtable(memDir, ly.nextSeq.Load(), ly.config.maxMemtablePages())
-	if err != nil {
-		return fmt.Errorf("create memtable: %w", err)
-	}
-	ly.memtable = mt
-	return nil
+func (ly *layer) initDirtyBatches() {
+	ly.active = newDirtyBatch(ly.config)
 }
 
 // openLayer loads a layer from S3 and initializes its local state.
@@ -135,10 +295,8 @@ func openLayer(ctx context.Context, p layerParams) (*layer, error) {
 		ly.Close()
 		return nil, fmt.Errorf("load index: %w", err)
 	}
-	if err := ly.initMemtable(); err != nil {
-		ly.Close()
-		return nil, err
-	}
+	ly.initDirtyBatches()
+	ly.startPeriodicFlush(context.Background())
 	return ly, nil
 }
 
@@ -153,10 +311,8 @@ func initLayerFromIndex(p layerParams, idx layerIndex) (*layer, error) {
 	ly.nextSeq.Store(idx.NextSeq)
 	ly.l1Map = newBlockRangeMap(idx.L1)
 	ly.l2Map = newBlockRangeMap(idx.L2)
-	if err := ly.initMemtable(); err != nil {
-		ly.Close()
-		return nil, err
-	}
+	ly.initDirtyBatches()
+	ly.startPeriodicFlush(context.Background())
 	return ly, nil
 }
 
@@ -206,9 +362,6 @@ func (ly *layer) refresh(ctx context.Context) error {
 }
 
 func (ly *layer) saveIndex(ctx context.Context) error {
-	ly.indexMu.Lock()
-	defer ly.indexMu.Unlock()
-
 	ly.mu.RLock()
 	idx := ly.index
 	idx.NextSeq = ly.nextSeq.Load()
@@ -239,19 +392,22 @@ func (ly *layer) saveIndex(ctx context.Context) error {
 	return nil
 }
 
-// snapshotLayers captures current layer state under both read locks
-// simultaneously, ensuring an atomic view of memtable + frozen + L1/L2.
+// snapshotLayers captures the current dirty-batch pointers plus the durable
+// layout maps for a consistent read.
 func (ly *layer) snapshotLayers() layerSnapshot {
+	ly.dirtyMu.Lock()
+	active := ly.active
+	pending := ly.pending
+	ly.dirtyMu.Unlock()
+
 	ly.mu.RLock()
-	ly.frozenMu.RLock()
 	snap := layerSnapshot{
 		layoutGen: ly.index.LayoutGen,
-		memtable:  ly.memtable,
-		frozen:    ly.frozen,
+		active:    active,
+		pending:   pending,
 		l1:        ly.l1Map,
 		l2:        ly.l2Map,
 	}
-	ly.frozenMu.RUnlock()
 	ly.mu.RUnlock()
 	return snap
 }
@@ -339,32 +495,30 @@ func (ly *layer) readPagesWithSnapshot(ctx context.Context, g safepoint.Guard, o
 }
 
 // readPageRef reads a single page using zero-copy references where possible.
-// The caller must hold the safepoint read lock for the duration of the
-// returned slice's use (protects memtable mmap and page cache arena).
+// Dirty pages are returned as detached copies; only stable cache/L1/L2 data
+// uses borrowed zero-copy references that depend on the safepoint guard.
 func (ly *layer) readPageRef(ctx context.Context, g safepoint.Guard, snap *layerSnapshot, pageIdx PageIdx) ([]byte, error) {
-	// 1. Active memtable.
-	if snap.memtable != nil {
-		if slot, ok := snap.memtable.get(pageIdx); ok {
-			data, err := snap.memtable.readDataRef(g, slot)
-			if err == nil {
-				metrics.PageReadSource.WithLabelValues("memtable").Inc()
-				return data, nil
+	// 1. Active dirty batch.
+	if snap.active != nil {
+		var page Page
+		if ok, tombstone := snap.active.copyPage(pageIdx, &page); ok {
+			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			if tombstone {
+				return zeroPage[:], nil
 			}
-			fresh := ly.snapshotLayers()
-			return ly.readPageRef(ctx, g, &fresh, pageIdx)
+			return append([]byte(nil), page[:]...), nil
 		}
 	}
 
-	// 2. Frozen memtable.
-	if snap.frozen != nil {
-		if slot, ok := snap.frozen.get(pageIdx); ok {
-			data, err := snap.frozen.readDataRef(g, slot)
-			if err == nil {
-				metrics.PageReadSource.WithLabelValues("frozen").Inc()
-				return data, nil
+	// 2. Pending dirty batch.
+	if snap.pending != nil {
+		var page Page
+		if ok, tombstone := snap.pending.copyPage(pageIdx, &page); ok {
+			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			if tombstone {
+				return zeroPage[:], nil
 			}
-			fresh := ly.snapshotLayers()
-			return ly.readPageRef(ctx, g, &fresh, pageIdx)
+			return append([]byte(nil), page[:]...), nil
 		}
 	}
 
@@ -422,31 +576,27 @@ func (ly *layer) cachedPageRef(g safepoint.Guard, sourceLayerID string, pageIdx 
 
 // readPageWith reads a single page using a pre-captured layer snapshot.
 func (ly *layer) readPageWith(ctx context.Context, snap *layerSnapshot, pageIdx PageIdx) ([]byte, error) {
-	// 1. Active memtable (nil for frozen layers).
-	if snap.memtable != nil {
-		if slot, ok := snap.memtable.get(pageIdx); ok {
-			data, err := snap.memtable.readData(slot)
-			if err == nil {
-				metrics.PageReadSource.WithLabelValues("memtable").Inc()
-				return data, nil
+	// 1. Active dirty batch.
+	if snap.active != nil {
+		var page Page
+		if ok, tombstone := snap.active.copyPage(pageIdx, &page); ok {
+			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			if tombstone {
+				return zeroPage[:], nil
 			}
-			// Memtable was cleaned up after flush. Retry with a fresh
-			// snapshot — the data is now in L1/L2 or a new memtable.
-			fresh := ly.snapshotLayers()
-			return ly.readPageWith(ctx, &fresh, pageIdx)
+			return page[:], nil
 		}
 	}
 
-	// 2. Frozen memtable.
-	if snap.frozen != nil {
-		if slot, ok := snap.frozen.get(pageIdx); ok {
-			data, err := snap.frozen.readData(slot)
-			if err == nil {
-				metrics.PageReadSource.WithLabelValues("frozen").Inc()
-				return data, nil
+	// 2. Pending dirty batch.
+	if snap.pending != nil {
+		var page Page
+		if ok, tombstone := snap.pending.copyPage(pageIdx, &page); ok {
+			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			if tombstone {
+				return zeroPage[:], nil
 			}
-			fresh := ly.snapshotLayers()
-			return ly.readPageWith(ctx, &fresh, pageIdx)
+			return page[:], nil
 		}
 	}
 
@@ -492,7 +642,12 @@ func (ly *layer) shouldUsePersistentPageCache(sourceLayerID string) bool {
 	if ly.diskCache == nil {
 		return false
 	}
-	return ly.memtable == nil || sourceLayerID != ly.id
+	// The persistent page cache key is (sourceLayerID, pageIdx). Pages from the
+	// current writable layer are therefore unstable even after a flush: later
+	// rewrites in the same layer would reuse the same cache key and could return
+	// stale data. Only pages from other layers, or from this layer when it is
+	// not writable (for example a read-only follower), are safe to cache.
+	return sourceLayerID != ly.id || ly.writeLeaseSeq == 0
 }
 
 func (ly *layer) cachedPage(sourceLayerID string, pageIdx PageIdx) []byte {
@@ -563,7 +718,7 @@ func (ly *layer) Write(data []byte, offset uint64) error {
 		remaining := len(data) - written
 
 		// Fast path: if this is a full block-aligned write on a fresh layer,
-		// write directly to L2 (skipping memtable → L1 → L2 pipeline).
+		// write directly to L2 (skipping dirty pages → L1 → L2 pipeline).
 		if remaining >= BlockSize && offset%BlockSize == 0 && ly.canDirectL2() {
 			if err := ly.writeBlockDirectL2(data[written:written+BlockSize], offset); err != nil {
 				return err
@@ -586,15 +741,21 @@ func (ly *layer) Write(data []byte, offset uint64) error {
 }
 
 // canDirectL2 returns true if the layer is fresh enough for direct L2 writes
-// (no L1 ranges, empty memtable).
+// (no L1 ranges, empty dirty pages).
 func (ly *layer) canDirectL2() bool {
 	ly.mu.RLock()
-	defer ly.mu.RUnlock()
-	return ly.l1Map.Len() == 0 && ly.memtable.isEmpty()
+	l1Empty := ly.l1Map.Len() == 0
+	ly.mu.RUnlock()
+	if !l1Empty {
+		return false
+	}
+	ly.dirtyMu.Lock()
+	defer ly.dirtyMu.Unlock()
+	return ly.pending == nil && (ly.active == nil || ly.active.isEmpty())
 }
 
 // writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,
-// bypassing the memtable/flush pipeline. The caller must ensure
+// bypassing the dirty pages/flush pipeline. The caller must ensure
 // offset is block-aligned and len(data) == BlockSize.
 func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	blockIdx := BlockIdx(offset / BlockSize)
@@ -614,44 +775,51 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 		return fmt.Errorf("build direct L2 block %d: %w", blockIdx, err)
 	}
 
-	ly.mu.RLock()
-	existingLayer, existingSeq := ly.l2Map.Find(blockIdx)
-	outputSeq := ly.outputSeq(existingLayer, existingSeq, ly.writeLeaseSeq)
-	ly.mu.RUnlock()
-
-	// Upload.
-	key := blockKey(ly.id, "l2", outputSeq, blockIdx)
 	ctx := context.Background()
-	if err := ly.store.PutReader(ctx, key, bytes.NewReader(blob)); err != nil {
-		return fmt.Errorf("upload direct L2 block %d: %w", blockIdx, err)
+	for attempt := 0; ; attempt++ {
+		ly.publishMu.Lock()
+
+		ly.mu.RLock()
+		existingLayer, existingSeq := ly.l2Map.Find(blockIdx)
+		outputSeq := ly.outputSeq(existingLayer, existingSeq, ly.writeLeaseSeq)
+		ly.mu.RUnlock()
+
+		key := blockKey(ly.id, "l2", outputSeq, blockIdx)
+		if err := ly.store.PutReader(ctx, key, bytes.NewReader(blob)); err != nil {
+			ly.publishMu.Unlock()
+			ly.sleepTransientRetry("upload direct l2 block", attempt, err)
+			continue
+		}
+
+		ly.mu.Lock()
+		ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, outputSeq)
+		ly.index.LayoutGen++
+		ly.mu.Unlock()
+
+		for saveAttempt := 0; ; saveAttempt++ {
+			if err := ly.saveIndex(ctx); err == nil {
+				ly.publishMu.Unlock()
+				return nil
+			} else {
+				ly.sleepTransientRetry("save index after direct l2 block", saveAttempt, err)
+			}
+		}
 	}
-
-	// Update the L2 map and persist the index so the entries survive
-	// a volume close/reopen cycle.
-	ly.mu.Lock()
-	ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, outputSeq)
-	ly.mu.Unlock()
-
-	if err := ly.saveIndex(ctx); err != nil {
-		return fmt.Errorf("save index after direct L2 block %d: %w", blockIdx, err)
-	}
-
-	return nil
 }
 
 func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error {
 	ctx := context.Background()
 	pageLock := ly.pageLock(pageIdx)
 	pageLock.Lock()
+	defer pageLock.Unlock()
 
-	var page [PageSize]byte
+	var page Page
 
 	// If partial page write, read-modify-write.
 	if uint64(len(chunk)) < PageSize {
 		snap := ly.snapshotLayers()
 		existing, err := ly.readPageWith(ctx, &snap, pageIdx)
 		if err != nil {
-			pageLock.Unlock()
 			return err
 		}
 		copy(page[:], existing)
@@ -659,67 +827,39 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	copy(page[pageOff:], chunk)
 
-	ly.mu.RLock()
-	mt := ly.memtable
-	err := mt.put(pageIdx, page[:])
-	ly.mu.RUnlock()
-	if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
-		slog.Info("trace write page",
-			"layer", ly.id,
-			"page", pageIdx,
-			"page_offset", pageOff,
-			"chunk_len", len(chunk),
-			"memtable_err", err,
-		)
-	}
+	for {
+		ly.dirtyMu.Lock()
+		active := ly.active
+		ly.dirtyMu.Unlock()
 
-	pageLock.Unlock()
-
-	metrics.MemtableBytes.Set(float64(mt.size.Load()))
-
-	// Backpressure: if the memtable is full or was frozen under us, retry.
-	for errors.Is(err, errMemtableUnavailable) {
-		bpStart := time.Now()
-		if err := ly.maybeFreezeAndFlush(); err != nil {
-			return err
-		}
-		ly.mu.RLock()
-		mt = ly.memtable
-		err = mt.put(pageIdx, page[:])
-		ly.mu.RUnlock()
+		retired, err := active.stagePageWithRetired(pageIdx, page)
 		if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
-			slog.Info("trace write page retry",
+			slog.Info("trace write page",
 				"layer", ly.id,
 				"page", pageIdx,
-				"memtable_err", err,
+				"page_offset", pageOff,
+				"chunk_len", len(chunk),
+				"dirty_batch_err", err,
 			)
 		}
-		metrics.BackpressureWaits.Inc()
-		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
-	}
-	if err != nil {
-		return err
-	}
-
-	// Notify flush loop.
-	if ly.writeNotify != nil {
-		select {
-		case ly.writeNotify <- struct{}{}:
+		switch {
+		case err == nil:
+			ly.enqueueRetiredDirtyPages(retired)
+			metrics.DirtyPageBytes.Set(float64(ly.currentDirtyPageBytes()))
+			ly.noteWrite()
+			return nil
+		case errors.Is(err, errDirtyBatchClosed):
+			continue
+		case errors.Is(err, errDirtyBatchFull):
+			bpStart := time.Now()
+			ly.waitForWriteCapacity(active)
+			metrics.BackpressureWaits.Inc()
+			metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
+			continue
 		default:
-		}
-	}
-
-	// Check if memtable needs freezing.
-	if mt.size.Load() >= ly.config.FlushThreshold {
-		bpStart := time.Now()
-		if err := ly.maybeFreezeAndFlush(); err != nil {
 			return err
 		}
-		metrics.BackpressureWaits.Inc()
-		metrics.BackpressureWaitDuration.Observe(time.Since(bpStart).Seconds())
 	}
-
-	return nil
 }
 
 // PunchHole zeroes all pages fully or partially covered by the range.
@@ -759,34 +899,30 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 	for pageIdx := firstFullPage; pageIdx < lastFullPage; pageIdx++ {
 		pageLock := ly.pageLock(pageIdx)
 		pageLock.Lock()
+		for {
+			ly.dirtyMu.Lock()
+			active := ly.active
+			ly.dirtyMu.Unlock()
 
-		ly.mu.RLock()
-		mt := ly.memtable
-		err := mt.putTombstone(pageIdx)
-		ly.mu.RUnlock()
-
-		pageLock.Unlock()
-
-		for errors.Is(err, errMemtableUnavailable) {
-			if fErr := ly.maybeFreezeAndFlush(); fErr != nil {
-				return fErr
+			retired, err := active.stageTombstoneWithRetired(pageIdx)
+			switch {
+			case err == nil:
+				ly.enqueueRetiredDirtyPages(retired)
+				metrics.DirtyPageBytes.Set(float64(ly.currentDirtyPageBytes()))
+				ly.noteWrite()
+				pageLock.Unlock()
+				goto nextPage
+			case errors.Is(err, errDirtyBatchClosed):
+				continue
+			case errors.Is(err, errDirtyBatchFull):
+				ly.waitForWriteCapacity(active)
+				continue
+			default:
+				pageLock.Unlock()
+				return err
 			}
-			ly.mu.RLock()
-			mt = ly.memtable
-			err = mt.putTombstone(pageIdx)
-			ly.mu.RUnlock()
 		}
-		if err != nil {
-			return err
-		}
-	}
-
-	// Notify flush loop.
-	if ly.writeNotify != nil {
-		select {
-		case ly.writeNotify <- struct{}{}:
-		default:
-		}
+	nextPage:
 	}
 
 	return nil
@@ -794,208 +930,52 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 
 // Flush flushes all pending data to S3.
 func (ly *layer) Flush() error {
-	if err := ly.freezememtable(); err != nil {
-		return err
-	}
-	return ly.flushFrozenTables()
-}
-
-func (ly *layer) freezememtable() error {
+	ly.requestDrain()
+	ly.dirtyMu.Lock()
 	for {
-		// Drain the frozen slot so we can install a new frozen memtable.
-		// This provides backpressure: memory is bounded to one active + one frozen.
-		if err := ly.waitForFrozenSlot(); err != nil {
-			return err
+		if ly.stopping {
+			ly.dirtyMu.Unlock()
+			return fmt.Errorf("layer stopping")
 		}
-
-		ly.mu.Lock()
-
-		if ly.memtable.isEmpty() {
-			ly.mu.Unlock()
-			return nil
-		}
-
-		// Another goroutine may have refilled the frozen slot between
-		// waitForFrozenSlot() and ly.mu.Lock(). We can't flush here
-		// (needs ly.mu released), so retry from scratch.
-		ly.frozenMu.RLock()
-		occupied := ly.frozen != nil
-		ly.frozenMu.RUnlock()
-		if occupied {
-			ly.mu.Unlock()
-			continue
-		}
-
-		memDir := filepath.Join(ly.scratchDir, "mem")
-		if err := ensureDir(memDir); err != nil {
-			ly.mu.Unlock()
-			return fmt.Errorf("ensure mem dir: %w", err)
-		}
-		freezeSeq := ly.nextSeq.Add(1)
-		mt, err := newMemtable(memDir, freezeSeq, ly.config.maxMemtablePages())
-		if err != nil {
-			ly.mu.Unlock()
-			return fmt.Errorf("create new memtable: %w", err)
-		}
-
-		old := ly.memtable
-		old.freeze(freezeSeq)
-		ly.traceFreeze(old, freezeSeq)
-
-		// Install: ly.mu is held continuously from the frozen-slot check above,
-		// so no other goroutine can be in this section concurrently.
-		ly.frozenMu.Lock()
-		ly.frozen = old
-		metrics.FrozenTableCount.Set(1)
-		ly.frozenMu.Unlock()
-
-		ly.memtable = mt
-		metrics.MemtableBytes.Set(0)
-		ly.mu.Unlock()
-		return nil
-	}
-}
-
-// waitForFrozenSlot blocks until the frozen memtable slot is empty by
-// flushing whatever is there.
-func (ly *layer) waitForFrozenSlot() error {
-	ly.frozenMu.RLock()
-	hasFrozen := ly.frozen != nil
-	ly.frozenMu.RUnlock()
-	if !hasFrozen {
-		return nil
-	}
-	return ly.flushFrozenTables()
-}
-
-func (ly *layer) traceFreeze(old *memtable, freezeSeq uint64) {
-	if !traceLayerEnabled(ly.id) {
-		return
-	}
-	entries := old.entries()
-	blockZeroOffsets := make([]uint16, 0, len(entries))
-	blockZeroTombstones := 0
-	tracedPages := make([]PageIdx, 0, len(entries))
-	for _, e := range entries {
-		if e.pageIdx.Block() == 0 {
-			blockZeroOffsets = append(blockZeroOffsets, uint16(uint64(e.pageIdx)%BlockPages))
-			if e.slot == tombstoneSlot {
-				blockZeroTombstones++
+		if ly.pending == nil && ly.active != nil && !ly.active.isEmpty() {
+			if ly.rotateActiveToPendingLocked() {
+				ly.drainForced = true
+				ly.dirtyMu.Unlock()
+				ly.requestDrain()
+				ly.dirtyMu.Lock()
+				continue
 			}
 		}
-		if tracePageEnabled(e.pageIdx) {
-			tracedPages = append(tracedPages, e.pageIdx)
+		if ly.pending == nil && !ly.drainInFlight && (ly.active == nil || ly.active.isEmpty()) {
+			ly.dirtyMu.Unlock()
+			return nil
 		}
-	}
-	slog.Info("trace freeze memtable",
-		"layer", ly.id,
-		"freeze_seq", freezeSeq,
-		"entries", len(entries),
-		"block0_offsets", blockZeroOffsets,
-		"block0_tombstones", blockZeroTombstones,
-		"traced_pages", tracedPages,
-	)
-}
-
-func (ly *layer) maybeFreezeAndFlush() error {
-	if err := ly.freezememtable(); err != nil {
-		return err
-	}
-	if ly.flushNotify != nil {
-		select {
-		case ly.flushNotify <- struct{}{}:
-		default:
+		if ly.pending != nil && !ly.drainInFlight {
+			ly.notifyDrainWorker()
 		}
-		return nil
-	}
-	return ly.flushFrozenTables()
-}
-
-func (ly *layer) flushFrozenTables() error {
-	for {
-		if ly.flushMu.TryLock() {
-			ch := ly.beginFlushAttempt()
-			err := ly.flushFrozenTablesLocked(5)
-			ly.endFlushAttempt(ch)
-			ly.flushMu.Unlock()
-			return err
-		}
-		ch := ly.currentFlushAttempt()
-		if ch == nil {
-			continue
-		}
-		<-ch
+		ly.dirtyCond.Wait()
 	}
 }
 
-const maxFlushWorkers = 8
-
-func (ly *layer) beginFlushAttempt() chan struct{} {
-	ly.flushWG.Lock()
-	defer ly.flushWG.Unlock()
-	if ly.flushCh != nil {
-		panic("storage: flush attempt already registered")
-	}
-	ch := make(chan struct{})
-	ly.flushCh = ch
-	return ch
-}
-
-func (ly *layer) endFlushAttempt(ch chan struct{}) {
-	ly.flushWG.Lock()
-	defer ly.flushWG.Unlock()
-	if ly.flushCh != ch {
-		panic("storage: flush attempt channel mismatch")
-	}
-	close(ch)
-	ly.flushCh = nil
-}
-
-func (ly *layer) currentFlushAttempt() chan struct{} {
-	ly.flushWG.Lock()
-	defer ly.flushWG.Unlock()
-	return ly.flushCh
-}
-
-func (ly *layer) flushFrozenTablesLocked(maxRetries int) error {
-	ly.frozenMu.RLock()
-	mt := ly.frozen
-	ly.frozenMu.RUnlock()
-	if mt == nil {
-		return nil
-	}
-
-	if err := ly.flushMemtableDirectLocked(mt, maxRetries); err != nil {
-		return err
-	}
-
-	// Quiesce readers via safepoint, then cleanup.
-	do := func(f func()) {
-		if ly.safepoint != nil {
-			ly.safepoint.Do(f)
-		} else {
-			f()
-		}
-	}
-	do(func() {
-		ly.frozenMu.Lock()
-		ly.frozen = nil
-		metrics.FrozenTableCount.Set(0)
-		ly.frozenMu.Unlock()
-		mt.cleanup()
-	})
-
-	return nil
-}
-
-// flushMemtableDirectLocked writes a single memtable's pages directly to
+// flushDirtyBatchDirectLocked writes a single dirty batch directly to
 // L1/L2 blocks. Pages are merged into existing blocks via read-modify-write.
 // The caller is responsible for cleanup of mt on success.
-func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
-	flushCycleStart := time.Now()
+const maxFlushWorkers = 8
 
-	// Phase 1 — Collect pages from memtable, group directly by block.
-	entries := mt.entries()
+func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) error {
+	flushCycleStart := time.Now()
+	ly.publishMu.Lock()
+	defer ly.publishMu.Unlock()
+
+	// Hold the pending batch RLock for the full flush so block assembly may
+	// borrow dirty page buffers without copying. Batch teardown returns pooled
+	// buffers under Lock, so clearAndRelease will wait until this flush is fully
+	// finished with them.
+	mt.mu.RLock()
+	defer mt.mu.RUnlock()
+
+	// Phase 1 — Collect pages from the dirty batch and group by block.
+	entries := mt.entriesLocked()
 	if len(entries) == 0 {
 		return nil
 	}
@@ -1005,19 +985,15 @@ func (ly *layer) flushMemtableDirectLocked(mt *memtable, maxRetries int) error {
 	for _, e := range entries {
 		blockAddr := e.pageIdx.Block()
 		offset := uint16(uint64(e.pageIdx) % BlockPages)
-		if e.slot == tombstoneSlot {
+		if e.record.tombstone {
 			blockGroups[blockAddr] = append(blockGroups[blockAddr], blockPage{
 				offset: offset,
 				data:   nil,
 			})
 		} else {
-			data, err := mt.readData(e.slot)
-			if err != nil {
-				return fmt.Errorf("read memtable slot %d for page %v: %w", e.slot, e.pageIdx, err)
-			}
 			blockGroups[blockAddr] = append(blockGroups[blockAddr], blockPage{
 				offset: offset,
-				data:   data,
+				data:   e.record.bytes(),
 			})
 		}
 		totalPages++
@@ -1311,9 +1287,63 @@ func (ly *layer) Snapshot(childID string) error {
 	return nil
 }
 
+func (ly *layer) noteWrite() {
+	if ly.writeNotify != nil {
+		select {
+		case ly.writeNotify <- struct{}{}:
+		default:
+		}
+	}
+
+	ly.dirtyMu.Lock()
+	rotated := false
+	if ly.pending == nil && ly.active != nil && ly.active.bytes() >= ly.config.FlushThreshold {
+		rotated = ly.rotateActiveToPendingLocked()
+		if rotated {
+			ly.drainForced = true
+		}
+	}
+	ly.dirtyMu.Unlock()
+
+	if rotated {
+		ly.requestDrain()
+	}
+}
+
+func (ly *layer) sleepTransientRetry(op string, attempt int, err error) bool {
+	delay := 100 * time.Millisecond
+	for i := 0; i < attempt && delay < 5*time.Second; i++ {
+		delay *= 2
+	}
+	slog.Warn("storage retrying", "layer", ly.id, "op", op, "attempt", attempt+1, "delay", delay, "error", err)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	if ly.flushStop != nil {
+		select {
+		case <-timer.C:
+			return true
+		case <-ly.flushStop:
+			return false
+		}
+	}
+
+	<-timer.C
+	return true
+}
+
 // Close shuts down the layer's background goroutines and cleans up resources.
 func (ly *layer) Close() {
 	ly.closeOnce.Do(func() {
+		ly.beginShutdown()
+
+		ly.dirtyMu.Lock()
+		active := ly.active
+		pending := ly.pending
+		ly.active = nil
+		ly.pending = nil
+		ly.dirtyMu.Unlock()
+
 		if ly.flushCancel != nil {
 			ly.flushCancel()
 		}
@@ -1321,72 +1351,56 @@ func (ly *layer) Close() {
 			close(ly.flushStop)
 			<-ly.flushDone
 		}
-
-		ly.mu.Lock()
-		if ly.memtable != nil {
-			ly.memtable.cleanup()
+		if active != nil {
+			ly.enqueueRetiredDirtyBatch(active)
 		}
-		ly.mu.Unlock()
-
-		ly.frozenMu.Lock()
-		if ly.frozen != nil {
-			ly.frozen.cleanup()
-		}
-		ly.frozen = nil
-		ly.frozenMu.Unlock()
-
-		if ly.scratchDir != "" {
-			if err := os.RemoveAll(ly.scratchDir); err != nil {
-				slog.Warn("remove layer work dir", "layer", ly.id, "error", err)
-			}
-			ly.scratchDir = ""
+		if pending != nil {
+			ly.enqueueRetiredDirtyBatch(pending)
 		}
 	})
 }
 
 // LayerDebugInfo holds layer structure details for the debug endpoint.
 type LayerDebugInfo struct {
-	LayerID        string `json:"layer_id"`
-	L1Ranges       int    `json:"l1_ranges"`
-	L2Ranges       int    `json:"l2_ranges"`
-	MemtablePages  int    `json:"memtable_pages"`
-	MemtableMax    int    `json:"memtable_max"`
-	FrozenCount    int    `json:"frozen_memtables"`
-	BlockCacheEnts int    `json:"block_cache_entries"`
+	LayerID             string `json:"layer_id"`
+	L1Ranges            int    `json:"l1_ranges"`
+	L2Ranges            int    `json:"l2_ranges"`
+	DirtyPages          int    `json:"dirty_pages"`
+	DirtyPageSlots      int    `json:"dirty_page_slots"`
+	PendingDirtyBatches int    `json:"pending_dirty_batches"`
+	BlockCacheEnts      int    `json:"block_cache_entries"`
 }
 
 func (ly *layer) debugInfo() LayerDebugInfo {
 	ly.mu.RLock()
 	l1Ranges := len(ly.l1Map.Ranges())
 	l2Ranges := len(ly.l2Map.Ranges())
-	mtPages, mtMax := 0, 0
-	if ly.memtable != nil {
-		ly.memtable.mu.RLock()
-		mtPages = len(ly.memtable.index)
-		mtMax = ly.memtable.maxPages
-		ly.memtable.mu.RUnlock()
-	}
 	ly.mu.RUnlock()
 
-	ly.frozenMu.RLock()
+	ly.dirtyMu.Lock()
+	mtPages, mtMax := 0, 0
+	if ly.active != nil {
+		mtPages = ly.active.pages()
+		mtMax = ly.active.maxEntries
+	}
 	frozenCount := 0
-	if ly.frozen != nil {
+	if ly.pending != nil {
 		frozenCount = 1
 	}
-	ly.frozenMu.RUnlock()
+	ly.dirtyMu.Unlock()
 
 	ly.blockCache.mu.RLock()
 	blockCached := len(ly.blockCache.entries)
 	ly.blockCache.mu.RUnlock()
 
 	return LayerDebugInfo{
-		LayerID:        ly.id,
-		L1Ranges:       l1Ranges,
-		L2Ranges:       l2Ranges,
-		MemtablePages:  mtPages,
-		MemtableMax:    mtMax,
-		FrozenCount:    frozenCount,
-		BlockCacheEnts: blockCached,
+		LayerID:             ly.id,
+		L1Ranges:            l1Ranges,
+		L2Ranges:            l2Ranges,
+		DirtyPages:          mtPages,
+		DirtyPageSlots:      mtMax,
+		PendingDirtyBatches: frozenCount,
+		BlockCacheEnts:      blockCached,
 	}
 }
 
@@ -1394,11 +1408,10 @@ func (ly *layer) debugInfo() LayerDebugInfo {
 // before actually flushing, to batch nearby writes.
 const flushWriteDelay = 2 * time.Second
 
-// startPeriodicFlush starts the background flush goroutine.
+// startPeriodicFlush starts the background drain worker. The worker always
+// exists once started; FlushInterval only controls whether it proactively
+// rotates a stale active batch when writes have gone quiet.
 func (ly *layer) startPeriodicFlush(parentCtx context.Context) {
-	if ly.config.FlushInterval < 0 {
-		return
-	}
 	if ly.flushStop != nil {
 		return
 	}
@@ -1432,18 +1445,31 @@ func (ly *layer) stopPeriodicFlush() {
 
 func (ly *layer) periodicFlushLoop(ctx context.Context) {
 	defer close(ly.flushDone)
-	timer := time.NewTimer(ly.config.FlushInterval)
-	defer timer.Stop()
+	var (
+		timer  *time.Timer
+		timerC <-chan time.Time
+	)
+	if ly.config.FlushInterval > 0 {
+		timer = time.NewTimer(ly.config.FlushInterval)
+		timerC = timer.C
+		defer timer.Stop()
+	}
 
 	for {
+		forceRotate := false
 		select {
 		case <-ly.flushStop:
 			return
 		case <-ctx.Done():
 			return
-		case <-timer.C:
+		case <-timerC:
+			forceRotate = true
 		case <-ly.flushNotify:
+			forceRotate = true
 		case <-ly.writeNotify:
+			if ly.config.FlushInterval < 0 {
+				continue
+			}
 			// A write arrived. If the last flush was longer than FlushInterval
 			// ago, schedule a flush after a short delay to batch nearby writes.
 			sinceFlush := time.Since(time.UnixMilli(ly.lastFlushAt.Load()))
@@ -1464,6 +1490,7 @@ func (ly *layer) periodicFlushLoop(ctx context.Context) {
 				return
 			case <-delay.C:
 			}
+			forceRotate = true
 		}
 
 		// Drain any pending notifications so we don't loop unnecessarily.
@@ -1476,44 +1503,58 @@ func (ly *layer) periodicFlushLoop(ctx context.Context) {
 		default:
 		}
 
-		ly.doPeriodicFlush(ctx)
-		timer.Reset(ly.config.FlushInterval)
+		ly.doPeriodicFlush(forceRotate)
+		if timer != nil {
+			timer.Reset(ly.config.FlushInterval)
+		}
 	}
 }
 
-func (ly *layer) doPeriodicFlush(ctx context.Context) {
-	// Flush frozen tables. TryLock avoids blocking if another goroutine
-	// (e.g. an explicit Flush call) already holds flushMu. Under synctest,
-	// a blocked goroutine prevents time from advancing, which deadlocks
-	// retry timers.
-	if ly.flushMu.TryLock() {
-		ch := ly.beginFlushAttempt()
-		err := ly.flushFrozenTablesLocked(5)
-		ly.endFlushAttempt(ch)
-		ly.flushMu.Unlock()
-		if err != nil {
-			slog.Error("periodic flush failed", "layer", ly.id, "error", err)
-		}
+func (ly *layer) doPeriodicFlush(forceRotate bool) {
+	var pending *dirtyBatch
+
+	ly.dirtyMu.Lock()
+	if ly.pending == nil && ly.active != nil && !ly.active.isEmpty() && (forceRotate || ly.drainForced) {
+		ly.rotateActiveToPendingLocked()
+		ly.drainForced = false
+	}
+	if ly.pending != nil && !ly.drainInFlight {
+		pending = ly.pending
+		ly.drainInFlight = true
+	}
+	ly.dirtyMu.Unlock()
+
+	if pending == nil {
+		return
 	}
 
-	// Also freeze+flush active memtable if non-empty.
-	ly.mu.RLock()
-	mt := ly.memtable
-	ly.mu.RUnlock()
-	if !mt.isEmpty() {
-		if err := ly.freezememtable(); err == nil {
-			if ly.flushMu.TryLock() {
-				ch := ly.beginFlushAttempt()
-				err := ly.flushFrozenTablesLocked(5)
-				ly.endFlushAttempt(ch)
-				ly.flushMu.Unlock()
-				if err != nil {
-					slog.Error("periodic flush failed", "layer", ly.id, "error", err)
-				}
+	for attempt := 0; ; attempt++ {
+		if err := ly.flushDirtyBatchDirectLocked(pending, 5); err != nil {
+			ly.dirtyMu.Lock()
+			stopping := ly.stopping
+			ly.dirtyMu.Unlock()
+			if stopping || !ly.sleepTransientRetry("flush pending batch", attempt, err) {
+				ly.dirtyMu.Lock()
+				ly.drainInFlight = false
+				ly.dirtyCond.Broadcast()
+				ly.dirtyMu.Unlock()
+				return
 			}
+			continue
 		}
+		break
 	}
+
+	ly.dirtyMu.Lock()
+	if ly.pending == pending {
+		ly.pending = nil
+		metrics.FrozenTableCount.Set(0)
+	}
+	ly.drainInFlight = false
 	ly.lastFlushAt.Store(time.Now().UnixMilli())
+	ly.dirtyCond.Broadcast()
+	ly.dirtyMu.Unlock()
+	ly.enqueueRetiredDirtyBatch(pending)
 }
 
 // blockKey returns the S3 key for a block blob, incorporating the write lease seq.
@@ -1584,9 +1625,4 @@ func readAll(body interface {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-// ensureDir creates a directory if it doesn't exist.
-func ensureDir(path string) error {
-	return ensureMemDir(path)
 }

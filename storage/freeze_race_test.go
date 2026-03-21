@@ -10,21 +10,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFreezeMemtableRaceWithPeriodicFlush reproduces a panic where the
-// periodic flush goroutine freezes a memtable into the frozen slot between
-// the write path's flushFrozenTables() call and its ly.mu.Lock() in
-// freezememtable(). The sequence is:
+// TestFreezeDirtyPagesRaceWithPeriodicFlush reproduces a panic where the
+// periodic flush goroutine rotated dirty pages into the pending batch between
+// the write path's old flush path and the freeze/rotate lock handoff. The sequence is:
 //
-//  1. Write goroutine fills memtable, calls freezememtable()
-//  2. freezememtable() sees ly.frozen != nil, calls flushFrozenTables() which drains it
-//  3. flushFrozenTables() returns — frozen slot is now empty
+//  1. Write goroutine fills dirty pages and starts rotation.
+//  2. The old flush path drains the pending slot.
+//  3. The drain returns and the pending slot is briefly empty.
 //  4. Before the write goroutine acquires ly.mu, the periodic flush goroutine
-//     calls freezememtable(), acquires ly.mu first, freezes a new memtable
-//  5. Write goroutine acquires ly.mu, finds frozen slot occupied → panic
+//     rotates a new pending dirty batch.
+//  5. The write goroutine reacquires ly.mu and finds the pending slot occupied.
 //
 // We reproduce this by using a small flush threshold with periodic flush
-// enabled and slow S3 uploads to keep the frozen slot occupied longer.
-func TestFreezeMemtableRaceWithPeriodicFlush(t *testing.T) {
+// enabled and slow object-store uploads to keep the pending slot occupied longer.
+func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
@@ -32,9 +31,8 @@ func TestFreezeMemtableRaceWithPeriodicFlush(t *testing.T) {
 		FlushInterval:  time.Millisecond,
 	}
 
-	// Slow down S3 uploads just enough to keep the frozen slot occupied,
-	// widening the race window between flushFrozenTables() returning
-	// and ly.mu.Lock() in freezememtable().
+	// Slow down uploads just enough to keep the pending slot occupied,
+	// widening the old race window around rotation.
 	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Delay: time.Millisecond,
 	})
@@ -48,8 +46,8 @@ func TestFreezeMemtableRaceWithPeriodicFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Hammer writes. With FlushThreshold=2*PageSize and 50ms upload delay,
-	// the write path and periodic flush will race on freezememtable.
+	// Hammer writes. With FlushThreshold=2*PageSize and upload delay,
+	// the write path and periodic flush will race on dirty batch rotation.
 	page := make([]byte, PageSize)
 	for i := range numPages {
 		page[0] = byte(i)
@@ -67,7 +65,7 @@ func TestFreezeMemtableRaceWithPeriodicFlush(t *testing.T) {
 }
 
 // TestFreezeRaceDataIntegrity verifies that no pages are silently lost when
-// the write path and periodic flush race on freezememtable. Each page is
+// the write path and periodic flush race on dirty batch rotation. Each page is
 // written with a unique byte pattern; after flushing we read every page
 // back and verify the contents.
 func TestFreezeRaceDataIntegrity(t *testing.T) {
@@ -117,11 +115,11 @@ func TestFreezeRaceDataIntegrity(t *testing.T) {
 	}
 }
 
-// TestConcurrentFreezeMemtable exercises the retry path in freezememtable
+// TestConcurrentFreezeDirtyPages exercises the retry path in dirty batch rotation
 // where multiple goroutines race to freeze simultaneously. With a tiny
-// memtable and no periodic flush, concurrent writers force repeated
+// dirty batch and no periodic flush, concurrent writers force repeated
 // freeze+flush cycles that stress the lock handoff.
-func TestConcurrentFreezeMemtable(t *testing.T) {
+func TestConcurrentFreezeDirtyPages(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{

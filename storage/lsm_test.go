@@ -41,89 +41,64 @@ func testStoreManager(t *testing.T) (*objstore.MemStore, *Manager) {
 }
 
 func TestMemLayerPutGet(t *testing.T) {
-	dir := t.TempDir()
-	ml, err := newMemtable(dir, 0, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ml.cleanup()
+	ml := testDirtyBatch(1024)
 
 	// Write a page.
-	var page [PageSize]byte
-	for i := range page {
-		page[i] = 0xAB
-	}
-	if err := ml.put(42, page[:]); err != nil {
+	page := filledPage(0xAB)
+	if err := ml.stagePage(42, page); err != nil {
 		t.Fatal(err)
 	}
 
 	// Read it back.
-	entry, ok := ml.get(42)
+	rec, ok := ml.lookup(42)
 	if !ok {
 		t.Fatal("page 42 not found")
 	}
-	data, err := ml.readData(entry)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := rec.bytes()
 	if !bytes.Equal(data, page[:]) {
 		t.Fatal("page data mismatch")
 	}
 
 	// Non-existent page.
-	_, ok = ml.get(99)
+	_, ok = ml.lookup(99)
 	if ok {
 		t.Fatal("page 99 should not exist")
 	}
 }
 
 func TestMemLayerZeroOverwrite(t *testing.T) {
-	dir := t.TempDir()
-	ml, err := newMemtable(dir, 0, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ml.cleanup()
+	ml := testDirtyBatch(1024)
 
 	// Write then overwrite with zeros.
-	page := make([]byte, PageSize)
+	page := filledPage(0)
 	page[0] = 0xFF
-	if err := ml.put(10, page); err != nil {
+	if err := ml.stagePage(10, page); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.put(10, zeroPage[:]); err != nil {
+	if err := ml.stagePage(10, Page{}); err != nil {
 		t.Fatal(err)
 	}
 
-	slot, ok := ml.get(10)
+	rec, ok := ml.lookup(10)
 	if !ok {
 		t.Fatal("page 10 not found")
 	}
-	data, err := ml.readData(slot)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := rec.bytes()
 	if data[0] != 0 {
 		t.Fatalf("expected zero page, got first byte %d", data[0])
 	}
 }
 
 func TestMemLayerFreeze(t *testing.T) {
-	dir := t.TempDir()
-	ml, err := newMemtable(dir, 0, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ml.cleanup()
+	ml := testDirtyBatch(1024)
 
-	page := make([]byte, PageSize)
-	if err := ml.put(1, page); err != nil {
+	if err := ml.stagePage(1, filledPage(0)); err != nil {
 		t.Fatal(err)
 	}
-	ml.freeze(1)
+	ml.markClosed()
 
 	// Writes should fail after freeze.
-	if err := ml.put(2, page); err == nil {
+	if err := ml.stagePage(2, filledPage(0)); err == nil {
 		t.Fatal("expected error writing to frozen memlayer")
 	}
 }
@@ -1144,16 +1119,26 @@ func TestFlushPutReaderFail(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 PUT failure"),
 	})
 
-	// Flush should fail.
-	err = v.Flush()
-	if err == nil {
-		t.Fatal("expected flush to fail with PutReader fault")
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- v.Flush()
+	}()
+
+	select {
+	case err := <-flushDone:
+		t.Fatalf("flush returned early under transient PutReader fault: %v", err)
+	case <-time.After(200 * time.Millisecond):
 	}
 
-	// Clear fault and retry — data in frozen layer should still be flushable.
+	// Clear the fault and let the blocked flush complete.
 	store.ClearAllFaults()
-	if err := v.Flush(); err != nil {
-		t.Fatalf("retry flush failed: %v", err)
+	select {
+	case err := <-flushDone:
+		if err != nil {
+			t.Fatalf("flush failed after clearing PutReader fault: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush did not complete after clearing PutReader fault")
 	}
 
 	// Read data back.
@@ -1197,9 +1182,16 @@ func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
 		PostErr: fmt.Errorf("phantom put failure"),
 	})
 	require.NoError(t, clone.Write(bytes.Repeat([]byte{0xDD}, PageSize), 0))
-	err = clone.Flush()
-	require.Error(t, err)
-	store.ClearAllFaults()
+	flushDone := make(chan error, 1)
+	go func() {
+		flushDone <- clone.Flush()
+	}()
+
+	select {
+	case err := <-flushDone:
+		t.Fatalf("flush returned early under phantom PutReader fault: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
 
 	buf := make([]byte, PageSize)
 	_, err = clone.Read(ctx, buf, 37*PageSize)
@@ -1210,8 +1202,14 @@ func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), buf)
 
-	// After clearing the fault, the pending rewrite should flush cleanly.
-	require.NoError(t, clone.Flush())
+	// After clearing the fault, the blocked rewrite should flush cleanly.
+	store.ClearAllFaults()
+	select {
+	case err := <-flushDone:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush did not complete after clearing phantom PutReader fault")
+	}
 	_, err = clone.Read(ctx, buf, 0)
 	require.NoError(t, err)
 	require.Equal(t, bytes.Repeat([]byte{0xDD}, PageSize), buf)
@@ -1250,14 +1248,9 @@ func TestPhantomAutoFlushRetryPreservesLaterPages(t *testing.T) {
 		PostErr: fmt.Errorf("phantom auto-flush failure"),
 	})
 
-	var writeErr error
 	for _, page := range []int{236, 241, 187, 21, 185, 80, 26, 12} {
-		writeErr = writePage(t, child, page, byte(page))
-		if writeErr != nil {
-			break
-		}
+		require.NoError(t, writePage(t, child, page, byte(page)))
 	}
-	require.Error(t, writeErr)
 	store.ClearAllFaults()
 
 	for _, page := range []int{119, 77, 78, 146, 196, 61} {
@@ -1711,8 +1704,9 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 		t.Fatalf("write page 0: %v", err)
 	}
 
-	// Step 2: Write page 1 — this triggers freeze+flush; inject fault so
-	// the flush fails. The data should still be in a frozen layer.
+	// Step 2: Write page 1 while S3 is faulted. The write should stage
+	// locally and remain immediately readable even though the pending batch
+	// cannot drain yet.
 	page1 := make([]byte, PageSize)
 	for i := range page1 {
 		page1[i] = 0xBB
@@ -1720,27 +1714,56 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
-	// Write returns error from auto-flush, but data should be in frozen layer.
-	_ = v.Write(page1, PageSize)
+	if err := v.Write(page1, PageSize); err != nil {
+		t.Fatalf("write page 1: %v", err)
+	}
 
-	// Step 3: Write page 2 — frozen layers are at capacity, so backpressure
-	// flush kicks in. With the fault still active, this flush fails. The bug
-	// was that this prevented the write from entering the memLayer at all.
+	require.Eventually(t, func() bool {
+		v.layer.dirtyMu.Lock()
+		defer v.layer.dirtyMu.Unlock()
+		return v.layer.pending != nil
+	}, time.Second, 10*time.Millisecond)
+
+	// Step 3: Write page 2. With one page already pending and the active batch
+	// full, the write should block until S3 recovers instead of failing.
 	page2 := make([]byte, PageSize)
 	for i := range page2 {
 		page2[i] = 0xCC
 	}
-	_ = v.Write(page2, 2*PageSize)
+	writeDone := make(chan error, 1)
+	go func() {
+		writeDone <- v.Write(page2, 2*PageSize)
+	}()
+	buf := make([]byte, PageSize)
+
+	select {
+	case err := <-writeDone:
+		t.Fatalf("write page 2 returned early under backpressure: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if _, err := v.Read(ctx, buf, PageSize); err != nil {
+		t.Fatalf("read page 1 while blocked: %v", err)
+	}
+	if !bytes.Equal(buf, page1) {
+		t.Fatalf("page 1 while blocked: expected 0xBB, got %x...", buf[:4])
+	}
 
 	// Step 4: Clear faults and flush everything.
 	store.ClearAllFaults()
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			t.Fatalf("write page 2 after recovery: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("write page 2 did not complete after clearing S3 fault")
+	}
 	if err := v.Flush(); err != nil {
 		t.Fatalf("flush: %v", err)
 	}
 
 	// Step 5: Verify all three pages are readable with correct data.
-	buf := make([]byte, PageSize)
-
 	if n, err := v.Read(ctx, buf, 0); err != nil || n != PageSize {
 		t.Fatalf("read page 0: n=%d err=%v", n, err)
 	}
@@ -1763,11 +1786,8 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	}
 }
 
-// TestCopyFromAutoFlushFault verifies that CopyFrom reports bytes based on
-// what actually became visible in the destination when an auto-flush fails.
-//
-// A destination write can fail after staging data locally or before staging
-// it at all. CopyFrom must count the faulting page only in the former case.
+// TestCopyFromAutoFlushFault verifies that CopyFrom blocks under transient
+// auto-flush failure and completes once the destination can drain again.
 func TestCopyFromAutoFlushFault(t *testing.T) {
 	store := objstore.NewMemStore()
 
@@ -1802,47 +1822,34 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Inject PUT fault so auto-flush during CopyFrom fails.
+	// Inject PUT fault so auto-flush during CopyFrom cannot drain.
 	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
-	// CopyFrom 4 pages. The first 1-2 writes go into memLayer without
-	// triggering flush. When the memLayer crosses FlushThreshold, the
-	// synchronous flush fails on the page that overflowed the memtable.
 	copied, err := dst.CopyFrom(src, 0, 0, 4*PageSize)
-	if err == nil {
-		t.Fatal("expected CopyFrom to fail due to S3 fault")
+	if err != nil {
+		t.Fatalf("CopyFrom: %v", err)
+	}
+	if copied != 4*PageSize {
+		t.Fatalf("expected CopyFrom to report full length after recovery, got %d", copied)
 	}
 
-	pagesReported := copied / PageSize
-	t.Logf("CopyFrom reported %d bytes copied (%d pages), err: %v", copied, pagesReported, err)
-
-	// Clear faults and flush — the data in the memLayer/frozen layers
-	// should now persist to S3.
+	// Clear faults and flush the dirty batches.
 	store.ClearAllFaults()
 	if err := dst.Flush(); err != nil {
 		t.Fatal(err)
 	}
 
-	// Read ALL pages from dst. The number of readable pages must match what
-	// CopyFrom reported.
-	var pagesActuallyWritten uint64
+	// Read all pages from dst. They should all match the source.
 	buf := make([]byte, PageSize)
 	for i := 0; i < 4; i++ {
 		if _, err := dst.Read(ctx, buf, uint64(i)*PageSize); err != nil {
 			t.Fatalf("read page %d: %v", i, err)
 		}
-		if bytes.Equal(buf, srcPages[i]) {
-			pagesActuallyWritten++
+		if !bytes.Equal(buf, srcPages[i]) {
+			t.Fatalf("page %d: expected copied source data", i)
 		}
-	}
-
-	t.Logf("pages reported by CopyFrom: %d, pages actually written: %d", pagesReported, pagesActuallyWritten)
-
-	if pagesActuallyWritten != pagesReported {
-		t.Fatalf("CopyFrom reported %d pages but %d became readable after flush",
-			pagesReported, pagesActuallyWritten)
 	}
 }
 
@@ -2085,68 +2092,39 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 // TestMemLayerOverwriteReusesSlot verifies that overwriting a page reuses
 // the same slot and doesn't corrupt other pages' data.
 func TestMemLayerOverwriteReusesSlot(t *testing.T) {
-	dir := t.TempDir()
-	ml, err := newMemtable(dir, 1, 64)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(ml.cleanup)
+	ml := testDirtyBatch(64)
 
-	// Write 3 pages into slots 0, 1, 2.
-	page0 := make([]byte, PageSize)
-	page1 := make([]byte, PageSize)
-	page2 := make([]byte, PageSize)
-	for i := range page0 {
-		page0[i] = 0xAA
-	}
-	for i := range page1 {
-		page1[i] = 0xBB
-	}
-	for i := range page2 {
-		page2[i] = 0xCC
-	}
-
-	if err := ml.put(100, page0); err != nil {
+	if err := ml.stagePage(100, filledPage(0xAA)); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.put(200, page1); err != nil {
+	if err := ml.stagePage(200, filledPage(0xBB)); err != nil {
 		t.Fatal(err)
 	}
-	if err := ml.put(300, page2); err != nil {
+	if err := ml.stagePage(300, filledPage(0xCC)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Overwrite page 300 with new data — should reuse slot 2.
-	page3 := make([]byte, PageSize)
-	for i := range page3 {
-		page3[i] = 0xDD
-	}
-	if err := ml.put(300, page3); err != nil {
+	if err := ml.stagePage(300, filledPage(0xDD)); err != nil {
 		t.Fatal(err)
 	}
 
-	// Read page 100 (slot 0) — should still be 0xAA.
-	slot0, ok := ml.get(100)
+	// Read page 100 — should still be 0xAA.
+	rec0, ok := ml.lookup(100)
 	if !ok {
 		t.Fatal("page 100 not found")
 	}
-	data0, err := ml.readData(slot0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data0 := rec0.bytes()
 	if data0[0] != 0xAA {
 		t.Fatalf("page 100 corrupted: expected 0xAA, got 0x%02X", data0[0])
 	}
 
 	// Read page 300 — should be 0xDD.
-	slot3, ok := ml.get(300)
+	rec3, ok := ml.lookup(300)
 	if !ok {
 		t.Fatal("page 300 not found")
 	}
-	data3, err := ml.readData(slot3)
-	if err != nil {
-		t.Fatal(err)
-	}
+	data3 := rec3.bytes()
 	if data3[0] != 0xDD {
 		t.Fatalf("page 300 wrong: expected 0xDD, got 0x%02X", data3[0])
 	}
@@ -2321,17 +2299,17 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	}
 }
 
-// TestMemLayerFullBackpressure verifies that the memtable layer handles
-// backpressure when the memtable is full.
+// TestMemLayerFullBackpressure verifies that the dirty pages layer handles
+// backpressure when the dirty pages is full.
 func TestMemLayerFullBackpressure(t *testing.T) {
 	store := objstore.NewMemStore()
 
-	// Use a small memtable slot cap so the test fills it quickly and
+	// Use a small dirty pages slot cap so the test fills it quickly and
 	// exercises the backpressure path without writing 65K+ pages.
 	const testSlotCap = 512
 	config := Config{
-		FlushThreshold:   1 << 62, // effectively infinite — force slot cap to trigger
-		MaxMemtableSlots: testSlotCap,
+		FlushThreshold:    1 << 62, // effectively infinite — force slot cap to trigger
+		MaxDirtyPageSlots: testSlotCap,
 	}
 	ctx := t.Context()
 
@@ -2344,7 +2322,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := range numPages {
-		var page [PageSize]byte
+		var page Page
 		// Store page index as a 4-byte little-endian value.
 		binary.LittleEndian.PutUint32(page[:4], uint32(i))
 		if err := v.Write(page[:], uint64(i)*PageSize); err != nil {
@@ -2450,14 +2428,13 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 	wg.Wait()
 }
 
-// TestBackpressureBlocksWriteOnS3Failure verifies that writes return an
-// error when S3 is down and the frozen memtable cannot be flushed. This
-// prevents unbounded memory growth — at most one active + one frozen memtable.
+// TestBackpressureBlocksWriteOnS3Failure verifies that writes block instead of
+// returning transient errors when S3 is down and the dirty pipeline is full.
 func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize, // freeze after every page
-		FlushInterval:  -1,       // no background flush
+		FlushInterval:  -1,       // no proactive timer; worker still drains pending
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2467,7 +2444,7 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// First write succeeds (goes into memtable).
+	// First write succeeds (goes into the active dirty batch).
 	page := make([]byte, PageSize)
 	page[0] = 1
 	require.NoError(t, v.Write(page, 0))
@@ -2477,19 +2454,43 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
-	// Second write triggers freeze → flush fails → backpressure error.
+	// Second write stages into the fresh active batch while the first page is
+	// stuck in pending.
 	page[0] = 2
-	err = v.Write(page, PageSize)
-	require.Error(t, err, "write should fail when S3 is down and frozen is full")
+	require.NoError(t, v.Write(page, PageSize))
 
-	// First page should still be readable.
+	// Third write has nowhere to go and must block until S3 recovers.
+	page[0] = 3
+	done := make(chan error, 1)
+	go func() {
+		done <- v.Write(page, 2*PageSize)
+	}()
+
+	select {
+	case err := <-done:
+		t.Fatalf("write should block while S3 is unavailable, got %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// Staged pages remain readable while the writer is blocked.
 	buf := make([]byte, PageSize)
 	_, err = v.Read(ctx, buf, 0)
 	require.NoError(t, err)
 	require.Equal(t, byte(1), buf[0])
+	_, err = v.Read(ctx, buf, PageSize)
+	require.NoError(t, err)
+	require.Equal(t, byte(2), buf[0])
 
-	// Clear fault and flush — data should be recoverable.
+	// Clear fault and the blocked write should complete.
 	store.ClearAllFaults()
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-done:
+			return err == nil
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 
 	// Verify data survives after flush by closing and reopening.
 	if err := v.Flush(); err != nil {
@@ -2505,7 +2506,7 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	}
 }
 
-func TestBackpressureWriteErrorCanStillStageCurrentPage(t *testing.T) {
+func TestBackpressureBlockedWriteStagesCurrentPage(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
@@ -2525,24 +2526,40 @@ func TestBackpressureWriteErrorCanStillStageCurrentPage(t *testing.T) {
 	})
 
 	second := bytes.Repeat([]byte{0x22}, PageSize)
-	err = v.Write(second, PageSize)
-	require.Error(t, err)
+	require.NoError(t, v.Write(second, PageSize))
 
 	buf := make([]byte, PageSize)
 	_, err = v.Read(ctx, buf, PageSize)
 	require.NoError(t, err)
 	require.Equal(t, second, buf)
 
+	done := make(chan error, 1)
 	third := bytes.Repeat([]byte{0x33}, PageSize)
-	err = v.Write(third, 2*PageSize)
-	require.Error(t, err)
+	go func() {
+		done <- v.Write(third, 2*PageSize)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("write should block, got %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	store.ClearAllFaults()
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-done:
+			return err == nil
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 
 	_, err = v.Read(ctx, buf, 2*PageSize)
 	require.NoError(t, err)
 	require.Equal(t, third, buf)
 }
 
-func TestBackpressurePartialWriteErrorCanStillStageMergedPage(t *testing.T) {
+func TestBackpressurePartialWriteCanStillStageMergedPage(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
@@ -2562,8 +2579,7 @@ func TestBackpressurePartialWriteErrorCanStillStageMergedPage(t *testing.T) {
 	})
 
 	partial := bytes.Repeat([]byte{0x22}, 256)
-	err = v.Write(partial, PageSize+700)
-	require.Error(t, err)
+	require.NoError(t, v.Write(partial, PageSize+700))
 
 	buf := make([]byte, PageSize)
 	_, err = v.Read(ctx, buf, PageSize)
@@ -2571,14 +2587,17 @@ func TestBackpressurePartialWriteErrorCanStillStageMergedPage(t *testing.T) {
 	expected := make([]byte, PageSize)
 	copy(expected[700:], partial)
 	require.Equal(t, expected, buf)
+
+	store.ClearAllFaults()
+	require.NoError(t, v.Flush())
 }
 
-func TestBackpressurePunchHoleErrorCanStillStageTombstones(t *testing.T) {
+func TestBackpressurePunchHoleCanStillStageTombstones(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
-		FlushThreshold:   1 << 20,
-		FlushInterval:    -1,
-		MaxMemtableSlots: 1,
+		FlushThreshold:    1 << 20,
+		FlushInterval:     -1,
+		MaxDirtyPageSlots: 1,
 	}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -2597,8 +2616,7 @@ func TestBackpressurePunchHoleErrorCanStillStageTombstones(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
-	err = v.PunchHole(0, 2*PageSize)
-	require.Error(t, err)
+	require.NoError(t, v.PunchHole(0, 2*PageSize))
 
 	buf := make([]byte, PageSize)
 	_, err = v.Read(ctx, buf, 0)
@@ -2607,7 +2625,10 @@ func TestBackpressurePunchHoleErrorCanStillStageTombstones(t *testing.T) {
 
 	_, err = v.Read(ctx, buf, PageSize)
 	require.NoError(t, err)
-	require.Equal(t, second, buf)
+	require.Equal(t, make([]byte, PageSize), buf)
+
+	store.ClearAllFaults()
+	require.NoError(t, v.Flush())
 }
 
 // TestAsyncFlushNotifyWakesLoop verifies that the flush loop wakes up
@@ -2637,20 +2658,20 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	vol := v
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		vol.layer.frozenMu.RLock()
-		hasFrozen := vol.layer.frozen != nil
-		vol.layer.frozenMu.RUnlock()
+		vol.layer.dirtyMu.Lock()
+		hasFrozen := vol.layer.pending != nil
+		vol.layer.dirtyMu.Unlock()
 		if !hasFrozen {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	vol.layer.frozenMu.RLock()
-	hasFrozen := vol.layer.frozen != nil
-	vol.layer.frozenMu.RUnlock()
+	vol.layer.dirtyMu.Lock()
+	hasFrozen := vol.layer.pending != nil
+	vol.layer.dirtyMu.Unlock()
 	if hasFrozen {
-		t.Fatalf("expected no frozen memtable after notify")
+		t.Fatalf("expected no frozen dirty pages after notify")
 	}
 
 	vol.layer.mu.RLock()
@@ -2661,13 +2682,14 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	}
 }
 
-// TestBackpressureStillBlocksInline verifies that when the memtable fills
-// up and flush fails, the S3 error propagates to the writer.
+// TestBackpressureStillBlocksInline verifies that when the dirty queue fills
+// up and flush cannot progress, the writer blocks instead of returning the
+// transient S3 error.
 func TestBackpressureStillBlocksInline(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
-		FlushInterval:  -1, // synchronous flush so errors propagate
+		FlushInterval:  -1,
 	}
 	m := newTestManager(t, store, cfg)
 
@@ -2681,30 +2703,69 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 
-	// Write enough pages to fill frozen layers. The first writes succeed
-	// (freeze to frozen layers), but eventually backpressure kicks in and
-	// the write fails because inline flush fails.
 	page := make([]byte, PageSize)
-	var writeErr error
-	for i := range 20 {
-		page[0] = byte(i)
-		writeErr = v.Write(page, uint64(i)*PageSize)
-		if writeErr != nil {
-			break
-		}
-	}
+	page[0] = 1
+	require.NoError(t, v.Write(page, 0))
+	page[0] = 2
+	require.NoError(t, v.Write(page, PageSize))
 
-	if writeErr == nil {
-		t.Fatal("expected write to fail due to backpressure + S3 fault")
-	}
-	if !strings.Contains(writeErr.Error(), "simulated S3 fault") {
-		t.Fatalf("expected S3 fault error, got: %v", writeErr)
+	done := make(chan error, 1)
+	page[0] = 3
+	go func() {
+		done <- v.Write(page, 2*PageSize)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("expected write to block, got %v", err)
+	case <-time.After(50 * time.Millisecond):
 	}
 
 	// Clear fault — data in frozen layers should be flushable.
 	store.ClearAllFaults()
+	require.Eventually(t, func() bool {
+		select {
+		case err := <-done:
+			return err == nil
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
 	if err := v.Flush(); err != nil {
 		t.Fatalf("flush after clearing fault: %v", err)
+	}
+}
+
+func TestManagerCloseStopsFlushRetryLoop(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: PageSize,
+		FlushInterval:  -1,
+	}
+	m := newTestManager(t, store, cfg)
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	page := bytes.Repeat([]byte{0xAA}, PageSize)
+	require.NoError(t, v.Write(page, 0))
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		Err: fmt.Errorf("simulated persistent S3 outage"),
+	})
+
+	page = bytes.Repeat([]byte{0xBB}, PageSize)
+	require.NoError(t, v.Write(page, PageSize))
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- m.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("manager close should stop the flush retry loop and return")
 	}
 }
 
@@ -2759,7 +2820,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := objstore.NewMemStore()
 		cfg := Config{
-			FlushThreshold: 64 * PageSize, // large — memtable never fills
+			FlushThreshold: 64 * PageSize, // large — dirty pages never fills
 			FlushInterval:  1 * time.Hour, // regular timer never fires
 		}
 		m := newTestManager(t, store, cfg)
@@ -3028,8 +3089,8 @@ func TestFlushReportsMetrics(t *testing.T) {
 	}
 }
 
-// TestReadAtMemtable verifies that ReadAt returns the expected page contents.
-func TestReadAtMemtable(t *testing.T) {
+// TestReadAtDirtyPages verifies that ReadAt returns the expected page contents.
+func TestReadAtDirtyPages(t *testing.T) {
 	store := objstore.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
@@ -4042,9 +4103,25 @@ func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
 				default:
 					t.Fatalf("unknown fault mode %q", faultMode)
 				}
-				err := flushBatchFn(t, root, batch)
-				require.Error(t, err)
+
+				flushDone := make(chan error, 1)
+				go func() {
+					flushDone <- flushBatchFn(t, root, batch)
+				}()
+
+				select {
+				case err := <-flushDone:
+					t.Fatalf("flush returned early under transient %s fault: %v", faultMode, err)
+				case <-time.After(200 * time.Millisecond):
+				}
+
 				store.ClearAllFaults()
+				select {
+				case err := <-flushDone:
+					require.NoError(t, err)
+				case <-time.After(2 * time.Second):
+					t.Fatalf("flush did not complete after clearing %s fault", faultMode)
+				}
 				continue
 			}
 			require.NoError(t, flushBatchFn(t, root, batch))
@@ -4141,18 +4218,18 @@ func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
 	data := bytes.Repeat([]byte{0xFF}, 2*PageSize)
 	require.NoError(t, ly.Write(data, 0))
 
-	// Record memtable slot count before punch.
-	ly.mu.RLock()
-	slotsBefore := ly.memtable.nextSlot
-	ly.mu.RUnlock()
+	// Record dirty pages slot count before punch.
+	ly.dirtyMu.Lock()
+	slotsBefore := ly.active.pages()
+	ly.dirtyMu.Unlock()
 
 	// Punch both pages.
 	require.NoError(t, ly.PunchHole(0, 2*PageSize))
 
 	// Tombstones should NOT have consumed additional slots.
-	ly.mu.RLock()
-	slotsAfter := ly.memtable.nextSlot
-	ly.mu.RUnlock()
+	ly.dirtyMu.Lock()
+	slotsAfter := ly.active.pages()
+	ly.dirtyMu.Unlock()
 	require.Equal(t, slotsBefore, slotsAfter)
 
 	// But reads should return zeros.

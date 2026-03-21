@@ -114,9 +114,9 @@ func TestDirectFlushL2Promotion(t *testing.T) {
 	store := objstore.NewMemStore()
 
 	cfg := Config{
-		FlushThreshold:   int64(L1PromoteThreshold) * PageSize,
-		FlushInterval:    -1,
-		MaxMemtableSlots: L1PromoteThreshold,
+		FlushThreshold:    int64(L1PromoteThreshold) * PageSize,
+		FlushInterval:     -1,
+		MaxDirtyPageSlots: L1PromoteThreshold,
 	}
 
 	ly, err := openLayer(ctx, layerParams{store: store, id: "test-direct-promote", config: cfg})
@@ -147,14 +147,14 @@ func TestDirectFlushL2Promotion(t *testing.T) {
 	}
 }
 
-func TestVolumeDirectWritebackFlushesExistingMemtableBeforeEntering(t *testing.T) {
+func TestVolumeDirectWritebackFlushesExistingDirtyPagesBeforeEntering(t *testing.T) {
 	ctx := t.Context()
 	m := newTestManager(t, objstore.NewMemStore(), Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  -1,
 	})
 	vol, err := m.NewVolume(CreateParams{
-		Volume: "direct-mode-flushes-existing-memtable",
+		Volume: "direct-mode-flushes-existing-dirty pages",
 		Size:   16 * PageSize,
 	})
 	require.NoError(t, err)

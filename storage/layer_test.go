@@ -290,11 +290,11 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 	}
 	require.NoError(t, ly.Write(blockData, 0))
 
-	// Now write a small amount — this goes through the memtable path since
+	// Now write a small amount — this goes through the dirty pages path since
 	// the layer is no longer "fresh" (l2Map is non-empty, but canDirectL2
-	// checks memtable.size which is 0, and l0/l1 are empty, so it would
+	// checks the dirty batch size, which is 0, and l0/l1 are empty, so it would
 	// still try direct L2 for aligned writes). Write a non-aligned small
-	// chunk to force the memtable path.
+	// chunk to force the dirty pages path.
 	extra := bytes.Repeat([]byte{0xAA}, 100)
 	extraOff := uint64(BlockSize) // start of second block, but only 100 bytes
 	require.NoError(t, ly.Write(extra, extraOff))
@@ -328,7 +328,7 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 
 	// Write data that spans: partial block + full block + partial block.
 	// The full block in the middle should NOT go through direct L2 because
-	// the leading partial write will populate the memtable first, making
+	// the leading partial write will populate the dirty pages first, making
 	// canDirectL2() return false.
 	leadingBytes := PageSize / 2 // half a page
 	data := make([]byte, leadingBytes+BlockSize+PageSize)

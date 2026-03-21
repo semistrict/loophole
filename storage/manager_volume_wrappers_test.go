@@ -63,6 +63,7 @@ func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, zeroPage[:], buf)
 
+	v.layer.stopPeriodicFlush()
 	v.layer.flushNotify = make(chan struct{}, 1)
 	require.NoError(t, v.FlushLocal())
 	select {
@@ -87,6 +88,9 @@ func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 	default:
 	}
 	v.directRefs = 0
+	v.layer.flushNotify = nil
+	v.layer.writeNotify = nil
+	v.layer.startPeriodicFlush(context.Background())
 
 	require.NoError(t, UpdateLabels(ctx, m.Store(), "vol", map[string]string{"env": "updated"}))
 

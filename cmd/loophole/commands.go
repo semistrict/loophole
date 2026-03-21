@@ -424,7 +424,7 @@ func deviceCloneCmd() *cobra.Command {
 func deviceFlushCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "flush <volume>",
-		Short: "Flush a volume's memtable to storage",
+		Short: "Flush a volume's dirty pages to storage",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := resolveOwnerClient(args[0])

@@ -39,7 +39,7 @@ type Manager struct {
 	volume *Volume
 }
 
-// localFS abstracts local filesystem operations for memtable backing files.
+// localFS abstracts local filesystem operations for dirty pages backing files.
 type localFS interface {
 	MkdirAll(path string, perm uint32) error
 }
@@ -248,6 +248,7 @@ func (m *Manager) Close() error {
 	m.mu.Unlock()
 
 	if v != nil {
+		v.layer.beginShutdown()
 		slog.Info("manager close: flushing", "volume", v.Name())
 		if err := v.flush(); err != nil {
 			slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
@@ -306,13 +307,10 @@ func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume
 		return nil, fmt.Errorf("open layer %q: %w", ref.LayerID, err)
 	}
 	ly.writeLeaseSeq = writeLeaseSeq
-	v.layer = ly
-
-	if !readOnly && m.config.FlushInterval > 0 {
-		// Use a background context — ctx may be a short-lived HTTP request
-		// context that gets cancelled when the handler returns.
-		ly.startPeriodicFlush(context.Background())
+	if readOnly {
+		ly.stopPeriodicFlush()
 	}
+	v.layer = ly
 
 	m.mu.Lock()
 	if m.volume != nil {

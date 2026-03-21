@@ -66,14 +66,14 @@ var (
 		Namespace: "loophole",
 		Subsystem: "flush",
 		Name:      "frozen_tables",
-		Help:      "Current number of frozen memtables awaiting flush.",
+		Help:      "Current number of pending dirty batches awaiting flush.",
 	}))
 
-	MemtableBytes = reg(prometheus.NewGauge(prometheus.GaugeOpts{
+	DirtyPageBytes = reg(prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: "loophole",
 		Subsystem: "flush",
-		Name:      "memtable_bytes",
-		Help:      "Current active memtable size in bytes.",
+		Name:      "dirty_page_bytes",
+		Help:      "Current active dirty pages size in bytes.",
 	}))
 
 	FlushPages = reg(prometheus.NewCounter(prometheus.CounterOpts{

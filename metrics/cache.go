@@ -22,7 +22,7 @@ var (
 		Namespace: "loophole",
 		Subsystem: "cache",
 		Name:      "page_read_source_total",
-		Help:      "Pages read by source: memtable, frozen, cache, l0, l1, l2, zero.",
+		Help:      "Pages read by source: dirty_pages, pending_dirty_batch, cache, l0, l1, l2, zero.",
 	}, []string{"source"}))
 
 	// --- Page cache daemon metrics ---

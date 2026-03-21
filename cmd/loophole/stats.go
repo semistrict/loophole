@@ -163,12 +163,12 @@ func printCache(fams map[string]*dto.MetricFamily) {
 func printFlush(fams map[string]*dto.MetricFamily) {
 	blocks := counterVal(fams, "loophole_flush_blocks_total")
 	frozenTables := gaugeVal(fams, "loophole_flush_frozen_tables")
-	mtBytes := gaugeVal(fams, "loophole_flush_memtable_bytes")
+	mtBytes := gaugeVal(fams, "loophole_flush_dirty_page_bytes")
 	if blocks == 0 && frozenTables == 0 && mtBytes == 0 {
 		return
 	}
 	_, _ = header.Println("Flush")
-	printGaugeBytes(fams, "loophole_flush_memtable_bytes", "memtable")
+	printGaugeBytes(fams, "loophole_flush_dirty_page_bytes", "dirty pages")
 	printGauge(fams, "loophole_flush_frozen_tables", "queue depth")
 	printCounter(fams, "loophole_flush_pages_total", "pages")
 	printCounterBytes(fams, "loophole_flush_bytes_total", "bytes")

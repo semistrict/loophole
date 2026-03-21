@@ -447,7 +447,7 @@ func (fs *blockDevFS) Fsync(_ <-chan struct{}, in *fuse.FsyncIn) fuse.Status {
 		done(fuse.Status(syscall.EBADF))
 		return fuse.Status(syscall.EBADF)
 	}
-	// Use FlushLocal to freeze the memtable without waiting for S3 upload.
+	// Use FlushLocal to freeze the dirty pages without waiting for S3 upload.
 	// The background flush loop will handle the upload asynchronously.
 	if err := h.vol.FlushLocal(); err != nil {
 		slog.Warn("blockdev: fsync error", "error", err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/semistrict/loophole/objstore"
@@ -65,25 +66,25 @@ func (s *SimObjectStore) InjectFaults() {
 	s.inner.ClearAllFaults()
 
 	if s.faults.GetFailRate > 0 && s.rng.Float64() < s.faults.GetFailRate {
-		s.inner.SetFault(objstore.OpGet, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpGet, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 GET failure"),
 		})
 	}
 
 	if s.faults.PutFailRate > 0 && s.rng.Float64() < s.faults.PutFailRate {
-		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
-		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
 	}
 
 	if s.faults.PhantomPutRate > 0 && s.rng.Float64() < s.faults.PhantomPutRate {
-		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
-		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
 	}
@@ -92,24 +93,24 @@ func (s *SimObjectStore) InjectFaults() {
 		isLayersJSON := func(key string) bool {
 			return strings.HasSuffix(key, "layers.json")
 		}
-		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
-		s.inner.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
 	}
 
 	if s.faults.ListFailRate > 0 && s.rng.Float64() < s.faults.ListFailRate {
-		s.inner.SetFault(objstore.OpListKeys, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpListKeys, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 LIST failure"),
 		})
 	}
 
 	if s.faults.DeleteFailRate > 0 && s.rng.Float64() < s.faults.DeleteFailRate {
-		s.inner.SetFault(objstore.OpDeleteObject, "", objstore.Fault{
+		setOneShotFault(s.inner, objstore.OpDeleteObject, "", objstore.Fault{
 			Err: fmt.Errorf("simulated S3 DELETE failure"),
 		})
 	}
@@ -130,4 +131,21 @@ func (s *SimObjectStore) InjectFaults() {
 // ClearFaults removes all armed faults.
 func (s *SimObjectStore) ClearFaults() {
 	s.inner.ClearAllFaults()
+}
+
+func setOneShotFault(store *objstore.MemStore, op objstore.OpType, key string, fault objstore.Fault) {
+	var fired atomic.Bool
+	originalShouldFault := fault.ShouldFault
+	fault.ShouldFault = func(fullKey string) bool {
+		if originalShouldFault != nil && !originalShouldFault(fullKey) {
+			return false
+		}
+		return !fired.Load()
+	}
+	fault.Hook = func() {
+		if fired.CompareAndSwap(false, true) {
+			store.ClearFault(op, key)
+		}
+	}
+	store.SetFault(op, key, fault)
 }

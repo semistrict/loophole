@@ -2,12 +2,9 @@ package storage
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/objstore"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -132,49 +129,27 @@ func TestReadPagesGuardExitReleasesLock(t *testing.T) {
 	assert.Equal(t, newData, buf)
 }
 
-// TestSafepointBlocksCleanup verifies that holding the safepoint
-// prevents memtable cleanup until the reader releases.
-func TestSafepointBlocksCleanup(t *testing.T) {
-	memDir := filepath.Join(t.TempDir(), "mem")
-	require.NoError(t, os.MkdirAll(memDir, 0o755))
-	mt, err := newMemtable(memDir, 4, 1)
+// TestReadPagesDirtySlicesAreDetached verifies that dirty ReadPages data is
+// copied out of the active batch rather than borrowing mutable batch storage.
+func TestReadPagesDirtySlicesAreDetached(t *testing.T) {
+	ctx := t.Context()
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, testConfig)
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 2 * PageSize})
 	require.NoError(t, err)
 
-	pageIdx := PageIdx(0)
-	data := bytes.Repeat([]byte{0xCC}, PageSize)
-	require.NoError(t, mt.put(pageIdx, data))
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xCC}, PageSize), 0))
 
-	slot, ok := mt.get(pageIdx)
-	require.True(t, ok)
-
-	// Get a zero-copy ref while holding the safepoint.
-	sp := safepoint.New()
-	g := sp.Enter()
-	ref, err := mt.readDataRef(g, slot)
+	slices, cleanup, err := v.ReadPages(ctx, 0, PageSize)
 	require.NoError(t, err)
-	require.Equal(t, data, ref)
+	defer cleanup()
+	require.Len(t, slices, 1)
+	require.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), slices[0])
 
-	// Start cleanup in background — should block on sp.Do.
-	cleanupDone := make(chan struct{})
-	go func() {
-		sp.Do(func() { mt.cleanup() })
-		close(cleanupDone)
-	}()
+	require.NoError(t, v.Write(bytes.Repeat([]byte{0xDD}, PageSize), 0))
 
-	// Give cleanup a moment to block on the exclusive lock.
-	// It should NOT complete yet.
-	select {
-	case <-cleanupDone:
-		t.Fatal("cleanup completed while safepoint was held")
-	default:
-	}
-
-	// Data should still be readable through the ref.
-	assert.Equal(t, data, ref)
-
-	// Release the safepoint — cleanup should now complete.
-	g.Exit()
-	<-cleanupDone
+	assert.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), slices[0])
 }
 
 // TestReadPagesPinSurvivesEviction verifies that pinned page cache slots

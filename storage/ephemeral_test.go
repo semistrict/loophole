@@ -10,11 +10,11 @@ import (
 // TestFlushAfterCloneEphemeralEOF reproduces the "read ephemeral at N: EOF" bug.
 // Scenario from TestE2E_Torture:
 //  1. Write many pages (triggers auto-flush cycles)
-//  2. Clone (freezes memtable)
+//  2. Clone (rotates dirty pages into the pending batch)
 //  3. Write more pages to parent
-//  4. Flush parent → fails reading frozen memtable's ephemeral file
+//  4. Flush parent -> fails reading the pending dirty batch's ephemeral file
 func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
-	// Use a small flush threshold to trigger multiple freeze/flush cycles
+	// Use a small flush threshold to trigger multiple rotate/flush cycles
 	// during the initial writes, matching the e2e behavior where mkfs.ext4
 	// + file writes generate hundreds of pages.
 	cfg := Config{

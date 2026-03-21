@@ -621,16 +621,25 @@ var fioJobs = []fioJob{
 
 // BenchResult is the structured output saved after a benchmark run.
 type BenchResult struct {
-	Timestamp   string      `json:"timestamp"`
-	HeadSHA     string      `json:"head_sha"`
-	Platform    string      `json:"platform"`
-	Instance    string      `json:"instance"`
-	MachineType string      `json:"machine_type"`
-	Zone        string      `json:"zone"`
-	Bucket      string      `json:"bucket"`
-	VolSize     string      `json:"vol_size"`
-	FioRuntime  string      `json:"fio_runtime"`
-	Fio         []FioResult `json:"fio,omitempty"`
+	Timestamp    string         `json:"timestamp"`
+	HeadSHA      string         `json:"head_sha"`
+	Platform     string         `json:"platform"`
+	Instance     string         `json:"instance"`
+	MachineType  string         `json:"machine_type"`
+	Project      string         `json:"project"`
+	Zone         string         `json:"zone"`
+	Region       string         `json:"region"`
+	Bucket       string         `json:"bucket"`
+	Endpoint     string         `json:"endpoint"`
+	Profile      string         `json:"profile"`
+	RemoteSrcDir string         `json:"remote_src_dir"`
+	VolumeName   string         `json:"volume_name"`
+	Mountpoint   string         `json:"mountpoint"`
+	VolSize      string         `json:"vol_size"`
+	FioRuntime   string         `json:"fio_runtime"`
+	Fio          []FioResult    `json:"fio,omitempty"`
+	RunConfig    BenchRunConfig `json:"run_config"`
+	Repro        BenchRepro     `json:"repro"`
 }
 
 type FioResult struct {
@@ -646,6 +655,28 @@ type FioResult struct {
 	WriteLatUs float64 `json:"write_lat_us,omitempty"`
 }
 
+type BenchRunConfig struct {
+	Debug   bool          `json:"debug"`
+	FioOnly bool          `json:"fio_only"`
+	FsxOnly bool          `json:"fsx_only"`
+	E2EOnly bool          `json:"e2e_only"`
+	FioJobs []BenchFioJob `json:"fio_jobs,omitempty"`
+}
+
+type BenchFioJob struct {
+	Name    string `json:"name"`
+	RW      string `json:"rw"`
+	BS      string `json:"bs"`
+	Size    string `json:"size"`
+	NumJobs int    `json:"num_jobs"`
+	Extra   string `json:"extra,omitempty"`
+}
+
+type BenchRepro struct {
+	SyncCommand string `json:"sync_command"`
+	RunCommand  string `json:"run_command"`
+}
+
 func (c *benchConfig) collectResults(ctx context.Context, opts runOpts) error {
 	repoRoot, err := findRepoRoot()
 	if err != nil {
@@ -654,17 +685,58 @@ func (c *benchConfig) collectResults(ctx context.Context, opts runOpts) error {
 
 	headSHA, _ := execOutput(ctx, repoRoot, "git", "rev-parse", "--short", "HEAD")
 	now := time.Now().UTC()
+	reproArgs := []string{
+		"go", "run", "./cmd/bench-gcp",
+		"--project", c.project,
+		"--zone", c.zone,
+		"--bucket", c.bucket,
+	}
+	fioConfig := make([]BenchFioJob, 0, len(fioJobs))
+	for _, job := range fioJobs {
+		fioConfig = append(fioConfig, BenchFioJob(job))
+	}
+	runArgs := append(append([]string{}, reproArgs...), "run", "--vol-size", opts.volSize, "--fio-runtime", opts.fioRuntime)
+	if opts.fioOnly {
+		runArgs = append(runArgs, "--fio-only")
+	}
+	if opts.fsxOnly {
+		runArgs = append(runArgs, "--fsx-only")
+	}
+	if opts.e2eOnly {
+		runArgs = append(runArgs, "--e2e-only")
+	}
+	if opts.debug {
+		runArgs = append(runArgs, "--debug")
+	}
 
 	result := BenchResult{
-		Timestamp:   now.Format(time.RFC3339),
-		HeadSHA:     headSHA,
-		Platform:    "gce",
-		Instance:    c.instance,
-		MachineType: machineType,
-		Zone:        c.zone,
-		Bucket:      c.bucket,
-		VolSize:     opts.volSize,
-		FioRuntime:  opts.fioRuntime,
+		Timestamp:    now.Format(time.RFC3339),
+		HeadSHA:      headSHA,
+		Platform:     "gce",
+		Instance:     c.instance,
+		MachineType:  machineType,
+		Project:      c.project,
+		Zone:         c.zone,
+		Region:       region(c.zone),
+		Bucket:       c.bucket,
+		Endpoint:     "https://storage.googleapis.com",
+		Profile:      "gcs",
+		RemoteSrcDir: remoteSrcDir,
+		VolumeName:   "bench-vol",
+		Mountpoint:   "/mnt/loophole-bench",
+		VolSize:      opts.volSize,
+		FioRuntime:   opts.fioRuntime,
+		RunConfig: BenchRunConfig{
+			Debug:   opts.debug,
+			FioOnly: opts.fioOnly,
+			FsxOnly: opts.fsxOnly,
+			E2EOnly: opts.e2eOnly,
+			FioJobs: fioConfig,
+		},
+		Repro: BenchRepro{
+			SyncCommand: strings.Join(append(append([]string{}, reproArgs...), "sync"), " "),
+			RunCommand:  strings.Join(runArgs, " "),
+		},
 	}
 
 	// Download and parse fio results.

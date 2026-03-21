@@ -34,36 +34,26 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	ly.mu.RLock()
 	l1map := ly.l1Map
 	l2map := ly.l2Map
-	mt := ly.memtable
 	ly.mu.RUnlock()
 
-	ly.frozenMu.RLock()
-	frozen := ly.frozen
-	ly.frozenMu.RUnlock()
+	ly.dirtyMu.Lock()
+	mt := ly.active
+	frozen := ly.pending
+	ly.dirtyMu.Unlock()
 
-	// 1. Active memtable.
+	// 1. Active dirty pages.
 	if mt != nil {
-		if slot, ok := mt.get(pageIdx); ok {
-			data, err := mt.readData(slot)
-			if err != nil {
-				add("  [1] memtable: err=%v", err)
-			} else {
-				add("  [1] memtable: zero=%v hash=%s", isZero(data), hash(data))
-			}
+		if rec, ok := mt.lookup(pageIdx); ok {
+			add("  [1] dirty pages: zero=%v hash=%s", isZero(rec.bytes()), hash(rec.bytes()))
 		} else {
-			add("  [1] memtable: not present")
+			add("  [1] dirty pages: not present")
 		}
 	}
 
-	// 2. Frozen memtable.
+	// 2. Pending dirty batch.
 	if frozen != nil {
-		if slot, ok := frozen.get(pageIdx); ok {
-			data, err := frozen.readData(slot)
-			if err != nil {
-				add("  [2] frozen: err=%v", err)
-			} else {
-				add("  [2] frozen: zero=%v hash=%s", isZero(data), hash(data))
-			}
+		if rec, ok := frozen.lookup(pageIdx); ok {
+			add("  [2] frozen: zero=%v hash=%s", isZero(rec.bytes()), hash(rec.bytes()))
 		}
 	}
 

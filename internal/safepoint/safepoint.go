@@ -3,7 +3,7 @@
 //
 // Readers call Enter to get a Guard, register zero-copy slices with
 // Guard.Register, and call Guard.Exit when done. Exclusive operations
-// (page cache drain, memtable cleanup) call Do to block until all
+// (page cache drain, dirty pages cleanup) call Do to block until all
 // guards have exited, then run a function under exclusive access.
 package safepoint
 

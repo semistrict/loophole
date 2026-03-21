@@ -109,7 +109,7 @@ func TestLayerReadPageRefUsesPersistentCache(t *testing.T) {
 
 	snap := &layerSnapshot{
 		layoutGen: ly.index.LayoutGen,
-		memtable:  ly.memtable,
+		active:    ly.active,
 		l1: newBlockRangeMap([]blockRange{{
 			Start:         0,
 			End:           1,

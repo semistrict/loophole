@@ -4,7 +4,7 @@
 //   - L1: sparse 4MB blocks (only changed pages within a 4MB region)
 //   - L2: dense 4MB blocks (full snapshot of a 4MB region)
 //
-// Frozen memtable pages are flushed directly to L1/L2 blocks.
+// Pending dirty batches are flushed directly to L1/L2 blocks.
 // Snapshots freeze the current layer and move the volume to a new child.
 // Each layer's index.json is self-contained — it references all data files
 // it needs, including inherited ones from ancestors.
@@ -36,9 +36,12 @@ const (
 	// triggers promotion to L2. 25% = 256 out of 1024 pages.
 	L1PromoteThreshold = BlockPages / 4
 
-	// maxMemtableSlots caps the number of unique page slots in a memtable.
-	maxMemtableSlots = 131072 // 512MB at 4KB/slot
+	// maxDirtyPageSlots caps the number of unique page slots in one active dirty batch.
+	maxDirtyPageSlots = 131072 // 512MB at 4KB/slot
 )
+
+// Page is a single 4 KiB filesystem page.
+type Page [PageSize]byte
 
 // PageIdx is a page index into the virtual disk.
 // Page 0 starts at byte offset 0, page 1 at byte offset 4096, etc.
@@ -73,7 +76,7 @@ func (b BlockIdx) PageIdx(pageOffset uint16) PageIdx {
 
 // zeroPage is a shared read-only zero page returned for tombstones and
 // never-written pages. Callers must not modify the returned slice.
-var zeroPage [PageSize]byte
+var zeroPage Page
 
 var newLayerID = uuid.NewString
 
@@ -121,20 +124,20 @@ func putZstdEncoder(e *zstd.Encoder) {
 
 // Config controls the storage engine's resource limits and behavior.
 type Config struct {
-	// FlushThreshold is the memtable size in bytes that triggers a freeze+flush.
+	// FlushThreshold is the active dirty pages size in bytes that triggers rotation.
 	FlushThreshold int64
 
-	// FlushInterval is how often the background goroutine flushes dirty
-	// memtables to S3. 0 = default (30s). Negative = disabled.
+	// FlushInterval is how often the background goroutine proactively rotates
+	// and flushes dirty pages to object storage. 0 = default (30s). Negative = disabled.
 	FlushInterval time.Duration
 
 	// MaxCacheEntries caps the number of in-memory parsed block entries.
 	// 0 = default (256).
 	MaxCacheEntries int
 
-	// MaxMemtableSlots caps the number of unique page slots in a memtable.
+	// MaxDirtyPageSlots caps the number of unique page slots in one active dirty batch.
 	// 0 = default (65536). Only useful for tests.
-	MaxMemtableSlots int
+	MaxDirtyPageSlots int
 
 	// DisableCompression stores pages uncompressed in blocks. This is used
 	// in tests to avoid zstd's internal goroutine channels which are
@@ -157,11 +160,11 @@ func (c *Config) setDefaults() {
 	}
 }
 
-// maxMemtablePages returns the number of page slots for a new memtable.
-func (c *Config) maxMemtablePages() int {
-	cap := maxMemtableSlots
-	if c.MaxMemtableSlots > 0 {
-		cap = c.MaxMemtableSlots
+// maxDirtyPageSlots returns the number of page slots for a new active dirty batch.
+func (c *Config) maxDirtyPageSlots() int {
+	cap := maxDirtyPageSlots
+	if c.MaxDirtyPageSlots > 0 {
+		cap = c.MaxDirtyPageSlots
 	}
 	n := int(c.FlushThreshold / PageSize)
 	if n < 1 {
