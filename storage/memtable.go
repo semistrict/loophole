@@ -14,8 +14,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// errMemtableFull is returned when the memtable is full.
-var errMemtableFull = fmt.Errorf("memtable full")
+// errMemtableUnavailable is returned when the memtable cannot accept writes,
+// either because it is full or because it was frozen by another goroutine.
+// Callers should retry with a fresh memtable reference.
+var errMemtableUnavailable = fmt.Errorf("memtable unavailable")
 
 // tombstoneSlot is the sentinel slot value for punched (tombstoned) pages.
 // It indicates the page is explicitly absent — reads return zeros.
@@ -91,7 +93,7 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 	defer mt.mu.Unlock()
 
 	if mt.frozen {
-		return fmt.Errorf("memtable is frozen")
+		return errMemtableUnavailable
 	}
 
 	var slot int
@@ -99,7 +101,7 @@ func (mt *memtable) put(pageIdx PageIdx, data []byte) error {
 		slot = existing
 	} else {
 		if mt.nextSlot >= mt.maxPages {
-			return errMemtableFull
+			return errMemtableUnavailable
 		}
 		slot = mt.nextSlot
 		mt.nextSlot++
@@ -118,10 +120,10 @@ func (mt *memtable) putTombstone(pageIdx PageIdx) error {
 	defer mt.mu.Unlock()
 
 	if mt.frozen {
-		return fmt.Errorf("memtable is frozen")
+		return errMemtableUnavailable
 	}
 	if len(mt.index) >= mt.maxPages {
-		return errMemtableFull
+		return errMemtableUnavailable
 	}
 
 	mt.index[pageIdx] = tombstoneSlot

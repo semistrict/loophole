@@ -9,6 +9,16 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// firstNonEmpty returns the first non-empty string.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
 // Config is the top-level ~/.loophole/config.toml structure.
 type Config struct {
 	DefaultProfile string             `toml:"default_profile"`
@@ -86,7 +96,7 @@ func (c *Config) Resolve(name string) (ResolvedProfile, error) {
 		AccessKey:   p.AccessKey,
 		SecretKey:   p.SecretKey,
 		Region:      p.Region,
-		LogLevel:    p.LogLevel,
+		LogLevel:    firstNonEmpty(p.LogLevel, os.Getenv("LOOPHOLE_LOG_LEVEL")),
 		DaemonURL:   p.DaemonURL,
 	}, nil
 }

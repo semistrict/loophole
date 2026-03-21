@@ -677,8 +677,8 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	metrics.MemtableBytes.Set(float64(mt.size.Load()))
 
-	// Backpressure: if the memtable is full, freeze and flush.
-	for errors.Is(err, errMemtableFull) {
+	// Backpressure: if the memtable is full or was frozen under us, retry.
+	for errors.Is(err, errMemtableUnavailable) {
 		bpStart := time.Now()
 		if err := ly.maybeFreezeAndFlush(); err != nil {
 			return err
@@ -767,7 +767,7 @@ func (ly *layer) PunchHole(offset, length uint64) error {
 
 		pageLock.Unlock()
 
-		for errors.Is(err, errMemtableFull) {
+		for errors.Is(err, errMemtableUnavailable) {
 			if fErr := ly.maybeFreezeAndFlush(); fErr != nil {
 				return fErr
 			}
@@ -801,77 +801,100 @@ func (ly *layer) Flush() error {
 }
 
 func (ly *layer) freezememtable() error {
-	// Block until any existing frozen memtable is flushed. This provides
-	// backpressure: we never accumulate multiple frozen memtables, bounding
-	// memory to at most one active + one frozen.
-	// Wait for any existing frozen memtable to be flushed before creating
-	// a new one. This bounds memory to one active + one frozen memtable.
+	for {
+		// Drain the frozen slot so we can install a new frozen memtable.
+		// This provides backpressure: memory is bounded to one active + one frozen.
+		if err := ly.waitForFrozenSlot(); err != nil {
+			return err
+		}
+
+		ly.mu.Lock()
+
+		if ly.memtable.isEmpty() {
+			ly.mu.Unlock()
+			return nil
+		}
+
+		// Another goroutine may have refilled the frozen slot between
+		// waitForFrozenSlot() and ly.mu.Lock(). We can't flush here
+		// (needs ly.mu released), so retry from scratch.
+		ly.frozenMu.RLock()
+		occupied := ly.frozen != nil
+		ly.frozenMu.RUnlock()
+		if occupied {
+			ly.mu.Unlock()
+			continue
+		}
+
+		memDir := filepath.Join(ly.scratchDir, "mem")
+		if err := ensureDir(memDir); err != nil {
+			ly.mu.Unlock()
+			return fmt.Errorf("ensure mem dir: %w", err)
+		}
+		freezeSeq := ly.nextSeq.Add(1)
+		mt, err := newMemtable(memDir, freezeSeq, ly.config.maxMemtablePages())
+		if err != nil {
+			ly.mu.Unlock()
+			return fmt.Errorf("create new memtable: %w", err)
+		}
+
+		old := ly.memtable
+		old.freeze(freezeSeq)
+		ly.traceFreeze(old, freezeSeq)
+
+		// Install: ly.mu is held continuously from the frozen-slot check above,
+		// so no other goroutine can be in this section concurrently.
+		ly.frozenMu.Lock()
+		ly.frozen = old
+		metrics.FrozenTableCount.Set(1)
+		ly.frozenMu.Unlock()
+
+		ly.memtable = mt
+		metrics.MemtableBytes.Set(0)
+		ly.mu.Unlock()
+		return nil
+	}
+}
+
+// waitForFrozenSlot blocks until the frozen memtable slot is empty by
+// flushing whatever is there.
+func (ly *layer) waitForFrozenSlot() error {
 	ly.frozenMu.RLock()
 	hasFrozen := ly.frozen != nil
 	ly.frozenMu.RUnlock()
-	if hasFrozen {
-		if err := ly.flushFrozenTables(); err != nil {
-			return fmt.Errorf("flush before freeze: %w", err)
-		}
-	}
-
-	ly.mu.Lock()
-	defer ly.mu.Unlock()
-
-	if ly.memtable.isEmpty() {
+	if !hasFrozen {
 		return nil
 	}
+	return ly.flushFrozenTables()
+}
 
-	memDir := filepath.Join(ly.scratchDir, "mem")
-	if err := ensureDir(memDir); err != nil {
-		return fmt.Errorf("ensure mem dir: %w", err)
+func (ly *layer) traceFreeze(old *memtable, freezeSeq uint64) {
+	if !traceLayerEnabled(ly.id) {
+		return
 	}
-	freezeSeq := ly.nextSeq.Add(1)
-	mt, err := newMemtable(memDir, freezeSeq, ly.config.maxMemtablePages())
-	if err != nil {
-		return fmt.Errorf("create new memtable: %w", err)
-	}
-
-	old := ly.memtable
-	old.freeze(freezeSeq)
-	if traceLayerEnabled(ly.id) {
-		entries := old.entries()
-		blockZeroOffsets := make([]uint16, 0, len(entries))
-		blockZeroTombstones := 0
-		tracedPages := make([]PageIdx, 0, len(entries))
-		for _, e := range entries {
-			if e.pageIdx.Block() == 0 {
-				blockZeroOffsets = append(blockZeroOffsets, uint16(uint64(e.pageIdx)%BlockPages))
-				if e.slot == tombstoneSlot {
-					blockZeroTombstones++
-				}
-			}
-			if tracePageEnabled(e.pageIdx) {
-				tracedPages = append(tracedPages, e.pageIdx)
+	entries := old.entries()
+	blockZeroOffsets := make([]uint16, 0, len(entries))
+	blockZeroTombstones := 0
+	tracedPages := make([]PageIdx, 0, len(entries))
+	for _, e := range entries {
+		if e.pageIdx.Block() == 0 {
+			blockZeroOffsets = append(blockZeroOffsets, uint16(uint64(e.pageIdx)%BlockPages))
+			if e.slot == tombstoneSlot {
+				blockZeroTombstones++
 			}
 		}
-		slog.Info("trace freeze memtable",
-			"layer", ly.id,
-			"freeze_seq", freezeSeq,
-			"entries", len(entries),
-			"block0_offsets", blockZeroOffsets,
-			"block0_tombstones", blockZeroTombstones,
-			"traced_pages", tracedPages,
-		)
+		if tracePageEnabled(e.pageIdx) {
+			tracedPages = append(tracedPages, e.pageIdx)
+		}
 	}
-
-	ly.frozenMu.Lock()
-	if ly.frozen != nil {
-		ly.frozenMu.Unlock()
-		panic("freezememtable: frozen slot occupied — backpressure failed")
-	}
-	ly.frozen = old
-	metrics.FrozenTableCount.Set(1)
-	ly.frozenMu.Unlock()
-
-	ly.memtable = mt
-	metrics.MemtableBytes.Set(0)
-	return nil
+	slog.Info("trace freeze memtable",
+		"layer", ly.id,
+		"freeze_seq", freezeSeq,
+		"entries", len(entries),
+		"block0_offsets", blockZeroOffsets,
+		"block0_tombstones", blockZeroTombstones,
+		"traced_pages", tracedPages,
+	)
 }
 
 func (ly *layer) maybeFreezeAndFlush() error {

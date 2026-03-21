@@ -118,5 +118,5 @@ func TestMemtableTombstoneFullGuard(t *testing.T) {
 	}
 
 	err = mt.putTombstone(PageIdx(10))
-	assert.ErrorIs(t, err, errMemtableFull)
+	assert.ErrorIs(t, err, errMemtableUnavailable)
 }

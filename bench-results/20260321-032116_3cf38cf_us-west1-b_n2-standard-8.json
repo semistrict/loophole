@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-03-21T03:21:16Z",
+  "head_sha": "3cf38cf",
+  "platform": "gce",
+  "instance": "loophole-bench",
+  "machine_type": "n2-standard-8",
+  "zone": "us-west1-b",
+  "bucket": "loophole-bench",
+  "vol_size": "10GB",
+  "fio_runtime": "15",
+  "fio": [
+    {
+      "name": "seq-write",
+      "rw": "write",
+      "bs": "1M",
+      "size": "256M",
+      "write_mbps": 728.4457082748413,
+      "write_iops": 728.445709,
+      "write_lat_us": 434.082420747
+    },
+    {
+      "name": "seq-read",
+      "rw": "read",
+      "bs": "1M",
+      "size": "256M",
+      "read_mbps": 2569.162055015564,
+      "read_iops": 2569.162056,
+      "read_lat_us": 323.04154193
+    },
+    {
+      "name": "rand-write-4k",
+      "rw": "randwrite",
+      "bs": "4k",
+      "size": "128M",
+      "write_mbps": 701.7422790527344,
+      "write_iops": 179646.023598,
+      "write_lat_us": 1.820685583
+    },
+    {
+      "name": "rand-read-4k",
+      "rw": "randread",
+      "bs": "4k",
+      "size": "128M",
+      "read_mbps": 194.2555389404297,
+      "read_iops": 49729.418039,
+      "read_lat_us": 19.321835645
+    },
+    {
+      "name": "randrw-4k",
+      "rw": "randrw",
+      "bs": "4k",
+      "size": "128M",
+      "read_mbps": 155.1516351699829,
+      "read_iops": 39718.818745,
+      "read_lat_us": 20.499027933,
+      "write_mbps": 66.64972305297852,
+      "write_iops": 17062.329178,
+      "write_lat_us": 2.3312487930000003
+    },
+    {
+      "name": "seq-write-64k",
+      "rw": "write",
+      "bs": "64k",
+      "size": "256M",
+      "write_mbps": 795.7469501495361,
+      "write_iops": 12731.951203,
+      "write_lat_us": 24.697555751
+    },
+    {
+      "name": "rand-write-64k",
+      "rw": "randwrite",
+      "bs": "64k",
+      "size": "256M",
+      "write_mbps": 765.4018001556396,
+      "write_iops": 12246.428809,
+      "write_lat_us": 25.448042269000002
+    }
+  ]
+}

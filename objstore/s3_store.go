@@ -76,8 +76,10 @@ func NewS3Store(ctx context.Context, inst env.ResolvedProfile) (*S3Store, error)
 	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
 		if endpoint != "" {
 			o.BaseEndpoint = aws.String(endpoint)
-			// Non-AWS S3 providers (Tigris, MinIO, etc.) typically don't
-			// return response checksums, which causes noisy SDK warnings.
+			// Non-AWS S3 providers (Tigris, MinIO, GCS, etc.) typically don't
+			// support the newer checksum algorithms that became default in
+			// aws-sdk-go-v2 service/s3 v1.73.0+.
+			o.RequestChecksumCalculation = aws.RequestChecksumCalculationWhenRequired
 			o.ResponseChecksumValidation = aws.ResponseChecksumValidationWhenRequired
 		}
 		o.UsePathStyle = true

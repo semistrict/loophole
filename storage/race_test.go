@@ -13,7 +13,7 @@ import (
 )
 
 // TestWritePageSeqReuseOnRetry demonstrates issue #3: when writePage gets
-// errMemtableFull and retries, it reuses the same sequence number. Another
+// errMemtableUnavailable and retries, it reuses the same sequence number. Another
 // writer can grab a higher seq for the same page in between, and the retry
 // overwrites the newer write with stale data.
 func TestWritePageSeqReuseOnRetry(t *testing.T) {
@@ -30,7 +30,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	require.NoError(t, err)
 	defer ly.Close()
 
-	// Fill the memtable to near capacity so the next write triggers errMemtableFull.
+	// Fill the memtable to near capacity so the next write triggers errMemtableUnavailable.
 	page0 := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, ly.Write(page0, 0))
 
@@ -47,7 +47,7 @@ func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		// Writer A writes page 1 to fill the memtable, then writes page 0.
-		// The page 0 write will likely hit errMemtableFull and retry.
+		// The page 0 write will likely hit errMemtableUnavailable and retry.
 		filler := bytes.Repeat([]byte{0xDD}, PageSize)
 		_ = ly.Write(filler, PageSize) // page 1 — fills memtable
 		err := ly.Write(writerA, 0)    // page 0 — may trigger retry
