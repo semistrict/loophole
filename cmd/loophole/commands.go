@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -104,11 +105,22 @@ func createCmd() *cobra.Command {
 	var mountpoint string
 	var sizeStr string
 	var noFormat bool
+	var fromDir string
+	var fromRaw string
 	cmd := &cobra.Command{
 		Use:   "create <store-url> <volume>",
 		Short: "Create and mount a new volume in the foreground",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if fromDir != "" && fromRaw != "" {
+				return fmt.Errorf("--from-dir and --from-raw are mutually exclusive")
+			}
+			if noFormat && (fromDir != "" || fromRaw != "") {
+				return fmt.Errorf("--from-dir/--from-raw cannot be combined with --no-format")
+			}
+			if runtime.GOOS != "linux" && (fromDir != "" || fromRaw != "") && mountpoint != "" {
+				return fmt.Errorf("--mount is not supported with --from-dir/--from-raw on %s", runtime.GOOS)
+			}
 			var size uint64
 			if sizeStr != "" {
 				var err error
@@ -121,16 +133,32 @@ func createCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return fsserver.CreateFSAndServe(cmd.Context(), inst, dir, storage.CreateParams{
+			err = fsserver.CreateFSAndServe(cmd.Context(), inst, dir, storage.CreateParams{
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
+				FromDir:  fromDir,
+				FromRaw:  fromRaw,
 			}, mountpoint, opts)
+			if err != nil {
+				return err
+			}
+			if runtime.GOOS != "linux" {
+				switch {
+				case fromDir != "":
+					fmt.Printf("created volume %s from directory %s\n", volume, fromDir)
+				case fromRaw != "":
+					fmt.Printf("created volume %s from raw image %s\n", volume, fromRaw)
+				}
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path (default: volume name)")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
+	cmd.Flags().StringVar(&fromDir, "from-dir", "", "populate the new ext4 volume from this host directory using e2fsprogs")
+	cmd.Flags().StringVar(&fromRaw, "from-raw", "", "populate the new volume from this raw image file")
 	return cmd
 }
 
@@ -871,9 +899,17 @@ func resolveOwnerOpts(rawURL, volume string) (env.ResolvedStore, env.Dir, fsserv
 	if _, err := c.Status(timeoutCtx); err == nil {
 		return env.ResolvedStore{}, "", fsserver.ServerOptions{}, "", fmt.Errorf("volume %q is already managed at %s", volume, socketPath)
 	}
+	consoleLogLevel := globalLogLevel
+	if consoleLogLevel == "" {
+		consoleLogLevel = os.Getenv("LOOPHOLE_LOG_LEVEL")
+	}
+	if consoleLogLevel == "" {
+		consoleLogLevel = "warn"
+	}
 	return inst, dir, fsserver.ServerOptions{
-		Foreground: true,
-		SocketPath: socketPath,
+		Foreground:      true,
+		ConsoleLogLevel: consoleLogLevel,
+		SocketPath:      socketPath,
 	}, volume, nil
 }
 

@@ -41,7 +41,7 @@ func rootCmd() *cobra.Command {
 	}
 
 	root.PersistentFlags().IntVar(&globalPID, "pid", 0, "Connect to an embedded loophole daemon in the process with this PID")
-	root.PersistentFlags().StringVar(&globalLogLevel, "log-level", "", "Set runtime log level (default: LOOPHOLE_LOG_LEVEL or info)")
+	root.PersistentFlags().StringVar(&globalLogLevel, "log-level", "", "Set runtime log level (CLI default: warn; explicit flag or LOOPHOLE_LOG_LEVEL also affects daemon/file logging)")
 
 	addCommands(root)
 

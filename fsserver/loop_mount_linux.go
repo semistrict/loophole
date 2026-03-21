@@ -302,10 +302,6 @@ func loopDetachPath(devPath string) error {
 	return nil
 }
 
-const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +
-	"extent,64bit,flex_bg,sparse_super,large_file,huge_file," +
-	"dir_nlink,extra_isize,metadata_csum"
-
 func mkfsArgs(device string) (string, []string) {
 	return "mkfs.ext4", []string{"-q", "-O", mkfsExt4Features, "-E", "lazy_itable_init=1,nodiscard", device}
 }

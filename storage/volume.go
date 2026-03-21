@@ -306,10 +306,10 @@ func (v *Volume) ReleaseRef() error {
 func (v *Volume) destroy() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.layer.beginShutdown()
 	if err := v.layer.Flush(); err != nil {
 		slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
 	}
+	v.layer.beginShutdown()
 	v.releaseLease(context.Background())
 	v.manager.closeVolume(v.name)
 	v.layer.Close()

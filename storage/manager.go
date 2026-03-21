@@ -252,11 +252,11 @@ func (m *Manager) Close() error {
 	m.mu.Unlock()
 
 	if v != nil {
-		v.layer.beginShutdown()
 		slog.Info("manager close: flushing", "volume", v.Name())
 		if err := v.flush(); err != nil {
 			slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
 		}
+		v.layer.beginShutdown()
 		slog.Info("manager close: releasing lease", "volume", v.Name())
 		v.releaseLease(ctx)
 		slog.Info("manager close: closing volume", "volume", v.Name())

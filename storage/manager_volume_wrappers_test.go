@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -153,4 +154,25 @@ func TestVolumeHandleLeaseRelease(t *testing.T) {
 
 	_, err = v.handleLeaseRelease(ctx, json.RawMessage(`{"volume":"other"}`))
 	require.Error(t, err)
+}
+
+func TestReleaseRefFlushesBeforeShutdown(t *testing.T) {
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, testConfig)
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 4 * PageSize})
+	require.NoError(t, err)
+
+	payload := bytes.Repeat([]byte("abc12345"), PageSize/8)
+	require.NoError(t, v.Write(payload, 0))
+	require.NoError(t, v.ReleaseRef())
+
+	m2 := newTestManager(t, store, testConfig)
+	reopened, err := m2.OpenVolume("vol")
+	require.NoError(t, err)
+	defer func() { require.NoError(t, reopened.ReleaseRef()) }()
+
+	got, err := reopened.ReadAt(context.Background(), 0, len(payload))
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
 }

@@ -20,10 +20,11 @@ import (
 
 // ServerOptions configures the HTTP server created by the *AndServe functions.
 type ServerOptions struct {
-	Foreground bool        // add console log handler
-	SocketMode os.FileMode // chmod the Unix socket
-	ListenAddr string      // "tcp://..." or ""
-	SocketPath string      // Unix socket path
+	Foreground      bool        // add console log handler
+	ConsoleLogLevel string      // foreground console level; empty => inherit file level
+	SocketMode      os.FileMode // chmod the Unix socket
+	ListenAddr      string      // "tcp://..." or ""
+	SocketPath      string      // Unix socket path
 }
 
 // CreateFSAndServe creates a new volume, formats ext4, mounts it, and serves.
@@ -39,6 +40,13 @@ func CreateFSAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, 
 	if err := s.backend.Create(ctx, p); err != nil {
 		s.cleanup(context.Background())
 		return err
+	}
+	if !s.backend.SupportsFilesystem() {
+		s.cleanup(context.Background())
+		if p.FromDir != "" || p.FromRaw != "" {
+			return nil
+		}
+		return fmt.Errorf("filesystem backend is not available on this platform")
 	}
 	if err := s.backend.Mount(ctx, p.Volume, mountpoint); err != nil {
 		s.cleanup(context.Background())
@@ -131,7 +139,7 @@ func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume stri
 		}
 	}
 
-	logPath, axiomClose, err := setupLogging(inst, dir, volume, opts.Foreground)
+	logPath, axiomClose, err := setupLogging(inst, dir, volume, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +181,7 @@ func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume stri
 }
 
 // setupLogging configures structured logging to a file (and optionally console/axiom).
-func setupLogging(inst env.ResolvedStore, dir env.Dir, volume string, foreground bool) (logPath string, axiomClose func(), err error) {
+func setupLogging(inst env.ResolvedStore, dir env.Dir, volume string, opts ServerOptions) (logPath string, axiomClose func(), err error) {
 	logPath = dir.VolumeLog(inst.VolsetID, volume)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return "", nil, err
@@ -186,25 +194,19 @@ func setupLogging(inst env.ResolvedStore, dir env.Dir, volume string, foreground
 	// Redirect Go's standard log package (used by net/http for panic recovery).
 	log.SetOutput(logFile)
 
-	var level slog.Level
-	switch strings.ToLower(inst.LogLevel) {
-	case "debug":
-		level = slog.LevelDebug
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
-		level = slog.LevelInfo
+	fileLevel := parseSlogLevel(inst.LogLevel, slog.LevelInfo)
+	consoleLevel := fileLevel
+	if opts.ConsoleLogLevel != "" {
+		consoleLevel = parseSlogLevel(opts.ConsoleLogLevel, slog.LevelWarn)
 	}
 
-	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: level})
+	fileHandler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{Level: fileLevel})
 	handlers := multiHandler{fileHandler}
-	if foreground {
-		handlers = append(handlers, &consoleHandler{level: level})
+	if opts.Foreground {
+		handlers = append(handlers, &consoleHandler{level: consoleLevel})
 	}
 	if os.Getenv("AXIOM_TOKEN") != "" {
-		ah, err := axiomslog.New(axiomslog.SetLevel(level))
+		ah, err := axiomslog.New(axiomslog.SetLevel(fileLevel))
 		if err != nil {
 			return "", nil, fmt.Errorf("create axiom handler: %w", err)
 		}
@@ -220,6 +222,19 @@ func setupLogging(inst env.ResolvedStore, dir env.Dir, volume string, foreground
 	slog.SetDefault(logger)
 	slog.Info("starting server", "s3", inst.URL(), "log", logPath)
 	return logPath, axiomClose, nil
+}
+
+func parseSlogLevel(raw string, fallback slog.Level) slog.Level {
+	switch strings.ToLower(raw) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return fallback
+	}
 }
 
 // listen creates the network listener based on options.

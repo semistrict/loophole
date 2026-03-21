@@ -21,6 +21,8 @@ type CreateParams struct {
 	Volume   string            `json:"volume"`
 	Size     uint64            `json:"size,omitempty,string"`
 	NoFormat bool              `json:"no_format,omitempty"`
+	FromDir  string            `json:"from_dir,omitempty"`
+	FromRaw  string            `json:"from_raw,omitempty"`
 	Type     string            `json:"type,omitempty"`
 	Parent   string            `json:"parent,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`

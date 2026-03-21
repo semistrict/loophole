@@ -58,6 +58,10 @@ func (b *Backend) driverFor() (*FUSEDriver, error) {
 	return b.driver, nil
 }
 
+func (b *Backend) SupportsFilesystem() bool {
+	return b.driver != nil
+}
+
 // VM returns the underlying Manager.
 func (b *Backend) VM() *storage.Manager { return b.vm }
 
@@ -70,6 +74,16 @@ func (b *Backend) Create(ctx context.Context, p storage.CreateParams) error {
 		volType = storage.VolumeTypeExt4
 	}
 	p.Type = volType
+
+	if p.FromDir != "" || p.FromRaw != "" {
+		if p.NoFormat {
+			return fmt.Errorf("imported create requires formatting")
+		}
+		if p.FromDir != "" {
+			return b.createExt4FromDir(ctx, p)
+		}
+		return b.createFromRawImage(p)
+	}
 
 	if p.NoFormat {
 		// Block-level import (e.g. device dd): just allocate storage, then
