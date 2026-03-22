@@ -26,6 +26,7 @@ package main
 import "C"
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"os"
 	"sync"
@@ -218,6 +219,51 @@ func loophole_checkpoint(id C.int64_t, out_id *C.char, out_id_cap C.uint32_t, ou
 	}
 	n := copy(unsafe.Slice((*byte)(unsafe.Pointer(out_id)), int(out_id_cap)), cpID)
 	*out_id_len = C.uint32_t(n)
+	return 0
+}
+
+// loophole_clone clones a volume from a checkpoint into a new volume.
+// The handle is used only to access the backing store; the clone operates
+// on the store, not the open volume.
+// Returns 0 on success, negative on error.
+//
+//export loophole_clone
+func loophole_clone(
+	id C.int64_t,
+	src_volume *C.char, src_volume_len C.uint32_t,
+	src_checkpoint *C.char, src_checkpoint_len C.uint32_t,
+	dest_volume *C.char, dest_volume_len C.uint32_t,
+) C.int32_t {
+	h := int64ToPtr(id)
+	goSrc := C.GoStringN(src_volume, C.int(src_volume_len))
+	goCp := C.GoStringN(src_checkpoint, C.int(src_checkpoint_len))
+	goDest := C.GoStringN(dest_volume, C.int(dest_volume_len))
+
+	ctx := context.Background()
+	store := h.manager.Store()
+	if err := storage.Clone(ctx, store, goSrc, goCp, goDest); err != nil {
+		slog.Error("loophole_clone", "src", goSrc, "checkpoint", goCp, "dest", goDest, "error", err)
+		return -2
+	}
+	return 0
+}
+
+// loophole_debug_info returns JSON-encoded debug information about the
+// volume. The JSON is written to out_buf (up to out_buf_cap bytes) and
+// the actual length is stored in *out_buf_len.
+// Returns 0 on success, negative on error.
+//
+//export loophole_debug_info
+func loophole_debug_info(id C.int64_t, out_buf *C.char, out_buf_cap C.uint32_t, out_buf_len *C.uint32_t) C.int32_t {
+	h := int64ToPtr(id)
+	info := h.vol.DebugInfo()
+	data, err := json.Marshal(info)
+	if err != nil {
+		slog.Error("loophole_debug_info: marshal", "error", err)
+		return -2
+	}
+	n := copy(unsafe.Slice((*byte)(unsafe.Pointer(out_buf)), int(out_buf_cap)), data)
+	*out_buf_len = C.uint32_t(n)
 	return 0
 }
 

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -12,8 +14,15 @@ import (
 
 var globalPID int
 var globalLogLevel string
+var globalVsock bool
 
 func main() {
+	// Auto-detect vsock mode when invoked as "loopholectl".
+	base := filepath.Base(os.Args[0])
+	if strings.TrimSuffix(base, ".exe") == "loopholectl" {
+		globalVsock = true
+	}
+
 	root := rootCmd()
 	if err := root.Execute(); err != nil {
 		var exitErr *exitCodeError
@@ -42,8 +51,13 @@ func rootCmd() *cobra.Command {
 
 	root.PersistentFlags().IntVar(&globalPID, "pid", 0, "Connect to an embedded loophole daemon in the process with this PID")
 	root.PersistentFlags().StringVar(&globalLogLevel, "log-level", "", "Set runtime log level (CLI default: warn; explicit flag or LOOPHOLE_LOG_LEVEL also affects daemon/file logging)")
+	root.PersistentFlags().BoolVar(&globalVsock, "vsock", globalVsock, "Use vsock transport (for use inside a Firecracker VM)")
 
-	addCommands(root)
+	if globalVsock {
+		addVsockCommands(root)
+	} else {
+		addCommands(root)
+	}
 
 	return root
 }
