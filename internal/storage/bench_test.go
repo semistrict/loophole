@@ -102,37 +102,9 @@ func BenchmarkS3Ops(b *testing.B) {
 	})
 
 	b.Run("Snapshot", func(b *testing.B) {
-		mem := blob.NewMemDriver()
-		store := blob.New(mem)
-		m := newBenchManager(b, store, defaultBenchConfig)
-
-		v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
-		if err != nil {
-			b.Fatal(err)
-		}
-
-		rng := rand.New(rand.NewPCG(1, 0))
-		page := make([]byte, PageSize)
-		for pg := uint64(0); pg < 256; pg++ {
-			randomPage(rng, page)
-			if err := v.Write(page, pg*PageSize); err != nil {
-				b.Fatal(err)
-			}
-		}
-		if err := v.Flush(); err != nil {
-			b.Fatal(err)
-		}
-
-		mem.ResetCounts()
-		for i := range b.N {
-			if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
-				b.Fatal(err)
-			}
-		}
-		reportS3Counts(b, mem, b.N)
-	})
-
-	b.Run("Snapshot100", func(b *testing.B) {
+		// Each iteration gets its own store to avoid checkpoint timestamp
+		// collisions (checkpoint IDs have second-level granularity and
+		// MemDriver is fast enough to exhaust the 60-attempt retry window).
 		for range b.N {
 			mem := blob.NewMemDriver()
 			store := blob.New(mem)
@@ -156,8 +128,43 @@ func BenchmarkS3Ops(b *testing.B) {
 			}
 
 			mem.ResetCounts()
+			if err := checkpointAndClone(b, v, "snap"); err != nil {
+				b.Fatal(err)
+			}
+			reportS3Counts(b, mem, 1)
+		}
+	})
+
+	b.Run("Snapshot100", func(b *testing.B) {
+		// Each iteration uses a separate volume per checkpoint to avoid
+		// timestamp collisions (100 > 60 retry limit).
+		for range b.N {
+			mem := blob.NewMemDriver()
+			store := blob.New(mem)
+			m := newBenchManager(b, store, defaultBenchConfig)
+
+			rng := rand.New(rand.NewPCG(1, 0))
+			page := make([]byte, PageSize)
+
 			for i := range 100 {
+				volName := fmt.Sprintf("vol-%d", i)
+				v, err := m.NewVolume(CreateParams{Volume: volName, Size: 256 * PageSize})
+				if err != nil {
+					b.Fatal(err)
+				}
+				for pg := uint64(0); pg < 256; pg++ {
+					randomPage(rng, page)
+					if err := v.Write(page, pg*PageSize); err != nil {
+						b.Fatal(err)
+					}
+				}
+				if err := v.Flush(); err != nil {
+					b.Fatal(err)
+				}
 				if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
+					b.Fatal(err)
+				}
+				if err := v.Close(); err != nil {
 					b.Fatal(err)
 				}
 			}
@@ -251,6 +258,13 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 	if err := v.Flush(); err != nil {
 		b.Fatal(err)
 	}
+	// Release the lease so fresh managers in the loop can acquire it.
+	if err := v.Close(); err != nil {
+		b.Fatal(err)
+	}
+	if err := m.Close(); err != nil {
+		b.Fatal(err)
+	}
 
 	readAddrs := [readPages]uint64{0, 256, 512, 768}
 	buf := make([]byte, PageSize)
@@ -268,6 +282,12 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 			if _, err := v2.Read(ctx, buf, addr*PageSize); err != nil {
 				b.Fatal(err)
 			}
+		}
+		if err := v2.Close(); err != nil {
+			b.Fatal(err)
+		}
+		if err := m2.Close(); err != nil {
+			b.Fatal(err)
 		}
 	}
 	b.StopTimer()

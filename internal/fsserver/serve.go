@@ -167,7 +167,7 @@ func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume stri
 		return nil, err
 	}
 
-	ln, err := listen(opts)
+	ln, err := listen(dir, opts)
 	if err != nil {
 		util.SafeClose(vm, "close manager after listen failure")
 		if closeErr := backend.Close(context.Background()); closeErr != nil {
@@ -180,6 +180,7 @@ func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume stri
 		inst:       inst,
 		dir:        dir,
 		socket:     opts.SocketPath,
+		pidSocket:  dir.PidSocket(),
 		backend:    backend,
 		ln:         ln,
 		logPath:    logPath,
@@ -247,8 +248,9 @@ func parseSlogLevel(raw string, fallback slog.Level) slog.Level {
 	}
 }
 
-// listen creates the network listener based on options.
-func listen(opts ServerOptions) (net.Listener, error) {
+// listen creates the network listener based on options. For Unix sockets it
+// opens a PID-named socket and symlinks the requested SocketPath to it.
+func listen(dir env.Dir, opts ServerOptions) (net.Listener, error) {
 	if strings.HasPrefix(opts.ListenAddr, "tcp://") {
 		addr := strings.TrimPrefix(opts.ListenAddr, "tcp://")
 		ln, err := net.Listen("tcp", addr)
@@ -259,25 +261,37 @@ func listen(opts ServerOptions) (net.Listener, error) {
 		return ln, nil
 	}
 
-	sockPath := opts.SocketPath
-	if sockPath == "" {
+	if opts.SocketPath == "" {
 		return nil, fmt.Errorf("socket path is required (use SocketPath option)")
 	}
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
+
+	pidSock := dir.PidSocket()
+	if err := os.MkdirAll(filepath.Dir(pidSock), 0o755); err != nil {
 		return nil, err
 	}
-	if err := os.Remove(sockPath); err != nil && !os.IsNotExist(err) {
-		slog.Warn("remove stale socket failed", "path", sockPath, "error", err)
-	}
-	ln, err := net.Listen("unix", sockPath)
+	_ = os.Remove(pidSock)
+
+	ln, err := net.Listen("unix", pidSock)
 	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", sockPath, err)
+		return nil, fmt.Errorf("listen %s: %w", pidSock, err)
 	}
 	if opts.SocketMode != 0 {
-		if err := os.Chmod(sockPath, opts.SocketMode); err != nil {
+		if err := os.Chmod(pidSock, opts.SocketMode); err != nil {
 			util.SafeClose(ln, "close listener after chmod failure")
 			return nil, fmt.Errorf("chmod socket: %w", err)
 		}
 	}
+
+	// Symlink volume socket → PID socket so clients can discover by volume name.
+	if err := os.MkdirAll(filepath.Dir(opts.SocketPath), 0o755); err != nil {
+		util.SafeClose(ln, "close listener after symlink dir failure")
+		return nil, err
+	}
+	_ = os.Remove(opts.SocketPath)
+	if err := os.Symlink(pidSock, opts.SocketPath); err != nil {
+		util.SafeClose(ln, "close listener after symlink failure")
+		return nil, fmt.Errorf("symlink %s -> %s: %w", opts.SocketPath, pidSock, err)
+	}
+
 	return ln, nil
 }

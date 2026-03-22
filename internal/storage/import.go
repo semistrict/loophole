@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,19 +20,28 @@ import (
 
 var maxImportWorkers = env.OptionInt("storage.maximportworkers", 64)
 
-// CreateVolumeFromImage reads a raw image from r, splits it into L1/L2 blocks,
+// CreateVolumeFromImage reads a raw image from f, splits it into L1/L2 blocks,
 // uploads them in parallel, and creates a volume ref pointing at the new layer.
-// The volume size is derived from the total bytes consumed from the reader.
-func CreateVolumeFromImage(ctx context.Context, store *blob.Store, name string, volType string, r io.Reader) error {
+// If the file is sparse, holes are skipped via SEEK_DATA/SEEK_HOLE.
+// The volume size is derived from the file size.
+func CreateVolumeFromImage(ctx context.Context, store *blob.Store, name string, volType string, f *os.File) error {
 	layerID := uuid.NewString()
 
 	var cfg Config
 	cfg.setDefaults()
 	compress := !cfg.DisableCompression
 
-	buf := make([]byte, BlockSize)
-	var totalBytes uint64
-	var blockAddr BlockIdx
+	iter, err := newSparseBlockIter(f, BlockSize)
+	if err != nil {
+		return fmt.Errorf("init sparse reader: %w", err)
+	}
+	totalBytes := uint64(iter.fileSize)
+
+	slog.Info("image import: starting",
+		"file_size", totalBytes,
+		"sparse", iter.sparse,
+	)
+
 	var seq atomic.Uint64
 	seq.Store(1)
 
@@ -42,87 +52,92 @@ func CreateVolumeFromImage(ctx context.Context, store *blob.Store, name string, 
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxImportWorkers)
 
+	buf := make([]byte, BlockSize)
+	var blocksRead, blocksSkipped uint64
+
 	for {
-		n, readErr := io.ReadFull(r, buf)
-		if n > 0 {
-			totalBytes += uint64(n)
-			data := buf[:n]
-
-			// Pad to page boundary if needed.
-			if rem := len(data) % PageSize; rem != 0 {
-				padded := make([]byte, len(data)+(PageSize-rem))
-				copy(padded, data)
-				data = padded
-			}
-
-			if !isZeroBlock(data) {
-				// Collect non-zero pages.
-				var pages []blockPage
-				for i := 0; i < len(data)/PageSize; i++ {
-					page := data[i*PageSize : (i+1)*PageSize]
-					if !isZeroBlock(page) {
-						pages = append(pages, blockPage{
-							offset: uint16(i),
-							data:   page,
-						})
-					}
-				}
-
-				if len(pages) > 0 {
-					// Capture loop variables for the goroutine.
-					capturedAddr := blockAddr
-					capturedPages := pages
-					capturedSeq := seq.Add(1) - 1
-
-					// Need a fresh copy of data since buf is reused.
-					ownedPages := make([]blockPage, len(capturedPages))
-					for i, p := range capturedPages {
-						owned := make([]byte, PageSize)
-						copy(owned, p.data)
-						ownedPages[i] = blockPage{offset: p.offset, data: owned}
-					}
-
-					promote := len(ownedPages) >= L1PromoteThreshold
-					level := "l1"
-					if promote {
-						level = "l2"
-					}
-
-					g.Go(func() error {
-						_, _, err := buildAndUploadBlock(gctx, store, layerID, level, capturedSeq,
-							capturedAddr, nil, ownedPages, compress)
-						if err != nil {
-							return err
-						}
-
-						br := blockRange{
-							Start:         capturedAddr,
-							End:           capturedAddr + 1,
-							Layer:         layerID,
-							WriteLeaseSeq: capturedSeq,
-						}
-
-						mu.Lock()
-						if promote {
-							l2Ranges = append(l2Ranges, br)
-						} else {
-							l1Ranges = append(l1Ranges, br)
-						}
-						mu.Unlock()
-						return nil
-					})
-				}
-			}
-		}
-
-		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+		blockAddr, n, readErr := iter.next(buf)
+		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
 			return fmt.Errorf("read image: %w", readErr)
 		}
 
-		blockAddr++
+		data := buf[:n]
+
+		// Pad to page boundary if needed.
+		if rem := len(data) % PageSize; rem != 0 {
+			padded := make([]byte, len(data)+(PageSize-rem))
+			copy(padded, data)
+			data = padded
+		}
+
+		blocksRead++
+
+		if isZeroBlock(data) {
+			blocksSkipped++
+			continue
+		}
+
+		// Collect non-zero pages.
+		var pages []blockPage
+		for i := 0; i < len(data)/PageSize; i++ {
+			page := data[i*PageSize : (i+1)*PageSize]
+			if !isZeroBlock(page) {
+				pages = append(pages, blockPage{
+					offset: uint16(i),
+					data:   page,
+				})
+			}
+		}
+
+		if len(pages) == 0 {
+			blocksSkipped++
+			continue
+		}
+
+		// Capture loop variables for the goroutine.
+		capturedAddr := blockAddr
+		capturedSeq := seq.Add(1) - 1
+
+		// Need a fresh copy of data since buf is reused.
+		ownedPages := make([]blockPage, len(pages))
+		for i, p := range pages {
+			owned := make([]byte, PageSize)
+			copy(owned, p.data)
+			ownedPages[i] = blockPage{offset: p.offset, data: owned}
+		}
+
+		promote := len(ownedPages) >= L1PromoteThreshold
+		level := "l1"
+		if promote {
+			level = "l2"
+		}
+
+		g.Go(func() error {
+			_, _, err := buildAndUploadBlock(gctx, store, layerID, level, capturedSeq,
+				capturedAddr, nil, ownedPages, compress)
+			if err != nil {
+				return err
+			}
+
+			br := blockRange{
+				Start:         capturedAddr,
+				End:           capturedAddr + 1,
+				Layer:         layerID,
+				WriteLeaseSeq: capturedSeq,
+			}
+
+			mu.Lock()
+			if promote {
+				l2Ranges = append(l2Ranges, br)
+			} else {
+				l1Ranges = append(l1Ranges, br)
+			}
+			mu.Unlock()
+			return nil
+		})
 	}
 
 	if err := g.Wait(); err != nil {
@@ -152,6 +167,9 @@ func CreateVolumeFromImage(ctx context.Context, store *blob.Store, name string, 
 		"l1_ranges", len(l1Ranges),
 		"l2_ranges", len(l2Ranges),
 		"total_bytes", totalBytes,
+		"blocks_read", blocksRead,
+		"blocks_skipped", blocksSkipped,
+		"sparse", iter.sparse,
 	)
 
 	// Write volume ref.
@@ -164,6 +182,13 @@ func CreateVolumeFromImage(ctx context.Context, store *blob.Store, name string, 
 	if err := putVolumeRefNew(ctx, volRefs, name, ref); err != nil {
 		return err
 	}
+
+	// Create an initial checkpoint so the volume can be cloned immediately.
+	cpID, err := putCheckpoint(ctx, volRefs, name, layerID)
+	if err != nil {
+		return fmt.Errorf("create initial checkpoint: %w", err)
+	}
+	slog.Info("image import: checkpoint created", "volume", name, "checkpoint", cpID)
 
 	return nil
 }

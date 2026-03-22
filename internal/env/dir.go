@@ -40,6 +40,11 @@ func (d Dir) VolumeSocket(volsetID, volume string) string {
 	return filepath.Join(string(d), "volumes", h+".sock")
 }
 
+// PidSocket returns the Unix socket path for the current process.
+func (d Dir) PidSocket() string {
+	return filepath.Join(string(d), "pids", fmt.Sprintf("%d.sock", os.Getpid()))
+}
+
 // Fuse returns the internal FUSE mount directory for the given store.
 func (d Dir) Fuse(volsetID string) string {
 	return filepath.Join(string(d), "fuse", volsetID)

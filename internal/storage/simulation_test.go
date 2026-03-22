@@ -78,6 +78,8 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 	rng := mrand.New(mrand.NewPCG(seed, 0))
 
 	store := NewSimObjectStore(rng, config.S3Faults)
+	_, _, err := FormatVolumeSet(t.Context(), store.Store())
+	require.NoError(t, err)
 
 	sim := &Simulation{
 		t:                t,

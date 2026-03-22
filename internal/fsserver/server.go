@@ -30,7 +30,8 @@ import (
 type server struct {
 	inst      env.ResolvedStore
 	dir       env.Dir
-	socket    string
+	socket    string // volume socket path (symlink to pidSocket)
+	pidSocket string // actual PID-named socket
 	backend   *Backend
 	diskCache storage.PageCache
 	ln        net.Listener
@@ -313,6 +314,9 @@ func (d *server) cleanup(ctx context.Context) {
 	}
 	if d.socket != "" {
 		_ = os.Remove(d.socket)
+	}
+	if d.pidSocket != "" {
+		_ = os.Remove(d.pidSocket)
 	}
 	if d.axiomClose != nil {
 		d.axiomClose()

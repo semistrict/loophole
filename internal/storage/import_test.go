@@ -2,11 +2,23 @@ package storage
 
 import (
 	"bytes"
+	"os"
 	"testing"
 
 	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
+
+func writeTempFile(t *testing.T, data []byte) *os.File {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "import-test-*")
+	require.NoError(t, err)
+	_, err = f.Write(data)
+	require.NoError(t, err)
+	_, err = f.Seek(0, 0)
+	require.NoError(t, err)
+	return f
+}
 
 func TestCreateVolumeFromImage(t *testing.T) {
 	ctx := t.Context()
@@ -18,7 +30,9 @@ func TestCreateVolumeFromImage(t *testing.T) {
 	imageData := bytes.Repeat([]byte("abcd"), BlockSize/4)
 	imageData = append(imageData, bytes.Repeat([]byte("wxyz"), BlockSize/4)...)
 
-	require.NoError(t, CreateVolumeFromImage(ctx, store, "seeded", VolumeTypeExt4, bytes.NewReader(imageData)))
+	f := writeTempFile(t, imageData)
+	defer f.Close()
+	require.NoError(t, CreateVolumeFromImage(ctx, store, "seeded", VolumeTypeExt4, f))
 
 	// Open the volume and read back.
 	m := &Manager{BlobStore: store}
@@ -44,7 +58,9 @@ func TestCreateVolumeFromImageSparse(t *testing.T) {
 		imageData[i] = byte((i * 7) % 251)
 	}
 
-	require.NoError(t, CreateVolumeFromImage(ctx, store, "sparse", VolumeTypeExt4, bytes.NewReader(imageData)))
+	f := writeTempFile(t, imageData)
+	defer f.Close()
+	require.NoError(t, CreateVolumeFromImage(ctx, store, "sparse", VolumeTypeExt4, f))
 
 	m := &Manager{BlobStore: store}
 	t.Cleanup(func() { require.NoError(t, m.Close()) })
@@ -72,7 +88,9 @@ func TestCreateVolumeFromImagePadsTail(t *testing.T) {
 	// Image not aligned to PageSize.
 	imageData := bytes.Repeat([]byte("z"), PageSize+123)
 
-	require.NoError(t, CreateVolumeFromImage(ctx, store, "tail", VolumeTypeExt4, bytes.NewReader(imageData)))
+	f := writeTempFile(t, imageData)
+	defer f.Close()
+	require.NoError(t, CreateVolumeFromImage(ctx, store, "tail", VolumeTypeExt4, f))
 
 	m := &Manager{BlobStore: store}
 	t.Cleanup(func() { require.NoError(t, m.Close()) })
@@ -98,8 +116,13 @@ func TestCreateVolumeFromImageDuplicateName(t *testing.T) {
 
 	data := bytes.Repeat([]byte{0xAA}, PageSize)
 
-	require.NoError(t, CreateVolumeFromImage(ctx, store, "dup", VolumeTypeExt4, bytes.NewReader(data)))
-	err = CreateVolumeFromImage(ctx, store, "dup", VolumeTypeExt4, bytes.NewReader(data))
+	f1 := writeTempFile(t, data)
+	defer f1.Close()
+	require.NoError(t, CreateVolumeFromImage(ctx, store, "dup", VolumeTypeExt4, f1))
+
+	f2 := writeTempFile(t, data)
+	defer f2.Close()
+	err = CreateVolumeFromImage(ctx, store, "dup", VolumeTypeExt4, f2)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "already exists")
 }

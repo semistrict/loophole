@@ -21,6 +21,7 @@ import (
 	"github.com/semistrict/loophole/internal/client"
 	"github.com/semistrict/loophole/internal/env"
 	"github.com/semistrict/loophole/internal/fsserver"
+	"github.com/semistrict/loophole/internal/httputil"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
 )
@@ -166,6 +167,21 @@ func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw s
 		return err
 	}
 
+	dir := env.DefaultDir()
+
+	// Start observability server so /metrics and pprof are available during import.
+	obs, err := httputil.StartObsServer(dir)
+	if err != nil {
+		return fmt.Errorf("start observability server: %w", err)
+	}
+	defer obs.Close()
+
+	// Symlink volume socket → PID socket for discovery.
+	volSock := dir.VolumeSocket(inst.VolsetID, volumeName)
+	if err := obs.Symlink(volSock); err != nil {
+		return fmt.Errorf("create volume socket symlink: %w", err)
+	}
+
 	volType := storage.VolumeTypeExt4
 
 	var imagePath string
@@ -214,7 +230,6 @@ func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw s
 
 	// If mount was requested, start the daemon to mount the already-created volume.
 	if mountpoint != "" {
-		dir := env.DefaultDir()
 		consoleLogLevel := globalLogLevel
 		if consoleLogLevel == "" {
 			consoleLogLevel = os.Getenv("LOOPHOLE_LOG_LEVEL")
@@ -222,11 +237,10 @@ func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw s
 		if consoleLogLevel == "" {
 			consoleLogLevel = "warn"
 		}
-		socketPath := dir.VolumeSocket(inst.VolsetID, volumeName)
 		opts := fsserver.ServerOptions{
 			Foreground:      true,
 			ConsoleLogLevel: consoleLogLevel,
-			SocketPath:      socketPath,
+			SocketPath:      volSock,
 		}
 		return fsserver.MountFSAndServe(ctx, inst, dir, volumeName, mountpoint, opts)
 	}

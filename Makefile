@@ -1,4 +1,4 @@
-.PHONY: build loophole install check fmt test clean deps e2e e2e-requirenbd e2e-nonbd bench-fuse fly-bin deadcode
+.PHONY: build loophole install check fmt test clean deps e2e e2e-requirenbd e2e-nonbd bench bench-fuse fly-bin deadcode
 
 .DEFAULT_GOAL := loophole
 
@@ -66,6 +66,12 @@ e2e-requirenbd:
 # Run e2e tests with NBD explicitly disabled, forcing the FUSE path.
 e2e-nonbd:
 	LOOPHOLE_OPTIONS=nonbd $(MAKE) e2e RUN='$(RUN)'
+
+# Run Go benchmarks and save results to bench-results/.
+# Usage: make bench
+#        make bench COUNT=5   (for benchstat: run 5 times)
+bench:
+	uv run --python 3.14 scripts/bench.py $(or $(COUNT),1)
 
 # Run FUSE benchmarks.
 # Usage: make bench-fuse
