@@ -5,13 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // TestDeepCloneChainReadCost creates a chain of 1000 snapshots and verifies
 // that reading from the leaf doesn't require O(n) S3 gets.
 func TestDeepCloneChainReadCost(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  time.Hour,
@@ -66,14 +67,13 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 
 	// Log total S3 ops for chain construction + open.
 	if debugCountersEnabled() {
-		t.Logf("S3 ops for chain construction + open: Get=%d PutCAS=%d PutReader=%d PutIfNX=%d List=%d Delete=%d",
-			store.Count(objstore.OpGet), store.Count(objstore.OpPutBytesCAS),
-			store.Count(objstore.OpPutReader), store.Count(objstore.OpPutIfNotExists),
-			store.Count(objstore.OpListKeys), store.Count(objstore.OpDeleteObject))
+		t.Logf("S3 ops for chain construction + open: Get=%d Put=%d List=%d Delete=%d",
+			mem.Count(blob.OpGet), mem.Count(blob.OpPut),
+			mem.Count(blob.OpList), mem.Count(blob.OpDelete))
 	}
 
 	// Reset S3 counters, then read.
-	store.ResetCounts()
+	mem.ResetCounts()
 
 	buf := make([]byte, PageSize)
 	if _, err := leaf.Read(ctx, buf, 0); err != nil {
@@ -83,7 +83,7 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 		t.Fatalf("expected 0xDEAD, got 0x%02X%02X", buf[0], buf[1])
 	}
 
-	gets := store.Count(objstore.OpGet)
+	gets := mem.Count(blob.OpGet)
 	if debugCountersEnabled() {
 		t.Logf("S3 gets for one read across %d-deep chain: %d", chainLen, gets)
 	}
@@ -92,11 +92,11 @@ func TestDeepCloneChainReadCost(t *testing.T) {
 	}
 
 	// Second read of the same page should hit layer caches — zero S3 gets.
-	store.ResetCounts()
+	mem.ResetCounts()
 	if _, err := leaf.Read(ctx, buf, 0); err != nil {
 		t.Fatal(err)
 	}
-	gets2 := store.Count(objstore.OpGet)
+	gets2 := mem.Count(blob.OpGet)
 	if debugCountersEnabled() {
 		t.Logf("S3 gets for second read: %d", gets2)
 	}

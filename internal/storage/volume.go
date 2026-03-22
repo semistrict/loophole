@@ -10,7 +10,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
+	"github.com/semistrict/loophole/internal/metrics"
 )
 
 type Volume struct {
@@ -28,7 +29,7 @@ type Volume struct {
 
 	directRefs      int
 	manager         *Manager
-	lease           *objstore.LeaseSession
+	lease           *blob.LeaseSession
 	leaseCloseOnce  sync.Once
 	onRemoteRelease func(ctx context.Context)
 }
@@ -43,7 +44,7 @@ func newVolume(name string, size uint64, volType string, ly *layer, m *Manager) 
 		volType: volType,
 		layer:   ly,
 		manager: m,
-		lease:   objstore.NewLeaseSession(m.store.At("leases")),
+		lease:   blob.NewLeaseSession(m.store.At("leases")),
 	}
 	v.lease.Handle("release", v.handleLeaseRelease)
 	v.refs.Store(1)
@@ -57,6 +58,7 @@ func (v *Volume) ReadOnly() bool { return v.readOnly }
 func (v *Volume) VolumeType() string { return v.volType }
 
 func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, error) {
+	metrics.ReadSize.Observe(float64(len(buf)))
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	return v.layer.Read(ctx, buf, offset)
@@ -67,6 +69,7 @@ func (v *Volume) Read(ctx context.Context, buf []byte, offset uint64) (int, erro
 // function MUST be called when the caller is done with all slices
 // (e.g. after writev completes). The caller must not modify the slices.
 func (v *Volume) ReadPages(ctx context.Context, offset uint64, length int) ([][]byte, func(), error) {
+	metrics.ReadSize.Observe(float64(length))
 	v.mu.RLock()
 	g := v.manager.safepoint.Enter()
 	slices, err := v.layer.ReadPages(ctx, g, offset, length)
@@ -93,6 +96,7 @@ func (v *Volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, erro
 }
 
 func (v *Volume) Write(data []byte, offset uint64) error {
+	metrics.WriteSize.Observe(float64(len(data)))
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.closing {
@@ -108,6 +112,7 @@ func (v *Volume) Write(data []byte, offset uint64) error {
 }
 
 func (v *Volume) PunchHole(offset, length uint64) error {
+	metrics.PunchHoleSize.Observe(float64(length))
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.closing {
@@ -361,7 +366,7 @@ func (v *Volume) acquireLease(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	var seq uint64
-	err = objstore.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
+	err = blob.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
 		if err := v.lease.CheckAvailable(ctx, ref.LeaseToken); err != nil {
 			return fmt.Errorf("volume %s: %w", v.name, err)
 		}
@@ -379,13 +384,13 @@ func (v *Volume) releaseLease(ctx context.Context) {
 		slog.Warn("release volume lease", "volume", v.name, "error", err)
 		return
 	}
-	if err := objstore.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
+	if err := blob.ModifyJSON[volumeRef](ctx, v.manager.volRefs, key, func(ref *volumeRef) error {
 		if ref.LeaseToken == v.lease.Token() {
 			ref.LeaseToken = ""
 		}
 		return nil
 	}); err != nil {
-		if errors.Is(err, objstore.ErrNotFound) {
+		if errors.Is(err, blob.ErrNotFound) {
 			return
 		}
 		slog.Warn("release volume lease", "volume", v.name, "error", err)
@@ -456,6 +461,9 @@ func (v *Volume) DisableDirectWriteback() error {
 }
 
 func (v *Volume) WritePagesDirect(pages []DirectPage) error {
+	for _, p := range pages {
+		metrics.WriteSize.Observe(float64(len(p.Data)))
+	}
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.closing {

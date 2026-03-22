@@ -4,13 +4,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestManagerRejectsInvalidVolumeNames(t *testing.T) {
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	_, err := m.NewVolume(CreateParams{Volume: "bad..name"})
 	require.Error(t, err)
@@ -18,7 +18,7 @@ func TestManagerRejectsInvalidVolumeNames(t *testing.T) {
 }
 
 func TestManagerRejectsInvalidCheckpointIDs(t *testing.T) {
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	err := Clone(t.Context(), m.Store(), "sandbox-1", "../evil", "clone-1")
 	require.Error(t, err)
@@ -26,7 +26,7 @@ func TestManagerRejectsInvalidCheckpointIDs(t *testing.T) {
 }
 
 func TestCloneRequiresCheckpointID(t *testing.T) {
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	err := Clone(t.Context(), m.Store(), "sandbox-1", "", "clone-1")
 	require.Error(t, err)

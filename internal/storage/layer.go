@@ -7,13 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/semistrict/loophole/internal/blob"
+	"github.com/semistrict/loophole/internal/env"
 	"github.com/semistrict/loophole/internal/metrics"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"golang.org/x/sync/errgroup"
 )
@@ -22,8 +24,8 @@ import (
 // Data flows: active dirty batch → pending dirty batch → L1 → L2 → zeros.
 type layer struct {
 	id         string
-	store      objstore.ObjectStore // global root (for reading blobs by full key)
-	layerStore objstore.ObjectStore // rooted at layers/<id>/ (for index.json)
+	store      *blob.Store // global root (for reading blobs by full key)
+	layerStore *blob.Store // rooted at layers/<id>/ (for index.json)
 
 	config    Config
 	diskCache PageCache
@@ -79,14 +81,15 @@ type layer struct {
 	// The drain worker always exists for writable layers. FlushInterval only
 	// controls whether the worker proactively rotates a stale active batch; it
 	// does not control whether draining exists.
-	flushStop   chan struct{}
-	retryStop   chan struct{}
-	flushDone   chan struct{}
-	flushNotify chan struct{}
-	writeNotify chan struct{} // poked on every write; triggers early flush if stale
-	flushCancel context.CancelFunc
-	lastFlushAt atomic.Int64 // UnixMilli of last successful flush
-	closeOnce   sync.Once
+	flushStop         chan struct{}
+	retryStop         chan struct{}
+	flushDone         chan struct{}
+	flushNotify       chan struct{}
+	writeNotify       chan struct{} // poked on every write; triggers early flush if stale
+	flushCancel       context.CancelFunc
+	lastFlushAt       atomic.Int64 // UnixMilli of last successful flush
+	closeOnce         sync.Once
+	directL2DebugOnce atomic.Bool // log first canDirectL2 failure only once
 }
 
 var errDirectL2Unavailable = errors.New("direct l2 unavailable")
@@ -299,7 +302,7 @@ func (ly *layer) waitForWriteCapacityLocked(active *dirtyBatch) {
 }
 
 type layerParams struct {
-	store     objstore.ObjectStore
+	store     *blob.Store
 	id        string
 	config    Config
 	diskCache PageCache
@@ -372,7 +375,7 @@ func initLayerFromIndex(p layerParams, idx layerIndex) (*layer, error) {
 }
 
 func (ly *layer) loadIndex(ctx context.Context) error {
-	idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	idx, _, err := blob.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		// No index.json yet — start fresh.
 		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1, DirectL2Eligible: true}
@@ -393,7 +396,7 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 // refresh re-reads index.json from S3 to pick up changes written by
 // another writer. Used for read-only "follow" mode.
 func (ly *layer) refresh(ctx context.Context) error {
-	idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+	idx, _, err := blob.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		return fmt.Errorf("refresh index: %w", err)
 	}
@@ -441,7 +444,7 @@ func (ly *layer) saveIndexLocked(ctx context.Context) error {
 		return nil
 	}
 
-	_, etag, err := objstore.ReadBytes(ctx, ly.layerStore, "index.json")
+	_, etag, err := blob.ReadBytes(ctx, ly.layerStore, "index.json")
 	if err != nil {
 		return fmt.Errorf("read index etag: %w", err)
 	}
@@ -783,10 +786,21 @@ func (ly *layer) canDirectL2() bool {
 }
 
 func (ly *layer) canDirectL2Locked() bool {
-	return ly.index.DirectL2Eligible &&
+	ok := ly.index.DirectL2Eligible &&
 		ly.l1Map.Len() == 0 &&
 		ly.pending == nil &&
 		(ly.active == nil || ly.active.isEmpty())
+	if !ok && ly.directL2DebugOnce.CompareAndSwap(false, true) {
+		slog.Warn("canDirectL2 first failure",
+			"layer", ly.id,
+			"eligible", ly.index.DirectL2Eligible,
+			"l1_len", ly.l1Map.Len(),
+			"has_pending", ly.pending != nil,
+			"active_nil", ly.active == nil,
+			"active_empty", ly.active == nil || ly.active.isEmpty(),
+		)
+	}
+	return ok
 }
 
 func (ly *layer) disableDirectL2() {
@@ -796,7 +810,21 @@ func (ly *layer) disableDirectL2() {
 }
 
 func (ly *layer) disableDirectL2Locked() {
+	if ly.index.DirectL2Eligible {
+		slog.Warn("disabling DirectL2Eligible",
+			"layer", ly.id,
+			"caller", callerName(2),
+		)
+	}
 	ly.index.DirectL2Eligible = false
+}
+
+func callerName(skip int) string {
+	pc, _, _, ok := runtime.Caller(skip)
+	if !ok {
+		return "unknown"
+	}
+	return runtime.FuncForPC(pc).Name()
 }
 
 // writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,
@@ -804,6 +832,13 @@ func (ly *layer) disableDirectL2Locked() {
 // offset is block-aligned and len(data) == BlockSize.
 func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	blockIdx := BlockIdx(offset / BlockSize)
+
+	// Skip all-zero blocks. This is safe because writeBlockDirectL2 is only
+	// reachable when DirectL2Eligible is true, which means this is a fresh
+	// layer with no parent — unwritten regions read back as zeros.
+	if isZeroBlock(data) {
+		return nil
+	}
 
 	// Split into pages.
 	pages := make([]blockPage, BlockPages)
@@ -824,6 +859,13 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 	for attempt := 0; ; attempt++ {
 		ly.mu.Lock()
 		if !ly.canDirectL2Locked() {
+			slog.Warn("direct L2 unavailable",
+				"block", blockIdx,
+				"eligible", ly.index.DirectL2Eligible,
+				"l1_len", ly.l1Map.Len(),
+				"has_pending", ly.pending != nil,
+				"active_empty", ly.active == nil || ly.active.isEmpty(),
+			)
 			ly.mu.Unlock()
 			return errDirectL2Unavailable
 		}
@@ -849,6 +891,13 @@ func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
 				ly.sleepTransientRetry("save index after direct l2 block", saveAttempt, err)
 				ly.mu.Lock()
 				if !ly.canDirectL2Locked() {
+					slog.Warn("direct L2 unavailable after index save retry",
+						"block", blockIdx,
+						"eligible", ly.index.DirectL2Eligible,
+						"l1_len", ly.l1Map.Len(),
+						"has_pending", ly.pending != nil,
+						"active_empty", ly.active == nil || ly.active.isEmpty(),
+					)
 					ly.mu.Unlock()
 					return errDirectL2Unavailable
 				}
@@ -1109,7 +1158,7 @@ type directBlockResult struct {
 // flushDirtyBatchDirectLocked writes a single dirty batch directly to
 // L1/L2 blocks. Pages are merged into existing blocks via read-modify-write.
 // The caller is responsible for cleanup of mt on success.
-const maxFlushWorkers = 8
+var maxFlushWorkers = env.OptionInt("storage.maxflushworkers", 8)
 
 func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) error {
 	flushCycleStart := time.Now()
@@ -1300,6 +1349,14 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 
 			metrics.FlushDirectBlocksWritten.Inc()
 			metrics.FlushBytes.Add(float64(len(blockData)))
+			metrics.FlushBlockCompressedSize.Observe(float64(len(blockData)))
+			uncompressedPages := len(existing)
+			for _, p := range newPages {
+				if p.data != nil {
+					uncompressedPages++
+				}
+			}
+			metrics.FlushBlockUncompressedSize.Observe(float64(uncompressedPages) * PageSize)
 			if promote {
 				metrics.FlushDirectL2Promotions.Inc()
 			}
@@ -1328,6 +1385,8 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 	if err := g.Wait(); err != nil {
 		return err
 	}
+
+	metrics.FlushBlocksPerCycle.Observe(float64(len(results)))
 
 	// Phase 3 — Commit: update maps, save index.
 	ly.mu.Lock()
@@ -1770,7 +1829,7 @@ func (ly *layer) shouldRetryAfterLayoutError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, objstore.ErrNotFound) {
+	if errors.Is(err, blob.ErrNotFound) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())
@@ -1787,7 +1846,7 @@ func (ly *layer) shouldRetryAfterLayoutError(err error) bool {
 func (ly *layer) waitRefreshForLayoutChange(ctx context.Context, prevGen uint64) (bool, error) {
 	deadline := time.Now().Add(200 * time.Millisecond)
 	for {
-		idx, _, err := objstore.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
+		idx, _, err := blob.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 		if err == nil && idx.LayoutGen != prevGen {
 			if err := ly.refresh(ctx); err != nil {
 				return false, err

@@ -19,9 +19,9 @@ import (
 	"github.com/google/uuid"
 	dto "github.com/prometheus/client_model/go"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/env"
 	"github.com/semistrict/loophole/internal/metrics"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/storage"
 )
 
@@ -74,7 +74,7 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
-	store, err := objstore.Open(context.Background(), testInst)
+	store, err := blob.Open(context.Background(), testInst)
 	if err != nil {
 		log.Fatal(err)
 	}

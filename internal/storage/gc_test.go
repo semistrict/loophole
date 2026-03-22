@@ -3,14 +3,14 @@ package storage
 import (
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestGarbageCollect(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	// Create a volume and write some data so a layer exists.
@@ -54,7 +54,7 @@ func TestGarbageCollect(t *testing.T) {
 
 func TestGarbageCollectPreservesReachable(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	// Create a volume — its layer should be reachable.
@@ -84,7 +84,7 @@ func TestGarbageCollectPreservesReachable(t *testing.T) {
 
 func TestGarbageCollectWithCheckpoints(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	// Create a volume, checkpoint it, then delete the volume.
@@ -102,7 +102,7 @@ func TestGarbageCollectWithCheckpoints(t *testing.T) {
 	require.NoError(t, checkpointAndClone(t, v, "cp-clone"))
 
 	// Close and delete the clone but keep the original volume.
-	m2 := &Manager{ObjectStore: store, CacheDir: m.CacheDir, config: m.config, fs: m.fs}
+	m2 := &Manager{BlobStore: store, CacheDir: m.CacheDir, config: m.config, fs: m.fs}
 	t.Cleanup(func() { _ = m2.Close() })
 	require.NoError(t, DeleteVolume(ctx, m2.Store(), "cp-clone"))
 

@@ -10,7 +10,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // GCResult contains the results of a garbage collection run.
@@ -31,7 +31,7 @@ const DefaultGCConcurrency = 128
 //
 // concurrency controls the maximum number of parallel goroutines for I/O.
 // If <= 0, DefaultGCConcurrency is used.
-func GarbageCollect(ctx context.Context, store objstore.ObjectStore, dryRun bool, concurrency int) (GCResult, error) {
+func GarbageCollect(ctx context.Context, store *blob.Store, dryRun bool, concurrency int) (GCResult, error) {
 	if concurrency <= 0 {
 		concurrency = DefaultGCConcurrency
 	}
@@ -52,7 +52,7 @@ func GarbageCollect(ctx context.Context, store objstore.ObjectStore, dryRun bool
 
 	for _, name := range volumes {
 		g.Go(func() error {
-			ref, _, err := objstore.ReadJSON[volumeRef](gctx, volRefs, name+"/index.json")
+			ref, _, err := blob.ReadJSON[volumeRef](gctx, volRefs, name+"/index.json")
 			if err != nil {
 				slog.Warn("gc: skip volume ref", "volume", name, "error", err)
 				return nil
@@ -80,7 +80,7 @@ func GarbageCollect(ctx context.Context, store objstore.ObjectStore, dryRun bool
 				if !strings.HasSuffix(obj.Key, "/index.json") {
 					continue
 				}
-				cpRef, _, err := objstore.ReadJSON[checkpointRef](gctx, volRefs, obj.Key)
+				cpRef, _, err := blob.ReadJSON[checkpointRef](gctx, volRefs, obj.Key)
 				if err != nil {
 					slog.Warn("gc: skip checkpoint ref", "key", obj.Key, "error", err)
 					continue
@@ -118,7 +118,7 @@ func GarbageCollect(ctx context.Context, store objstore.ObjectStore, dryRun bool
 		g.SetLimit(concurrency)
 		for i, id := range queue {
 			g.Go(func() error {
-				idx, _, err := objstore.ReadJSON[layerIndex](gctx, store.At("layers/"+id), "index.json")
+				idx, _, err := blob.ReadJSON[layerIndex](gctx, store.At("layers/"+id), "index.json")
 				if err != nil {
 					slog.Warn("gc: read layer index", "layer", id, "error", err)
 					return nil

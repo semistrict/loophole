@@ -13,7 +13,7 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 func s3testCmd() *cobra.Command {
@@ -29,7 +29,7 @@ func s3testCmd() *cobra.Command {
 				return err
 			}
 			ctx := cmd.Context()
-			store, err := objstore.Open(ctx, inst)
+			store, err := blob.Open(ctx, inst)
 			if err != nil {
 				return err
 			}
@@ -75,7 +75,7 @@ func s3testCmd() *cobra.Command {
 	return cmd
 }
 
-func benchSize(ctx context.Context, store objstore.ObjectStore, label string, size, count int) error {
+func benchSize(ctx context.Context, store *blob.Store, label string, size, count int) error {
 	data := make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
 		return err
@@ -129,7 +129,7 @@ func benchSize(ctx context.Context, store objstore.ObjectStore, label string, si
 	return nil
 }
 
-func benchParallelPut(ctx context.Context, store objstore.ObjectStore, size, workers, totalPuts int) error {
+func benchParallelPut(ctx context.Context, store *blob.Store, size, workers, totalPuts int) error {
 	data := make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
 		return err

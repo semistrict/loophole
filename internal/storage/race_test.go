@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,7 +18,7 @@ import (
 // overwrites the newer write with stale data.
 func TestWritePageSeqReuseOnRetry(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	// Use a tiny dirty batch (2 pages) so it fills up quickly.
 	cfg := Config{
@@ -119,7 +119,7 @@ func TestBlockRangeMapConcurrentRace(t *testing.T) {
 // pointers and durable layout never produces a torn read view.
 func TestSnapshotLayersAtomicity(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -173,7 +173,7 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 // reads fall through to zeros for data that was already written.
 func TestReadDuringFlushReturnsZeros(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -234,7 +234,7 @@ func TestReadDuringFlushReturnsZeros(t *testing.T) {
 // page buffers.
 func TestReadAfterFlushWithFreshSnapshot(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,

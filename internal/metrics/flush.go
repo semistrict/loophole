@@ -103,4 +103,28 @@ var (
 		Name:      "superseded_deletes_total",
 		Help:      "Superseded block blobs deleted after flush commit.",
 	}))
+
+	FlushBlockCompressedSize = reg(prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "block_compressed_bytes",
+		Help:      "Compressed size of each flushed block.",
+		Buckets:   prometheus.ExponentialBuckets(256, 4, 12), // 256B .. ~4MB
+	}))
+
+	FlushBlockUncompressedSize = reg(prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "block_uncompressed_bytes",
+		Help:      "Uncompressed page data size of each flushed block (before compression).",
+		Buckets:   prometheus.ExponentialBuckets(4096, 4, 8), // 4KB .. ~4MB
+	}))
+
+	FlushBlocksPerCycle = reg(prometheus.NewHistogram(prometheus.HistogramOpts{
+		Namespace: "loophole",
+		Subsystem: "flush",
+		Name:      "blocks_per_cycle",
+		Help:      "Number of block regions uploaded per flush cycle.",
+		Buckets:   prometheus.ExponentialBuckets(1, 2, 14), // 1 .. 8192
+	}))
 )

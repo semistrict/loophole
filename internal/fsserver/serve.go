@@ -12,8 +12,8 @@ import (
 
 	axiomslog "github.com/axiomhq/axiom-go/adapters/slog"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/env"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
 )
@@ -37,25 +37,38 @@ func CreateFSAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, 
 	if mountpoint == "" {
 		mountpoint = p.Volume
 	}
+
+	// Start the HTTP server early so /metrics and /status are available during create.
+	serveCtx, stop := context.WithCancel(ctx)
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- s.serve(serveCtx) }()
+
+	shutdownAndReturn := func(err error) error {
+		stop()
+		<-serveErr
+		s.cleanup(context.Background())
+		return err
+	}
+
 	if err := s.backend.Create(ctx, p); err != nil {
-		s.cleanup(context.Background())
-		return err
+		return shutdownAndReturn(err)
 	}
+
 	if !s.backend.SupportsFilesystem() {
-		s.cleanup(context.Background())
 		if p.FromDir != "" || p.FromRaw != "" {
-			return nil
+			return shutdownAndReturn(nil)
 		}
-		return fmt.Errorf("filesystem backend is not available on this platform")
+		return shutdownAndReturn(fmt.Errorf("filesystem backend is not available on this platform"))
 	}
+
 	if err := s.backend.Mount(ctx, p.Volume, mountpoint); err != nil {
-		s.cleanup(context.Background())
-		return err
+		return shutdownAndReturn(err)
 	}
+
 	s.setVolume(s.volume())
 	s.mountpoint = mountpoint
 	s.writeSymlink(mountpoint)
-	return s.serve(ctx)
+	return <-serveErr
 }
 
 // MountFSAndServe mounts an existing volume and serves.
@@ -122,7 +135,7 @@ func AttachBlockDeviceAndServe(ctx context.Context, inst env.ResolvedStore, dir 
 // setup creates all the infrastructure for a server: logging, process tuning,
 // object store, page cache, volume manager, backend, and network listener.
 func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume string, opts ServerOptions) (*server, error) {
-	var store objstore.ObjectStore
+	var store *blob.Store
 	var err error
 	if inst.VolsetID == "" {
 		inst, store, err = storage.ResolveFormattedStore(ctx, inst)
@@ -130,7 +143,7 @@ func setup(ctx context.Context, inst env.ResolvedStore, dir env.Dir, volume stri
 			return nil, err
 		}
 	} else {
-		store, err = objstore.Open(ctx, inst)
+		store, err = blob.Open(ctx, inst)
 		if err != nil {
 			if inst.IsLocal() {
 				return nil, fmt.Errorf("create file store: %w", err)

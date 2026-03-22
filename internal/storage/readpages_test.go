@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +14,7 @@ import (
 // identical data to Read for various offset/length combinations.
 func TestReadPagesMatchesRead(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	// Use a higher threshold than the data we write to avoid an auto-flush
 	// rotation racing with the reads.
 	m := newTestManager(t, store, Config{FlushThreshold: 32 * PageSize})
@@ -71,7 +71,7 @@ func TestReadPagesMatchesRead(t *testing.T) {
 // flushed to L1/L2 (exercises the block cache + decompression path).
 func TestReadPagesMatchesReadFlushed(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	const volSize = 16 * PageSize
@@ -105,7 +105,7 @@ func TestReadPagesMatchesReadFlushed(t *testing.T) {
 // subsequent writes to proceed.
 func TestReadPagesGuardExitReleasesLock(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 4 * PageSize})
@@ -135,7 +135,7 @@ func TestReadPagesGuardExitReleasesLock(t *testing.T) {
 // copied out of the active batch rather than borrowing mutable batch storage.
 func TestReadPagesDirtySlicesAreDetached(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 2 * PageSize})
@@ -158,7 +158,7 @@ func TestReadPagesDirtySlicesAreDetached(t *testing.T) {
 // are not reused by eviction, keeping the data valid.
 func TestReadPagesPinSurvivesEviction(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
@@ -202,7 +202,7 @@ func TestReadPagesPinSurvivesEviction(t *testing.T) {
 // don't race or corrupt data.
 func TestReadPagesConcurrent(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	const volSize = 16 * PageSize

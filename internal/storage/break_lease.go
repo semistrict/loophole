@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // BreakLease requests the remote holder to release a volume.
-func BreakLease(ctx context.Context, store objstore.ObjectStore, volumeName string, force bool) (bool, error) {
+func BreakLease(ctx context.Context, store *blob.Store, volumeName string, force bool) (bool, error) {
 	volRefs := store.At("volumes")
 	leases := store.At("leases")
 
@@ -18,7 +18,7 @@ func BreakLease(ctx context.Context, store objstore.ObjectStore, volumeName stri
 	if err != nil {
 		return false, err
 	}
-	ref, etag, err := objstore.ReadJSON[volumeRef](ctx, volRefs, key)
+	ref, etag, err := blob.ReadJSON[volumeRef](ctx, volRefs, key)
 	if err != nil {
 		return false, fmt.Errorf("read volume ref %q: %w", volumeName, err)
 	}
@@ -27,7 +27,7 @@ func BreakLease(ctx context.Context, store objstore.ObjectStore, volumeName stri
 	}
 
 	oldToken := ref.LeaseToken
-	lm := objstore.NewLeaseSession(leases)
+	lm := blob.NewLeaseSession(leases)
 
 	slog.Info("break-lease: requesting release", "volume", volumeName, "token", oldToken)
 	_, rpcErr := lm.Call(ctx, oldToken, "release", map[string]string{"volume": volumeName})

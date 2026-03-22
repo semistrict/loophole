@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 const volumeSetDescriptorKey = "loophole.json"
@@ -17,7 +17,7 @@ type volumeSetDescriptor struct {
 	VolsetID string `json:"volset_id"`
 }
 
-func FormatVolumeSet(ctx context.Context, store objstore.ObjectStore) (volumeSetDescriptor, bool, error) {
+func FormatVolumeSet(ctx context.Context, store *blob.Store) (volumeSetDescriptor, bool, error) {
 	desc := volumeSetDescriptor{
 		PageSize: PageSize,
 		VolsetID: uuid.NewString(),
@@ -27,7 +27,7 @@ func FormatVolumeSet(ctx context.Context, store objstore.ObjectStore) (volumeSet
 		return volumeSetDescriptor{}, false, fmt.Errorf("marshal volume set descriptor: %w", err)
 	}
 	if err := store.PutIfNotExists(ctx, volumeSetDescriptorKey, data); err != nil {
-		if !errors.Is(err, objstore.ErrExists) {
+		if !errors.Is(err, blob.ErrExists) {
 			return volumeSetDescriptor{}, false, fmt.Errorf("create volume set descriptor: %w", err)
 		}
 		existing, err := CheckVolumeSet(ctx, store)
@@ -39,10 +39,10 @@ func FormatVolumeSet(ctx context.Context, store objstore.ObjectStore) (volumeSet
 	return desc, true, nil
 }
 
-func CheckVolumeSet(ctx context.Context, store objstore.ObjectStore) (volumeSetDescriptor, error) {
-	desc, _, err := objstore.ReadJSON[volumeSetDescriptor](ctx, store, volumeSetDescriptorKey)
+func CheckVolumeSet(ctx context.Context, store *blob.Store) (volumeSetDescriptor, error) {
+	desc, _, err := blob.ReadJSON[volumeSetDescriptor](ctx, store, volumeSetDescriptorKey)
 	if err != nil {
-		if errors.Is(err, objstore.ErrNotFound) {
+		if errors.Is(err, blob.ErrNotFound) {
 			return volumeSetDescriptor{}, fmt.Errorf("store is not formatted: missing %s (run `loophole format`)", volumeSetDescriptorKey)
 		}
 		return volumeSetDescriptor{}, fmt.Errorf("read volume set descriptor: %w", err)

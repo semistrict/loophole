@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/cached"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/semistrict/loophole/internal/util"
 )
@@ -21,16 +21,16 @@ import (
 // Set exported fields before calling any methods. Internal state is
 // lazily initialized on first use.
 type Manager struct {
-	ObjectStore objstore.ObjectStore
-	CacheDir    string // page cache daemon directory; empty = no persistent cache
-	config      Config
-	fs          localFS
+	BlobStore *blob.Store
+	CacheDir  string // page cache daemon directory; empty = no persistent cache
+	config    Config
+	fs        localFS
 
 	// lazily initialized
-	store     objstore.ObjectStore
+	store     *blob.Store
 	diskCache PageCache
 	safepoint *safepoint.Safepoint
-	volRefs   objstore.ObjectStore
+	volRefs   *blob.Store
 	initOnce  sync.Once
 	initErr   error
 
@@ -54,7 +54,7 @@ func (osLocalFS) MkdirAll(path string, perm uint32) error {
 func (m *Manager) init() error {
 	m.initOnce.Do(func() {
 		m.config.setDefaults()
-		m.store = m.ObjectStore
+		m.store = m.BlobStore
 		if _, err := CheckVolumeSet(context.Background(), m.store); err != nil {
 			m.initErr = err
 			return
@@ -103,7 +103,7 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 	layerID := newLayerID()
 
 	// Write initial index.json with created_at in object metadata.
-	idx := layerIndex{NextSeq: 1, LayoutGen: 1}
+	idx := layerIndex{NextSeq: 1, LayoutGen: 1, DirectL2Eligible: true}
 	idxData, err := json.Marshal(idx)
 	if err != nil {
 		return nil, err
@@ -232,7 +232,7 @@ func (m *Manager) PageSize() int {
 }
 
 // Store returns the underlying object store.
-func (m *Manager) Store() objstore.ObjectStore {
+func (m *Manager) Store() *blob.Store {
 	if err := m.init(); err != nil {
 		slog.Error("manager: init for store failed", "error", err)
 		return nil

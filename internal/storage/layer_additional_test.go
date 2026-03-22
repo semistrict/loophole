@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/stretchr/testify/require"
 )
@@ -16,7 +16,7 @@ import (
 func TestLayerStopPeriodicFlush(t *testing.T) {
 	ctx := t.Context()
 	ly, err := openLayer(ctx, layerParams{
-		store:  objstore.NewMemStore(),
+		store:  blob.New(blob.NewMemDriver()),
 		id:     "periodic-flush",
 		config: Config{FlushThreshold: 4 * PageSize, FlushInterval: 10 * time.Millisecond},
 	})
@@ -40,7 +40,7 @@ func TestLayerStopPeriodicFlush(t *testing.T) {
 
 func TestLayerWaitRefreshForLayoutChange(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ly, err := openLayer(ctx, layerParams{
 		store:  store,
 		id:     "refresh-layer",
@@ -52,7 +52,7 @@ func TestLayerWaitRefreshForLayoutChange(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		err := objstore.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
+		err := blob.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
 			idx.LayoutGen++
 			return nil
 		})
@@ -94,7 +94,7 @@ func TestLayerReadPageRefUsesPersistentCache(t *testing.T) {
 	ctx := t.Context()
 	sp := safepoint.New()
 	ly, err := openLayer(ctx, layerParams{
-		store:     objstore.NewMemStore(),
+		store:     blob.New(blob.NewMemDriver()),
 		id:        "child",
 		config:    Config{FlushThreshold: 4 * PageSize, FlushInterval: -1},
 		safepoint: sp,
@@ -129,7 +129,7 @@ func TestLayerReadPageRefUsesPersistentCache(t *testing.T) {
 func TestLayerShouldRetryAfterLayoutError(t *testing.T) {
 	ly := &layer{}
 	require.False(t, ly.shouldRetryAfterLayoutError(nil))
-	require.True(t, ly.shouldRetryAfterLayoutError(objstore.ErrNotFound))
+	require.True(t, ly.shouldRetryAfterLayoutError(blob.ErrNotFound))
 	require.True(t, ly.shouldRetryAfterLayoutError(errors.New("parse block failed")))
 	require.True(t, ly.shouldRetryAfterLayoutError(errors.New("bad magic in l0 block")))
 	require.True(t, ly.shouldRetryAfterLayoutError(errors.New("crc mismatch")))
@@ -139,7 +139,7 @@ func TestLayerShouldRetryAfterLayoutError(t *testing.T) {
 func TestLayerPunchHolePartialPages(t *testing.T) {
 	ctx := t.Context()
 	ly, err := openLayer(ctx, layerParams{
-		store:  objstore.NewMemStore(),
+		store:  blob.New(blob.NewMemDriver()),
 		id:     "partial-punch",
 		config: Config{FlushThreshold: 4 * PageSize, FlushInterval: -1},
 	})
@@ -166,7 +166,7 @@ func TestLayerPunchHolePartialPages(t *testing.T) {
 
 func TestLayerReadRetriesAfterLayoutRefresh(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ly, err := openLayerReadOnly(ctx, layerParams{
 		store:  store,
 		id:     "retry-read",
@@ -191,7 +191,7 @@ func TestLayerReadRetriesAfterLayoutRefresh(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		err := objstore.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
+		err := blob.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
 			idx.LayoutGen++
 			idx.L1 = nil
 			idx.L2 = nil
@@ -209,7 +209,7 @@ func TestLayerReadRetriesAfterLayoutRefresh(t *testing.T) {
 
 func TestLayerReadPagesRetriesAfterLayoutRefresh(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	sp := safepoint.New()
 	ly, err := openLayerReadOnly(ctx, layerParams{
 		store:     store,
@@ -236,7 +236,7 @@ func TestLayerReadPagesRetriesAfterLayoutRefresh(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		err := objstore.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
+		err := blob.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
 			idx.LayoutGen++
 			idx.L1 = nil
 			idx.L2 = nil
@@ -256,7 +256,7 @@ func TestLayerReadPagesRetriesAfterLayoutRefresh(t *testing.T) {
 func TestLayerWaitRefreshForLayoutChangeTimeoutAndCancel(t *testing.T) {
 	ctx := t.Context()
 	ly, err := openLayer(ctx, layerParams{
-		store:  objstore.NewMemStore(),
+		store:  blob.New(blob.NewMemDriver()),
 		id:     "wait-refresh",
 		config: Config{FlushThreshold: 4 * PageSize, FlushInterval: -1},
 	})

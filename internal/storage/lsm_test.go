@@ -17,8 +17,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/metrics"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,17 +28,17 @@ func promCounterValue(c prometheus.Counter) float64 {
 	return m.GetCounter().GetValue()
 }
 
-// testManager creates a Manager backed by a MemStore for testing.
+// testManager creates a Manager backed by a MemDriver for testing.
 // The manager is automatically closed when the test finishes.
 func testManager(t *testing.T) *Manager {
 	t.Helper()
-	return newTestManager(t, objstore.NewMemStore(), testConfig)
+	return newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 }
 
-func testStoreManager(t *testing.T) (*objstore.MemStore, *Manager) {
+func testStoreManager(t *testing.T) (*blob.MemDriver, *Manager) {
 	t.Helper()
-	store := objstore.NewMemStore()
-	return store, newTestManager(t, store, testConfig)
+	mem, store := blob.NewMemStore()
+	return mem, newTestManager(t, store, testConfig)
 }
 
 func TestMemLayerPutGet(t *testing.T) {
@@ -153,7 +153,7 @@ func TestWriteFlushRead(t *testing.T) {
 }
 
 func TestWriteFlushReopenRead(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	formatTestStore(t, store)
 
 	config := Config{
@@ -162,7 +162,7 @@ func TestWriteFlushReopenRead(t *testing.T) {
 	ctx := t.Context()
 
 	// Write and flush with first manager.
-	m1 := &Manager{ObjectStore: store, config: config}
+	m1 := &Manager{BlobStore: store, config: config}
 	t.Cleanup(func() { m1.Close() })
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
@@ -599,7 +599,7 @@ func TestClone(t *testing.T) {
 }
 
 func TestCloneFromCheckpoint(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	m := newTestManager(t, store, testConfig)
 	ctx := t.Context()
 
@@ -638,7 +638,7 @@ func TestCloneFromCheckpoint(t *testing.T) {
 	if err := Clone(ctx, m.Store(), "parent", cpID, "clone1"); err != nil {
 		t.Fatal(err)
 	}
-	m2 := &Manager{ObjectStore: store, config: testConfig}
+	m2 := &Manager{BlobStore: store, config: testConfig}
 	t.Cleanup(func() { _ = m2.Close() })
 	clone, err := m2.OpenVolume("clone1")
 	if err != nil {
@@ -674,7 +674,7 @@ func TestCloneFromCheckpoint(t *testing.T) {
 }
 
 func TestCloneFromMultipleCheckpoints(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	m := newTestManager(t, store, testConfig)
 	ctx := t.Context()
 
@@ -799,7 +799,7 @@ func TestOverwriteAfterFlush(t *testing.T) {
 // TestSnapshotReadFromDifferentNode opens the snapshot volume fresh
 // (simulating a different node) and verifies data is readable via ancestor.
 func TestSnapshotReadFromDifferentNode(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -844,7 +844,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 // TestSnapshotOfSnapshotRead creates a snapshot of a snapshot and verifies
 // data is readable through a 2-level ancestor chain.
 func TestSnapshotOfSnapshotRead(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -917,7 +917,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 // TestSnapshotReadAfterMultipleFlushes tests that snapshots created after
 // multiple flush cycles still see all written data.
 func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -987,7 +987,7 @@ func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
 // TestCloneOfSnapshotFromDifferentNode verifies clone of snapshot works
 // when opened on a different node.
 func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1096,7 +1096,7 @@ func TestDeleteVolumeWhileOpen(t *testing.T) {
 }
 
 func TestDeleteVolumeThenList(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1181,7 +1181,7 @@ func TestFlushNoWrites(t *testing.T) {
 // --- Flush S3 failure tests ---
 
 func TestFlushPutReaderFail(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1201,7 +1201,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	}
 
 	// Arm fault on PutReader.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 PUT failure"),
 	})
 
@@ -1217,7 +1217,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 	}
 
 	// Clear the fault and let the blocked flush complete.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	select {
 	case err := <-flushDone:
 		if err != nil {
@@ -1238,7 +1238,7 @@ func TestFlushPutReaderFail(t *testing.T) {
 }
 
 func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -1264,7 +1264,7 @@ func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
 	// Now attempt to rewrite that same child-owned block. The object write lands,
 	// but the flush reports an error after upload. Readers must still observe the
 	// previously committed block, not the failed rewrite payload.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		PostErr: fmt.Errorf("phantom put failure"),
 	})
 	require.NoError(t, clone.Write(bytes.Repeat([]byte{0xDD}, PageSize), 0))
@@ -1289,7 +1289,7 @@ func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
 	require.Equal(t, bytes.Repeat([]byte{0xCC}, PageSize), buf)
 
 	// After clearing the fault, the blocked rewrite should flush cleanly.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	select {
 	case err := <-flushDone:
 		require.NoError(t, err)
@@ -1302,7 +1302,7 @@ func TestFailedRewriteDoesNotCorruptVisibleBlock(t *testing.T) {
 }
 
 func TestPhantomAutoFlushRetryPreservesLaterPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -1330,14 +1330,14 @@ func TestPhantomAutoFlushRetryPreservesLaterPages(t *testing.T) {
 	require.NoError(t, writePage(t, child, 5, 0x05))
 	require.NoError(t, child.Flush())
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		PostErr: fmt.Errorf("phantom auto-flush failure"),
 	})
 
 	for _, page := range []int{236, 241, 187, 21, 185, 80, 26, 12} {
 		require.NoError(t, writePage(t, child, page, byte(page)))
 	}
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 
 	for _, page := range []int{119, 77, 78, 146, 196, 61} {
 		require.NoError(t, writePage(t, child, page, byte(page)))
@@ -1351,7 +1351,7 @@ func TestPhantomAutoFlushRetryPreservesLaterPages(t *testing.T) {
 }
 
 func TestLoadLayerMapFromListing(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -1420,7 +1420,7 @@ func TestLoadLayerMapFromListing(t *testing.T) {
 }
 
 func TestListAllVolumes(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	ctx := t.Context()
 
 	// Create two volumes via separate managers (one volume per manager),
@@ -1497,9 +1497,9 @@ func TestAcquireRefAndRelease(t *testing.T) {
 // --- PageCache edge cases ---
 
 func TestNewVolumeMetaFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
-	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated meta.json failure"),
 	})
 	_, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
@@ -1511,11 +1511,11 @@ func TestNewVolumeMetaFail(t *testing.T) {
 // TestNewVolumeRefFail tests that a PutIfNotExists failure on the volume ref
 // propagates an error from NewVolume (timeline meta.json succeeds, volume ref fails).
 func TestNewVolumeRefFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
 	// Key-specific fault: only the volume ref write (volumes/vol) fails,
 	// not the timeline meta.json write (timelines/<uuid>/meta.json).
-	store.SetFault(objstore.OpPutIfNotExists, "volumes/vol/index.json", objstore.Fault{
+	mem.SetFault(blob.OpPut, "volumes/vol/index.json", blob.Fault{
 		Err: fmt.Errorf("simulated volume ref failure"),
 	})
 
@@ -1528,7 +1528,7 @@ func TestNewVolumeRefFail(t *testing.T) {
 // TestDeleteVolumeS3Fail tests that a DeleteObject failure on the volume ref
 // propagates an error from DeleteVolume.
 func TestDeleteVolumeS3Fail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 	ctx := t.Context()
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
@@ -1540,7 +1540,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store.SetFault(objstore.OpDeleteObject, "", objstore.Fault{
+	mem.SetFault(blob.OpDelete, "", blob.Fault{
 		Err: fmt.Errorf("simulated delete failure"),
 	})
 	err = DeleteVolume(ctx, m.Store(), "vol")
@@ -1549,7 +1549,7 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 	}
 
 	// Clear fault — delete should work.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := DeleteVolume(ctx, m.Store(), "vol"); err != nil {
 		t.Fatalf("retry delete failed: %v", err)
 	}
@@ -1557,10 +1557,10 @@ func TestDeleteVolumeS3Fail(t *testing.T) {
 
 // TestListAllVolumesFail tests that a ListKeys failure propagates from ListAllVolumes.
 func TestListAllVolumesFail(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	ctx := t.Context()
 
-	store.SetFault(objstore.OpListKeys, "", objstore.Fault{
+	mem.SetFault(blob.OpList, "", blob.Fault{
 		Err: fmt.Errorf("simulated list failure"),
 	})
 	_, err := ListAllVolumes(ctx, store)
@@ -1572,7 +1572,7 @@ func TestListAllVolumesFail(t *testing.T) {
 // TestOpenVolumeRefFail tests that a Get failure when reading the volume ref
 // propagates from OpenVolume.
 func TestOpenVolumeRefFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
 	// Create a volume successfully.
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
@@ -1585,7 +1585,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 	}
 
 	// Fault on Get — reading the volume ref fails.
-	store.SetFault(objstore.OpGet, "", objstore.Fault{
+	mem.SetFault(blob.OpGet, "", blob.Fault{
 		Err: fmt.Errorf("simulated get failure"),
 	})
 	_, err = m.OpenVolume("vol")
@@ -1597,7 +1597,7 @@ func TestOpenVolumeRefFail(t *testing.T) {
 // TestOpenTimelineMetaFail tests that a Get failure when reading timeline meta.json
 // propagates from OpenVolume (volume ref reads fine, but timeline meta fails).
 func TestWritePartialPageReadFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
@@ -1618,14 +1618,14 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	m.Close()
 
 	// Open on a fresh manager (empty local cache) so reads must go to S3.
-	m2 := newTestManager(t, store, m.config)
+	m2 := newTestManager(t, m.Store(), m.config)
 	v2, err := m2.OpenVolume("vol")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Now fault Get — a partial page write needs to read the existing page.
-	store.SetFault(objstore.OpGet, "", objstore.Fault{
+	mem.SetFault(blob.OpGet, "", blob.Fault{
 		Err: fmt.Errorf("simulated read failure"),
 	})
 
@@ -1636,7 +1636,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 	}
 
 	// Clear fault — full page writes should still work (no read needed).
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := v2.Write(page, 0); err != nil {
 		t.Fatalf("full page write after clearing fault: %v", err)
 	}
@@ -1645,7 +1645,7 @@ func TestWritePartialPageReadFail(t *testing.T) {
 // TestGetDeltaLayerFail tests that a Get failure when downloading a delta layer
 // propagates through readPage.
 func TestSnapshotCreateChildFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
@@ -1662,7 +1662,7 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	}
 
 	// Fault PutIfNotExists — createChild writes child meta.json.
-	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated createChild failure"),
 	})
 	err = checkpointAndClone(t, v, "snap")
@@ -1671,7 +1671,7 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	}
 
 	// Clear — snapshot should work.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := checkpointAndClone(t, v, "snap"); err != nil {
 		t.Fatalf("snapshot retry: %v", err)
 	}
@@ -1680,7 +1680,7 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 // TestSnapshotPutVolumeRefFail tests that a PutIfNotExists failure on the
 // snapshot's volume ref propagates from Snapshot.
 func TestSnapshotPutVolumeRefFail(t *testing.T) {
-	store, m := testStoreManager(t)
+	mem, m := testStoreManager(t)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
 	if err != nil {
@@ -1698,7 +1698,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 
 	// Key-specific fault: only the snapshot volume ref write (volumes/snap) fails,
 	// not the child timeline meta.json write.
-	store.SetFault(objstore.OpPutIfNotExists, "volumes/snap/index.json", objstore.Fault{
+	mem.SetFault(blob.OpPut, "volumes/snap/index.json", blob.Fault{
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
@@ -1710,7 +1710,7 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 
 // TestOpenAncestorFail tests that an ancestor timeline open failure propagates.
 func TestWriteBackpressurePreservesData(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold:    PageSize, // freeze after every write
 		FlushInterval:     -1,       // disable periodic flush
@@ -1747,7 +1747,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	for i := range page1 {
 		page1[i] = 0xBB
 	}
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 	if err := v.Write(page1, PageSize); err != nil {
@@ -1796,7 +1796,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	}
 
 	// Step 5: Clear faults and flush everything.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	select {
 	case err := <-writeDone:
 		if err != nil {
@@ -1842,7 +1842,7 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 // TestCopyFromAutoFlushFault verifies that CopyFrom blocks under transient
 // auto-flush failure and completes once the destination can drain again.
 func TestCopyFromAutoFlushFault(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 
 	// Very low flush threshold: 2 pages triggers auto-flush.
 	cfg := Config{
@@ -1876,7 +1876,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	}
 
 	// Inject PUT fault so auto-flush during CopyFrom cannot drain.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -1889,7 +1889,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 	}
 
 	// Clear faults and flush the dirty batches.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := dst.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -1919,7 +1919,7 @@ func TestCopyFromAutoFlushFault(t *testing.T) {
 //  6. On reopen, the page has the CopyFrom'd value (zeros from source)
 //     but an oracle tracking only `copied` pages would expect the branch-inherited value
 func TestCopyFromOracleConsistency(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -1967,7 +1967,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Inject PUT fault.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -1977,7 +1977,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	t.Logf("CopyFrom: copied=%d (%d pages), err=%v", copied, pagesReported, copyErr)
 
 	// Clear faults, flush dst to persist everything in memLayer.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := dst.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -2045,7 +2045,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 //  7. Reopen and read page 5: it has non-zero data from the partial write
 //     but an oracle that skipped RecordWrite on error would expect zeros
 func TestPartialWriteAutoFlushFault(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 
 	cfg := Config{
 		FlushThreshold: 2 * PageSize,
@@ -2074,7 +2074,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 	}
 
 	// Inject PUT fault so auto-flush fails.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("injected S3 PUT failure"),
 	})
 
@@ -2088,7 +2088,7 @@ func TestPartialWriteAutoFlushFault(t *testing.T) {
 
 	// The data IS in memLayer despite the error.
 	// Clear faults and flush.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
@@ -2186,7 +2186,7 @@ func TestMemLayerOverwriteReusesSlot(t *testing.T) {
 // TestPunchHoleFlushReopenRead reproduces the e2e "bad message" bug:
 // write data, punch holes over some of it, flush, reopen from S3, read back.
 func TestPunchHoleFlushReopenRead(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 
 	config := Config{
 		FlushThreshold: 16 * PageSize,
@@ -2195,7 +2195,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 
 	// Write and flush with first manager.
 	formatTestStore(t, store)
-	m1 := &Manager{ObjectStore: store, config: config}
+	m1 := &Manager{BlobStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	if err != nil {
 		t.Fatal(err)
@@ -2262,7 +2262,7 @@ func TestPunchHoleFlushReopenRead(t *testing.T) {
 // TestConcurrentWriteReadFlushReopen stresses concurrent writes and reads
 // with interleaved flushes, then reopens and verifies data.
 func TestConcurrentWriteReadFlushReopen(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 
 	config := Config{
 		FlushThreshold: 8 * PageSize, // small threshold to force frequent flushes
@@ -2270,7 +2270,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 	ctx := t.Context()
 
 	formatTestStore(t, store)
-	m1 := &Manager{ObjectStore: store, config: config}
+	m1 := &Manager{BlobStore: store, config: config}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 64 * PageSize})
 	if err != nil {
 		t.Fatal(err)
@@ -2357,7 +2357,7 @@ func TestConcurrentWriteReadFlushReopen(t *testing.T) {
 // TestMemLayerFullBackpressure verifies that the dirty pages layer handles
 // backpressure when the dirty pages is full.
 func TestMemLayerFullBackpressure(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 
 	// Use a small dirty pages slot cap so the test fills it quickly and
 	// exercises the backpressure path without writing 65K+ pages.
@@ -2369,7 +2369,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 	ctx := t.Context()
 
 	formatTestStore(t, store)
-	m := &Manager{ObjectStore: store, config: config}
+	m := &Manager{BlobStore: store, config: config}
 	defer m.Close()
 
 	const numPages = testSlotCap + 100
@@ -2408,7 +2408,7 @@ func TestMemLayerFullBackpressure(t *testing.T) {
 // TestConcurrentReadsAndFlushes hammers concurrent reads and flushes to
 // catch data races in the lock-free read path.
 func TestConcurrentReadsAndFlushes(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	config := Config{
 		FlushThreshold: 64 * PageSize,
 	}
@@ -2487,7 +2487,7 @@ func TestConcurrentReadsAndFlushes(t *testing.T) {
 // TestBackpressureBlocksWriteOnS3Failure verifies that writes block instead of
 // returning transient errors when S3 is down and the dirty pipeline is full.
 func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize, // freeze after every page
 		FlushInterval:  -1,       // no proactive timer; worker still drains pending
@@ -2506,7 +2506,7 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	require.NoError(t, v.Write(page, 0))
 
 	// Make S3 uploads fail.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
@@ -2538,7 +2538,7 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 	require.Equal(t, byte(2), buf[0])
 
 	// Clear fault and the blocked write should complete.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.Eventually(t, func() bool {
 		select {
 		case err := <-done:
@@ -2563,7 +2563,7 @@ func TestBackpressureBlocksWriteOnS3Failure(t *testing.T) {
 }
 
 func TestBackpressureBlockedWriteStagesCurrentPage(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1,
@@ -2577,7 +2577,7 @@ func TestBackpressureBlockedWriteStagesCurrentPage(t *testing.T) {
 	first := bytes.Repeat([]byte{0x11}, PageSize)
 	require.NoError(t, v.Write(first, 0))
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
@@ -2600,7 +2600,7 @@ func TestBackpressureBlockedWriteStagesCurrentPage(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.Eventually(t, func() bool {
 		select {
 		case err := <-done:
@@ -2616,7 +2616,7 @@ func TestBackpressureBlockedWriteStagesCurrentPage(t *testing.T) {
 }
 
 func TestBackpressurePartialWriteCanStillStageMergedPage(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1,
@@ -2630,7 +2630,7 @@ func TestBackpressurePartialWriteCanStillStageMergedPage(t *testing.T) {
 	seedPage := bytes.Repeat([]byte{0x11}, PageSize)
 	require.NoError(t, v.Write(seedPage, 0))
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
@@ -2644,12 +2644,12 @@ func TestBackpressurePartialWriteCanStillStageMergedPage(t *testing.T) {
 	copy(expected[700:], partial)
 	require.Equal(t, expected, buf)
 
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.NoError(t, v.Flush())
 }
 
 func TestBackpressurePunchHoleCanStillStageTombstones(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold:    1 << 20,
 		FlushInterval:     -1,
@@ -2668,7 +2668,7 @@ func TestBackpressurePunchHoleCanStillStageTombstones(t *testing.T) {
 	require.NoError(t, v.Write(second, PageSize))
 	require.NoError(t, v.Flush())
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 outage"),
 	})
 
@@ -2683,14 +2683,14 @@ func TestBackpressurePunchHoleCanStillStageTombstones(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, make([]byte, PageSize), buf)
 
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.NoError(t, v.Flush())
 }
 
 // TestAsyncFlushNotifyWakesLoop verifies that the flush loop wakes up
 // promptly when notified, rather than waiting for the timer.
 func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  10 * time.Second, // very long timer
@@ -2742,7 +2742,7 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 // up and flush cannot progress, the writer blocks instead of returning the
 // transient S3 error.
 func TestBackpressureStillBlocksInline(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1,
@@ -2755,7 +2755,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 	}
 
 	// Inject S3 fault so flushes fail.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated S3 fault"),
 	})
 
@@ -2777,7 +2777,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 	}
 
 	// Clear fault — data in frozen layers should be flushable.
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.Eventually(t, func() bool {
 		select {
 		case err := <-done:
@@ -2792,7 +2792,7 @@ func TestBackpressureStillBlocksInline(t *testing.T) {
 }
 
 func TestManagerCloseStopsFlushRetryLoop(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1,
@@ -2805,7 +2805,7 @@ func TestManagerCloseStopsFlushRetryLoop(t *testing.T) {
 	page := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, v.Write(page, 0))
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated persistent S3 outage"),
 	})
 
@@ -2827,7 +2827,7 @@ func TestManagerCloseStopsFlushRetryLoop(t *testing.T) {
 }
 
 func TestVolumeCloseRejectsNewWrites(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: PageSize,
 		FlushInterval:  -1,
@@ -2840,7 +2840,7 @@ func TestVolumeCloseRejectsNewWrites(t *testing.T) {
 	page := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, v.Write(page, 0))
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("simulated persistent S3 outage"),
 	})
 
@@ -2866,7 +2866,7 @@ func TestVolumeCloseRejectsNewWrites(t *testing.T) {
 // TestFlushRetryOnTransientError verifies that flushMemLayer retries
 // on transient S3 errors before giving up.
 func TestFlushRetryOnTransientError(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 	}
@@ -2886,7 +2886,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 
 	// Fault that expires after 3 calls.
 	var faultCount atomic.Int32
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Err: fmt.Errorf("transient S3 error"),
 		ShouldFault: func(string) bool {
 			return faultCount.Add(1) <= 3
@@ -2912,7 +2912,7 @@ func TestFlushRetryOnTransientError(t *testing.T) {
 // flush after a 2s delay when the last flush was more than FlushInterval ago.
 func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := objstore.NewMemStore()
+		_, store := blob.NewMemStore()
 		cfg := Config{
 			FlushThreshold: 64 * PageSize, // large — dirty pages never fills
 			FlushInterval:  1 * time.Hour, // regular timer never fires
@@ -2988,7 +2988,7 @@ func TestWriteTriggersEarlyFlushWhenStale(t *testing.T) {
 // TestSingleflightDeduplicatesBlockDownloads verifies that concurrent reads
 // for the same uncached block only trigger one S3 download.
 func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3016,7 +3016,7 @@ func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
 	vol.layer.blockCache.clear()
 
 	// Record S3 Get count before concurrent reads.
-	getBefore := store.Count(objstore.OpGet)
+	getBefore := mem.Count(blob.OpGet)
 
 	// Launch concurrent reads for the same page (same block).
 	var wg sync.WaitGroup
@@ -3039,7 +3039,7 @@ func TestSingleflightDeduplicatesBlockDownloads(t *testing.T) {
 
 	// Without singleflight, we'd see up to 10 Gets. With it, should be ≤2
 	// (1 for the block blob + possibly 1 for index.json or other metadata).
-	getAfter := store.Count(objstore.OpGet)
+	getAfter := mem.Count(blob.OpGet)
 	gets := getAfter - getBefore
 	if gets > 2 {
 		t.Fatalf("expected ≤2 S3 Gets with singleflight, got %d", gets)
@@ -3081,7 +3081,7 @@ func TestBoundedCacheEviction(t *testing.T) {
 // TestRefreshFollowMode verifies that a reader can see data written by
 // another writer after calling Refresh().
 func TestRefreshFollowMode(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	ctx := t.Context()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
@@ -3153,7 +3153,7 @@ func TestRefreshFollowMode(t *testing.T) {
 
 // TestFlushReportsMetrics verifies that FlushBytes metric is incremented.
 func TestFlushReportsMetrics(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3185,7 +3185,7 @@ func TestFlushReportsMetrics(t *testing.T) {
 
 // TestReadAtDirtyPages verifies that ReadAt returns the expected page contents.
 func TestReadAtDirtyPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -3224,7 +3224,7 @@ func TestReadAtDirtyPages(t *testing.T) {
 
 // TestReadAtAfterFlush verifies that ReadAt works after data has been flushed.
 func TestReadAtAfterFlush(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3259,7 +3259,7 @@ func TestReadAtAfterFlush(t *testing.T) {
 // TestReadAtSubPageFallback verifies that sub-page or unaligned ReadAt
 // falls back to the allocating path correctly.
 func TestReadAtSubPageFallback(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -3300,7 +3300,7 @@ func TestReadAtSubPageFallback(t *testing.T) {
 
 // TestReadAtReturnsCopy verifies that ReadAt returns a detached copy.
 func TestReadAtReturnsCopy(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 64 * PageSize,
 		FlushInterval:  -1,
@@ -3543,7 +3543,7 @@ func TestDiffSnapshotClone(t *testing.T) {
 // the case where Firecracker restores from a snapshot and the daemon is a
 // fresh process that reopens the volume.
 func TestDiffSnapshotCloneReopened(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3625,7 +3625,7 @@ func TestDiffSnapshotCloneReopened(t *testing.T) {
 // create, write, clone-1, write dirty, clone-2, then open clone-2 on a
 // completely fresh manager (simulating the restored VM reading memory).
 func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3705,7 +3705,7 @@ func TestDiffSnapshotCloneReadFromFreshNode(t *testing.T) {
 }
 
 func TestSparseAncestorPagePreservedAcrossChildSparseFlush(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3747,7 +3747,7 @@ func TestSparseAncestorPagePreservedAcrossChildSparseFlush(t *testing.T) {
 }
 
 func TestSingleBlockCloneChainPreservesUntouchedAncestorPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 16 * PageSize,
 		FlushInterval:  -1,
@@ -3824,7 +3824,7 @@ func TestSingleBlockCloneChainPreservesUntouchedAncestorPages(t *testing.T) {
 }
 
 func TestSimulationSingleBlockSequenceWithoutFaults(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -3900,7 +3900,7 @@ func TestSimulationSingleBlockSequenceWithoutFaults(t *testing.T) {
 }
 
 func TestDirectReproRelayeredSingleBlockPreservesEarlierChildPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -4015,7 +4015,7 @@ func TestDirectReproRelayeredSingleBlockPreservesEarlierChildPages(t *testing.T)
 }
 
 func TestFailedCloneAfterSnapshotDoesNotDropEarlierPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -4068,12 +4068,12 @@ func TestFailedCloneAfterSnapshotDoesNotDropEarlierPages(t *testing.T) {
 		164: 0xa4, 166: 0xa6, 183: 0xb7, 241: 0xf1, 251: 0xfb,
 	}, 100, 101, 172, 173, 174)
 
-	store.SetFault(objstore.OpGet, "volumes/root/index.json", objstore.Fault{
+	mem.SetFault(blob.OpGet, "volumes/root/index.json", blob.Fault{
 		Err: fmt.Errorf("simulated relayer volume-ref GET failure"),
 	})
 	err = checkpointAndClone(t, root, "failed-clone")
 	require.Error(t, err)
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 
 	flushPages(t, root, map[int]byte{
 		13: 0x8d, 19: 0x19, 65: 0x41, 111: 0x6f, 120: 0x78,
@@ -4107,7 +4107,7 @@ func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
 	runScenario := func(t *testing.T, faultBatch int, faultMode string, phantom bool) {
 		t.Helper()
 
-		store := objstore.NewMemStore()
+		mem, store := blob.NewMemStore()
 		cfg := Config{
 			FlushThreshold: 256 * PageSize,
 			FlushInterval:  -1,
@@ -4185,13 +4185,13 @@ func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
 			if i == faultBatch {
 				switch faultMode {
 				case "put":
-					fault := objstore.Fault{Err: fmt.Errorf("simulated block upload failure")}
+					fault := blob.Fault{Err: fmt.Errorf("simulated block upload failure")}
 					if phantom {
-						fault = objstore.Fault{PostErr: fmt.Errorf("simulated phantom block upload failure")}
+						fault = blob.Fault{PostErr: fmt.Errorf("simulated phantom block upload failure")}
 					}
-					store.SetFault(objstore.OpPutReader, "", fault)
+					mem.SetFault(blob.OpPut, "", fault)
 				case "index-get":
-					store.SetFault(objstore.OpGet, "layers/"+root.layer.id+"/index.json", objstore.Fault{
+					mem.SetFault(blob.OpGet, "layers/"+root.layer.id+"/index.json", blob.Fault{
 						Err: fmt.Errorf("simulated index get failure"),
 					})
 				default:
@@ -4209,7 +4209,7 @@ func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
 				case <-time.After(200 * time.Millisecond):
 				}
 
-				store.ClearAllFaults()
+				mem.ClearAllFaults()
 				select {
 				case err := <-flushDone:
 					require.NoError(t, err)
@@ -4241,7 +4241,7 @@ func TestFaultedSingleBlockRewriteStillPreservesEarlierPages(t *testing.T) {
 }
 
 func TestSingleLayerManySparseFlushesPreserveEarlierPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -4301,7 +4301,7 @@ func TestSingleLayerManySparseFlushesPreserveEarlierPages(t *testing.T) {
 }
 
 func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{FlushThreshold: 4 * PageSize, FlushInterval: -1}
 
 	ly, err := openLayer(t.Context(), layerParams{store: store, id: "test", config: cfg})
@@ -4334,7 +4334,7 @@ func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
 }
 
 func TestPunchHoleTombstoneCloneInheritance(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{FlushThreshold: 4 * PageSize, FlushInterval: -1}
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
@@ -4379,12 +4379,12 @@ func TestPunchHoleTombstoneCloneInheritance(t *testing.T) {
 }
 
 func TestPunchHoleTombstoneFlushReopenRead(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{FlushThreshold: 16 * PageSize}
 	ctx := t.Context()
 
 	formatTestStore(t, store)
-	m1 := &Manager{ObjectStore: store, config: cfg}
+	m1 := &Manager{BlobStore: store, config: cfg}
 	v1, err := m1.NewVolume(CreateParams{Volume: "test", Size: 1024 * 1024})
 	require.NoError(t, err)
 
@@ -4422,7 +4422,7 @@ func TestPunchHoleTombstoneFlushReopenRead(t *testing.T) {
 // store. Deletion is deferred: superseded keys from flush N are deleted at the
 // start of flush N+1, so we need three flushes to observe the cleanup.
 func TestSupersededBlockBlobsDeleted(t *testing.T) {
-	store := objstore.NewMemStore()
+	_, store := blob.NewMemStore()
 	cfg := Config{FlushThreshold: 16 * PageSize}
 	ctx := t.Context()
 
@@ -4465,7 +4465,7 @@ func TestSupersededBlockBlobsDeleted(t *testing.T) {
 }
 
 // listBlockKeys returns all L1/L2 block keys for the given layer (excluding index.json).
-func listBlockKeys(t *testing.T, store objstore.ObjectStore, layerID string) []string {
+func listBlockKeys(t *testing.T, store *blob.Store, layerID string) []string {
 	t.Helper()
 	objs, err := store.At("layers/"+layerID).ListKeys(context.Background(), "")
 	require.NoError(t, err)

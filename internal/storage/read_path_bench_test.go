@@ -6,7 +6,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // --- Block parse + page lookup benchmarks ---
@@ -162,7 +162,7 @@ func BenchmarkBlockCacheMiss(b *testing.B) {
 
 func BenchmarkReadL1Sparse(b *testing.B) {
 	// Write only a few pages per block, then read them back from L1.
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ctx := context.Background()
 
 	m := newBenchManager(b, store, Config{FlushThreshold: 64 * PageSize})
@@ -206,7 +206,7 @@ func BenchmarkReadL1Sparse(b *testing.B) {
 
 func BenchmarkReadL1Dense(b *testing.B) {
 	// Write all pages in a block, flush to L1, then read back.
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ctx := context.Background()
 
 	m := newBenchManager(b, store, Config{FlushThreshold: BlockSize + PageSize})
@@ -249,7 +249,7 @@ func BenchmarkReadL1Dense(b *testing.B) {
 // --- Multi-layer read: reads that must fall through L1 miss to L2 ---
 
 func BenchmarkReadL1MissFallsToL2(b *testing.B) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ctx := context.Background()
 
 	m := newBenchManager(b, store, Config{FlushThreshold: BlockSize + PageSize})
@@ -304,7 +304,7 @@ func BenchmarkReadL1MissFallsToL2(b *testing.B) {
 // --- Clone read: read from a snapshot (cloned) volume ---
 
 func BenchmarkReadAfterClone(b *testing.B) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	ctx := context.Background()
 
 	cfg := Config{FlushThreshold: BlockSize + PageSize}
@@ -331,7 +331,7 @@ func BenchmarkReadAfterClone(b *testing.B) {
 	}
 
 	// Open clone on a separate manager (same store), mirroring production.
-	m2 := &Manager{ObjectStore: store, config: cfg, fs: NewSimLocalFS()}
+	m2 := &Manager{BlobStore: store, config: cfg, fs: NewSimLocalFS()}
 	b.Cleanup(func() { _ = m2.Close() })
 	clone, err := m2.OpenVolume("snap")
 	if err != nil {

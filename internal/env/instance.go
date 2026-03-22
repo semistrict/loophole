@@ -8,7 +8,7 @@ type ResolvedStore struct {
 	Bucket   string
 	Prefix   string
 	Endpoint string // object-store endpoint URL
-	LocalDir string // non-empty => local FileStore
+	LocalDir string // non-empty => local FileDriver
 	LogLevel string // "debug", "info", "warn", "error"; empty = "info"
 	VolsetID string // populated after reading loophole.json
 }

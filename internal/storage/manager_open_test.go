@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
 
@@ -23,7 +23,7 @@ func TestOSLocalFSMkdirAll(t *testing.T) {
 
 func TestManagerOpenVolumeBranches(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	v1, err := m.NewVolume(CreateParams{Volume: "one", Size: 8 * PageSize})
@@ -51,7 +51,7 @@ func TestManagerOpenVolumeBranches(t *testing.T) {
 
 func TestManagerOpenVolumeReadOnlyFollowsActiveWriter(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	writer := newTestManager(t, store, Config{
 		FlushThreshold: 4 * PageSize,
@@ -87,7 +87,7 @@ func TestManagerOpenVolumeReadOnlyFollowsActiveWriter(t *testing.T) {
 
 func TestReadOnlyFollowerSeesCommittedSnapshotUntilRefresh(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  10 * time.Millisecond,
@@ -127,7 +127,7 @@ func TestReadOnlyFollowerSeesCommittedSnapshotUntilRefresh(t *testing.T) {
 
 func TestReadOnlyFollowerClosePreservesWriterLease(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  10 * time.Millisecond,
@@ -155,7 +155,7 @@ func TestReadOnlyFollowerClosePreservesWriterLease(t *testing.T) {
 
 func TestReadOnlyFollowerTracksLatestVolumeRefOnFreshOpen(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  10 * time.Millisecond,
@@ -194,7 +194,7 @@ func TestReadOnlyFollowerTracksLatestVolumeRefOnFreshOpen(t *testing.T) {
 
 func TestMultipleReadOnlyFollowersDoNotInterfereWithWriter(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  10 * time.Millisecond,
@@ -226,7 +226,7 @@ func TestMultipleReadOnlyFollowersDoNotInterfereWithWriter(t *testing.T) {
 }
 
 func TestReadOnlyVolumeRejectsMutation(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	writer := newTestManager(t, store, testConfig)
 	v, err := writer.NewVolume(CreateParams{Volume: "vol", Size: 16 * PageSize})
@@ -246,7 +246,7 @@ func TestReadOnlyVolumeRejectsMutation(t *testing.T) {
 }
 
 func TestOpenVolumeReadOnlyRejectsSecondVolumeInSameManager(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	_, err := m.NewVolume(CreateParams{Volume: "one", Size: 8 * PageSize})
@@ -263,7 +263,7 @@ func TestOpenVolumeReadOnlyRejectsSecondVolumeInSameManager(t *testing.T) {
 
 func TestManagerOpenVolumeRejectsFrozenLayer(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	_, err := m.NewVolume(CreateParams{Volume: "vol", Size: 8 * PageSize})
@@ -288,7 +288,7 @@ func TestManagerOpenVolumeRejectsFrozenLayer(t *testing.T) {
 
 func TestVolumeRefreshWrapper(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	writer := newTestManager(t, store, testConfig)
 	v, err := writer.NewVolume(CreateParams{Volume: "vol", Size: 16 * PageSize})

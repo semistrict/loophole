@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // TestS3Bench measures raw S3 upload throughput and object creation speed.
@@ -18,11 +18,11 @@ func TestS3Bench(t *testing.T) {
 	ctx := t.Context()
 
 	inst := uniqueInstance(t)
-	store, err := objstore.NewS3Store(ctx, inst)
+	drv, err := blob.NewS3Driver(ctx, inst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := store.At("bench")
+	base := blob.New(drv).At("bench")
 
 	// --- Object creation latency: 100 small (1KB) objects sequentially ---
 	t.Run("CreateLatency", func(t *testing.T) {

@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
 
 func TestManagerCloseVolumeAndWaitClosed(t *testing.T) {
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 8 * PageSize, Type: VolumeTypeExt4})
 	require.NoError(t, err)
@@ -41,7 +41,7 @@ func TestManagerCloseVolumeAndWaitClosed(t *testing.T) {
 
 func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 	ctx := context.Background()
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	v, err := m.NewVolume(CreateParams{
 		Volume: "vol",
@@ -136,7 +136,7 @@ func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 
 func TestVolumeHandleLeaseRelease(t *testing.T) {
 	ctx := context.Background()
-	m := newTestManager(t, objstore.NewMemStore(), testConfig)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), testConfig)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 4 * PageSize})
 	require.NoError(t, err)
@@ -157,7 +157,7 @@ func TestVolumeHandleLeaseRelease(t *testing.T) {
 }
 
 func TestReleaseRefFlushesBeforeShutdown(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
 
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 4 * PageSize})

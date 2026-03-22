@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
 
@@ -24,7 +24,8 @@ import (
 // We reproduce this by using a small flush threshold with periodic flush
 // enabled and slow object-store uploads to keep the pending slot occupied longer.
 func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	formatTestStore(t, store)
 
 	cfg := Config{
@@ -34,11 +35,11 @@ func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 
 	// Slow down uploads just enough to keep the pending slot occupied,
 	// widening the old race window around rotation.
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Delay: time.Millisecond,
 	})
 
-	m := &Manager{ObjectStore: store, config: cfg}
+	m := &Manager{BlobStore: store, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	const numPages = 200
@@ -59,7 +60,7 @@ func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 		}
 	}
 
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	if err := v.Flush(); err != nil {
 		t.Fatalf("final flush: %v", err)
 	}
@@ -70,7 +71,8 @@ func TestFreezeDirtyPagesRaceWithPeriodicFlush(t *testing.T) {
 // written with a unique byte pattern; after flushing we read every page
 // back and verify the contents.
 func TestFreezeRaceDataIntegrity(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	formatTestStore(t, store)
 
 	cfg := Config{
@@ -78,11 +80,11 @@ func TestFreezeRaceDataIntegrity(t *testing.T) {
 		FlushInterval:  time.Millisecond,
 	}
 
-	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+	mem.SetFault(blob.OpPut, "", blob.Fault{
 		Delay: time.Millisecond,
 	})
 
-	m := &Manager{ObjectStore: store, config: cfg}
+	m := &Manager{BlobStore: store, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	const numPages = 100
@@ -103,7 +105,7 @@ func TestFreezeRaceDataIntegrity(t *testing.T) {
 		lastWritten[offset] = byte(i + 1)
 	}
 
-	store.ClearAllFaults()
+	mem.ClearAllFaults()
 	require.NoError(t, v.Flush())
 
 	// Read back every written page and verify contents.
@@ -122,7 +124,7 @@ func TestFreezeRaceDataIntegrity(t *testing.T) {
 // dirty batch and no periodic flush, concurrent writers force repeated
 // freeze+flush cycles that stress the lock handoff.
 func TestConcurrentFreezeDirtyPages(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	formatTestStore(t, store)
 
 	cfg := Config{
@@ -130,7 +132,7 @@ func TestConcurrentFreezeDirtyPages(t *testing.T) {
 		FlushInterval:  -1, // no periodic flush — writers do all freezing
 	}
 
-	m := &Manager{ObjectStore: store, config: cfg}
+	m := &Manager{BlobStore: store, config: cfg}
 	t.Cleanup(func() { _ = m.Close() })
 
 	const numWriters = 4

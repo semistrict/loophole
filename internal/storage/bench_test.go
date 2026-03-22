@@ -6,7 +6,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 func randomPage(rng *rand.Rand, buf []byte) {
@@ -19,12 +19,12 @@ func randomPage(rng *rand.Rand, buf []byte) {
 	}
 }
 
-func newBenchManager(b *testing.B, store *objstore.MemStore, config Config) *Manager {
+func newBenchManager(b *testing.B, store *blob.Store, config Config) *Manager {
 	b.Helper()
 	if _, _, err := FormatVolumeSet(context.Background(), store); err != nil {
 		b.Fatal(err)
 	}
-	m := &Manager{ObjectStore: store, config: config, fs: NewSimLocalFS()}
+	m := &Manager{BlobStore: store, config: config, fs: NewSimLocalFS()}
 	b.Cleanup(func() {
 		_ = m.Close()
 	})
@@ -36,10 +36,11 @@ var defaultBenchConfig = Config{
 }
 
 // BenchmarkS3Ops measures S3 operation counts for various workloads.
-// Wall-clock times are meaningless (MemStore); only the s3-*/op metrics matter.
+// Wall-clock times are meaningless (MemDriver); only the s3-*/op metrics matter.
 func BenchmarkS3Ops(b *testing.B) {
 	b.Run("Write64Flush", func(b *testing.B) {
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		m := newBenchManager(b, store, defaultBenchConfig)
 
 		v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -50,7 +51,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		rng := rand.New(rand.NewPCG(1, 0))
 		page := make([]byte, PageSize)
 
-		store.ResetCounts()
+		mem.ResetCounts()
 		for range b.N {
 			for pg := 0; pg < 64; pg++ {
 				randomPage(rng, page)
@@ -62,11 +63,12 @@ func BenchmarkS3Ops(b *testing.B) {
 				b.Fatal(err)
 			}
 		}
-		reportS3Counts(b, store, b.N)
+		reportS3Counts(b, mem, b.N)
 	})
 
 	b.Run("Read256Pages", func(b *testing.B) {
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		m := newBenchManager(b, store, defaultBenchConfig)
 		ctx := context.Background()
 
@@ -88,7 +90,7 @@ func BenchmarkS3Ops(b *testing.B) {
 		}
 
 		buf := make([]byte, PageSize)
-		store.ResetCounts()
+		mem.ResetCounts()
 		for range b.N {
 			for pg := uint64(0); pg < 256; pg++ {
 				if _, err := v.Read(ctx, buf, pg*PageSize); err != nil {
@@ -96,11 +98,12 @@ func BenchmarkS3Ops(b *testing.B) {
 				}
 			}
 		}
-		reportS3Counts(b, store, b.N)
+		reportS3Counts(b, mem, b.N)
 	})
 
 	b.Run("Snapshot", func(b *testing.B) {
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		m := newBenchManager(b, store, defaultBenchConfig)
 
 		v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -120,18 +123,19 @@ func BenchmarkS3Ops(b *testing.B) {
 			b.Fatal(err)
 		}
 
-		store.ResetCounts()
+		mem.ResetCounts()
 		for i := range b.N {
 			if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
 				b.Fatal(err)
 			}
 		}
-		reportS3Counts(b, store, b.N)
+		reportS3Counts(b, mem, b.N)
 	})
 
 	b.Run("Snapshot100", func(b *testing.B) {
 		for range b.N {
-			store := objstore.NewMemStore()
+			mem := blob.NewMemDriver()
+			store := blob.New(mem)
 			m := newBenchManager(b, store, defaultBenchConfig)
 
 			v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 256 * PageSize})
@@ -151,13 +155,13 @@ func BenchmarkS3Ops(b *testing.B) {
 				b.Fatal(err)
 			}
 
-			store.ResetCounts()
+			mem.ResetCounts()
 			for i := range 100 {
 				if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
 					b.Fatal(err)
 				}
 			}
-			reportS3Counts(b, store, 100)
+			reportS3Counts(b, mem, 100)
 		}
 	})
 
@@ -165,22 +169,20 @@ func BenchmarkS3Ops(b *testing.B) {
 
 var s3OpNames = []struct {
 	name string
-	op   objstore.OpType
+	op   blob.OpType
 }{
-	{"Get", objstore.OpGet},
-	{"Put", objstore.OpPutReader},
-	{"PutIfNX", objstore.OpPutIfNotExists},
-	{"CAS", objstore.OpPutBytesCAS},
-	{"Delete", objstore.OpDeleteObject},
-	{"List", objstore.OpListKeys},
+	{"Get", blob.OpGet},
+	{"Put", blob.OpPut},
+	{"Delete", blob.OpDelete},
+	{"List", blob.OpList},
 }
 
-func reportS3Counts(b *testing.B, store *objstore.MemStore, n int) {
+func reportS3Counts(b *testing.B, drv *blob.MemDriver, n int) {
 	b.Helper()
 	for _, o := range s3OpNames {
-		b.ReportMetric(float64(store.Count(o.op))/float64(n), "s3-"+o.name+"/op")
+		b.ReportMetric(float64(drv.Count(o.op))/float64(n), "s3-"+o.name+"/op")
 	}
-	b.ReportMetric(float64(store.BytesRx())/float64(n), "s3-rx-bytes/op")
+	b.ReportMetric(float64(drv.BytesRx())/float64(n), "s3-rx-bytes/op")
 }
 
 // BenchmarkWritePage measures the cost of writing a single sub-page chunk
@@ -189,7 +191,7 @@ func BenchmarkWritePage(b *testing.B) {
 	for _, chunkSize := range []int{512, 1024, 4096, 16384, 32768, PageSize, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024, 4 * 1024 * 1024} {
 		name := fmt.Sprintf("chunk=%d", chunkSize)
 		b.Run(name, func(b *testing.B) {
-			store := objstore.NewMemStore()
+			store := blob.New(blob.NewMemDriver())
 			config := Config{
 				FlushThreshold: 512 * 1024 * 1024, // huge threshold to avoid flush during bench
 			}
@@ -225,7 +227,8 @@ func BenchmarkWritePage(b *testing.B) {
 // This is the scenario where range reads win: instead of downloading the
 // entire ~4MB layer, we fetch just the index + 4 compressed pages.
 func BenchmarkReadFewFromLargeLayer(b *testing.B) {
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	ctx := context.Background()
 
 	const totalPages = 1024
@@ -252,7 +255,7 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 	readAddrs := [readPages]uint64{0, 256, 512, 768}
 	buf := make([]byte, PageSize)
 
-	store.ResetCounts()
+	mem.ResetCounts()
 	b.ResetTimer()
 	for range b.N {
 		// Fresh manager each iteration — no cached layers.
@@ -268,5 +271,5 @@ func BenchmarkReadFewFromLargeLayer(b *testing.B) {
 		}
 	}
 	b.StopTimer()
-	reportS3Counts(b, store, b.N)
+	reportS3Counts(b, mem, b.N)
 }

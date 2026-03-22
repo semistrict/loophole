@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/fuseblockdev"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +20,7 @@ func skipWithoutFuse(t *testing.T) {
 }
 
 type fuseTestEnv struct {
-	store *objstore.MemStore
+	store *blob.Store
 	vm    *storage.Manager
 	vol   *storage.Volume
 	srv   *fuseblockdev.Server
@@ -31,8 +31,8 @@ func setupFuse(t *testing.T) *fuseTestEnv {
 	t.Helper()
 	skipWithoutFuse(t)
 
-	store := objstore.NewMemStore()
-	vm := &storage.Manager{ObjectStore: store}
+	store := blob.New(blob.NewMemDriver())
+	vm := &storage.Manager{BlobStore: store}
 	t.Cleanup(func() { vm.Close() })
 
 	vol, err := vm.NewVolume(storage.CreateParams{Volume: "testvol", Size: 4096})
@@ -155,7 +155,7 @@ func TestFuseReaddir(t *testing.T) {
 func TestFuseAddVolume(t *testing.T) {
 	env := setupFuse(t)
 
-	vm2 := &storage.Manager{ObjectStore: env.store}
+	vm2 := &storage.Manager{BlobStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	newvol, err := vm2.NewVolume(storage.CreateParams{Volume: "newvol", Size: 4096})
@@ -183,7 +183,7 @@ func TestFuseCopyFileRangeFullVolume(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, env.f.Sync()) // flush writeback cache to storage
 
-	vm2 := &storage.Manager{ObjectStore: env.store}
+	vm2 := &storage.Manager{BlobStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	cloneVol, err := vm2.NewVolume(storage.CreateParams{Volume: "clone", Size: 4096})
@@ -214,7 +214,7 @@ func TestFuseCopyFileRangeIsCoW(t *testing.T) {
 
 	require.NoError(t, env.vol.Flush())
 
-	vm2 := &storage.Manager{ObjectStore: env.store}
+	vm2 := &storage.Manager{BlobStore: env.store}
 	t.Cleanup(func() { vm2.Close() })
 
 	dstVol, err := vm2.NewVolume(storage.CreateParams{Volume: "refclone", Size: 4096})

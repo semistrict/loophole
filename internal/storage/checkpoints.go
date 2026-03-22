@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // checkpointRef is the S3-persisted metadata for a volume checkpoint.
@@ -38,7 +38,7 @@ func checkpointIndexKey(volumeName, checkpointID string) (string, error) {
 	return prefix + checkpointID + "/index.json", nil
 }
 
-func putCheckpoint(ctx context.Context, volRefs objstore.ObjectStore, volumeName string, layerID string) (string, error) {
+func putCheckpoint(ctx context.Context, volRefs *blob.Store, volumeName string, layerID string) (string, error) {
 	if err := ValidateVolumeName(volumeName); err != nil {
 		return "", err
 	}
@@ -62,7 +62,7 @@ func putCheckpoint(ctx context.Context, volRefs objstore.ObjectStore, volumeName
 		if err == nil {
 			return ts, nil
 		}
-		if !errors.Is(err, objstore.ErrExists) {
+		if !errors.Is(err, blob.ErrExists) {
 			return "", fmt.Errorf("write checkpoint ref: %w", err)
 		}
 		now = now.Add(time.Second)
@@ -77,7 +77,7 @@ func putCheckpoint(ctx context.Context, volRefs objstore.ObjectStore, volumeName
 }
 
 // ListCheckpoints returns all checkpoints for a volume, sorted by ID (oldest first).
-func ListCheckpoints(ctx context.Context, store objstore.ObjectStore, volumeName string) ([]CheckpointInfo, error) {
+func ListCheckpoints(ctx context.Context, store *blob.Store, volumeName string) ([]CheckpointInfo, error) {
 	volRefs := store.At("volumes")
 	prefix, err := checkpointPrefix(volumeName)
 	if err != nil {
@@ -114,7 +114,7 @@ func ListCheckpoints(ctx context.Context, store objstore.ObjectStore, volumeName
 // Clone creates a new volume by cloning from a source volume checkpoint.
 // This is a metadata-only operation: it reads the checkpoint's layer index and writes
 // a new layer index + volume ref that reference the same block ranges.
-func Clone(ctx context.Context, store objstore.ObjectStore, srcVolume, srcCheckpoint, destVolume string) error {
+func Clone(ctx context.Context, store *blob.Store, srcVolume, srcCheckpoint, destVolume string) error {
 	if srcCheckpoint == "" {
 		return fmt.Errorf("missing checkpoint ID")
 	}
@@ -127,7 +127,7 @@ func Clone(ctx context.Context, store objstore.ObjectStore, srcVolume, srcCheckp
 		return err
 	}
 	volRefs := store.At("volumes")
-	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
+	cpRef, _, err := blob.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
 		return fmt.Errorf("read checkpoint %s/%s: %w", srcVolume, srcCheckpoint, err)
 	}
@@ -137,7 +137,7 @@ func Clone(ctx context.Context, store objstore.ObjectStore, srcVolume, srcCheckp
 		return fmt.Errorf("read volume ref %q: %w", srcVolume, err)
 	}
 
-	idx, _, err := objstore.ReadJSON[layerIndex](ctx, store.At("layers/"+cpRef.LayerID), "index.json")
+	idx, _, err := blob.ReadJSON[layerIndex](ctx, store.At("layers/"+cpRef.LayerID), "index.json")
 	if err != nil {
 		return fmt.Errorf("read checkpoint layer index %q: %w", cpRef.LayerID, err)
 	}

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // TestStalePageCacheAfterFlush verifies that flushing a dirty pages to S3
@@ -23,7 +23,7 @@ func TestStalePageCacheAfterFlush(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize // high so flushes are manual only
 
-	m := newTestManager(t, objstore.NewMemStore(), cfg)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "stale-flush"})

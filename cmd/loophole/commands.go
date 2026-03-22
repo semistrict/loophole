@@ -17,11 +17,11 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/cached/cachedserver"
 	"github.com/semistrict/loophole/internal/client"
 	"github.com/semistrict/loophole/internal/env"
 	"github.com/semistrict/loophole/internal/fsserver"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
 )
@@ -63,7 +63,7 @@ func formatCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			store, err := objstore.Open(cmd.Context(), inst)
+			store, err := blob.Open(cmd.Context(), inst)
 			if err != nil {
 				return err
 			}

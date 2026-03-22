@@ -5,7 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 const (
@@ -13,9 +13,9 @@ const (
 	fuseMaxWrite    = 1024 * 1024      // 1 MiB
 )
 
-func setupBenchVolume(b *testing.B, flush bool) (*Volume, *objstore.MemStore) {
+func setupBenchVolume(b *testing.B, flush bool) (*Volume, *blob.Store) {
 	b.Helper()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newBenchManager(b, store, Config{FlushThreshold: benchVolumeSize + PageSize})
 	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: benchVolumeSize})
 	if err != nil {

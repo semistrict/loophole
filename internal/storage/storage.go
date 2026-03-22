@@ -79,6 +79,16 @@ func (b BlockIdx) PageIdx(pageOffset uint16) PageIdx {
 // never-written pages. Callers must not modify the returned slice.
 var zeroPage Page
 
+// isZeroBlock reports whether all bytes in b are zero.
+func isZeroBlock(b []byte) bool {
+	for _, v := range b {
+		if v != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 var newLayerID = uuid.NewString
 
 // zstd encoder/decoder pools.

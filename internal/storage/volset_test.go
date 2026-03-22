@@ -6,12 +6,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
 
 func TestFormatVolumeSetCreatesDescriptor(t *testing.T) {
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 
 	desc, created, err := FormatVolumeSet(context.Background(), store)
 	require.NoError(t, err)
@@ -20,7 +21,7 @@ func TestFormatVolumeSetCreatesDescriptor(t *testing.T) {
 	_, err = uuid.Parse(desc.VolsetID)
 	require.NoError(t, err)
 
-	raw, ok := store.GetObject(volumeSetDescriptorKey)
+	raw, ok := mem.GetObject(volumeSetDescriptorKey)
 	require.True(t, ok)
 
 	var stored volumeSetDescriptor
@@ -29,16 +30,16 @@ func TestFormatVolumeSetCreatesDescriptor(t *testing.T) {
 }
 
 func TestCheckVolumeSetRequiresDescriptor(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	_, err := CheckVolumeSet(context.Background(), store)
 	require.ErrorContains(t, err, "store is not formatted")
 }
 
 func TestCheckVolumeSetRejectsPageSizeMismatch(t *testing.T) {
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	data, err := json.Marshal(volumeSetDescriptor{
-		PageSize: 4096,
+		PageSize: 65536,
 		VolsetID: uuid.NewString(),
 	})
 	require.NoError(t, err)

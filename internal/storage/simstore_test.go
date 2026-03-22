@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // FaultConfig controls probabilistic fault injection in SimObjectStore.
@@ -32,59 +32,61 @@ type FaultConfig struct {
 	LayersJsonPhantomPutRate float64
 }
 
-// SimObjectStore wraps a MemStore with deterministic fault injection.
+// SimObjectStore wraps a MemDriver with deterministic fault injection.
 // All randomness comes from the provided *rand.Rand for reproducibility.
 type SimObjectStore struct {
-	inner  *objstore.MemStore
+	inner  *blob.MemDriver
+	store  *blob.Store
 	rng    *rand.Rand
 	faults FaultConfig
 }
 
 // NewSimObjectStore creates a fault-injecting object store wrapper.
 func NewSimObjectStore(rng *rand.Rand, faults FaultConfig) *SimObjectStore {
+	mem, store := blob.NewMemStore()
 	return &SimObjectStore{
-		inner:  objstore.NewMemStore(),
+		inner:  mem,
+		store:  store,
 		rng:    rng,
 		faults: faults,
 	}
 }
 
-// Store returns the underlying MemStore (for use as objstore.ObjectStore).
-// Fault injection is applied via MemStore's SetFault mechanism, driven
-// by the simulation's tick cycle rather than per-call randomness, because
-// MemStore.SetFault is the established pattern for this codebase.
-//
-// The simulation calls InjectFaults() before each tick to randomly arm
-// faults based on the FaultConfig probabilities.
-func (s *SimObjectStore) Store() *objstore.MemStore {
+// Store returns a *blob.Store wrapping the inner MemDriver.
+func (s *SimObjectStore) Store() *blob.Store {
+	return s.store
+}
+
+// Driver returns the underlying MemDriver for direct fault injection.
+func (s *SimObjectStore) Driver() *blob.MemDriver {
 	return s.inner
 }
 
-// InjectFaults randomly arms faults on the underlying MemStore for the
+// InjectFaults randomly arms faults on the underlying MemDriver for the
 // current tick, based on FaultConfig probabilities. Call once per simulation tick.
 func (s *SimObjectStore) InjectFaults() {
 	s.inner.ClearAllFaults()
 
 	if s.faults.GetFailRate > 0 && s.rng.Float64() < s.faults.GetFailRate {
-		setOneShotFault(s.inner, objstore.OpGet, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpGet, "", blob.Fault{
 			Err: fmt.Errorf("simulated S3 GET failure"),
 		})
 	}
 
 	if s.faults.PutFailRate > 0 && s.rng.Float64() < s.faults.PutFailRate {
-		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
-		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			Err: fmt.Errorf("simulated S3 PUT failure"),
 		})
 	}
 
 	if s.faults.PhantomPutRate > 0 && s.rng.Float64() < s.faults.PhantomPutRate {
-		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
-		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			PostErr: fmt.Errorf("simulated phantom PUT: data written but error returned"),
 		})
 	}
@@ -93,36 +95,36 @@ func (s *SimObjectStore) InjectFaults() {
 		isLayersJSON := func(key string) bool {
 			return strings.HasSuffix(key, "layers.json")
 		}
-		setOneShotFault(s.inner, objstore.OpPutReader, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
-		setOneShotFault(s.inner, objstore.OpPutIfNotExists, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpPut, "", blob.Fault{
 			PostErr:     fmt.Errorf("simulated phantom PUT on layers.json"),
 			ShouldFault: isLayersJSON,
 		})
 	}
 
 	if s.faults.ListFailRate > 0 && s.rng.Float64() < s.faults.ListFailRate {
-		setOneShotFault(s.inner, objstore.OpListKeys, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpList, "", blob.Fault{
 			Err: fmt.Errorf("simulated S3 LIST failure"),
 		})
 	}
 
 	if s.faults.DeleteFailRate > 0 && s.rng.Float64() < s.faults.DeleteFailRate {
-		setOneShotFault(s.inner, objstore.OpDeleteObject, "", objstore.Fault{
+		setOneShotFault(s.inner, blob.OpDelete, "", blob.Fault{
 			Err: fmt.Errorf("simulated S3 DELETE failure"),
 		})
 	}
 
 	if s.faults.GetLatency > 0 {
-		s.inner.SetFault(objstore.OpGet, "", objstore.Fault{
+		s.inner.SetFault(blob.OpGet, "", blob.Fault{
 			Delay: s.faults.GetLatency,
 		})
 	}
 
 	if s.faults.PutLatency > 0 {
-		s.inner.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		s.inner.SetFault(blob.OpPut, "", blob.Fault{
 			Delay: s.faults.PutLatency,
 		})
 	}
@@ -133,7 +135,7 @@ func (s *SimObjectStore) ClearFaults() {
 	s.inner.ClearAllFaults()
 }
 
-func setOneShotFault(store *objstore.MemStore, op objstore.OpType, key string, fault objstore.Fault) {
+func setOneShotFault(store *blob.MemDriver, op blob.OpType, key string, fault blob.Fault) {
 	var fired atomic.Bool
 	originalShouldFault := fault.ShouldFault
 	fault.ShouldFault = func(fullKey string) bool {

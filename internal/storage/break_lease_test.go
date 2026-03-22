@@ -6,16 +6,16 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/require"
 )
 
 func TestBreakLeaseGraceful(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := objstore.NewMemStore()
+		store := blob.New(blob.NewMemDriver())
 		leases := store.At("leases")
 
-		holder := objstore.NewLeaseSession(leases)
+		holder := blob.NewLeaseSession(leases)
 		holder.Handle("release", func(context.Context, json.RawMessage) (any, error) {
 			return map[string]string{"status": "released"}, nil
 		})
@@ -36,14 +36,14 @@ func TestBreakLeaseGraceful(t *testing.T) {
 		ref := mustBreakLeaseTestVolumeRef(t.Context(), t, store, "vol")
 		require.Empty(t, ref.LeaseToken)
 
-		_, _, err = objstore.ReadJSON[map[string]any](t.Context(), leases, holder.Token()+".json")
-		require.ErrorIs(t, err, objstore.ErrNotFound)
+		_, _, err = blob.ReadJSON[map[string]any](t.Context(), leases, holder.Token()+".json")
+		require.ErrorIs(t, err, blob.ErrNotFound)
 	})
 }
 
 func TestBreakLeaseForceClearsStaleLease(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := objstore.NewMemStore()
+		store := blob.New(blob.NewMemDriver())
 
 		require.NoError(t, putBreakLeaseTestVolumeRef(t.Context(), store, "vol", volumeRef{
 			LayerID:    "layer-1",
@@ -61,7 +61,7 @@ func TestBreakLeaseForceClearsStaleLease(t *testing.T) {
 
 func TestBreakLeaseRequiresForceWhenHolderMissing(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		store := objstore.NewMemStore()
+		store := blob.New(blob.NewMemDriver())
 
 		require.NoError(t, putBreakLeaseTestVolumeRef(t.Context(), store, "vol", volumeRef{
 			LayerID:    "layer-1",
@@ -77,7 +77,7 @@ func TestBreakLeaseRequiresForceWhenHolderMissing(t *testing.T) {
 	})
 }
 
-func putBreakLeaseTestVolumeRef(ctx context.Context, store objstore.ObjectStore, name string, ref volumeRef) error {
+func putBreakLeaseTestVolumeRef(ctx context.Context, store *blob.Store, name string, ref volumeRef) error {
 	data, err := json.Marshal(ref)
 	if err != nil {
 		return err
@@ -85,9 +85,9 @@ func putBreakLeaseTestVolumeRef(ctx context.Context, store objstore.ObjectStore,
 	return store.At("volumes").PutIfNotExists(ctx, name+"/index.json", data)
 }
 
-func mustBreakLeaseTestVolumeRef(ctx context.Context, t *testing.T, store objstore.ObjectStore, name string) volumeRef {
+func mustBreakLeaseTestVolumeRef(ctx context.Context, t *testing.T, store *blob.Store, name string) volumeRef {
 	t.Helper()
-	ref, _, err := objstore.ReadJSON[volumeRef](ctx, store.At("volumes"), name+"/index.json")
+	ref, _, err := blob.ReadJSON[volumeRef](ctx, store.At("volumes"), name+"/index.json")
 	require.NoError(t, err)
 	return ref
 }

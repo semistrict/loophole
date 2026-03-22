@@ -10,7 +10,7 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // Block file format (L1 and L2):
@@ -224,7 +224,7 @@ type parsedBlock struct {
 	header     blockHeader
 	dictBytes  []byte // shared dictionary; may be nil
 	index      []blockIndexEntry
-	store      objstore.ObjectStore
+	store      *blob.Store
 	key        string
 	compressed bool // true if pages are zstd-compressed
 }

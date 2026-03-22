@@ -6,11 +6,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // ListAllVolumes returns the names of all volumes in the store.
-func ListAllVolumes(ctx context.Context, store objstore.ObjectStore) ([]string, error) {
+func ListAllVolumes(ctx context.Context, store *blob.Store) ([]string, error) {
 	volRefs := store.At("volumes")
 	objects, err := volRefs.ListKeys(ctx, "")
 	if err != nil {
@@ -31,7 +31,7 @@ func ListAllVolumes(ctx context.Context, store objstore.ObjectStore) ([]string, 
 	return names, nil
 }
 
-func GetVolumeInfo(ctx context.Context, store objstore.ObjectStore, name string) (VolumeInfo, error) {
+func GetVolumeInfo(ctx context.Context, store *blob.Store, name string) (VolumeInfo, error) {
 	if err := ValidateVolumeName(name); err != nil {
 		return VolumeInfo{}, err
 	}
@@ -48,19 +48,19 @@ func GetVolumeInfo(ctx context.Context, store objstore.ObjectStore, name string)
 	}, nil
 }
 
-func UpdateLabels(ctx context.Context, store objstore.ObjectStore, name string, labels map[string]string) error {
+func UpdateLabels(ctx context.Context, store *blob.Store, name string, labels map[string]string) error {
 	volRefs := store.At("volumes")
 	key, err := volumeIndexKey(name)
 	if err != nil {
 		return err
 	}
-	return objstore.ModifyJSON[volumeRef](ctx, volRefs, key, func(ref *volumeRef) error {
+	return blob.ModifyJSON[volumeRef](ctx, volRefs, key, func(ref *volumeRef) error {
 		ref.Labels = labels
 		return nil
 	})
 }
 
-func DeleteVolume(ctx context.Context, store objstore.ObjectStore, name string) error {
+func DeleteVolume(ctx context.Context, store *blob.Store, name string) error {
 	if err := ValidateVolumeName(name); err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func DeleteVolume(ctx context.Context, store objstore.ObjectStore, name string) 
 	volRefs := store.At("volumes")
 	v := &Volume{
 		name:  name,
-		lease: objstore.NewLeaseSession(store.At("leases")),
+		lease: blob.NewLeaseSession(store.At("leases")),
 		manager: &Manager{
 			store:   store,
 			volRefs: volRefs,

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // TestFlushAfterCloneEphemeralEOF reproduces the "read ephemeral at N: EOF" bug.
@@ -20,7 +20,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 	}
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 
@@ -99,7 +99,7 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
 	}
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, cfg)
 	ctx := t.Context()
 

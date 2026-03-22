@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -59,11 +59,11 @@ func TestResolveMKE2FS(t *testing.T) {
 
 func TestImportImageFileDirect(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	_, _, err := storage.FormatVolumeSet(ctx, store)
 	require.NoError(t, err)
 
-	vm := &storage.Manager{ObjectStore: store}
+	vm := &storage.Manager{BlobStore: store}
 	t.Cleanup(func() { require.NoError(t, vm.Close()) })
 
 	vol, err := vm.NewVolume(storage.CreateParams{
@@ -90,11 +90,11 @@ func TestImportImageFileDirect(t *testing.T) {
 
 func TestImportImageFileDirectPadsTailToPageSize(t *testing.T) {
 	ctx := context.Background()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	_, _, err := storage.FormatVolumeSet(ctx, store)
 	require.NoError(t, err)
 
-	vm := &storage.Manager{ObjectStore: store}
+	vm := &storage.Manager{BlobStore: store}
 	t.Cleanup(func() { require.NoError(t, vm.Close()) })
 
 	vol, err := vm.NewVolume(storage.CreateParams{

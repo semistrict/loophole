@@ -60,7 +60,7 @@ func printStats(fams map[string]*dto.MetricFamily) {
 	printLayer(fams)
 	printCache(fams)
 	printFlush(fams)
-	printS3(fams)
+	printBlob(fams)
 }
 
 // --- sections ---
@@ -120,6 +120,9 @@ func printLayer(fams map[string]*dto.MetricFamily) {
 	_, _ = header.Println("Layer I/O")
 	printCounterBytes(fams, "loophole_layer_read_bytes_total", "read")
 	printCounterBytes(fams, "loophole_layer_write_bytes_total", "write")
+	printHistBytes(fams, "loophole_storage_read_size_bytes", "read size")
+	printHistBytes(fams, "loophole_storage_write_size_bytes", "write size")
+	printHistBytes(fams, "loophole_storage_punch_hole_size_bytes", "punch size")
 	printGauge(fams, "loophole_layer_dirty_blocks", "dirty blocks")
 	printGauge(fams, "loophole_layer_open_blocks", "open blocks")
 
@@ -185,6 +188,8 @@ func printFlush(fams map[string]*dto.MetricFamily) {
 	printGauge(fams, "loophole_flush_frozen_tables", "queue depth")
 	printCounter(fams, "loophole_flush_pages_total", "pages")
 	printCounterBytes(fams, "loophole_flush_bytes_total", "bytes")
+	printHistBytes(fams, "loophole_flush_block_uncompressed_bytes", "raw size")
+	printHistBytes(fams, "loophole_flush_block_compressed_bytes", "compressed")
 	printCounter(fams, "loophole_flush_errors_total", "errors")
 	printCounter(fams, "loophole_flush_tombstones_total", "tombstones")
 	printHistSummary(fams, "loophole_flush_duration_seconds", "duration")
@@ -195,15 +200,15 @@ func printFlush(fams map[string]*dto.MetricFamily) {
 	fmt.Println()
 }
 
-func printS3(fams map[string]*dto.MetricFamily) {
-	total := counterVal(fams, "loophole_s3_requests_total")
+func printBlob(fams map[string]*dto.MetricFamily) {
+	total := counterVal(fams, "loophole_blob_requests_total")
 	if total == 0 {
 		return
 	}
-	_, _ = header.Println("S3")
+	_, _ = header.Println("Blob Store")
 
 	// requests by op
-	if fam := fams["loophole_s3_requests_total"]; fam != nil {
+	if fam := fams["loophole_blob_requests_total"]; fam != nil {
 		ops := make(map[string]float64)
 		for _, m := range fam.GetMetric() {
 			v := m.GetCounter().GetValue()
@@ -219,7 +224,7 @@ func printS3(fams map[string]*dto.MetricFamily) {
 	}
 
 	// errors by op
-	if fam := fams["loophole_s3_errors_total"]; fam != nil {
+	if fam := fams["loophole_blob_errors_total"]; fam != nil {
 		errs := make(map[string]float64)
 		for _, m := range fam.GetMetric() {
 			v := m.GetCounter().GetValue()
@@ -235,7 +240,7 @@ func printS3(fams map[string]*dto.MetricFamily) {
 	}
 
 	// transfer bytes
-	if fam := fams["loophole_s3_transfer_bytes_total"]; fam != nil {
+	if fam := fams["loophole_blob_transfer_bytes_total"]; fam != nil {
 		var tx, rx float64
 		for _, m := range fam.GetMetric() {
 			switch labelVal(m, "direction") {
@@ -251,8 +256,8 @@ func printS3(fams map[string]*dto.MetricFamily) {
 		}
 	}
 
-	printGauge(fams, "loophole_s3_inflight_uploads", "uploads inflight")
-	printGauge(fams, "loophole_s3_inflight_downloads", "downloads inflight")
+	printGauge(fams, "loophole_blob_inflight_uploads", "uploads inflight")
+	printGauge(fams, "loophole_blob_inflight_downloads", "downloads inflight")
 	fmt.Println()
 }
 
@@ -324,6 +329,27 @@ func printGaugeBytes(fams map[string]*dto.MetricFamily, name, lbl string) {
 		}
 		_, _ = label.Printf("  %-10s ", lbl)
 		fmt.Println(humanBytes(v))
+	}
+}
+
+func printHistBytes(fams map[string]*dto.MetricFamily, name, lbl string) {
+	fam := fams[name]
+	if fam == nil {
+		return
+	}
+	for _, m := range fam.GetMetric() {
+		h := m.GetHistogram()
+		count := h.GetSampleCount()
+		if count == 0 {
+			continue
+		}
+		avg := h.GetSampleSum() / float64(count)
+		p50 := histPercentile(h, 0.5)
+		p99 := histPercentile(h, 0.99)
+		_, _ = label.Printf("  %-10s ", lbl)
+		fmt.Printf("%s calls  avg %s  p50 %s  p99 %s\n",
+			humanCount(float64(count)),
+			humanBytes(avg), humanBytes(p50), humanBytes(p99))
 	}
 }
 

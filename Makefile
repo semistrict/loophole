@@ -1,4 +1,4 @@
-.PHONY: build loophole install check fmt test clean deps e2e e2e-requirenbd e2e-nonbd bench-fuse fly-bin
+.PHONY: build loophole install check fmt test clean deps e2e e2e-requirenbd e2e-nonbd bench-fuse fly-bin deadcode
 
 .DEFAULT_GOAL := loophole
 
@@ -72,3 +72,9 @@ e2e-nonbd:
 #        make bench-fuse COUNT=5   (for benchstat: run 5 times)
 bench-fuse:
 	LOG_LEVEL=error go test -tags "$(BUILDTAGS)" -bench=. -run=^$$ -benchmem -count=$(or $(COUNT),1) -timeout 600s ./e2e/
+
+# Find unused code in internal/ packages via whole-program analysis.
+# Loads all main packages + tests to build a complete call graph.
+# Run on Linux for accurate results (macOS stubs hide real call paths).
+deadcode:
+	deadcode -test -tags "$(BUILDTAGS)" -filter='github.com/semistrict/loophole/internal' ./...

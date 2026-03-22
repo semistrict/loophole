@@ -4,13 +4,13 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestVolumeDirectWritebackRejectsNormalWrite(t *testing.T) {
-	m := newTestManager(t, objstore.NewMemStore(), Config{
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  -1,
 	})
@@ -32,7 +32,7 @@ func TestVolumeDirectWritebackRejectsNormalWrite(t *testing.T) {
 
 func TestDirectFlush(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
@@ -80,7 +80,7 @@ func TestDirectFlush(t *testing.T) {
 
 func TestDirectFlushMultipleFlushes(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
@@ -111,7 +111,7 @@ func TestDirectFlushMultipleFlushes(t *testing.T) {
 
 func TestDirectFlushL2Promotion(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold:    int64(L1PromoteThreshold) * PageSize,
@@ -149,7 +149,7 @@ func TestDirectFlushL2Promotion(t *testing.T) {
 
 func TestVolumeDirectWritebackFlushesExistingDirtyPagesBeforeEntering(t *testing.T) {
 	ctx := t.Context()
-	m := newTestManager(t, objstore.NewMemStore(), Config{
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), Config{
 		FlushThreshold: 4 * PageSize,
 		FlushInterval:  -1,
 	})

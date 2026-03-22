@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/cached"
 	"github.com/semistrict/loophole/internal/cached/cachedserver"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/stretchr/testify/require"
 )
@@ -35,9 +35,9 @@ func TestWritableLayerDoesNotUsePersistentPageCache(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	formatTestStore(t, store)
-	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m := &Manager{BlobStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{
@@ -70,9 +70,9 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 		FlushInterval:  -1,
 	}
 
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	formatTestStore(t, store)
-	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m := &Manager{BlobStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	v, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -87,7 +87,7 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	v.layer.blockCache.clear()
 
 	// Open child on a separate manager (same store, same cache).
-	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m2 := &Manager{BlobStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")
@@ -115,9 +115,9 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 		FlushInterval:  -1,
 	}
 
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	formatTestStore(t, store)
-	m := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m := &Manager{BlobStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m.Close() })
 
 	parent, err := m.NewVolume(CreateParams{Volume: "root", Size: 1024 * 1024, NoFormat: true})
@@ -129,7 +129,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	require.NoError(t, checkpointAndClone(t, parent, "child"))
 
 	// Open child on a separate manager (same store).
-	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}
+	m2 := &Manager{BlobStore: store, config: cfg, diskCache: cache}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	child, err := m2.OpenVolume("child")

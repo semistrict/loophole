@@ -5,7 +5,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -34,21 +34,21 @@ func requireBytesEqualWithPageDebug(t *testing.T, ly *layer, got, want []byte) {
 	t.Fatal("data mismatch")
 }
 
-func formatTestStore(t *testing.T, store objstore.ObjectStore) {
+func formatTestStore(t *testing.T, store *blob.Store) {
 	t.Helper()
 	_, _, err := FormatVolumeSet(context.Background(), store)
 	require.NoError(t, err)
 }
 
-func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Manager {
+func newTestManager(t *testing.T, store *blob.Store, config Config) *Manager {
 	t.Helper()
 	formatTestStore(t, store)
 	if config.FlushInterval == 0 {
 		config.FlushInterval = -1
 	}
 	m := &Manager{
-		ObjectStore: store,
-		config:      config,
+		BlobStore: store,
+		config:    config,
 	}
 	t.Cleanup(func() {
 		_ = m.Close()
@@ -58,7 +58,7 @@ func newTestManager(t *testing.T, store objstore.ObjectStore, config Config) *Ma
 
 func TestLayerReadWrite(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		// Keep the mixed-write test focused on direct-L2 eligibility rather than
@@ -91,7 +91,7 @@ func TestLayerReadWrite(t *testing.T) {
 
 func TestLayerFlushAndRead(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * BlockSize,
@@ -120,7 +120,7 @@ func TestLayerFlushAndRead(t *testing.T) {
 
 func TestLayerPunchHole(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * BlockSize,
@@ -152,7 +152,7 @@ func TestLayerPunchHole(t *testing.T) {
 
 func TestLayerFlushAndReadPages(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 4 * PageSize,
@@ -190,7 +190,7 @@ func TestLayerFlushAndReadPages(t *testing.T) {
 
 func TestLayerSnapshot(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -238,7 +238,7 @@ func TestLayerSnapshot(t *testing.T) {
 
 func TestLayerDirectL2Write(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * BlockSize,
@@ -301,7 +301,7 @@ func TestLayerDirectL2Write(t *testing.T) {
 
 func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * BlockSize,
@@ -344,7 +344,7 @@ func TestLayerDirectL2ThenNormalWrite(t *testing.T) {
 
 func TestLayerDirectL2MixedWrite(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -377,7 +377,7 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 
 func TestLayerMixedWriteWithoutDirectL2(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -407,7 +407,7 @@ func TestLayerMixedWriteWithoutDirectL2(t *testing.T) {
 
 func TestLayerMixedWriteAfterExplicitFlushWithoutDirectL2(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 64 * 1024,
@@ -438,7 +438,7 @@ func TestLayerMixedWriteAfterExplicitFlushWithoutDirectL2(t *testing.T) {
 
 func TestLayerPunchHoleDisablesDirectL2(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 
 	cfg := Config{
 		FlushThreshold: 2 * BlockSize,

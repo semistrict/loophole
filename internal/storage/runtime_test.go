@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/env"
-	"github.com/semistrict/loophole/internal/objstore"
 	"github.com/stretchr/testify/require"
 )
 
@@ -35,9 +35,9 @@ func TestStoreRuntimeHelpers(t *testing.T) {
 	cacheDir := StoreCacheDir(dir, inst)
 	require.Equal(t, filepath.Join(string(dir), "cache", inst.VolsetID), cacheDir)
 
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	m := NewManagerForStore(inst, dir, store)
-	require.Equal(t, store, m.ObjectStore)
+	require.Equal(t, store, m.BlobStore)
 	require.Equal(t, cacheDir, m.CacheDir)
 	require.Equal(t, ConfigFromEnv(), m.config)
 }
@@ -51,7 +51,7 @@ func TestOpenManagerForStore(t *testing.T) {
 
 	t.Setenv("LOOPHOLE_TEST_STORAGE_FLUSH_THRESHOLD", "16384")
 
-	store, err := objstore.Open(context.Background(), inst)
+	store, err := blob.Open(context.Background(), inst)
 	require.NoError(t, err)
 	desc, _, err := FormatVolumeSet(context.Background(), store)
 	require.NoError(t, err)

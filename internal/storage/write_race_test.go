@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 )
 
 // TestConcurrentPartialPageWrites verifies that concurrent sub-page writes
@@ -16,7 +16,7 @@ func TestConcurrentPartialPageWrites(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize
 
-	m := newTestManager(t, objstore.NewMemStore(), cfg)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "race"})
@@ -81,7 +81,7 @@ func TestConcurrentWriteAndPunchHole(t *testing.T) {
 	cfg := testConfig
 	cfg.FlushThreshold = 256 * PageSize
 
-	m := newTestManager(t, objstore.NewMemStore(), cfg)
+	m := newTestManager(t, blob.New(blob.NewMemDriver()), cfg)
 	ctx := t.Context()
 
 	vol, err := m.NewVolume(CreateParams{Volume: "punch-race"})

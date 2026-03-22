@@ -8,7 +8,7 @@ import (
 	"testing"
 	"testing/synctest"
 
-	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/blob"
 	"github.com/semistrict/loophole/internal/safepoint"
 	"github.com/stretchr/testify/require"
 )
@@ -29,7 +29,7 @@ func copyReadPagesResult(slices [][]byte) []byte {
 	return out
 }
 
-func putTestBlock(t *testing.T, store objstore.ObjectStore, cfg Config, layerID, level string, seq uint64, blockIdx BlockIdx, data []byte) {
+func putTestBlock(t *testing.T, store *blob.Store, cfg Config, layerID, level string, seq uint64, blockIdx BlockIdx, data []byte) {
 	t.Helper()
 	require.Len(t, data, BlockSize)
 	cfg.setDefaults()
@@ -49,7 +49,8 @@ func putTestBlock(t *testing.T, store objstore.ObjectStore, cfg Config, layerID,
 
 func TestLayerReadBlocksFlushCommit(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -71,7 +72,7 @@ func TestLayerReadBlocksFlushCommit(t *testing.T) {
 	readStarted := make(chan struct{})
 	unblockRead := make(chan struct{})
 	var getCalls atomic.Int32
-	store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+	mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 		Hook: func() {
 			if getCalls.Add(1) != 1 {
 				return
@@ -129,7 +130,8 @@ func TestLayerReadBlocksFlushCommit(t *testing.T) {
 
 func TestLayerReadBlocksDirectL2Commit(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -151,7 +153,7 @@ func TestLayerReadBlocksDirectL2Commit(t *testing.T) {
 	readStarted := make(chan struct{})
 	unblockRead := make(chan struct{})
 	var getCalls atomic.Int32
-	store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+	mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 		Hook: func() {
 			if getCalls.Add(1) != 1 {
 				return
@@ -203,7 +205,8 @@ func TestLayerReadBlocksDirectL2Commit(t *testing.T) {
 
 func TestLayerReadPagesFlushCommit(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	mem := blob.NewMemDriver()
+	store := blob.New(mem)
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -231,7 +234,7 @@ func TestLayerReadPagesFlushCommit(t *testing.T) {
 	readStarted := make(chan struct{})
 	unblockRead := make(chan struct{})
 	var getCalls atomic.Int32
-	store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+	mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 		Hook: func() {
 			if getCalls.Add(1) != 1 {
 				return
@@ -292,7 +295,8 @@ func TestLayerReadPagesFlushCommit(t *testing.T) {
 func TestLayerFollowerMidReadRefresh(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := t.Context()
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		cfg := Config{
 			FlushThreshold: 4 * PageSize,
 			FlushInterval:  -1,
@@ -330,7 +334,7 @@ func TestLayerFollowerMidReadRefresh(t *testing.T) {
 		readStarted := make(chan struct{})
 		unblockRead := make(chan struct{})
 		var getCalls atomic.Int32
-		store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+		mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 			Hook: func() {
 				if getCalls.Add(1) != 1 {
 					return
@@ -352,7 +356,7 @@ func TestLayerFollowerMidReadRefresh(t *testing.T) {
 		}()
 
 		<-readStarted
-		err = objstore.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
+		err = blob.ModifyJSON[layerIndex](ctx, store.At("layers/"+ly.id), "index.json", func(idx *layerIndex) error {
 			idx.LayoutGen++
 			idx.L1 = []blockRange{
 				{Start: 0, End: 1, Layer: ly.id, WriteLeaseSeq: 2},
@@ -372,7 +376,7 @@ func TestLayerFollowerMidReadRefresh(t *testing.T) {
 
 func TestVolumeCloseFlushesAcceptedWritesBeforeReturn(t *testing.T) {
 	ctx := t.Context()
-	store := objstore.NewMemStore()
+	store := blob.New(blob.NewMemDriver())
 	cfg := Config{
 		FlushThreshold: 8 * PageSize,
 		FlushInterval:  -1,
@@ -388,7 +392,7 @@ func TestVolumeCloseFlushesAcceptedWritesBeforeReturn(t *testing.T) {
 	require.NoError(t, v.Write(page1, PageSize))
 	require.NoError(t, v.Close())
 
-	m2 := &Manager{ObjectStore: store, config: cfg}
+	m2 := &Manager{BlobStore: store, config: cfg}
 	t.Cleanup(func() { _ = m2.Close() })
 
 	reopened, err := m2.OpenVolume("close-flushes-accepted")
@@ -414,7 +418,7 @@ func TestLayerPunchHoleVsFullBlockWriteSameBlock(t *testing.T) {
 	punchLast := append(make([]byte, PageSize), blockData[PageSize:]...)
 
 	for i := 0; i < 64; i++ {
-		store := objstore.NewMemStore()
+		store := blob.New(blob.NewMemDriver())
 		ly, err := openLayer(ctx, layerParams{store: store, id: "punch-vs-full-block", config: cfg})
 		require.NoError(t, err)
 
@@ -455,7 +459,8 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 	ctx := t.Context()
 
 	t.Run("flush", func(t *testing.T) {
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		cfg := Config{
 			FlushThreshold: 8 * PageSize,
 			FlushInterval:  -1,
@@ -476,7 +481,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 		partialStarted := make(chan struct{})
 		unblockPartial := make(chan struct{})
 		var getCalls atomic.Int32
-		store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+		mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 			Hook: func() {
 				if getCalls.Add(1) != 1 {
 					return
@@ -489,7 +494,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 		page1 := bytes.Repeat([]byte{0xA2}, PageSize)
 		require.NoError(t, ly.Write(page1, PageSize))
 
-		partialData := bytes.Repeat([]byte{0xA3}, 4096)
+		partialData := bytes.Repeat([]byte{0xA3}, 512)
 		partialDone := make(chan error, 1)
 		go func() {
 			partialDone <- ly.Write(partialData, 0)
@@ -527,7 +532,8 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 	})
 
 	t.Run("full-block-write", func(t *testing.T) {
-		store := objstore.NewMemStore()
+		mem := blob.NewMemDriver()
+		store := blob.New(mem)
 		cfg := Config{
 			FlushThreshold: 2 * BlockSize,
 			FlushInterval:  -1,
@@ -548,7 +554,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 		partialStarted := make(chan struct{})
 		unblockPartial := make(chan struct{})
 		var getCalls atomic.Int32
-		store.SetFault(objstore.OpGet, oldKey, objstore.Fault{
+		mem.SetFault(blob.OpGet, oldKey, blob.Fault{
 			Hook: func() {
 				if getCalls.Add(1) != 1 {
 					return
@@ -558,7 +564,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 			},
 		})
 
-		partialData := bytes.Repeat([]byte{0xB2}, 4096)
+		partialData := bytes.Repeat([]byte{0xB2}, 512)
 		partialDone := make(chan error, 1)
 		go func() {
 			partialDone <- ly.Write(partialData, 0)

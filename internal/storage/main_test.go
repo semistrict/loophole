@@ -54,10 +54,10 @@ func cloneOpen(t testing.TB, v *Volume, name string) *Volume {
 	}
 	m := v.manager
 	m2 := &Manager{
-		ObjectStore: m.ObjectStore,
-		CacheDir:    m.CacheDir,
-		config:      m.config,
-		fs:          m.fs,
+		BlobStore: m.Store(),
+		CacheDir:  m.CacheDir,
+		config:    m.config,
+		fs:        m.fs,
 	}
 	t.Cleanup(func() { _ = m2.Close() })
 	clone, err := m2.OpenVolume(name)
