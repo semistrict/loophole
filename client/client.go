@@ -70,18 +70,6 @@ func (c *Client) BreakLease(ctx context.Context, volume string, force bool) (gra
 	return result.Graceful, nil
 }
 
-// CloneParams controls how Clone operates.
-type CloneParams struct {
-	Checkpoint string `json:"checkpoint,omitempty"`
-	Clone      string `json:"clone"`
-}
-
-// Clone creates an unmounted clone of the managed volume.
-func (c *Client) Clone(ctx context.Context, p CloneParams) error {
-	_, err := c.post(ctx, "/clone", p)
-	return err
-}
-
 // Checkpoint creates a checkpoint and returns the checkpoint ID (timestamp).
 func (c *Client) Checkpoint(ctx context.Context) (string, error) {
 	resp, err := c.post(ctx, "/checkpoint", nil)
@@ -106,18 +94,6 @@ func (c *Client) DeviceCheckpoint(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return result.Checkpoint, nil
-}
-
-// DeviceCloneParams controls how DeviceClone operates.
-type DeviceCloneParams struct {
-	Checkpoint string `json:"checkpoint,omitempty"`
-	Clone      string `json:"clone"`
-}
-
-// DeviceClone creates an unattached clone of the managed volume.
-func (c *Client) DeviceClone(ctx context.Context, p DeviceCloneParams) error {
-	_, err := c.post(ctx, "/device/clone", p)
-	return err
 }
 
 // DeviceDDWriteExisting writes a raw disk image into an already-open volume.

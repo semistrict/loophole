@@ -1,5 +1,5 @@
 // Package cached implements the client side of the page cache daemon
-// (loophole-cached). The daemon server code lives in cmd/loophole-cached.
+// (loophole cached). The daemon server code lives in cached/cachedserver.
 package cached
 
 import (
@@ -304,7 +304,7 @@ func (c *conn) close() error {
 
 // --- PageCache (public API with auto-reconnect) ---
 
-// PageCache connects to the page cache daemon (loophole-cached) and
+// PageCache connects to the page cache daemon (loophole cached) and
 // provides zero-copy page reads via a shared mmap arena.
 type PageCache struct {
 	dir       string

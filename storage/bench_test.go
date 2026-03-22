@@ -119,7 +119,7 @@ func BenchmarkS3Ops(b *testing.B) {
 
 		store.ResetCounts()
 		for i := range b.N {
-			if err := snapshotVolume(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
+			if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -150,7 +150,7 @@ func BenchmarkS3Ops(b *testing.B) {
 
 			store.ResetCounts()
 			for i := range 100 {
-				if err := snapshotVolume(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
+				if err := checkpointAndClone(b, v, fmt.Sprintf("snap-%d", i)); err != nil {
 					b.Fatal(err)
 				}
 			}

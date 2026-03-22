@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -16,8 +17,8 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
-	if err := ensureCachedBinaryForTests(); err != nil {
-		slog.Error("build loophole-cached for tests failed", "error", err)
+	if err := ensureLoopholeBinaryForTests(); err != nil {
+		slog.Error("build loophole for tests failed", "error", err)
 		os.Exit(1)
 	}
 
@@ -38,7 +39,7 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func ensureCachedBinaryForTests() error {
+func ensureLoopholeBinaryForTests() error {
 	if os.Getenv("LOOPHOLE_CACHED_BIN") != "" {
 		return nil
 	}
@@ -48,9 +49,9 @@ func ensureCachedBinaryForTests() error {
 		return err
 	}
 	root := filepath.Dir(wd)
-	binPath := filepath.Join(root, "bin", "loophole-cached-"+runtime.GOOS+"-"+runtime.GOARCH)
+	binPath := filepath.Join(root, "bin", "loophole-"+runtime.GOOS+"-"+runtime.GOARCH)
 	if _, err := os.Stat(binPath); err != nil {
-		cmd := exec.Command("make", "loophole-cached")
+		cmd := exec.Command("make", "loophole")
 		cmd.Dir = root
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -65,9 +66,13 @@ func debugCountersEnabled() bool {
 	return os.Getenv("LOOPHOLE_DEBUG_COUNTERS") != ""
 }
 
-func snapshotVolume(t testing.TB, v *Volume, name string) error {
+func checkpointAndClone(t testing.TB, v *Volume, name string) error {
 	t.Helper()
-	return v.Clone(name)
+	cpID, err := v.Checkpoint()
+	if err != nil {
+		return fmt.Errorf("checkpoint before clone: %w", err)
+	}
+	return Clone(t.Context(), v.manager.Store(), v.Name(), cpID, name)
 }
 
 // cloneOpen clones a volume and opens the clone on a separate manager
@@ -75,7 +80,7 @@ func snapshotVolume(t testing.TB, v *Volume, name string) error {
 // owned by a different process.
 func cloneOpen(t testing.TB, v *Volume, name string) *Volume {
 	t.Helper()
-	if err := v.Clone(name); err != nil {
+	if err := checkpointAndClone(t, v, name); err != nil {
 		t.Fatalf("clone %q: %v", name, err)
 	}
 	m := v.manager

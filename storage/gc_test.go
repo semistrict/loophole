@@ -99,18 +99,19 @@ func TestGarbageCollectWithCheckpoints(t *testing.T) {
 	require.NoError(t, v.Flush())
 
 	// Create a checkpoint (this creates a frozen layer + new writable layer).
-	require.NoError(t, v.Clone("cp-clone"))
+	require.NoError(t, checkpointAndClone(t, v, "cp-clone"))
 
 	// Close and delete the clone but keep the original volume.
 	m2 := &Manager{ObjectStore: store, CacheDir: m.CacheDir, config: m.config, fs: m.fs}
 	t.Cleanup(func() { _ = m2.Close() })
 	require.NoError(t, DeleteVolume(ctx, m2.Store(), "cp-clone"))
 
-	// GC should delete the clone's orphaned layer but preserve the original
-	// volume's layers (including the frozen parent referenced via blockRanges).
+	// GC should preserve the original volume's layers (including the checkpoint
+	// ancestry) and delete both orphaned layers created by this flow:
+	// the deleted clone's layer and the detached pre-checkpoint writable layer.
 	result, err := GarbageCollect(ctx, store, false, 0)
 	require.NoError(t, err)
-	assert.Equal(t, 1, result.OrphanedLayers)
+	assert.Equal(t, 2, result.OrphanedLayers)
 	assert.Greater(t, result.ReachableLayers, 0)
 
 	// Original volume should still work.

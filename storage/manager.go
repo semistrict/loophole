@@ -244,23 +244,17 @@ func (m *Manager) Close() error {
 	if err := m.init(); err != nil {
 		return err
 	}
-	ctx := context.Background()
-
 	m.mu.Lock()
 	v := m.volume
 	m.volume = nil
 	m.mu.Unlock()
 
 	if v != nil {
-		slog.Info("manager close: flushing", "volume", v.Name())
-		if err := v.flush(); err != nil {
-			slog.Warn("flush on close failed", "volume", v.Name(), "error", err)
-		}
-		v.layer.beginShutdown()
-		slog.Info("manager close: releasing lease", "volume", v.Name())
-		v.releaseLease(ctx)
 		slog.Info("manager close: closing volume", "volume", v.Name())
-		v.close()
+		if err := v.Close(); err != nil {
+			slog.Warn("manager close: volume close failed", "volume", v.Name(), "error", err)
+			return err
+		}
 		slog.Info("manager close: volume closed", "volume", v.Name())
 	}
 	if m.diskCache != nil {
@@ -327,7 +321,7 @@ func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume
 		if m.volume.Name() == name {
 			existing := m.volume
 			m.mu.Unlock()
-			v.close()
+			v.closeResources()
 			if writeLeaseSeq > 0 {
 				v.releaseLease(ctx)
 			}
@@ -335,7 +329,7 @@ func (m *Manager) openVolume(name string, ref volumeRef, readOnly bool) (*Volume
 		}
 		current := m.volume.Name()
 		m.mu.Unlock()
-		v.close()
+		v.closeResources()
 		if writeLeaseSeq > 0 {
 			v.releaseLease(ctx)
 		}

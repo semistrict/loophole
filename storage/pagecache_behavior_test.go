@@ -82,7 +82,7 @@ func TestImmutableSourcePagesSharePersistentCacheAcrossClone(t *testing.T) {
 	require.NoError(t, v.Write(page, 0))
 	require.NoError(t, v.Flush())
 
-	require.NoError(t, v.Clone("child"))
+	require.NoError(t, checkpointAndClone(t, v, "child"))
 
 	v.layer.blockCache.clear()
 
@@ -126,7 +126,7 @@ func TestChildOverrideDoesNotPopulatePersistentCacheForWritablePage(t *testing.T
 	page := bytes.Repeat([]byte{0xAA}, PageSize)
 	require.NoError(t, parent.Write(page, 0))
 	require.NoError(t, parent.Flush())
-	require.NoError(t, parent.Clone("child"))
+	require.NoError(t, checkpointAndClone(t, parent, "child"))
 
 	// Open child on a separate manager (same store).
 	m2 := &Manager{ObjectStore: store, config: cfg, diskCache: cache}

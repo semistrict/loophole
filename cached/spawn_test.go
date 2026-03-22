@@ -24,22 +24,22 @@ func TestEnsureDaemonFastPathWithExistingSocket(t *testing.T) {
 }
 
 func TestEnsureDaemonReturnsBinaryLookupErrorWithoutSpawning(t *testing.T) {
-	t.Setenv("LOOPHOLE_CACHED_BIN", filepath.Join(t.TempDir(), "missing-loophole-cached"))
+	t.Setenv("LOOPHOLE_CACHED_BIN", filepath.Join(t.TempDir(), "missing-loophole"))
 	t.Setenv("PATH", "")
 
 	err := EnsureDaemon(t.TempDir())
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "find loophole-cached")
+	require.Contains(t, err.Error(), "find loophole binary")
 }
 
-func TestFindCachedBinaryUsesEnvOverride(t *testing.T) {
+func TestFindLoopholeBinaryUsesEnvOverride(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "loophole-cached")
+	bin := filepath.Join(dir, "loophole")
 	require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755))
 
 	t.Setenv("LOOPHOLE_CACHED_BIN", bin)
 
-	got, err := findCachedBinary()
+	got, err := findLoopholeBinary()
 	require.NoError(t, err)
 	require.Equal(t, bin, got)
 }

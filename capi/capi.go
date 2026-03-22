@@ -14,7 +14,7 @@
 //	int32_t loophole_write(handle, buf, offset, count)         — write bytes
 //	int32_t loophole_flush(handle)                             — flush to store
 //	uint64_t loophole_size(handle)                             — volume size
-//	int32_t loophole_clone(handle, clone_name, clone_name_len) — clone volume
+//	int32_t loophole_checkpoint(handle, out_id, cap, *len)     — checkpoint volume
 //	int32_t loophole_close(handle)                             — close handle
 //
 // The handle value is a pointer to the internal state. Read/write use it
@@ -64,7 +64,7 @@ func int64ToPtr(id C.int64_t) *handle {
 // loophole_open opens a volume by name. Each call creates its own store,
 // cache, and manager — the returned handle is fully self-contained.
 // A volserver is started on a UDS socket so the CLI can discover and
-// interact with the volume (status, checkpoint, clone, etc.).
+// interact with the volume (status, checkpoint, etc.).
 //
 // home_dir: path to the loophole runtime directory (e.g. ~/.loophole), or NULL to
 // use the default. The LOOPHOLE_HOME env var overrides the default.
@@ -203,17 +203,21 @@ func loophole_size(id C.int64_t) C.uint64_t {
 	return C.uint64_t(h.vol.Size())
 }
 
-// loophole_clone creates a copy-on-write clone of the volume (includes an
-// implicit flush). Returns 0 on success, negative on error.
+// loophole_checkpoint creates a checkpoint of the volume. On success the
+// checkpoint ID (timestamp string) is written to out_id (up to out_id_cap
+// bytes) and the actual length is stored in *out_id_len. Returns 0 on
+// success, negative on error.
 //
-//export loophole_clone
-func loophole_clone(id C.int64_t, clone_name *C.char, clone_name_len C.uint32_t) C.int32_t {
+//export loophole_checkpoint
+func loophole_checkpoint(id C.int64_t, out_id *C.char, out_id_cap C.uint32_t, out_id_len *C.uint32_t) C.int32_t {
 	h := int64ToPtr(id)
-	goName := C.GoStringN(clone_name, C.int(clone_name_len))
-	if err := h.vol.Clone(goName); err != nil {
-		slog.Error("loophole_clone failed", "error", err)
+	cpID, err := h.vol.Checkpoint()
+	if err != nil {
+		slog.Error("loophole_checkpoint failed", "error", err)
 		return -2
 	}
+	n := copy(unsafe.Slice((*byte)(unsafe.Pointer(out_id)), int(out_id_cap)), cpID)
+	*out_id_len = C.uint32_t(n)
 	return 0
 }
 

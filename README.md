@@ -1,5 +1,8 @@
 # Loophole
 
+> [!WARNING]
+> This software is unstable and not safe for real data. If you use it, assume you will lose data.
+
 S3-backed virtual block device with ext4-over-FUSE mounts, checkpoints, and clones.
 
 ## Overview

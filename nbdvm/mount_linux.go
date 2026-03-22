@@ -169,9 +169,6 @@ func (s *Server) Disconnect(ctx context.Context, volumeName string) error {
 	if err := clearDisconnectedDevice(nbd.DevicePath(exp.devIdx)); err != nil {
 		return err
 	}
-	if err := waitForDisconnected(ctx, exp.devIdx); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -237,10 +234,6 @@ func waitForConnected(ctx context.Context, idx uint32, sizeBytes uint64) error {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-}
-
-func waitForDisconnected(ctx context.Context, idx uint32) error {
-	return waitForStatus(ctx, idx, false)
 }
 
 func waitForStatus(ctx context.Context, idx uint32, connected bool) error {

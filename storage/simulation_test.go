@@ -107,6 +107,14 @@ func NewSimulation(t *testing.T, seed uint64, config SimConfig) *Simulation {
 	return sim
 }
 
+func (sim *Simulation) checkpointAndClone(ctx context.Context, v *Volume, cloneName string) error {
+	cpID, err := v.Checkpoint()
+	if err != nil {
+		return fmt.Errorf("checkpoint before clone: %w", err)
+	}
+	return Clone(ctx, sim.store.Store(), v.Name(), cpID, cloneName)
+}
+
 func (sim *Simulation) nextLayerID() string {
 	id := fmt.Sprintf("%08x-simtl-%08x", sim.nextTLID, sim.nextTLID)
 	sim.nextTLID++
@@ -555,7 +563,7 @@ func (sim *Simulation) opSnapshot(ctx context.Context, node *SimNode) {
 	snapName := fmt.Sprintf("%s-snap-%d", volName, sim.nextVolID)
 	sim.nextVolID++
 
-	err := snapshotVolume(sim.t, v, snapName)
+	err := checkpointAndClone(sim.t, v, snapName)
 	if err != nil {
 		return
 	}
@@ -624,7 +632,7 @@ func (sim *Simulation) opClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	if err := v.Clone(cloneName); err != nil {
+	if err := sim.checkpointAndClone(ctx, v, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -690,9 +698,8 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	// No pre-flush! Clone's internal freezeMemLayer + flushFrozenLayers
-	// persists unflushed data, so the child sees everything.
-	if err := v.Clone(cloneName); err != nil {
+	// Checkpoint flushes internally, so unflushed data is persisted.
+	if err := sim.checkpointAndClone(ctx, v, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -700,7 +707,7 @@ func (sim *Simulation) opCloneNoFlush(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	// Clone's internal flush persisted parent data — record it in oracle.
+	// Checkpoint internally flushed parent data — record it in oracle.
 	sim.oracle.RecordFlush(node.id, parentTL)
 
 	ref, err := sim.getVolRef(ctx, cloneName)
@@ -1166,7 +1173,7 @@ func (sim *Simulation) opDeepClone(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	if err := v.Clone(cloneName); err != nil {
+	if err := sim.checkpointAndClone(ctx, v, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -1254,7 +1261,7 @@ func (sim *Simulation) opCloneFromSnapshot(ctx context.Context, node *SimNode) {
 		parentNextSeq = pv.layer.nextSeq.Load()
 	}
 
-	if err := snapVol.Clone(cloneName); err != nil {
+	if err := sim.checkpointAndClone(ctx, snapVol, cloneName); err != nil {
 		// Close the snapshot.
 		snapVol.ReleaseRef()
 		delete(sim.leases, snapName)
@@ -1397,7 +1404,7 @@ func (sim *Simulation) opCloneFromCheckpoint(ctx context.Context, node *SimNode)
 		return
 	}
 
-	if err := CloneFromCheckpoint(ctx, store, srcVolName, cp.ID, cloneName); err != nil {
+	if err := Clone(ctx, store, srcVolName, cp.ID, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -1498,7 +1505,7 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 
 	cloneName := fmt.Sprintf("%s-iso-%d", volName, sim.nextVolID)
 	sim.nextVolID++
-	if err := v.Clone(cloneName); err != nil {
+	if err := sim.checkpointAndClone(ctx, v, cloneName); err != nil {
 		return
 	}
 	clone, err := sim.managerFor(node, cloneName).OpenVolume(cloneName)
@@ -1506,7 +1513,7 @@ func (sim *Simulation) opSnapshotIsolation(ctx context.Context, node *SimNode) {
 		return
 	}
 
-	// Clone internally flushes parent data.
+	// Checkpoint internally flushes parent data.
 	sim.oracle.RecordFlush(node.id, parentTL)
 
 	ref, err := sim.getVolRef(ctx, cloneName)

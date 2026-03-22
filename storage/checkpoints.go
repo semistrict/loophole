@@ -111,27 +111,30 @@ func ListCheckpoints(ctx context.Context, store objstore.ObjectStore, volumeName
 	return checkpoints, nil
 }
 
-// CloneFromCheckpoint creates a new volume by cloning from a checkpoint's frozen layer.
+// Clone creates a new volume by cloning from a source volume checkpoint.
 // This is a metadata-only operation: it reads the checkpoint's layer index and writes
 // a new layer index + volume ref that reference the same block ranges.
-func CloneFromCheckpoint(ctx context.Context, store objstore.ObjectStore, volumeName, checkpointID, cloneName string) error {
-	if err := ValidateVolumeName(cloneName); err != nil {
+func Clone(ctx context.Context, store objstore.ObjectStore, srcVolume, srcCheckpoint, destVolume string) error {
+	if srcCheckpoint == "" {
+		return fmt.Errorf("missing checkpoint ID")
+	}
+	if err := ValidateVolumeName(destVolume); err != nil {
 		return err
 	}
 
-	cpKey, err := checkpointIndexKey(volumeName, checkpointID)
+	cpKey, err := checkpointIndexKey(srcVolume, srcCheckpoint)
 	if err != nil {
 		return err
 	}
 	volRefs := store.At("volumes")
 	cpRef, _, err := objstore.ReadJSON[checkpointRef](ctx, volRefs, cpKey)
 	if err != nil {
-		return fmt.Errorf("read checkpoint %s/%s: %w", volumeName, checkpointID, err)
+		return fmt.Errorf("read checkpoint %s/%s: %w", srcVolume, srcCheckpoint, err)
 	}
 
-	volRef, err := getVolumeRef(ctx, volRefs, volumeName)
+	volRef, err := getVolumeRef(ctx, volRefs, srcVolume)
 	if err != nil {
-		return fmt.Errorf("read volume ref %q: %w", volumeName, err)
+		return fmt.Errorf("read volume ref %q: %w", srcVolume, err)
 	}
 
 	idx, _, err := objstore.ReadJSON[layerIndex](ctx, store.At("layers/"+cpRef.LayerID), "index.json")
@@ -165,7 +168,7 @@ func CloneFromCheckpoint(ctx context.Context, store objstore.ObjectStore, volume
 		return nil
 	})
 	g.Go(func() error {
-		if err := volRefs.PutIfNotExists(gctx, cloneName+"/index.json", refData); err != nil {
+		if err := volRefs.PutIfNotExists(gctx, destVolume+"/index.json", refData); err != nil {
 			return fmt.Errorf("create clone ref: %w", err)
 		}
 		return nil

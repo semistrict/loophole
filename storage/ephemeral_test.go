@@ -44,7 +44,7 @@ func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
 		t.Fatalf("pre-clone flush: %v", err)
 	}
 
-	if err := v.Clone("child"); err != nil {
+	if err := checkpointAndClone(t, v, "child"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -117,7 +117,7 @@ func TestMultipleFlushCyclesThenClone(t *testing.T) {
 	}
 
 	// Clone.
-	if err := v.Clone("child"); err != nil {
+	if err := checkpointAndClone(t, v, "child"); err != nil {
 		t.Fatal(err)
 	}
 

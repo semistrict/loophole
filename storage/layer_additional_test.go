@@ -107,20 +107,20 @@ func TestLayerReadPageRefUsesPersistentCache(t *testing.T) {
 		pages: map[string][]byte{layerCacheKey("parent", 0): cached},
 	}
 
-	snap := &layerSnapshot{
-		layoutGen: ly.index.LayoutGen,
-		active:    ly.active,
-		l1: newBlockRangeMap([]blockRange{{
-			Start:         0,
-			End:           1,
-			Layer:         "parent",
-			WriteLeaseSeq: 1,
-		}}),
-		l2: newBlockRangeMap(nil),
-	}
+	ly.mu.Lock()
+	ly.l1Map = newBlockRangeMap([]blockRange{{
+		Start:         0,
+		End:           1,
+		Layer:         "parent",
+		WriteLeaseSeq: 1,
+	}})
+	ly.l2Map = newBlockRangeMap(nil)
+	ly.mu.Unlock()
 
 	g := sp.Enter()
-	got, err := ly.readPageRef(ctx, g, snap, 0)
+	ly.mu.RLock()
+	got, err := ly.readPageRefLocked(ctx, g, 0)
+	ly.mu.RUnlock()
 	g.Exit()
 	require.NoError(t, err)
 	require.Equal(t, cached, got)

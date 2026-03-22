@@ -1,6 +1,6 @@
 // Package fsserver implements the loophole HTTP/UDS API with filesystem
 // (FUSE/ext4) support. It embeds volserver for pure volume endpoints and
-// adds freeze/thaw-wrapped checkpoint/clone.
+// adds freeze/thaw-wrapped checkpoint.
 package fsserver
 
 import (
@@ -25,7 +25,7 @@ import (
 
 // server serves the loophole HTTP API over a Unix socket.
 // It embeds a volserver.Server for volume-level endpoints and adds
-// filesystem-specific routes (freeze/thaw checkpoint/clone).
+// filesystem-specific routes (freeze/thaw checkpoint).
 type server struct {
 	inst      env.ResolvedStore
 	dir       env.Dir
@@ -185,7 +185,6 @@ func (d *server) mux(stop context.CancelFunc) *http.ServeMux {
 		// No FS-level freeze/thaw routes.
 		mux.HandleFunc("POST /device/flush", vs.HandleFlush)
 		mux.HandleFunc("POST /device/checkpoint", vs.HandleCheckpoint)
-		mux.HandleFunc("POST /device/clone", vs.HandleClone)
 		mux.HandleFunc("POST /device/dd/write", vs.HandleDeviceDDWrite)
 		mux.HandleFunc("GET /device/dd/read", vs.HandleDeviceDDRead)
 		mux.HandleFunc("GET /device/dd/size", vs.HandleDeviceDDSize)
@@ -195,7 +194,6 @@ func (d *server) mux(stop context.CancelFunc) *http.ServeMux {
 		// No raw device routes; callers must use the FS-aware API.
 		mux.HandleFunc("POST /flush", vs.HandleFlush)
 		mux.HandleFunc("POST /checkpoint", d.handleCheckpoint)
-		mux.HandleFunc("POST /clone", d.handleClone)
 	}
 
 	mux.HandleFunc("GET /status", d.handleStatus)

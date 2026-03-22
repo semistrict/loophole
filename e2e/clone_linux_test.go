@@ -20,7 +20,7 @@ func TestE2E_CloneMountStaysReadableDuringAggressiveFlush(t *testing.T) {
 
 	ctx := t.Context()
 	cloneMP := mountpoint(t, "cln-stress-clone")
-	require.NoError(t, b.Clone(ctx, parentMP, "cln-stress-clone"))
+	require.NoError(t, b.CheckpointAndClone(ctx, parentMP, "cln-stress-parent", "cln-stress-clone"))
 	require.NoError(t, b.Mount(ctx, "cln-stress-clone", cloneMP))
 
 	cloneFS := newTestFS(t, b, cloneMP)

@@ -157,18 +157,12 @@ func (b *testBackend) Unmount(ctx context.Context, mountpoint string) error {
 	return nil
 }
 
-func (b *testBackend) Clone(ctx context.Context, srcMountpoint, cloneName string) error {
-	owner := b.ownerByMountpoint(srcMountpoint)
-	if owner == nil {
-		return fmt.Errorf("no owner for mountpoint %s", srcMountpoint)
+func (b *testBackend) CheckpointAndClone(ctx context.Context, srcMountpoint, srcVolume, cloneName string) error {
+	cpID, err := b.Checkpoint(ctx, srcMountpoint)
+	if err != nil {
+		return fmt.Errorf("checkpoint before clone: %w", err)
 	}
-	if err := owner.client.Clone(ctx, client.CloneParams{
-		Clone: cloneName,
-	}); err != nil {
-		return err
-	}
-	b.trackCreated(cloneName)
-	return nil
+	return b.CloneFromCheckpoint(ctx, srcVolume, cpID, cloneName)
 }
 
 func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string, error) {
@@ -180,26 +174,13 @@ func (b *testBackend) Checkpoint(ctx context.Context, mountpoint string) (string
 }
 
 func (b *testBackend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
-	owner, err := b.ensureDeviceOwner(ctx, volume)
+	vm, cleanup, err := openDirectManager(ctx)
 	if err != nil {
 		return err
 	}
-	if owner.mountpoint != "" {
-		// FS mode — use the FS-level clone endpoint.
-		if err := owner.client.Clone(ctx, client.CloneParams{
-			Checkpoint: checkpointID,
-			Clone:      cloneName,
-		}); err != nil {
-			return err
-		}
-	} else {
-		// Device mode — use the device-level clone endpoint.
-		if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{
-			Checkpoint: checkpointID,
-			Clone:      cloneName,
-		}); err != nil {
-			return err
-		}
+	defer cleanup()
+	if err := storage.Clone(ctx, vm.Store(), volume, checkpointID, cloneName); err != nil {
+		return err
 	}
 	b.trackCreated(cloneName)
 	return nil
@@ -247,18 +228,6 @@ func (b *testBackend) DeviceCheckpoint(ctx context.Context, volume string) (stri
 		return "", err
 	}
 	return owner.client.DeviceCheckpoint(ctx)
-}
-
-func (b *testBackend) DeviceClone(ctx context.Context, volume, clone string) error {
-	owner, err := b.ensureDeviceOwner(ctx, volume)
-	if err != nil {
-		return err
-	}
-	if err := owner.client.DeviceClone(ctx, client.DeviceCloneParams{Clone: clone}); err != nil {
-		return err
-	}
-	b.trackCreated(clone)
-	return nil
 }
 
 func (b *testBackend) Close(ctx context.Context) error {

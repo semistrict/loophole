@@ -7,10 +7,11 @@ import (
 // layerIndex is the on-disk and in-memory representation of a layer's state.
 // Stored as index.json per layer.
 type layerIndex struct {
-	NextSeq   uint64       `json:"next_seq"`
-	LayoutGen uint64       `json:"layout_gen,omitempty"`
-	L1        []blockRange `json:"l1,omitempty"`
-	L2        []blockRange `json:"l2,omitempty"`
+	NextSeq          uint64       `json:"next_seq"`
+	LayoutGen        uint64       `json:"layout_gen,omitempty"`
+	DirectL2Eligible bool         `json:"direct_l2_eligible,omitempty"`
+	L1               []blockRange `json:"l1,omitempty"`
+	L2               []blockRange `json:"l2,omitempty"`
 }
 
 // blockRange maps a contiguous range of block indices [Start, End) to

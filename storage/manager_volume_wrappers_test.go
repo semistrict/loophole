@@ -114,7 +114,7 @@ func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 	require.Len(t, checkpoints, 1)
 	require.Equal(t, cpID, checkpoints[0].ID)
 
-	require.NoError(t, v.CloneFromCheckpoint(ctx, cpID, "clone"))
+	require.NoError(t, Clone(ctx, m.Store(), "vol", cpID, "clone"))
 
 	m2 := newTestManager(t, m.Store(), testConfig)
 	clone, err := m2.OpenVolume("clone")

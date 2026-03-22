@@ -170,7 +170,7 @@ func TestReadOnlyFollowerTracksLatestVolumeRefOnFreshOpen(t *testing.T) {
 	refBefore, err := getVolumeRef(ctx, store.At("volumes"), "vol")
 	require.NoError(t, err)
 
-	require.NoError(t, wv.Clone("vol-clone"))
+	require.NoError(t, checkpointAndClone(t, wv, "vol-clone"))
 	require.NoError(t, wv.Write(pageWithByte(0x32), PageSize))
 	require.NoError(t, wv.Flush())
 

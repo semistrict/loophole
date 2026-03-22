@@ -93,19 +93,10 @@ func TestMain(m *testing.M) {
 		log.Fatal(err)
 	}
 
-	// Build loophole-cached so page cache tests can spawn it.
+	// Point LOOPHOLE_CACHED_BIN at the main loophole binary so page cache
+	// tests spawn "loophole cached" (the cache daemon is a subcommand now).
 	if os.Getenv("LOOPHOLE_CACHED_BIN") == "" {
-		repoRoot := filepath.Clean(filepath.Join(cwd, ".."))
-		binName := "loophole-cached-" + runtime.GOOS + "-" + runtime.GOARCH
-		binPath := filepath.Join(repoRoot, "bin", binName)
-		cmd := exec.Command("go", "build", "-o", binPath, "./cmd/loophole-cached")
-		cmd.Dir = repoRoot
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Run(); err != nil {
-			log.Fatalf("build loophole-cached: %v", err)
-		}
-		os.Setenv("LOOPHOLE_CACHED_BIN", binPath)
+		os.Setenv("LOOPHOLE_CACHED_BIN", testBin)
 	}
 
 	code := m.Run()

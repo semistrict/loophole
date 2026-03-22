@@ -85,7 +85,7 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 2: Clone-A ---
 
 	cloneAMP := mountpoint(t, "tort-clone-a")
-	require.NoError(t, b.Clone(ctx, rootMP, "tort-clone-a"))
+	require.NoError(t, b.CheckpointAndClone(ctx, rootMP, "tort-root", "tort-clone-a"))
 	require.NoError(t, b.Mount(ctx, "tort-clone-a", cloneAMP))
 	cloneAFS := newTestFS(t, b, cloneAMP)
 
@@ -141,7 +141,7 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 6: Second branch — clone clone-a → clone-b ---
 
 	cloneBMP := mountpoint(t, "tort-clone-b")
-	require.NoError(t, b.Clone(ctx, cloneAMP, "tort-clone-b"))
+	require.NoError(t, b.CheckpointAndClone(ctx, cloneAMP, "tort-clone-a", "tort-clone-b"))
 	require.NoError(t, b.Mount(ctx, "tort-clone-b", cloneBMP))
 	cloneBFS := newTestFS(t, b, cloneBMP)
 
@@ -259,12 +259,12 @@ func TestE2E_Torture(t *testing.T) {
 	// --- Phase 12: Deep clone chain — clone-b → clone-c → clone-d ---
 
 	cloneCMP := mountpoint(t, "tort-clone-c")
-	require.NoError(t, b.Clone(ctx, cloneBMP, "tort-clone-c"))
+	require.NoError(t, b.CheckpointAndClone(ctx, cloneBMP, "tort-clone-b", "tort-clone-c"))
 	require.NoError(t, b.Mount(ctx, "tort-clone-c", cloneCMP))
 	cloneCFS := newTestFS(t, b, cloneCMP)
 
 	cloneDMP := mountpoint(t, "tort-clone-d")
-	require.NoError(t, b.Clone(ctx, cloneCMP, "tort-clone-d"))
+	require.NoError(t, b.CheckpointAndClone(ctx, cloneCMP, "tort-clone-c", "tort-clone-d"))
 	require.NoError(t, b.Mount(ctx, "tort-clone-d", cloneDMP))
 	cloneDFS := newTestFS(t, b, cloneDMP)
 

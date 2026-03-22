@@ -2,6 +2,12 @@ NB: this is a completely new system with no users. Don't worry about backwards c
 
 When choosing between a quick patch and the intended architecture, always do the right architectural fix. Do not preserve or reintroduce obsolete behavior just to get tests passing faster.
 
+## Communication
+
+- Answer behavior-first in plain language by default. Start with the shortest direct explanation of what happens.
+- Do not lead with implementation details, control-flow narration, or internal terminology unless the user asks for internals.
+- Do not include file paths or line numbers in normal explanations. Only include code references when the user explicitly asks for them.
+
 ## Package manager -- CRITICAL
 
 **NEVER use `npm`, `npx`, or `node_modules/.bin/*` directly. This project uses pnpm exclusively.**

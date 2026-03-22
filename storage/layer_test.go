@@ -15,6 +15,25 @@ var testConfig = Config{
 	FlushInterval:  -1,
 }
 
+func requireBytesEqualWithPageDebug(t *testing.T, ly *layer, got, want []byte) {
+	t.Helper()
+	if bytes.Equal(got, want) {
+		return
+	}
+	pageCount := (max(len(got), len(want)) + PageSize - 1) / PageSize
+	for i := 0; i < pageCount; i++ {
+		start := i * PageSize
+		gotEnd := min(start+PageSize, len(got))
+		wantEnd := min(start+PageSize, len(want))
+		if start >= len(got) || start >= len(want) || !bytes.Equal(got[start:gotEnd], want[start:wantEnd]) {
+			t.Logf("first mismatching page=%d got=%x want=%x", i, got[start:min(start+32, len(got))], want[start:min(start+32, len(want))])
+			t.Log(ly.DebugPage(t.Context(), PageIdx(i)))
+			t.Fatalf("data mismatch at page %d", i)
+		}
+	}
+	t.Fatal("data mismatch")
+}
+
 func formatTestStore(t *testing.T, store objstore.ObjectStore) {
 	t.Helper()
 	_, _, err := FormatVolumeSet(context.Background(), store)
@@ -353,7 +372,68 @@ func TestLayerDirectL2MixedWrite(t *testing.T) {
 	n, err := ly.Read(ctx, buf, 0)
 	require.NoError(t, err)
 	assert.Equal(t, len(data), n)
-	assert.Equal(t, data, buf)
+	requireBytesEqualWithPageDebug(t, ly, buf, data)
+}
+
+func TestLayerMixedWriteWithoutDirectL2(t *testing.T) {
+	ctx := t.Context()
+	store := objstore.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
+	}
+
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg})
+	require.NoError(t, err)
+	defer ly.Close()
+
+	ly.disableDirectL2()
+
+	leadingBytes := PageSize / 2
+	data := make([]byte, leadingBytes+BlockSize+PageSize)
+	for i := range data {
+		data[i] = byte((i * 13) % 256)
+	}
+	require.NoError(t, ly.Write(data[:leadingBytes], 0))
+	require.NoError(t, ly.Write(data[leadingBytes:], uint64(leadingBytes)))
+
+	buf := make([]byte, len(data))
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), n)
+	requireBytesEqualWithPageDebug(t, ly, buf, data)
+}
+
+func TestLayerMixedWriteAfterExplicitFlushWithoutDirectL2(t *testing.T) {
+	ctx := t.Context()
+	store := objstore.NewMemStore()
+
+	cfg := Config{
+		FlushThreshold: 64 * 1024,
+		FlushInterval:  -1,
+	}
+
+	ly, err := openLayer(ctx, layerParams{store: store, id: "test-layer", config: cfg})
+	require.NoError(t, err)
+	defer ly.Close()
+
+	ly.disableDirectL2()
+
+	leadingBytes := PageSize / 2
+	data := make([]byte, leadingBytes+BlockSize+PageSize)
+	for i := range data {
+		data[i] = byte((i * 13) % 256)
+	}
+	require.NoError(t, ly.Write(data[:leadingBytes], 0))
+	require.NoError(t, ly.Flush())
+	require.NoError(t, ly.Write(data[leadingBytes:], uint64(leadingBytes)))
+
+	buf := make([]byte, len(data))
+	n, err := ly.Read(ctx, buf, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(data), n)
+	requireBytesEqualWithPageDebug(t, ly, buf, data)
 }
 
 func TestLayerPunchHoleDisablesDirectL2(t *testing.T) {

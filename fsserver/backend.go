@@ -183,39 +183,6 @@ func (b *Backend) Checkpoint(ctx context.Context, mountpoint string) (string, er
 	return cpID, cpErr
 }
 
-// CloneFromCheckpoint creates an unmounted clone from a volume checkpoint.
-func (b *Backend) CloneFromCheckpoint(ctx context.Context, volume, checkpointID, cloneName string) error {
-	return storage.CloneFromCheckpoint(ctx, b.vm.Store(), volume, checkpointID, cloneName)
-}
-
-// Clone freezes the filesystem, creates the clone, and thaws without mounting it.
-func (b *Backend) Clone(ctx context.Context, mountpoint string, cloneName string) error {
-	slog.Info("backend: cloning", "mountpoint", mountpoint, "clone", cloneName)
-	b.mu.Lock()
-	if b.vol == nil {
-		b.mu.Unlock()
-		return fmt.Errorf("no volume mounted")
-	}
-	vol, handle := b.vol, b.handle
-	b.mu.Unlock()
-
-	slog.Debug("backend: freezing for clone", "mountpoint", mountpoint)
-	if err := b.freezeHandle(ctx, handle); err != nil {
-		return fmt.Errorf("freeze: %w", err)
-	}
-	slog.Debug("backend: frozen, cloning volume", "clone", cloneName)
-	err := vol.Clone(cloneName)
-	slog.Debug("backend: thawing after clone", "mountpoint", mountpoint, "cloneErr", err)
-	if thawErr := b.thawHandle(ctx, handle); thawErr != nil {
-		slog.Error("thaw failed after clone", "mountpoint", mountpoint, "error", thawErr)
-		if err == nil {
-			err = thawErr
-		}
-	}
-	slog.Debug("backend: thawed", "mountpoint", mountpoint)
-	return err
-}
-
 // MountpointForVolume returns the mountpoint for a volume, or "" if not mounted.
 func (b *Backend) MountpointForVolume(volume string) string {
 	b.mu.Lock()
@@ -323,18 +290,6 @@ func (b *Backend) DeviceCheckpoint(ctx context.Context, volume string) (string, 
 		return "", fmt.Errorf("volume %q not open", volume)
 	}
 	return vol.Checkpoint()
-}
-
-// DeviceClone creates an unattached clone.
-func (b *Backend) DeviceClone(ctx context.Context, volume, checkpointID, clone string) error {
-	if checkpointID != "" {
-		return storage.CloneFromCheckpoint(ctx, b.vm.Store(), volume, checkpointID, clone)
-	}
-	vol := b.vm.GetVolume(volume)
-	if vol == nil {
-		return fmt.Errorf("volume %q not open", volume)
-	}
-	return vol.Clone(clone)
 }
 
 // DevicePath returns the block device path for a volume.

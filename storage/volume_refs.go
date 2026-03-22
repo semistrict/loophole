@@ -57,24 +57,6 @@ func putVolumeRefNew(ctx context.Context, volRefs objstore.ObjectStore, name str
 	return nil
 }
 
-func putVolumeRef(ctx context.Context, volRefs objstore.ObjectStore, name string, ref volumeRef) error {
-	key, err := volumeIndexKey(name)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(ref)
-	if err != nil {
-		return err
-	}
-	if err := volRefs.PutIfNotExists(ctx, key, data); err != nil {
-		if errors.Is(err, objstore.ErrExists) {
-			return fmt.Errorf("volume %q already exists", name)
-		}
-		return err
-	}
-	return nil
-}
-
 func relayerVolumeRef(ctx context.Context, volRefs objstore.ObjectStore, name string, newLayerID string) (uint64, error) {
 	key, err := volumeIndexKey(name)
 	if err != nil {

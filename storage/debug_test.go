@@ -34,12 +34,9 @@ func (ly *layer) DebugPage(ctx context.Context, pageIdx PageIdx) string {
 	ly.mu.RLock()
 	l1map := ly.l1Map
 	l2map := ly.l2Map
-	ly.mu.RUnlock()
-
-	ly.dirtyMu.Lock()
 	mt := ly.active
 	frozen := ly.pending
-	ly.dirtyMu.Unlock()
+	ly.mu.RUnlock()
 
 	// 1. Active dirty pages.
 	if mt != nil {

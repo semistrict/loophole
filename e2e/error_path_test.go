@@ -103,7 +103,7 @@ func TestE2E_CloneNonexistentVolume(t *testing.T) {
 	require.NoError(t, b.Mount(ctx, vol, mp))
 
 	// Clone with an invalid name.
-	err := b.Clone(ctx, mp, "has/slash")
+	err := b.CheckpointAndClone(ctx, mp, vol, "has/slash")
 	require.Error(t, err, "clone with invalid name should fail")
 }
 
@@ -120,7 +120,7 @@ func TestE2E_CloneDuplicateName(t *testing.T) {
 	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "clone-dup-target", Size: defaultVolumeSize}))
 
 	// Clone into existing name should fail.
-	err := b.Clone(ctx, mp, "clone-dup-target")
+	err := b.CheckpointAndClone(ctx, mp, "clone-dup-src", "clone-dup-target")
 	require.Error(t, err, "cloning into an existing volume name should fail")
 	assert.Contains(t, err.Error(), "already exists")
 }
@@ -207,7 +207,7 @@ func TestE2E_VolumeSurvivesFailedClone(t *testing.T) {
 	require.NoError(t, b.Create(ctx, storage.CreateParams{Volume: "survive-collider", Size: defaultVolumeSize}))
 
 	// Clone should fail due to name collision.
-	err := b.Clone(ctx, mp, "survive-collider")
+	err := b.CheckpointAndClone(ctx, mp, vol, "survive-collider")
 	require.Error(t, err)
 
 	// Original volume should be intact and writable.

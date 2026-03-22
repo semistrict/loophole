@@ -6,15 +6,18 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/semistrict/loophole/cached/cachedserver"
 	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/env"
 	"github.com/semistrict/loophole/fsserver"
@@ -46,6 +49,7 @@ func addCommands(root *cobra.Command) {
 		breakLeaseCmd(),
 		s3testCmd(),
 		gcCmd(),
+		cachedCmd(),
 	)
 }
 
@@ -315,41 +319,30 @@ func checkpointsCmd() *cobra.Command {
 func cloneCmd() *cobra.Command {
 	var fromCheckpoint string
 	cmd := &cobra.Command{
-		Use:   "clone <mountpoint|device> <name> | clone <store-url> <volume> <name>",
-		Short: "Create a clone volume",
-		Long: `Create a clone from a live mounted volume, or from a checkpoint.
-
-With --from-checkpoint, the first arg is the mounted target or volume name with store URL:
-  loophole clone --from-checkpoint <checkpoint_id> <volume> <clone_name>`,
-		Args: cobra.RangeArgs(2, 3),
+		Use:   "clone --from-checkpoint <checkpoint_id> <store-url> <volume> <name>",
+		Short: "Create a clone volume from a checkpoint",
+		Args:  cobra.RangeArgs(2, 3),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target, cloneName, err := parseCloneArgs(cmd.Context(), args)
+			if fromCheckpoint == "" {
+				return fmt.Errorf("--from-checkpoint is required")
+			}
+			target, cloneName, err := parseCheckpointCloneArgs(cmd.Context(), args)
 			if err != nil {
 				return err
 			}
-			if fromCheckpoint != "" {
-				c := client.NewFromSocket(target.Socket)
-				if err := c.Clone(cmd.Context(), client.CloneParams{
-					Checkpoint: fromCheckpoint,
-					Clone:      cloneName,
-				}); err != nil {
-					return err
-				}
-				fmt.Printf("created clone %s from %s@%s\n", cloneName, target, fromCheckpoint)
-				return nil
-			}
-
-			c := client.NewFromSocket(target.Socket)
-			if err := c.Clone(cmd.Context(), client.CloneParams{
-				Clone: cloneName,
-			}); err != nil {
+			_, vm, cleanup, err := openDirectManager(cmd.Context(), target.Store.URL())
+			if err != nil {
 				return err
 			}
-			fmt.Printf("created clone %s\n", cloneName)
+			defer cleanup()
+			if err := storage.Clone(cmd.Context(), vm.Store(), target.Volume, fromCheckpoint, cloneName); err != nil {
+				return err
+			}
+			fmt.Printf("created clone %s from %s@%s\n", cloneName, target, fromCheckpoint)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&fromCheckpoint, "from-checkpoint", "", "clone from a checkpoint ID instead of a live volume")
+	cmd.Flags().StringVar(&fromCheckpoint, "from-checkpoint", "", "checkpoint ID to clone from (required)")
 	return cmd
 }
 
@@ -392,7 +385,6 @@ func deviceCmd() *cobra.Command {
 		deviceCreateCmd(),
 		deviceAttachCmd(),
 		deviceCheckpointCmd(),
-		deviceCloneCmd(),
 		deviceDDCmd(),
 		deviceFlushCmd(),
 	)
@@ -463,32 +455,6 @@ func deviceCheckpointCmd() *cobra.Command {
 			return nil
 		},
 	}
-}
-
-func deviceCloneCmd() *cobra.Command {
-	var fromCheckpoint string
-	cmd := &cobra.Command{
-		Use:   "clone <mountpoint|device> <name> | clone <store-url> <volume> <name>",
-		Short: "Clone a volume device",
-		Args:  cobra.RangeArgs(2, 3),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			target, cloneName, err := parseCloneArgs(cmd.Context(), args)
-			if err != nil {
-				return err
-			}
-			c := client.NewFromSocket(target.Socket)
-			if err := c.DeviceClone(cmd.Context(), client.DeviceCloneParams{
-				Checkpoint: fromCheckpoint,
-				Clone:      cloneName,
-			}); err != nil {
-				return err
-			}
-			fmt.Printf("created clone %s\n", cloneName)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&fromCheckpoint, "from-checkpoint", "", "clone from a checkpoint ID instead of the open writable device")
-	return cmd
 }
 
 func deviceFlushCmd() *cobra.Command {
@@ -767,6 +733,38 @@ func gcCmd() *cobra.Command {
 	return cmd
 }
 
+func cachedCmd() *cobra.Command {
+	var dir string
+	cmd := &cobra.Command{
+		Use:    "cached",
+		Short:  "Run the page cache daemon (usually started automatically)",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if dir == "" {
+				return fmt.Errorf("--dir is required")
+			}
+
+			if err := cachedserver.StartServer(dir); err != nil {
+				return fmt.Errorf("start cached server: %w", err)
+			}
+
+			slog.Info("loophole cached started", "dir", dir)
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			<-sigCh
+
+			slog.Info("shutting down")
+			if err := cachedserver.Shutdown(); err != nil {
+				return fmt.Errorf("close cached server: %w", err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&dir, "dir", "", "cache directory (required)")
+	return cmd
+}
+
 func socketFromMountpoint(mountpoint string) (string, error) {
 	dir := env.DefaultDir()
 	symPath := dir.MountSymlink(mountpoint)
@@ -961,16 +959,16 @@ func resolveRunningTargetArgs(ctx context.Context, args []string) (resolvedTarge
 	}
 }
 
-func parseCloneArgs(ctx context.Context, args []string) (resolvedTarget, string, error) {
+func parseCheckpointCloneArgs(ctx context.Context, args []string) (resolvedTarget, string, error) {
 	switch len(args) {
 	case 2:
-		target, err := resolveRunningTargetArgs(ctx, args[:1])
+		target, err := resolveStoreVolumeArgs(ctx, args[:1])
 		if err != nil {
 			return resolvedTarget{}, "", err
 		}
 		return target, args[1], nil
 	case 3:
-		target, err := resolveRunningTargetArgs(ctx, args[:2])
+		target, err := resolveStoreVolumeArgs(ctx, args[:2])
 		if err != nil {
 			return resolvedTarget{}, "", err
 		}

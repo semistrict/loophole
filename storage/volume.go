@@ -20,8 +20,11 @@ type Volume struct {
 	refs     atomic.Int32
 	readOnly bool
 
-	mu    sync.RWMutex
-	layer *layer
+	mu        sync.RWMutex
+	layer     *layer
+	closing   bool
+	closeErr  error
+	closeDone chan struct{}
 
 	directRefs      int
 	manager         *Manager
@@ -92,6 +95,9 @@ func (v *Volume) ReadAt(ctx context.Context, offset uint64, n int) ([]byte, erro
 func (v *Volume) Write(data []byte, offset uint64) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
@@ -104,6 +110,9 @@ func (v *Volume) Write(data []byte, offset uint64) error {
 func (v *Volume) PunchHole(offset, length uint64) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
@@ -120,6 +129,9 @@ func (v *Volume) ZeroRange(offset, length uint64) error {
 func (v *Volume) Flush() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
@@ -213,6 +225,9 @@ func (v *Volume) relayer() error {
 func (v *Volume) Checkpoint() (string, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closing {
+		return "", fmt.Errorf("volume %q is closing", v.name)
+	}
 
 	childID, err := v.branch()
 	if err != nil {
@@ -226,29 +241,15 @@ func (v *Volume) Checkpoint() (string, error) {
 	return ts, nil
 }
 
-func (v *Volume) Clone(cloneName string) error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	slog.Info("volume: clone starting", "src", v.name, "dst", cloneName, "directRefs", v.directRefs)
-
-	childID, err := v.branch()
-	if err != nil {
-		slog.Error("volume: clone branch failed", "src", v.name, "dst", cloneName, "error", err)
-		return err
-	}
-
-	ref := volumeRef{LayerID: childID, Size: v.size, Type: v.volType}
-	if err := putVolumeRef(context.Background(), v.manager.volRefs, cloneName, ref); err != nil {
-		return fmt.Errorf("create clone ref: %w", err)
-	}
-
-	slog.Info("volume: clone completed", "src", v.name, "dst", cloneName, "childID", childID)
-	return nil
-}
-
 func (v *Volume) CopyFrom(src *Volume, srcOff, dstOff, length uint64) (uint64, error) {
-	if v.readOnly {
+	v.mu.RLock()
+	closing := v.closing
+	readOnly := v.readOnly
+	v.mu.RUnlock()
+	if closing {
+		return 0, fmt.Errorf("volume %q is closing", v.name)
+	}
+	if readOnly {
 		return 0, fmt.Errorf("volume %q is read-only", v.name)
 	}
 	ctx := context.Background()
@@ -305,21 +306,40 @@ func (v *Volume) ReleaseRef() error {
 }
 
 func (v *Volume) destroy() error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if err := v.layer.Flush(); err != nil {
-		slog.Warn("flush on destroy failed", "volume", v.name, "error", err)
-	}
-	v.layer.beginShutdown()
-	v.releaseLease(context.Background())
-	v.manager.closeVolume(v.name)
-	v.layer.Close()
-	v.closeLeaseSession(context.Background())
-	return nil
+	return v.Close()
 }
 
-func (v *Volume) flush() error { return v.layer.Flush() }
-func (v *Volume) close() {
+func (v *Volume) Close() error {
+	v.mu.Lock()
+	if v.closeDone != nil {
+		done := v.closeDone
+		v.mu.Unlock()
+		<-done
+		v.mu.RLock()
+		err := v.closeErr
+		v.mu.RUnlock()
+		return err
+	}
+	v.closing = true
+	v.closeDone = make(chan struct{})
+	done := v.closeDone
+	ly := v.layer
+	v.mu.Unlock()
+
+	err := ly.shutdownFlush()
+	v.releaseLease(context.Background())
+	v.manager.closeVolume(v.name)
+	ly.Close()
+	v.closeLeaseSession(context.Background())
+
+	v.mu.Lock()
+	v.closeErr = err
+	close(done)
+	v.mu.Unlock()
+	return err
+}
+
+func (v *Volume) closeResources() {
 	v.layer.Close()
 	v.closeLeaseSession(context.Background())
 }
@@ -395,19 +415,19 @@ func (v *Volume) handleLeaseRelease(ctx context.Context, params json.RawMessage)
 	if v.onRemoteRelease != nil {
 		v.onRemoteRelease(ctx)
 	}
-	v.manager.closeVolume(v.name)
-	v.layer.beginShutdown()
-	if err := v.flush(); err != nil {
-		slog.Warn("release: flush failed", "volume", v.name, "error", err)
+	if err := v.Close(); err != nil {
+		slog.Warn("release: close failed", "volume", v.name, "error", err)
+		return nil, err
 	}
-	v.releaseLease(ctx)
-	v.close()
 	return map[string]string{"status": "ok"}, nil
 }
 
 func (v *Volume) EnableDirectWriteback() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
@@ -424,6 +444,9 @@ func (v *Volume) EnableDirectWriteback() error {
 func (v *Volume) DisableDirectWriteback() error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 
 	if v.directRefs == 0 {
 		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
@@ -435,6 +458,9 @@ func (v *Volume) DisableDirectWriteback() error {
 func (v *Volume) WritePagesDirect(pages []DirectPage) error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
+	if v.closing {
+		return fmt.Errorf("volume %q is closing", v.name)
+	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
@@ -471,12 +497,6 @@ func (v *Volume) DebugInfo() VolumeDebugInfo {
 // ListCheckpoints lists checkpoints for this volume (convenience for Manager.ListCheckpoints).
 func (v *Volume) ListCheckpoints(ctx context.Context) ([]CheckpointInfo, error) {
 	return ListCheckpoints(ctx, v.manager.Store(), v.name)
-}
-
-// CloneFromCheckpoint creates a clone from a checkpoint of this volume
-// (convenience for Manager.CloneFromCheckpoint).
-func (v *Volume) CloneFromCheckpoint(ctx context.Context, checkpointID, cloneName string) error {
-	return CloneFromCheckpoint(ctx, v.manager.Store(), v.name, checkpointID, cloneName)
 }
 
 // Info returns metadata for this volume.

@@ -153,10 +153,12 @@ func TestSnapshotLayersAtomicity(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for range iterations {
-			snap := ly.snapshotLayers()
-			if snap.pending != nil {
+			ly.mu.RLock()
+			pending := ly.pending
+			ly.mu.RUnlock()
+			if pending != nil {
 				var page Page
-				if ok, tombstone := snap.pending.copyPage(0, &page); ok {
+				if ok, tombstone := pending.copyPage(0, &page); ok {
 					assert.False(t, tombstone)
 					assert.Len(t, page[:], PageSize)
 				}
@@ -250,9 +252,9 @@ func TestReadAfterFlushWithFreshSnapshot(t *testing.T) {
 	// Flush the dirty batch into the durable layer state.
 	require.NoError(t, ly.Flush())
 
-	// A fresh snapshot after flush must still read the page correctly.
-	snap := ly.snapshotLayers()
-	data, err := ly.readPageWith(ctx, &snap, 0)
+	ly.mu.RLock()
+	data, err := ly.readPageLocked(ctx, 0)
+	ly.mu.RUnlock()
 	require.NoError(t, err)
 	assert.Equal(t, expected, data, "data should survive flush")
 }

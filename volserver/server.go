@@ -19,7 +19,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/semistrict/loophole/client"
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/semistrict/loophole/metrics"
 	"github.com/semistrict/loophole/storage"
@@ -157,7 +156,6 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, stop context.CancelFunc) {
 	mux.HandleFunc("GET /debug/volume", s.HandleDebugVolume)
 	mux.HandleFunc("POST /device/flush", s.HandleFlush)
 	mux.HandleFunc("POST /device/checkpoint", s.HandleCheckpoint)
-	mux.HandleFunc("POST /device/clone", s.HandleClone)
 	mux.HandleFunc("POST /device/dd/write", s.HandleDeviceDDWrite)
 	mux.HandleFunc("GET /device/dd/read", s.HandleDeviceDDRead)
 	mux.HandleFunc("GET /device/dd/size", s.HandleDeviceDDSize)
@@ -242,36 +240,6 @@ func (s *Server) HandleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	WriteJSON(w, map[string]string{"status": "ok", "checkpoint": cpID})
-}
-
-func (s *Server) HandleClone(w http.ResponseWriter, r *http.Request) {
-	if s.RequireVolume(w) {
-		return
-	}
-	var req client.CloneParams
-	if err := ReadJSON(r, &req); err != nil {
-		WriteError(w, 400, err)
-		return
-	}
-	if req.Clone == "" {
-		WriteError(w, 400, fmt.Errorf("missing clone parameter"))
-		return
-	}
-
-	var err error
-	if req.Checkpoint != "" {
-		slog.Info("clone from checkpoint", "volume", s.vol.Name(), "checkpoint", req.Checkpoint, "clone", req.Clone)
-		err = s.vol.CloneFromCheckpoint(r.Context(), req.Checkpoint, req.Clone)
-	} else {
-		slog.Info("clone", "volume", s.vol.Name(), "clone", req.Clone)
-		err = s.vol.Clone(req.Clone)
-	}
-	if err != nil {
-		slog.Error("clone failed", "err", err)
-		WriteError(w, 500, err)
-		return
-	}
-	WriteJSON(w, map[string]string{"status": "ok", "volume": req.Clone})
 }
 
 func (s *Server) HandleDebugVolume(w http.ResponseWriter, r *http.Request) {

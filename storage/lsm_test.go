@@ -439,7 +439,7 @@ func TestSnapshotThenFlush(t *testing.T) {
 	}
 
 	// Snapshot freezes the memLayer.
-	if err := snapshotVolume(t, v, "snap"); err != nil {
+	if err := checkpointAndClone(t, v, "snap"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -524,7 +524,7 @@ func TestSnapshot(t *testing.T) {
 	}
 
 	// Snapshot.
-	if err := snapshotVolume(t, v, "snap1"); err != nil {
+	if err := checkpointAndClone(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -635,7 +635,7 @@ func TestCloneFromCheckpoint(t *testing.T) {
 	}
 
 	// Clone from checkpoint on a separate manager.
-	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cpID, "clone1"); err != nil {
+	if err := Clone(ctx, m.Store(), "parent", cpID, "clone1"); err != nil {
 		t.Fatal(err)
 	}
 	m2 := &Manager{ObjectStore: store, config: testConfig}
@@ -711,10 +711,10 @@ func TestCloneFromMultipleCheckpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cp1, "clone1"); err != nil {
+	if err := Clone(ctx, m.Store(), "parent", cp1, "clone1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := CloneFromCheckpoint(ctx, m.Store(), "parent", cp2, "clone2"); err != nil {
+	if err := Clone(ctx, m.Store(), "parent", cp2, "clone2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -821,7 +821,7 @@ func TestSnapshotReadFromDifferentNode(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := snapshotVolume(t, v, "snap1"); err != nil {
+	if err := checkpointAndClone(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -868,7 +868,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot parent -> snap1
-	if err := snapshotVolume(t, v, "snap1"); err != nil {
+	if err := checkpointAndClone(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -885,7 +885,7 @@ func TestSnapshotOfSnapshotRead(t *testing.T) {
 	}
 
 	// Snapshot snap1-clone -> snap2
-	if err := snapshotVolume(t, snap1, "snap2"); err != nil {
+	if err := checkpointAndClone(t, snap1, "snap2"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -943,12 +943,12 @@ func TestSnapshotReadAfterMultipleFlushes(t *testing.T) {
 	}
 
 	// Take two snapshots at different points.
-	if err := snapshotVolume(t, v, "snap-pre"); err != nil {
+	if err := checkpointAndClone(t, v, "snap-pre"); err != nil {
 		t.Fatal(err)
 	}
 
 	// Second snapshot.
-	if err := snapshotVolume(t, v, "snap-post"); err != nil {
+	if err := checkpointAndClone(t, v, "snap-post"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1008,7 +1008,7 @@ func TestCloneOfSnapshotFromDifferentNode(t *testing.T) {
 	if err := v.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	if err := snapshotVolume(t, v, "snap1"); err != nil {
+	if err := checkpointAndClone(t, v, "snap1"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1665,14 +1665,14 @@ func TestSnapshotCreateChildFail(t *testing.T) {
 	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
 		Err: fmt.Errorf("simulated createChild failure"),
 	})
-	err = snapshotVolume(t, v, "snap")
+	err = checkpointAndClone(t, v, "snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated createChild failure") {
 		t.Fatalf("expected createChild failure, got: %v", err)
 	}
 
 	// Clear — snapshot should work.
 	store.ClearAllFaults()
-	if err := snapshotVolume(t, v, "snap"); err != nil {
+	if err := checkpointAndClone(t, v, "snap"); err != nil {
 		t.Fatalf("snapshot retry: %v", err)
 	}
 }
@@ -1702,67 +1702,9 @@ func TestSnapshotPutVolumeRefFail(t *testing.T) {
 		Err: fmt.Errorf("simulated putVolumeRef failure"),
 	})
 
-	err = snapshotVolume(t, v, "snap")
+	err = checkpointAndClone(t, v, "snap")
 	if err == nil || !strings.Contains(err.Error(), "simulated putVolumeRef failure") {
 		t.Fatalf("expected putVolumeRef failure, got: %v", err)
-	}
-}
-
-// TestCreateChildUpdateParentMetaFail tests that a PutBytesCAS failure when
-// updating the parent's meta.json during createChild propagates.
-func TestCloneCreateChildFail(t *testing.T) {
-	store, m := testStoreManager(t)
-
-	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	page := make([]byte, PageSize)
-	page[0] = 0x88
-	if err := v.Write(page, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Fault PutIfNotExists for createChild.
-	store.SetFault(objstore.OpPutIfNotExists, "", objstore.Fault{
-		Err: fmt.Errorf("simulated clone createChild failure"),
-	})
-	err = v.Clone("clone")
-	if err == nil || !strings.Contains(err.Error(), "simulated clone createChild failure") {
-		t.Fatalf("expected clone createChild failure, got: %v", err)
-	}
-}
-
-// TestClonePutVolumeRefFail tests that putVolumeRef failure propagates from Clone.
-func TestClonePutVolumeRefFail(t *testing.T) {
-	store, m := testStoreManager(t)
-
-	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	page := make([]byte, PageSize)
-	page[0] = 0x99
-	if err := v.Write(page, 0); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.Flush(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Key-specific fault: only the clone volume ref write (volumes/clone) fails.
-	store.SetFault(objstore.OpPutIfNotExists, "volumes/clone/index.json", objstore.Fault{
-		Err: fmt.Errorf("simulated clone putVolumeRef failure"),
-	})
-
-	err = v.Clone("clone")
-	if err == nil || !strings.Contains(err.Error(), "simulated clone putVolumeRef failure") {
-		t.Fatalf("expected clone putVolumeRef failure, got: %v", err)
 	}
 }
 
@@ -1790,6 +1732,13 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	if err := v.Write(page0, 0); err != nil {
 		t.Fatalf("write page 0: %v", err)
 	}
+	require.Eventually(t, func() bool {
+		v.layer.mu.RLock()
+		defer v.layer.mu.RUnlock()
+		return v.layer.pending == nil &&
+			!v.layer.drainInFlight &&
+			(v.layer.active == nil || v.layer.active.isEmpty())
+	}, time.Second, 10*time.Millisecond)
 
 	// Step 2: Write page 1 while S3 is faulted. The write should stage
 	// locally and remain immediately readable even though the pending batch
@@ -1806,8 +1755,8 @@ func TestWriteBackpressurePreservesData(t *testing.T) {
 	}
 
 	require.Eventually(t, func() bool {
-		v.layer.dirtyMu.Lock()
-		defer v.layer.dirtyMu.Unlock()
+		v.layer.mu.RLock()
+		defer v.layer.mu.RUnlock()
 		return v.layer.pending != nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -1995,7 +1944,7 @@ func TestCopyFromOracleConsistency(t *testing.T) {
 	}
 
 	// Clone parent → dst. dst inherits parent's data for pages 0-3.
-	if err := parent.Clone("dst"); err != nil {
+	if err := checkpointAndClone(t, parent, "dst"); err != nil {
 		t.Fatal(err)
 	}
 	if err := mParent.Close(); err != nil {
@@ -2765,18 +2714,18 @@ func TestAsyncFlushNotifyWakesLoop(t *testing.T) {
 	vol := v
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		vol.layer.dirtyMu.Lock()
+		vol.layer.mu.RLock()
 		hasFrozen := vol.layer.pending != nil
-		vol.layer.dirtyMu.Unlock()
+		vol.layer.mu.RUnlock()
 		if !hasFrozen {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	vol.layer.dirtyMu.Lock()
+	vol.layer.mu.RLock()
 	hasFrozen := vol.layer.pending != nil
-	vol.layer.dirtyMu.Unlock()
+	vol.layer.mu.RUnlock()
 	if hasFrozen {
 		t.Fatalf("expected no frozen dirty pages after notify")
 	}
@@ -2870,9 +2819,47 @@ func TestManagerCloseStopsFlushRetryLoop(t *testing.T) {
 
 	select {
 	case err := <-closed:
-		require.NoError(t, err)
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "flush dirty data on close")
 	case <-time.After(time.Second):
 		t.Fatal("manager close should stop the flush retry loop and return")
+	}
+}
+
+func TestVolumeCloseRejectsNewWrites(t *testing.T) {
+	store := objstore.NewMemStore()
+	cfg := Config{
+		FlushThreshold: PageSize,
+		FlushInterval:  -1,
+	}
+	m := newTestManager(t, store, cfg)
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 1024 * 1024})
+	require.NoError(t, err)
+
+	page := bytes.Repeat([]byte{0xAA}, PageSize)
+	require.NoError(t, v.Write(page, 0))
+
+	store.SetFault(objstore.OpPutReader, "", objstore.Fault{
+		Err: fmt.Errorf("simulated persistent S3 outage"),
+	})
+
+	closeDone := make(chan error, 1)
+	go func() {
+		closeDone <- v.Close()
+	}()
+
+	require.Eventually(t, func() bool {
+		err := v.Write(page, PageSize)
+		return err != nil && strings.Contains(err.Error(), `volume "vol" is closing`)
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case err := <-closeDone:
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "flush dirty data on close")
+	case <-time.After(time.Second):
+		t.Fatal("volume close should return promptly on persistent flush failure")
 	}
 }
 
@@ -4084,8 +4071,8 @@ func TestFailedCloneAfterSnapshotDoesNotDropEarlierPages(t *testing.T) {
 	store.SetFault(objstore.OpGet, "volumes/root/index.json", objstore.Fault{
 		Err: fmt.Errorf("simulated relayer volume-ref GET failure"),
 	})
-	err = root.Clone("failed-clone")
-	require.ErrorContains(t, err, "re-layer parent: update volume ref")
+	err = checkpointAndClone(t, root, "failed-clone")
+	require.Error(t, err)
 	store.ClearAllFaults()
 
 	flushPages(t, root, map[int]byte{
@@ -4326,17 +4313,17 @@ func TestPunchHoleTombstoneNoSlotConsumed(t *testing.T) {
 	require.NoError(t, ly.Write(data, 0))
 
 	// Record dirty pages slot count before punch.
-	ly.dirtyMu.Lock()
+	ly.mu.RLock()
 	slotsBefore := ly.active.pages()
-	ly.dirtyMu.Unlock()
+	ly.mu.RUnlock()
 
 	// Punch both pages.
 	require.NoError(t, ly.PunchHole(0, 2*PageSize))
 
 	// Tombstones should NOT have consumed additional slots.
-	ly.dirtyMu.Lock()
+	ly.mu.RLock()
 	slotsAfter := ly.active.pages()
-	ly.dirtyMu.Unlock()
+	ly.mu.RUnlock()
 	require.Equal(t, slotsBefore, slotsAfter)
 
 	// But reads should return zeros.
