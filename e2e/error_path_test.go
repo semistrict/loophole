@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 // ---------- Create errors ----------

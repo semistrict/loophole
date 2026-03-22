@@ -17,13 +17,13 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/cached/cachedserver"
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/env"
-	"github.com/semistrict/loophole/fsserver"
+	"github.com/semistrict/loophole/internal/cached/cachedserver"
+	"github.com/semistrict/loophole/internal/client"
+	"github.com/semistrict/loophole/internal/env"
+	"github.com/semistrict/loophole/internal/fsserver"
+	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/objstore"
-	"github.com/semistrict/loophole/storage"
 )
 
 type resolvedTarget struct {

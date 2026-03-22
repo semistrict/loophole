@@ -18,8 +18,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/semistrict/loophole/internal/pagegeom"
+	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage"
 )
 
 func TestE2E_MetadataChurnDuringFlush(t *testing.T) {

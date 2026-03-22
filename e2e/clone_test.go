@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 func TestE2E_ClonePreservesData(t *testing.T) {

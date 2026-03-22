@@ -529,12 +529,16 @@ func (c *benchConfig) tarCopyFiles(ctx context.Context, repoRoot string, files [
 
 func runCmd(cfgFn func() *benchConfig) *cobra.Command {
 	var (
-		volSize    string
-		fioOnly    bool
-		fsxOnly    bool
-		e2eOnly    bool
-		fioRuntime string
-		debug      bool
+		volSize           string
+		fioOnly           bool
+		fsxOnly           bool
+		e2eOnly           bool
+		fioRuntime        string
+		debug             bool
+		options           string
+		fioJob            string
+		statsInterval     int
+		goroutineInterval int
 	)
 	cmd := &cobra.Command{
 		Use:   "run",
@@ -543,12 +547,16 @@ func runCmd(cfgFn func() *benchConfig) *cobra.Command {
 			cfg := cfgFn()
 			ctx := cmd.Context()
 			return cfg.doRun(ctx, runOpts{
-				volSize:    volSize,
-				fioOnly:    fioOnly,
-				fsxOnly:    fsxOnly,
-				e2eOnly:    e2eOnly,
-				fioRuntime: fioRuntime,
-				debug:      debug,
+				volSize:           volSize,
+				fioOnly:           fioOnly,
+				fsxOnly:           fsxOnly,
+				e2eOnly:           e2eOnly,
+				fioRuntime:        fioRuntime,
+				debug:             debug,
+				options:           options,
+				fioJob:            fioJob,
+				statsInterval:     statsInterval,
+				goroutineInterval: goroutineInterval,
 			})
 		},
 	}
@@ -558,31 +566,60 @@ func runCmd(cfgFn func() *benchConfig) *cobra.Command {
 	cmd.Flags().BoolVar(&e2eOnly, "e2e-only", false, "run only e2e Go benchmarks")
 	cmd.Flags().StringVar(&fioRuntime, "fio-runtime", "30", "fio runtime in seconds per job")
 	cmd.Flags().BoolVar(&debug, "debug", false, "enable debug logging on the loophole daemon")
+	cmd.Flags().StringVar(&options, "options", "", "LOOPHOLE_OPTIONS value (e.g. nonbd, requirenbd)")
+	cmd.Flags().StringVar(&fioJob, "fio-job", "", "run only a specific fio job by name (e.g. rand-write-4k)")
+	cmd.Flags().IntVar(&statsInterval, "stats-interval", 0, "dump daemon stats every N seconds to a log file (0=disabled)")
+	cmd.Flags().IntVar(&goroutineInterval, "goroutine-interval", 0, "dump goroutines every N seconds to a file (0=disabled)")
 	return cmd
 }
 
 type runOpts struct {
-	volSize    string
-	fioOnly    bool
-	fsxOnly    bool
-	e2eOnly    bool
-	fioRuntime string
-	debug      bool
+	volSize           string
+	fioOnly           bool
+	fsxOnly           bool
+	e2eOnly           bool
+	fioRuntime        string
+	debug             bool
+	options           string
+	fioJob            string
+	statsInterval     int
+	goroutineInterval int
 }
 
 func (c *benchConfig) doRun(ctx context.Context, opts runOpts) error {
 	runAll := !opts.fioOnly && !opts.fsxOnly && !opts.e2eOnly
 
+	jobs := fioJobs
+	if opts.fioJob != "" {
+		jobs = nil
+		for _, j := range fioJobs {
+			if j.Name == opts.fioJob {
+				jobs = append(jobs, j)
+			}
+		}
+		if len(jobs) == 0 {
+			names := make([]string, len(fioJobs))
+			for i, j := range fioJobs {
+				names[i] = j.Name
+			}
+			return fmt.Errorf("unknown fio job %q; available: %s", opts.fioJob, strings.Join(names, ", "))
+		}
+	}
+
 	script, err := renderTemplate(benchTmpl, map[string]any{
-		"SrcDir":     remoteSrcDir,
-		"VolSize":    opts.volSize,
-		"Debug":      opts.debug,
-		"RunFio":     runAll || opts.fioOnly,
-		"RunFsx":     runAll || opts.fsxOnly,
-		"RunE2E":     runAll || opts.e2eOnly,
-		"FioRuntime": opts.fioRuntime,
-		"FioJobs":    fioJobs,
-		"StoreURL":   c.storeURL(),
+		"SrcDir":            remoteSrcDir,
+		"VolSize":           opts.volSize,
+		"Debug":             opts.debug,
+		"Options":           opts.options,
+		"RunFio":            runAll || opts.fioOnly,
+		"RunFsx":            runAll || opts.fsxOnly,
+		"RunE2E":            runAll || opts.e2eOnly,
+		"FioRuntime":        opts.fioRuntime,
+		"FioJobs":           jobs,
+		"StoreURL":          c.storeURL(),
+		"Bucket":            c.bucket,
+		"StatsInterval":     opts.statsInterval,
+		"GoroutineInterval": opts.goroutineInterval,
 	})
 	if err != nil {
 		return err
@@ -848,6 +885,7 @@ func renderTemplate(tmpl string, data any) (string, error) {
 const benchTmpl = `set -eux
 export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin
 {{if .Debug}}export LOOPHOLE_LOG_LEVEL=debug{{end}}
+{{if .Options}}export LOOPHOLE_OPTIONS={{.Options}}{{end}}
 LOOPHOLE=$HOME/{{.SrcDir}}/bin/loophole-linux-amd64
 STORE_URL='{{.StoreURL}}'
 RESULTS_DIR=$HOME/bench-results
@@ -857,8 +895,10 @@ mkdir -p $RESULTS_DIR
 
 sudo -E HOME=$HOME $LOOPHOLE format "$STORE_URL" >/dev/null
 
+POLL_PIDS=""
 cleanup() {
     echo "==> Cleaning up..."
+    for pid in $POLL_PIDS; do kill $pid 2>/dev/null || true; done
     {{if .Debug}}
     # Dump daemon log and dmesg on exit
     LOGFILE=$(find $HOME/.loophole -name '*.log' -newer $MOUNTPOINT 2>/dev/null | head -1)
@@ -899,6 +939,38 @@ if ! mountpoint -q $MOUNTPOINT; then
 fi
 echo "==> Volume mounted at $MOUNTPOINT"
 df -h $MOUNTPOINT
+
+# Find the owner socket via the mount symlink.
+OWNER_SOCK=$(readlink $HOME/.loophole/mounts/*.sock 2>/dev/null | head -1)
+if [ -z "$OWNER_SOCK" ]; then
+    echo "WARNING: could not find owner socket, stats/goroutine polling disabled"
+fi
+
+{{if .StatsInterval}}
+if [ -n "$OWNER_SOCK" ]; then
+    echo "==> Starting stats polling every {{.StatsInterval}}s -> $RESULTS_DIR/stats.log"
+    (while true; do
+        echo "--- $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" >> $RESULTS_DIR/stats.log
+        sudo curl -sS --unix-socket "$OWNER_SOCK" http://localhost/status >> $RESULTS_DIR/stats.log 2>&1
+        echo "" >> $RESULTS_DIR/stats.log
+        sleep {{.StatsInterval}}
+    done) &
+    POLL_PIDS="$POLL_PIDS $!"
+fi
+{{end}}
+
+{{if .GoroutineInterval}}
+if [ -n "$OWNER_SOCK" ]; then
+    echo "==> Starting goroutine polling every {{.GoroutineInterval}}s -> $RESULTS_DIR/goroutines.log"
+    (while true; do
+        echo "--- $(date -u +%Y-%m-%dT%H:%M:%SZ) ---" >> $RESULTS_DIR/goroutines.log
+        sudo curl -sS --unix-socket "$OWNER_SOCK" 'http://localhost/debug/pprof/goroutine?debug=2' >> $RESULTS_DIR/goroutines.log 2>&1
+        echo "" >> $RESULTS_DIR/goroutines.log
+        sleep {{.GoroutineInterval}}
+    done) &
+    POLL_PIDS="$POLL_PIDS $!"
+fi
+{{end}}
 
 {{if .RunFio}}
 echo ""

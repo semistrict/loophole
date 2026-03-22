@@ -5,7 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 // Store tests are kernel-only: they test the raw FUSE device layout.

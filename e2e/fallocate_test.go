@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 // Fallocate tests are Linux-only: they need FUSE + fallocate syscall.

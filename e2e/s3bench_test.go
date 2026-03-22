@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/semistrict/loophole/objstore"
+	"github.com/semistrict/loophole/internal/objstore"
 )
 
 // TestS3Bench measures raw S3 upload throughput and object creation speed.

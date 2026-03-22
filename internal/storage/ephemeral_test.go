@@ -1,0 +1,163 @@
+package storage
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/semistrict/loophole/internal/objstore"
+)
+
+// TestFlushAfterCloneEphemeralEOF reproduces the "read ephemeral at N: EOF" bug.
+// Scenario from TestE2E_Torture:
+//  1. Write many pages (triggers auto-flush cycles)
+//  2. Clone (rotates dirty pages into the pending batch)
+//  3. Write more pages to parent
+//  4. Flush parent -> fails reading the pending dirty batch's ephemeral file
+func TestFlushAfterCloneEphemeralEOF(t *testing.T) {
+	// Use a small flush threshold to trigger multiple rotate/flush cycles
+	// during the initial writes, matching the e2e behavior where mkfs.ext4
+	// + file writes generate hundreds of pages.
+	cfg := Config{
+		FlushThreshold: 4 * PageSize,
+	}
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "parent", Size: 128 * 1024 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 1: Write many pages. This triggers multiple freeze+flush cycles
+	// internally (FlushThreshold=4 pages, so every 4 pages we freeze+flush).
+	nPages := 20
+	for i := 0; i < nPages; i++ {
+		data := bytes.Repeat([]byte{byte(i + 1)}, PageSize)
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+
+	// Phase 2: Flush to clear all frozen layers, then clone.
+	if err := v.Flush(); err != nil {
+		t.Fatalf("pre-clone flush: %v", err)
+	}
+
+	if err := checkpointAndClone(t, v, "child"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Phase 3: Write more pages to parent after clone.
+	for i := 0; i < 5; i++ {
+		data := bytes.Repeat([]byte{byte(0xF0 + i)}, PageSize)
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
+			t.Fatalf("post-clone write page %d: %v", i, err)
+		}
+	}
+
+	// Phase 4: Flush parent — this must flush the frozen memLayer from the clone.
+	if err := v.Flush(); err != nil {
+		t.Fatalf("post-clone flush: %v", err)
+	}
+
+	// Verify parent has the new data.
+	buf := make([]byte, PageSize)
+	n, err := v.Read(ctx, buf, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != PageSize {
+		t.Fatalf("read %d bytes, expected %d", n, PageSize)
+	}
+	if buf[0] != 0xF0 {
+		t.Fatalf("expected parent page 0 = 0xF0, got 0x%02x", buf[0])
+	}
+
+	// Open child on a separate manager to verify it has the old data.
+	m2 := newTestManager(t, store, cfg)
+	snap, err := m2.OpenVolume("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	n, err = snap.Read(ctx, buf, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != PageSize {
+		t.Fatalf("read %d bytes, expected %d", n, PageSize)
+	}
+	if buf[0] != 1 {
+		t.Fatalf("expected child page 0 = 0x01, got 0x%02x", buf[0])
+	}
+}
+
+// TestMultipleFlushCyclesThenClone tests that repeated flush cycles
+// don't corrupt the ephemeral file state when followed by a clone.
+func TestMultipleFlushCyclesThenClone(t *testing.T) {
+	cfg := Config{
+		FlushThreshold: 4 * PageSize,
+	}
+	store := objstore.NewMemStore()
+	m := newTestManager(t, store, cfg)
+	ctx := t.Context()
+
+	v, err := m.NewVolume(CreateParams{Volume: "vol", Size: 128 * 1024 * 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write 50 pages — triggers ~12 freeze+flush cycles.
+	for i := 0; i < 50; i++ {
+		data := bytes.Repeat([]byte{byte(i + 1)}, PageSize)
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
+			t.Fatalf("write page %d: %v", i, err)
+		}
+	}
+
+	// Clone.
+	if err := checkpointAndClone(t, v, "child"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write to parent after clone.
+	for i := 0; i < 10; i++ {
+		data := bytes.Repeat([]byte{0xFF}, PageSize)
+		if err := v.Write(data, uint64(i)*PageSize); err != nil {
+			t.Fatalf("post-clone write %d: %v", i, err)
+		}
+	}
+
+	// Flush parent.
+	if err := v.Flush(); err != nil {
+		t.Fatalf("flush parent: %v", err)
+	}
+
+	// Open child on a separate manager and verify all 50 pages.
+	m2 := newTestManager(t, store, cfg)
+	child, err := m2.OpenVolume("child")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Flush child (should be a no-op since it has no writes).
+	if err := child.Flush(); err != nil {
+		t.Fatalf("flush child: %v", err)
+	}
+
+	buf := make([]byte, PageSize)
+	for i := 0; i < 50; i++ {
+		n, err := child.Read(ctx, buf, uint64(i)*PageSize)
+		if err != nil {
+			t.Fatalf("child read page %d: %v", i, err)
+		}
+		if n != PageSize {
+			t.Fatalf("child read page %d: got %d bytes", i, n)
+		}
+		expected := byte(i + 1)
+		if buf[0] != expected {
+			t.Fatalf("child page %d: expected 0x%02x, got 0x%02x", i, expected, buf[0])
+		}
+	}
+}

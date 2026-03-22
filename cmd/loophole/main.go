@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/env"
+	"github.com/semistrict/loophole/internal/env"
 )
 
 var globalPID int

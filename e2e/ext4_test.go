@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/semistrict/loophole/fsserver"
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/fsserver"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 func TestE2E_FormatCreatesMountableExt4(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 // TestE2E_Torture is a multi-phase torture test that exercises branching, clone,

@@ -13,7 +13,7 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/client"
+	"github.com/semistrict/loophole/internal/client"
 )
 
 func statsCmd() *cobra.Command {

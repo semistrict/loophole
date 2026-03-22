@@ -13,7 +13,7 @@ import (
 	"github.com/semistrict/loophole/internal/util"
 	"github.com/spf13/cobra"
 
-	"github.com/semistrict/loophole/objstore"
+	"github.com/semistrict/loophole/internal/objstore"
 )
 
 func s3testCmd() *cobra.Command {

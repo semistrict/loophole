@@ -20,10 +20,10 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
-	"github.com/semistrict/loophole/client"
-	"github.com/semistrict/loophole/env"
+	"github.com/semistrict/loophole/internal/client"
+	"github.com/semistrict/loophole/internal/env"
+	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage"
 )
 
 const defaultVolumeSize = 1024 * 1024 * 1024 // 1 GB

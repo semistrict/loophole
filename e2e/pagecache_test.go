@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/semistrict/loophole/cached"
+	"github.com/semistrict/loophole/internal/cached"
 	"github.com/semistrict/loophole/internal/safepoint"
 )
 

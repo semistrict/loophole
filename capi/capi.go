@@ -31,10 +31,10 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/semistrict/loophole/env"
+	"github.com/semistrict/loophole/internal/env"
+	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
-	"github.com/semistrict/loophole/storage"
-	"github.com/semistrict/loophole/volserver"
+	"github.com/semistrict/loophole/internal/volserver"
 )
 
 // handle bundles everything needed for a single open volume.

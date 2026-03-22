@@ -19,10 +19,10 @@ import (
 	"github.com/google/uuid"
 	dto "github.com/prometheus/client_model/go"
 
-	"github.com/semistrict/loophole/env"
-	"github.com/semistrict/loophole/metrics"
-	"github.com/semistrict/loophole/objstore"
-	"github.com/semistrict/loophole/storage"
+	"github.com/semistrict/loophole/internal/env"
+	"github.com/semistrict/loophole/internal/metrics"
+	"github.com/semistrict/loophole/internal/objstore"
+	"github.com/semistrict/loophole/internal/storage"
 )
 
 var (
