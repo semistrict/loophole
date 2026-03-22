@@ -203,6 +203,35 @@ func (b *dirtyBatch) stagePageWithRetired(pageIdx PageIdx, data Page) (*Page, er
 	return b.stageRecord(pageIdx, newPageRecord(data))
 }
 
+// stagePageDirect stages a pool-allocated *Page into the batch without copying.
+// On success, ownership transfers to the batch — the caller must not use page after.
+// On error, ownership remains with the caller (the page is NOT returned to the pool).
+func (b *dirtyBatch) stagePageDirect(pageIdx PageIdx, page *Page) (*Page, error) {
+	rec := &dirtyRecord{page: page}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if err := b.canStageLocked(pageIdx, rec); err != nil {
+		// Do NOT return page to pool — caller still owns it and may retry.
+		rec.page = nil
+		return nil, err
+	}
+
+	var retired *Page
+	prev, ok := b.records[pageIdx]
+	if !ok {
+		b.entryCount++
+	} else if prev != nil && !prev.tombstone {
+		b.bytesUsed -= PageSize
+		retired = prev.page
+		prev.page = nil
+	}
+	b.bytesUsed += PageSize
+	b.records[pageIdx] = rec
+	return retired, nil
+}
+
 func (b *dirtyBatch) stagePage(pageIdx PageIdx, data Page) error {
 	_, err := b.stagePageWithRetired(pageIdx, data)
 	return err

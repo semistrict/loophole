@@ -863,16 +863,20 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 	pageLock.Lock()
 	defer pageLock.Unlock()
 
-	var page Page
+	page := dirtyPagePool.Get().(*Page)
 
 	// If partial page write, read-modify-write.
 	if uint64(len(chunk)) < PageSize {
 		ly.mu.RLock()
-		err := ly.readPageForWriteLocked(ctx, pageIdx, &page)
+		err := ly.readPageForWriteLocked(ctx, pageIdx, page)
 		ly.mu.RUnlock()
 		if err != nil {
+			dirtyPagePool.Put(page)
 			return err
 		}
+	} else {
+		// Full-page write: zero the page since pool pages contain stale data.
+		*page = Page{}
 	}
 
 	copy(page[pageOff:], chunk)
@@ -881,7 +885,7 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 		ly.mu.Lock()
 		ly.disableDirectL2Locked()
 		active := ly.active
-		retired, err := active.stagePageWithRetired(pageIdx, page)
+		retired, err := active.stagePageDirect(pageIdx, page)
 		if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
 			slog.Info("trace write page",
 				"layer", ly.id,
@@ -893,6 +897,7 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 		}
 		switch {
 		case err == nil:
+			// Ownership of page transferred to dirty batch.
 			shouldDrain := ly.noteWriteLocked()
 			writeNotify := ly.writeNotify
 			ly.mu.Unlock()
@@ -915,17 +920,75 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 			continue
 		default:
 			ly.mu.Unlock()
+			dirtyPagePool.Put(page)
 			return err
 		}
 	}
 }
 
 func (ly *layer) readPageForWriteLocked(ctx context.Context, pageIdx PageIdx, dst *Page) error {
-	existing, err := ly.readPageLocked(ctx, pageIdx)
-	if err != nil {
-		return err
+	return ly.readPageIntoLocked(ctx, pageIdx, dst)
+}
+
+// readPageIntoLocked reads a page into a caller-provided buffer, avoiding
+// heap allocations for the common dirty-batch and zero-page paths.
+func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *Page) error {
+	if ly.active != nil {
+		if ok, tombstone := ly.active.copyPage(pageIdx, dst); ok {
+			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			if tombstone {
+				*dst = Page{}
+			}
+			return nil
+		}
 	}
-	copy(dst[:], existing)
+
+	if ly.pending != nil {
+		if ok, tombstone := ly.pending.copyPage(pageIdx, dst); ok {
+			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			if tombstone {
+				*dst = Page{}
+			}
+			return nil
+		}
+	}
+
+	if layer, seq := ly.l1Map.Find(pageIdx.Block()); layer != "" {
+		if data := ly.cachedPage(layer, pageIdx); data != nil {
+			copy(dst[:], data)
+			return nil
+		}
+		data, found, err := ly.readFromBlock(ctx, "l1", layer, seq, pageIdx)
+		if err != nil {
+			return err
+		}
+		if found {
+			ly.cachePage(layer, pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l1").Inc()
+			copy(dst[:], data)
+			return nil
+		}
+	}
+
+	if layer, seq := ly.l2Map.Find(pageIdx.Block()); layer != "" {
+		if data := ly.cachedPage(layer, pageIdx); data != nil {
+			copy(dst[:], data)
+			return nil
+		}
+		data, found, err := ly.readFromBlock(ctx, "l2", layer, seq, pageIdx)
+		if err != nil {
+			return err
+		}
+		if found {
+			ly.cachePage(layer, pageIdx, data)
+			metrics.PageReadSource.WithLabelValues("l2").Inc()
+			copy(dst[:], data)
+			return nil
+		}
+	}
+
+	metrics.PageReadSource.WithLabelValues("zero").Inc()
+	*dst = Page{}
 	return nil
 }
 

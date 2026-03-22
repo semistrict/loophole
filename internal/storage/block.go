@@ -42,6 +42,24 @@ type blockHeader struct {
 
 const blockHeaderSize = 4 + 2 + 8 + 4 + 4 + 8 + 8 + 8 // 46 bytes
 
+func encodeHeader(dst []byte, hdr blockHeader) {
+	copy(dst[0:4], hdr.Magic[:])
+	binary.LittleEndian.PutUint16(dst[4:6], hdr.Version)
+	binary.LittleEndian.PutUint64(dst[6:14], uint64(hdr.BlockIdx))
+	binary.LittleEndian.PutUint32(dst[14:18], hdr.NumEntries)
+	binary.LittleEndian.PutUint32(dst[18:22], hdr.DictSize)
+	binary.LittleEndian.PutUint64(dst[22:30], hdr.DictOffset)
+	binary.LittleEndian.PutUint64(dst[30:38], hdr.DataOffset)
+	binary.LittleEndian.PutUint64(dst[38:46], hdr.IdxOffset)
+}
+
+func encodeIndexEntry(dst []byte, ie blockIndexEntry) {
+	binary.LittleEndian.PutUint16(dst[0:2], ie.PageOffset)
+	binary.LittleEndian.PutUint64(dst[2:10], ie.DataOffset)
+	binary.LittleEndian.PutUint32(dst[10:14], ie.DataLen)
+	binary.LittleEndian.PutUint32(dst[14:18], ie.CRC32)
+}
+
 type blockIndexEntry struct {
 	PageOffset uint16 // offset within block (0..BlockPages-1)
 	DataOffset uint64 // byte offset of compressed page in file
@@ -134,36 +152,38 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, er
 		}
 	}
 
-	// Assemble the block from compressed results.
-	var buf bytes.Buffer
+	// Compute exact output size and assemble directly into a right-sized slice.
+	dataSize := 0
+	for _, cp := range compressed {
+		dataSize += len(cp.compressed)
+	}
+	totalSize := blockHeaderSize + dataSize + len(compressed)*blockIndexEntrySize
+	result := make([]byte, totalSize)
+	pos := blockHeaderSize // skip header, backfill later
 
-	// Reserve space for header.
-	buf.Write(make([]byte, blockHeaderSize))
-
-	dictOffset := uint64(buf.Len())
-	dataOffset := uint64(buf.Len())
+	dictOffset := uint64(pos)
+	dataOffset := uint64(pos)
 
 	indexEntries := make([]blockIndexEntry, len(compressed))
 	for i, cp := range compressed {
 		indexEntries[i] = blockIndexEntry{
 			PageOffset: cp.offset,
-			DataOffset: uint64(buf.Len()),
+			DataOffset: uint64(pos),
 			DataLen:    uint32(len(cp.compressed)),
 			CRC32:      cp.crc32,
 		}
-		buf.Write(cp.compressed)
+		pos += copy(result[pos:], cp.compressed)
 	}
 
 	// Write index.
-	idxOffset := uint64(buf.Len())
+	idxOffset := uint64(pos)
 	for _, ie := range indexEntries {
-		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
-			return nil, fmt.Errorf("write index entry: %w", err)
-		}
+		encodeIndexEntry(result[pos:pos+blockIndexEntrySize], ie)
+		pos += blockIndexEntrySize
 	}
 
 	// Backfill header.
-	hdr := blockHeader{
+	encodeHeader(result[:blockHeaderSize], blockHeader{
 		Magic:      blockMagic,
 		Version:    blockVersion,
 		BlockIdx:   blockIdx,
@@ -172,14 +192,7 @@ func buildBlock(blockIdx BlockIdx, pages []blockPage, compress bool) ([]byte, er
 		DictOffset: dictOffset,
 		DataOffset: dataOffset,
 		IdxOffset:  idxOffset,
-	}
-
-	result := buf.Bytes()
-	var hdrBuf bytes.Buffer
-	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
-		return nil, fmt.Errorf("encode header: %w", err)
-	}
-	copy(result[:blockHeaderSize], hdrBuf.Bytes())
+	})
 
 	return result, nil
 }
@@ -453,48 +466,55 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		return offsets[i] < offsets[j]
 	})
 
-	var buf bytes.Buffer
+	// Compute exact output size and assemble directly into a right-sized slice.
+	dataSize := 0
+	for _, offset := range offsets {
+		if cp, ok := newByOffset[offset]; ok {
+			dataSize += len(cp.compressed)
+		} else {
+			dataSize += len(existingByOffset[offset].compressed)
+		}
+	}
+	totalSize := blockHeaderSize + dataSize + len(offsets)*blockIndexEntrySize
+	result := make([]byte, totalSize)
+	pos := blockHeaderSize // skip header, backfill later
 
-	// Reserve space for header.
-	buf.Write(make([]byte, blockHeaderSize))
-
-	dictOffset := uint64(buf.Len())
-	dataOffset := uint64(buf.Len())
+	dictOffset := uint64(pos)
+	dataOffset := uint64(pos)
 
 	indexEntries := make([]blockIndexEntry, 0, len(offsets))
 	for _, offset := range offsets {
 		if cp, ok := newByOffset[offset]; ok {
 			ie := blockIndexEntry{
 				PageOffset: cp.offset,
-				DataOffset: uint64(buf.Len()),
+				DataOffset: uint64(pos),
 				DataLen:    uint32(len(cp.compressed)),
 				CRC32:      cp.crc32,
 			}
-			buf.Write(cp.compressed)
+			pos += copy(result[pos:], cp.compressed)
 			indexEntries = append(indexEntries, ie)
 			continue
 		}
 		e := existingByOffset[offset]
 		ie := blockIndexEntry{
 			PageOffset: e.offset,
-			DataOffset: uint64(buf.Len()),
+			DataOffset: uint64(pos),
 			DataLen:    uint32(len(e.compressed)),
 			CRC32:      e.crc32,
 		}
-		buf.Write(e.compressed)
+		pos += copy(result[pos:], e.compressed)
 		indexEntries = append(indexEntries, ie)
 	}
 
 	// Write index.
-	idxOffset := uint64(buf.Len())
+	idxOffset := uint64(pos)
 	for _, ie := range indexEntries {
-		if err := binary.Write(&buf, binary.LittleEndian, ie); err != nil {
-			return nil, fmt.Errorf("write index entry: %w", err)
-		}
+		encodeIndexEntry(result[pos:pos+blockIndexEntrySize], ie)
+		pos += blockIndexEntrySize
 	}
 
 	// Backfill header.
-	hdr := blockHeader{
+	encodeHeader(result[:blockHeaderSize], blockHeader{
 		Magic:      blockMagic,
 		Version:    blockVersion,
 		BlockIdx:   blockIdx,
@@ -503,14 +523,7 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 		DictOffset: dictOffset,
 		DataOffset: dataOffset,
 		IdxOffset:  idxOffset,
-	}
-
-	result := buf.Bytes()
-	var hdrBuf bytes.Buffer
-	if err := binary.Write(&hdrBuf, binary.LittleEndian, hdr); err != nil {
-		return nil, fmt.Errorf("encode header: %w", err)
-	}
-	copy(result[:blockHeaderSize], hdrBuf.Bytes())
+	})
 
 	return result, nil
 }
