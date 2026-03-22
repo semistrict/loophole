@@ -1,7 +1,6 @@
 package util
 
 import (
-	"context"
 	"io"
 	"log/slog"
 )
@@ -16,13 +15,6 @@ func SafeClose(c io.Closer, msg string) {
 // SafeRun calls fn and logs a warning on error.
 func SafeRun(fn func() error, msg string) {
 	if err := fn(); err != nil {
-		slog.Warn(msg, "error", err)
-	}
-}
-
-// SafeRunCtx calls fn with ctx and logs a warning on error.
-func SafeRunCtx(ctx context.Context, fn func(context.Context) error, msg string) {
-	if err := fn(ctx); err != nil {
 		slog.Warn(msg, "error", err)
 	}
 }

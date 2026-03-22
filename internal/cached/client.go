@@ -477,14 +477,6 @@ func newConnForTest(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *conn {
 	return c
 }
 
-// TestOnlyNewInProcess creates a PageCache connected to an in-process server via
-// the given net.Conn and shared arena. No daemon binary, no mmap, no files.
-// Use with cachedserver.StartServerWithListener + net.Pipe for testing.
-func TestOnlyNewInProcess(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *PageCache {
-	c := newConnForTest(nc, arena, sp)
-	return &PageCache{safepoint: sp, client: c}
-}
-
 // TestOnlyNewInProcessBufio is like TestOnlyNewInProcess but accepts a
 // buffered reader (from HTTP upgrade handshake).
 func TestOnlyNewInProcessBufio(nc net.Conn, br *bufio.Reader, arena []byte, sp *safepoint.Safepoint) *PageCache {

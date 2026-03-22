@@ -193,16 +193,6 @@ func (b *Backend) MountpointForVolume(volume string) string {
 	return ""
 }
 
-// OnBeforeUnmount registers a callback that fires (LIFO) before the
-// filesystem is unmounted.
-func (b *Backend) OnBeforeUnmount(mountpoint string, fn func()) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.vol != nil && b.mountpoint == mountpoint {
-		b.beforeUnmount = append(b.beforeUnmount, fn)
-	}
-}
-
 // doUnmount tears down the mount: fires beforeUnmount callbacks (LIFO),
 // unmounts the FS via the driver, clears tracking, and unregisters the volume.
 func (b *Backend) doUnmount(ctx context.Context) {
@@ -223,18 +213,6 @@ func (b *Backend) doUnmount(ctx context.Context) {
 		slog.Warn("unmount failed", "mountpoint", mountpoint, "error", err)
 	}
 	b.unregisterVolume(volName)
-}
-
-// Thaw resumes the filesystem after Freeze.
-func (b *Backend) Thaw(ctx context.Context, mountpoint string) error {
-	b.mu.Lock()
-	if b.vol == nil {
-		b.mu.Unlock()
-		return fmt.Errorf("no volume mounted")
-	}
-	handle := b.handle
-	b.mu.Unlock()
-	return b.thawHandle(ctx, handle)
 }
 
 // --- Device-level operations (raw block device access) ---
@@ -283,15 +261,6 @@ func (b *Backend) DeviceDetach(ctx context.Context, volume string) error {
 	return vol.ReleaseRef()
 }
 
-// DeviceCheckpoint creates a checkpoint of a volume by name (no freeze/thaw).
-func (b *Backend) DeviceCheckpoint(ctx context.Context, volume string) (string, error) {
-	vol := b.vm.GetVolume(volume)
-	if vol == nil {
-		return "", fmt.Errorf("volume %q not open", volume)
-	}
-	return vol.Checkpoint()
-}
-
 // DevicePath returns the block device path for a volume.
 func (b *Backend) DevicePath(volume string) (string, error) {
 	var dev string
@@ -310,30 +279,6 @@ func (b *Backend) DevicePath(volume string) (string, error) {
 }
 
 // --- Query methods ---
-
-// IsMounted reports whether mountpoint is tracked as an active mount.
-func (b *Backend) IsMounted(mountpoint string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.vol != nil && b.mountpoint == mountpoint
-}
-
-// IsVolumeMounted returns true if the named volume is currently mounted.
-func (b *Backend) IsVolumeMounted(volume string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.vol != nil && b.vol.Name() == volume
-}
-
-// VolumeAt returns the volume name mounted at mountpoint, or "" if none.
-func (b *Backend) VolumeAt(mountpoint string) string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.vol != nil && b.mountpoint == mountpoint {
-		return b.vol.Name()
-	}
-	return ""
-}
 
 // Mounts returns a copy of all active mountpoint → volume name mappings.
 func (b *Backend) Mounts() map[string]string {
@@ -427,11 +372,6 @@ func (b *Backend) closeMount(ctx context.Context, mountpoint, volume string) {
 }
 
 // --- internal ---
-
-// MountOpen mounts an already-open Volume at the given mountpoint.
-func (b *Backend) MountOpen(ctx context.Context, vol *storage.Volume, mountpoint string) error {
-	return b.mountVolume(ctx, vol, mountpoint)
-}
 
 // mountVolume mounts an already-open *Volume. Used by Mount and MountOpen.
 // Acquires a ref on the volume; Unmount releases it.

@@ -47,14 +47,6 @@ func (c *conn) send(msg any) error {
 	return json.NewEncoder(c.netConn).Encode(msg)
 }
 
-func newConn(nc net.Conn) *conn {
-	return &conn{
-		netConn: nc,
-		decoder: json.NewDecoder(nc),
-		done:    make(chan struct{}),
-	}
-}
-
 func handleConn(c *conn) {
 	defer wg.Done()
 	defer close(c.done)
@@ -271,14 +263,4 @@ func StartServerWithListener(d string, ln net.Listener) error {
 	}()
 
 	return nil
-}
-
-// Accept registers a pre-connected net.Conn (for testing).
-func Accept(nc net.Conn) {
-	c := newConn(nc)
-	mu.Lock()
-	conns[c] = struct{}{}
-	mu.Unlock()
-	wg.Add(1)
-	go handleConn(c)
 }

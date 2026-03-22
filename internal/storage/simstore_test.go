@@ -57,11 +57,6 @@ func (s *SimObjectStore) Store() *blob.Store {
 	return s.store
 }
 
-// Driver returns the underlying MemDriver for direct fault injection.
-func (s *SimObjectStore) Driver() *blob.MemDriver {
-	return s.inner
-}
-
 // InjectFaults randomly arms faults on the underlying MemDriver for the
 // current tick, based on FaultConfig probabilities. Call once per simulation tick.
 func (s *SimObjectStore) InjectFaults() {

@@ -19,8 +19,8 @@ func startInProcessCache(t *testing.T) *cached.PageCache {
 	ln := cachedserver.NewPipeListener()
 	require.NoError(t, cachedserver.StartServerWithListener("", ln))
 	t.Cleanup(func() {
-		ln.Close()
 		cachedserver.Shutdown()
+		ln.Close()
 	})
 	sp := safepoint.New()
 	client := ln.Dial(sp)

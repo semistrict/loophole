@@ -57,31 +57,6 @@ func (d Dir) Cache(volsetID string) string {
 	return filepath.Join(string(d), "cache", volsetID)
 }
 
-// CachedSocket returns the page cache daemon socket path for the given store.
-func (d Dir) CachedSocket(volsetID string) string {
-	return filepath.Join(string(d), "cache", volsetID, "cached.sock")
-}
-
-// CachedLog returns the page cache daemon log file path for the given store.
-func (d Dir) CachedLog(volsetID string) string {
-	return filepath.Join(string(d), "cache", volsetID, "cached.log")
-}
-
-// SandboxdSocket returns the Unix socket path for the sandbox daemon.
-func (d Dir) SandboxdSocket() string {
-	return filepath.Join(string(d), "sandboxd.sock")
-}
-
-// SandboxdLog returns the sandbox daemon log file path.
-func (d Dir) SandboxdLog() string {
-	return filepath.Join(string(d), "sandboxd.log")
-}
-
-// SandboxdState returns the sandbox daemon state directory.
-func (d Dir) SandboxdState() string {
-	return filepath.Join(string(d), "sandboxd")
-}
-
 // MountSymlink returns the symlink path that maps a user mountpoint back to
 // the daemon socket. This allows post-mount commands to find the daemon.
 func (d Dir) MountSymlink(mountpoint string) string {

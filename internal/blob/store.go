@@ -37,14 +37,6 @@ type Store struct {
 // Option configures an Store.
 type Option func(*Store)
 
-// WithReadRetries sets the number of read retries and base delay.
-func WithReadRetries(n int, baseDelay time.Duration) Option {
-	return func(s *Store) {
-		s.readRetries = n
-		s.readBaseDelay = baseDelay
-	}
-}
-
 // New creates an Store wrapping the given driver.
 func New(driver Driver, opts ...Option) *Store {
 	s := &Store{

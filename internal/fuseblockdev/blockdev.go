@@ -113,11 +113,6 @@ func Start(mountDir string, opts *Options) (*Server, error) {
 	}, nil
 }
 
-// Wait blocks until the FUSE server is unmounted.
-func (s *Server) Wait() {
-	s.server.Wait()
-}
-
 // Unmount unmounts the FUSE filesystem.
 func (s *Server) Unmount() error {
 	return s.server.Unmount()

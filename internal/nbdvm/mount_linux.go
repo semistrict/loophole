@@ -236,33 +236,6 @@ func waitForConnected(ctx context.Context, idx uint32, sizeBytes uint64) error {
 	}
 }
 
-func waitForStatus(ctx context.Context, idx uint32, connected bool) error {
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		st, err := nbdnl.Status(idx)
-		if err == nil && st.Connected == connected {
-			return nil
-		}
-		if !connected && err != nil {
-			return nil
-		}
-		if ctx != nil {
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("wait for nbd%d connected=%t: %w", idx, connected, ctx.Err())
-			default:
-			}
-		}
-		if time.Now().After(deadline) {
-			if err != nil {
-				return fmt.Errorf("wait for nbd%d connected=%t: %w", idx, connected, err)
-			}
-			return fmt.Errorf("wait for nbd%d connected=%t: timeout", idx, connected)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 func deviceSizeReady(idx uint32, sizeBytes uint64) (bool, error) {
 	data, err := os.ReadFile(filepath.Join("/sys/block", fmt.Sprintf("nbd%d", idx), "size"))
 	if err != nil {

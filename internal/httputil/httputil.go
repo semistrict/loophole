@@ -26,12 +26,3 @@ func WriteJSON(w http.ResponseWriter, v any) {
 		slog.Warn("writeJSON encode error", "error", err)
 	}
 }
-
-func WriteError(w http.ResponseWriter, code int, err error) {
-	slog.Warn("returning http error", "code", code, "err", err)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	if encErr := json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}); encErr != nil {
-		slog.Warn("writeError encode error", "error", encErr)
-	}
-}

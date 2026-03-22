@@ -123,12 +123,6 @@ func (s *Server) Close() {
 	<-s.doneCh
 }
 
-// Socket returns the Unix socket path.
-func (s *Server) Socket() string { return s.socket }
-
-// Volume returns the managed volume (may be nil).
-func (s *Server) Volume() *storage.Volume { return s.vol }
-
 // ShuttingDown reports whether the server is shutting down.
 func (s *Server) ShuttingDown() bool {
 	select {
@@ -138,9 +132,6 @@ func (s *Server) ShuttingDown() bool {
 		return false
 	}
 }
-
-// DoneCh returns a channel that is closed when shutdown cleanup is complete.
-func (s *Server) DoneCh() <-chan struct{} { return s.doneCh }
 
 // Mux returns an http.ServeMux with all volume-level routes registered.
 func (s *Server) Mux(stop context.CancelFunc) *http.ServeMux {
@@ -341,16 +332,6 @@ func (s *Server) HandleDeviceDDFinalize(w http.ResponseWriter, r *http.Request) 
 }
 
 // --- HTTP helpers (exported so fsserver can reuse them) ---
-
-func ReadJSON(r *http.Request, v any) error {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
-		if err == io.EOF {
-			return nil
-		}
-		return fmt.Errorf("decode request: %w", err)
-	}
-	return nil
-}
 
 func WriteJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")

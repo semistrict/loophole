@@ -26,25 +26,6 @@ const (
 	EventRead // verified read — logged for determinism checks
 )
 
-func (k OracleEventKind) String() string {
-	switch k {
-	case EventWrite:
-		return "WRITE"
-	case EventPunchHole:
-		return "PUNCH"
-	case EventFlush:
-		return "FLUSH"
-	case EventCrash:
-		return "CRASH"
-	case EventBranch:
-		return "BRANCH"
-	case EventRead:
-		return "READ"
-	default:
-		return "?"
-	}
-}
-
 // OracleEvent records a single mutation for post-mortem analysis.
 type OracleEvent struct {
 	Seq      int // global event counter
@@ -332,20 +313,6 @@ func (o *Oracle) flushedOrZero(timelineID string, pageIdx PageIdx) []byte {
 }
 
 // FlushedPages returns a copy of all known-flushed pages for a timeline.
-func (o *Oracle) FlushedPages(timelineID string) map[PageIdx][]byte {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	result := make(map[PageIdx][]byte)
-	if tlPages := o.flushed[timelineID]; tlPages != nil {
-		for addr, data := range tlPages {
-			cp := make([]byte, len(data))
-			copy(cp, data)
-			result[addr] = cp
-		}
-	}
-	return result
-}
-
 func isZeroPage(b []byte) bool {
 	for _, v := range b {
 		if v != 0 {

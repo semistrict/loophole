@@ -45,16 +45,3 @@ func OptionInt(key string, fallback int) int {
 	}
 	return fallback
 }
-
-// OptionString returns the string value of a key=value option from LOOPHOLE_OPTIONS.
-// Returns fallback if the key is not set.
-func OptionString(key string, fallback string) string {
-	key = strings.ToLower(strings.TrimSpace(key))
-	for _, part := range splitOptions() {
-		k, v, ok := strings.Cut(part, "=")
-		if ok && strings.ToLower(strings.TrimSpace(k)) == key {
-			return strings.TrimSpace(v)
-		}
-	}
-	return fallback
-}
