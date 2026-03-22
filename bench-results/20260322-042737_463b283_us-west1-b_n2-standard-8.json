@@ -1,0 +1,151 @@
+{
+  "timestamp": "2026-03-22T04:27:37Z",
+  "head_sha": "463b283",
+  "platform": "gce",
+  "instance": "loophole-bench",
+  "machine_type": "n2-standard-8",
+  "project": "loophole-fc",
+  "zone": "us-west1-b",
+  "region": "us-west1",
+  "bucket": "loophole-bench",
+  "endpoint": "https://storage.googleapis.com",
+  "store_url": "https://storage.googleapis.com/loophole-bench",
+  "remote_src_dir": "loophole",
+  "volume_name": "bench-vol",
+  "mountpoint": "/mnt/loophole-bench",
+  "vol_size": "10GB",
+  "fio_runtime": "30",
+  "page_size": 4096,
+  "block_size": 4194304,
+  "block_pages": 1024,
+  "fio": [
+    {
+      "name": "seq-write",
+      "rw": "write",
+      "bs": "1M",
+      "size": "256M",
+      "write_mbps": 740.705020904541,
+      "write_iops": 740.705022,
+      "write_lat_us": 435.003135321
+    },
+    {
+      "name": "seq-read",
+      "rw": "read",
+      "bs": "1M",
+      "size": "256M",
+      "read_mbps": 2834.4055194854736,
+      "read_iops": 2834.40552,
+      "read_lat_us": 292.426499747
+    },
+    {
+      "name": "rand-write-4k",
+      "rw": "randwrite",
+      "bs": "4k",
+      "size": "128M",
+      "write_mbps": 600.8004159927368,
+      "write_iops": 153804.906503,
+      "write_lat_us": 1.869551501
+    },
+    {
+      "name": "rand-read-4k",
+      "rw": "randread",
+      "bs": "4k",
+      "size": "128M",
+      "read_mbps": 196.30647659301758,
+      "read_iops": 50254.458185,
+      "read_lat_us": 19.129437382
+    },
+    {
+      "name": "randrw-4k",
+      "rw": "randrw",
+      "bs": "4k",
+      "size": "128M",
+      "read_mbps": 146.13627433776855,
+      "read_iops": 37410.886304,
+      "read_lat_us": 21.162488271999997,
+      "write_mbps": 62.63879680633545,
+      "write_iops": 16035.532149,
+      "write_lat_us": 2.2225247770000003
+    },
+    {
+      "name": "seq-write-64k",
+      "rw": "write",
+      "bs": "64k",
+      "size": "256M",
+      "write_mbps": 686.6245851516724,
+      "write_iops": 10985.993377,
+      "write_lat_us": 26.699362897
+    },
+    {
+      "name": "rand-write-64k",
+      "rw": "randwrite",
+      "bs": "64k",
+      "size": "256M",
+      "write_mbps": 681.9640531539917,
+      "write_iops": 10911.424861,
+      "write_lat_us": 26.468009375
+    }
+  ],
+  "run_config": {
+    "debug": false,
+    "fio_only": true,
+    "fsx_only": false,
+    "e2e_only": false,
+    "fio_jobs": [
+      {
+        "name": "seq-write",
+        "rw": "write",
+        "bs": "1M",
+        "size": "256M",
+        "num_jobs": 1
+      },
+      {
+        "name": "seq-read",
+        "rw": "read",
+        "bs": "1M",
+        "size": "256M",
+        "num_jobs": 1
+      },
+      {
+        "name": "rand-write-4k",
+        "rw": "randwrite",
+        "bs": "4k",
+        "size": "128M",
+        "num_jobs": 1
+      },
+      {
+        "name": "rand-read-4k",
+        "rw": "randread",
+        "bs": "4k",
+        "size": "128M",
+        "num_jobs": 1
+      },
+      {
+        "name": "randrw-4k",
+        "rw": "randrw",
+        "bs": "4k",
+        "size": "128M",
+        "num_jobs": 1,
+        "extra": "--rwmixread=70"
+      },
+      {
+        "name": "seq-write-64k",
+        "rw": "write",
+        "bs": "64k",
+        "size": "256M",
+        "num_jobs": 1
+      },
+      {
+        "name": "rand-write-64k",
+        "rw": "randwrite",
+        "bs": "64k",
+        "size": "256M",
+        "num_jobs": 1
+      }
+    ]
+  },
+  "repro": {
+    "sync_command": "go run ./cmd/bench-gcp --project loophole-fc --zone us-west1-b --bucket loophole-bench sync",
+    "run_command": "go run ./cmd/bench-gcp --project loophole-fc --zone us-west1-b --bucket loophole-bench run --vol-size 10GB --fio-runtime 30 --fio-only"
+  }
+}
