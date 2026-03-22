@@ -1,14 +1,16 @@
 package cachedserver
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 
 	"github.com/semistrict/loophole/internal/cached"
+	"github.com/semistrict/loophole/internal/httputil"
 	"github.com/semistrict/loophole/internal/metrics"
 	"github.com/semistrict/loophole/internal/util"
 )
@@ -153,6 +155,73 @@ func finishDrain() {
 	drainMu.Unlock()
 }
 
+// handleConnect upgrades an HTTP connection to the streaming JSON protocol
+// using HTTP 101 Switching Protocols.
+func handleConnect(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("Connection") != "Upgrade" || r.Header.Get("Upgrade") != "loophole-cached" {
+		http.Error(w, "expected Connection: Upgrade + Upgrade: loophole-cached", http.StatusBadRequest)
+		return
+	}
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "hijack not supported", http.StatusInternalServerError)
+		return
+	}
+
+	nc, bufrw, err := hj.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Write the 101 response manually since we've hijacked.
+	if _, err := bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: loophole-cached\r\n\r\n"); err != nil {
+		util.SafeClose(nc, "close hijacked conn after write error")
+		return
+	}
+	if err := bufrw.Flush(); err != nil {
+		util.SafeClose(nc, "close hijacked conn after flush error")
+		return
+	}
+
+	c := newConnFromHijack(nc, bufrw.Reader)
+
+	mu.Lock()
+	conns[c] = struct{}{}
+	metrics.CacheDaemonClients.Set(float64(len(conns)))
+	mu.Unlock()
+
+	wg.Add(1)
+	go handleConn(c)
+}
+
+// newConnFromHijack creates a conn from a hijacked connection.
+// Uses the buffered reader from hijack (may have buffered data).
+func newConnFromHijack(nc net.Conn, br *bufio.Reader) *conn {
+	return &conn{
+		netConn: nc,
+		decoder: json.NewDecoder(br),
+		done:    make(chan struct{}),
+	}
+}
+
+func handleStatus(w http.ResponseWriter, r *http.Request) {
+	mu.Lock()
+	pages := len(index)
+	used := usedBytes
+	b := budget
+	clients := len(conns)
+	mu.Unlock()
+
+	httputil.WriteJSON(w, map[string]any{
+		"pages":      pages,
+		"used_bytes": used,
+		"budget":     b,
+		"clients":    clients,
+	})
+}
+
 // StartServer initializes the daemon state from dir and starts accepting
 // connections on a Unix socket at dir/cached.sock.
 func StartServer(d string) error {
@@ -183,13 +252,28 @@ func StartServerWithListener(d string, ln net.Listener) error {
 		}
 	}
 
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /connect", handleConnect)
+	mux.HandleFunc("GET /status", handleStatus)
+	httputil.RegisterObservabilityRoutes(mux)
+
+	srv := &http.Server{Handler: mux}
+
 	wg.Add(1)
-	go acceptLoop(ln)
+	go func() {
+		defer wg.Done()
+		_ = srv.Serve(ln) //nolint:errcheck // returns on Close
+	}()
+
+	go func() {
+		<-stopCh
+		util.SafeClose(srv, "close cached HTTP server")
+	}()
+
 	return nil
 }
 
-// Accept returns the listener's accept channel so tests can inject
-// pre-connected net.Conns. Only valid after StartServerWithListener.
+// Accept registers a pre-connected net.Conn (for testing).
 func Accept(nc net.Conn) {
 	c := newConn(nc)
 	mu.Lock()
@@ -197,29 +281,4 @@ func Accept(nc net.Conn) {
 	mu.Unlock()
 	wg.Add(1)
 	go handleConn(c)
-}
-
-func acceptLoop(ln net.Listener) {
-	defer wg.Done()
-	for {
-		nc, err := ln.Accept()
-		if err != nil {
-			select {
-			case <-stopCh:
-				return
-			default:
-				slog.Error("cached: accept error", "error", err)
-				continue
-			}
-		}
-
-		c := newConn(nc)
-		mu.Lock()
-		conns[c] = struct{}{}
-		metrics.CacheDaemonClients.Set(float64(len(conns)))
-		mu.Unlock()
-
-		wg.Add(1)
-		go handleConn(c)
-	}
 }

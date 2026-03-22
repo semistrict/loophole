@@ -13,12 +13,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/semistrict/loophole/internal/httputil"
 	"github.com/semistrict/loophole/internal/metrics"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/util"
@@ -171,18 +171,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux, stop context.CancelFunc) {
 		WriteJSON(w, map[string]string{"status": "done"})
 	})
 
-	RegisterObservabilityRoutes(mux)
-}
-
-// RegisterObservabilityRoutes registers process-level metrics and pprof
-// endpoints on the given mux. Called by both volserver and fsserver.
-func RegisterObservabilityRoutes(mux *http.ServeMux) {
-	mux.Handle("GET /metrics", metrics.Handler())
-	mux.HandleFunc("GET /debug/pprof/", pprof.Index)
-	mux.HandleFunc("GET /debug/pprof/cmdline", pprof.Cmdline)
-	mux.HandleFunc("GET /debug/pprof/profile", pprof.Profile)
-	mux.HandleFunc("GET /debug/pprof/symbol", pprof.Symbol)
-	mux.HandleFunc("GET /debug/pprof/trace", pprof.Trace)
+	httputil.RegisterObservabilityRoutes(mux)
 }
 
 // --- Exported handlers (used by fsserver to wire individually) ---

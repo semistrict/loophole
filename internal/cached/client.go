@@ -3,6 +3,7 @@
 package cached
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -53,13 +55,43 @@ type localKey struct {
 	pageIdx uint64
 }
 
-// dial connects to the cache daemon at dir/cached.sock and mmaps
-// the arena file read-only.
+// dial connects to the cache daemon at dir/cached.sock via HTTP upgrade
+// and mmaps the arena file read-only.
 func dial(dir string, sp *safepoint.Safepoint) (*conn, error) {
 	sockPath := SocketPath(dir)
 	nc, err := net.Dial("unix", sockPath)
 	if err != nil {
 		return nil, err
+	}
+
+	// HTTP 101 upgrade to the streaming JSON protocol.
+	upgradeReq := "GET /connect HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: loophole-cached\r\n\r\n"
+	if _, err := nc.Write([]byte(upgradeReq)); err != nil {
+		safeClose(nc)
+		return nil, fmt.Errorf("send upgrade: %w", err)
+	}
+
+	// Read the 101 response (scan until empty line).
+	br := bufio.NewReader(nc)
+	statusLine, err := br.ReadString('\n')
+	if err != nil {
+		safeClose(nc)
+		return nil, fmt.Errorf("read upgrade response: %w", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 101") {
+		safeClose(nc)
+		return nil, fmt.Errorf("unexpected upgrade response: %s", strings.TrimSpace(statusLine))
+	}
+	// Consume remaining headers until blank line.
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			safeClose(nc)
+			return nil, fmt.Errorf("read upgrade headers: %w", err)
+		}
+		if line == "\r\n" || line == "\n" {
+			break
+		}
 	}
 
 	arenaPath := filepath.Join(dir, "arena")
@@ -104,14 +136,19 @@ func dial(dir string, sp *safepoint.Safepoint) (*conn, error) {
 		readDone:   make(chan struct{}),
 	}
 
-	go c.readLoop(ctx)
+	// Use the buffered reader (may have data from the upgrade response).
+	go c.readLoopBufio(ctx, br)
 	return c, nil
 }
 
 func (c *conn) readLoop(ctx context.Context) {
+	c.readLoopBufio(ctx, bufio.NewReader(c.nc))
+}
+
+func (c *conn) readLoopBufio(ctx context.Context, br *bufio.Reader) {
 	defer close(c.readDone)
 	defer close(c.respCh) // unblock doRequest on conn death
-	decoder := json.NewDecoder(c.nc)
+	decoder := json.NewDecoder(br)
 	for {
 		var resp DaemonMsg
 		if err := decoder.Decode(&resp); err != nil {
@@ -193,8 +230,10 @@ func (c *conn) getPage(layerID string, pageIdx uint64) []byte {
 	metrics.CacheIPCLookups.Inc()
 	resp, err := c.doRequest(ClientMsg{Op: OpLookup, LayerID: layerID, PageIdx: pageIdx})
 	if err != nil || !resp.Hit {
+		metrics.CacheIPCMisses.Inc()
 		return nil
 	}
+	metrics.CacheIPCHits.Inc()
 
 	g := c.safepoint.Enter()
 	buf := make([]byte, SlotSize)
@@ -232,8 +271,10 @@ func (c *conn) getPageRef(g safepoint.Guard, layerID string, pageIdx uint64) []b
 	metrics.CacheIPCLookups.Inc()
 	resp, err := c.doRequest(ClientMsg{Op: OpLookup, LayerID: layerID, PageIdx: pageIdx})
 	if err != nil || !resp.Hit {
+		metrics.CacheIPCMisses.Inc()
 		return nil
 	}
+	metrics.CacheIPCHits.Inc()
 
 	c.localMu.Lock()
 	c.localCache[localKey{layerID, pageIdx}] = resp.Slot
@@ -436,11 +477,30 @@ func newConnForTest(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *conn {
 	return c
 }
 
-// NewInProcess creates a PageCache connected to an in-process server via
+// TestOnlyNewInProcess creates a PageCache connected to an in-process server via
 // the given net.Conn and shared arena. No daemon binary, no mmap, no files.
 // Use with cachedserver.StartServerWithListener + net.Pipe for testing.
 func TestOnlyNewInProcess(nc net.Conn, arena []byte, sp *safepoint.Safepoint) *PageCache {
 	c := newConnForTest(nc, arena, sp)
+	return &PageCache{safepoint: sp, client: c}
+}
+
+// TestOnlyNewInProcessBufio is like TestOnlyNewInProcess but accepts a
+// buffered reader (from HTTP upgrade handshake).
+func TestOnlyNewInProcessBufio(nc net.Conn, br *bufio.Reader, arena []byte, sp *safepoint.Safepoint) *PageCache {
+	ctx, cancel := context.WithCancel(context.Background())
+	c := &conn{
+		nc:         nc,
+		encoder:    json.NewEncoder(nc),
+		cancel:     cancel,
+		arena:      arena,
+		arenaSlots: len(arena) / SlotSize,
+		localCache: make(map[localKey]int),
+		safepoint:  sp,
+		respCh:     make(chan DaemonMsg, 1),
+		readDone:   make(chan struct{}),
+	}
+	go c.readLoopBufio(ctx, br)
 	return &PageCache{safepoint: sp, client: c}
 }
 

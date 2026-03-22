@@ -542,7 +542,7 @@ func (ly *layer) readPageRefLocked(ctx context.Context, g safepoint.Guard, pageI
 	if ly.active != nil {
 		var page Page
 		if ok, tombstone := ly.active.copyPage(pageIdx, &page); ok {
-			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			metrics.PageReadDirtyPages.Inc()
 			if tombstone {
 				return zeroPage[:], nil
 			}
@@ -553,7 +553,7 @@ func (ly *layer) readPageRefLocked(ctx context.Context, g safepoint.Guard, pageI
 	if ly.pending != nil {
 		var page Page
 		if ok, tombstone := ly.pending.copyPage(pageIdx, &page); ok {
-			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			metrics.PageReadPendingDirtyBatch.Inc()
 			if tombstone {
 				return zeroPage[:], nil
 			}
@@ -571,7 +571,7 @@ func (ly *layer) readPageRefLocked(ctx context.Context, g safepoint.Guard, pageI
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l1").Inc()
+			metrics.PageReadL1.Inc()
 			return data, nil
 		}
 	}
@@ -586,12 +586,12 @@ func (ly *layer) readPageRefLocked(ctx context.Context, g safepoint.Guard, pageI
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l2").Inc()
+			metrics.PageReadL2.Inc()
 			return data, nil
 		}
 	}
 
-	metrics.PageReadSource.WithLabelValues("zero").Inc()
+	metrics.PageReadZero.Inc()
 	return zeroPage[:], nil
 }
 
@@ -603,7 +603,7 @@ func (ly *layer) cachedPageRef(g safepoint.Guard, sourceLayerID string, pageIdx 
 	}
 	if data := ly.diskCache.GetPageRef(g, sourceLayerID, uint64(pageIdx)); data != nil {
 		metrics.CacheHits.Inc()
-		metrics.PageReadSource.WithLabelValues("cache").Inc()
+		metrics.PageReadCache.Inc()
 		return data
 	}
 	metrics.CacheMisses.Inc()
@@ -614,7 +614,7 @@ func (ly *layer) readPageLocked(ctx context.Context, pageIdx PageIdx) ([]byte, e
 	if ly.active != nil {
 		var page Page
 		if ok, tombstone := ly.active.copyPage(pageIdx, &page); ok {
-			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			metrics.PageReadDirtyPages.Inc()
 			if tombstone {
 				return zeroPage[:], nil
 			}
@@ -625,7 +625,7 @@ func (ly *layer) readPageLocked(ctx context.Context, pageIdx PageIdx) ([]byte, e
 	if ly.pending != nil {
 		var page Page
 		if ok, tombstone := ly.pending.copyPage(pageIdx, &page); ok {
-			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			metrics.PageReadPendingDirtyBatch.Inc()
 			if tombstone {
 				return zeroPage[:], nil
 			}
@@ -643,7 +643,7 @@ func (ly *layer) readPageLocked(ctx context.Context, pageIdx PageIdx) ([]byte, e
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l1").Inc()
+			metrics.PageReadL1.Inc()
 			return data, nil
 		}
 	}
@@ -658,12 +658,12 @@ func (ly *layer) readPageLocked(ctx context.Context, pageIdx PageIdx) ([]byte, e
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l2").Inc()
+			metrics.PageReadL2.Inc()
 			return data, nil
 		}
 	}
 
-	metrics.PageReadSource.WithLabelValues("zero").Inc()
+	metrics.PageReadZero.Inc()
 	return zeroPage[:], nil
 }
 
@@ -685,7 +685,7 @@ func (ly *layer) cachedPage(sourceLayerID string, pageIdx PageIdx) []byte {
 	}
 	if data := ly.diskCache.GetPage(sourceLayerID, uint64(pageIdx)); data != nil {
 		metrics.CacheHits.Inc()
-		metrics.PageReadSource.WithLabelValues("cache").Inc()
+		metrics.PageReadCache.Inc()
 		return data
 	}
 	metrics.CacheMisses.Inc()
@@ -935,7 +935,7 @@ func (ly *layer) readPageForWriteLocked(ctx context.Context, pageIdx PageIdx, ds
 func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *Page) error {
 	if ly.active != nil {
 		if ok, tombstone := ly.active.copyPage(pageIdx, dst); ok {
-			metrics.PageReadSource.WithLabelValues("dirty_pages").Inc()
+			metrics.PageReadDirtyPages.Inc()
 			if tombstone {
 				*dst = Page{}
 			}
@@ -945,7 +945,7 @@ func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *P
 
 	if ly.pending != nil {
 		if ok, tombstone := ly.pending.copyPage(pageIdx, dst); ok {
-			metrics.PageReadSource.WithLabelValues("pending_dirty_batch").Inc()
+			metrics.PageReadPendingDirtyBatch.Inc()
 			if tombstone {
 				*dst = Page{}
 			}
@@ -964,7 +964,7 @@ func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *P
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l1").Inc()
+			metrics.PageReadL1.Inc()
 			copy(dst[:], data)
 			return nil
 		}
@@ -981,13 +981,13 @@ func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *P
 		}
 		if found {
 			ly.cachePage(layer, pageIdx, data)
-			metrics.PageReadSource.WithLabelValues("l2").Inc()
+			metrics.PageReadL2.Inc()
 			copy(dst[:], data)
 			return nil
 		}
 	}
 
-	metrics.PageReadSource.WithLabelValues("zero").Inc()
+	metrics.PageReadZero.Inc()
 	*dst = Page{}
 	return nil
 }

@@ -100,6 +100,36 @@ func TestPatchBlockWithTombstones(t *testing.T) {
 	assert.Equal(t, bytes.Repeat([]byte{0x44}, PageSize), data)
 }
 
+func TestDecodeHeaderRoundTrip(t *testing.T) {
+	hdr := blockHeader{
+		Magic:      blockMagic,
+		Version:    blockVersion,
+		BlockIdx:   42,
+		NumEntries: 1024,
+		DictSize:   0,
+		DictOffset: 46,
+		DataOffset: 46,
+		IdxOffset:  4242880,
+	}
+	buf := make([]byte, blockHeaderSize)
+	encodeHeader(buf, hdr)
+	got := decodeHeader(buf)
+	assert.Equal(t, hdr, got)
+}
+
+func TestDecodeIndexEntryRoundTrip(t *testing.T) {
+	ie := blockIndexEntry{
+		PageOffset: 511,
+		DataOffset: 123456789,
+		DataLen:    4000,
+		CRC32:      0xDEADBEEF,
+	}
+	buf := make([]byte, blockIndexEntrySize)
+	encodeIndexEntry(buf, ie)
+	got := decodeIndexEntry(buf)
+	assert.Equal(t, ie, got)
+}
+
 func TestPatchBlockDeduplicatesOffsetsPreferringNewPages(t *testing.T) {
 	oldData := bytes.Repeat([]byte{0x11}, PageSize)
 	newData := bytes.Repeat([]byte{0x22}, PageSize)

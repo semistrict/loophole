@@ -25,6 +25,15 @@ var (
 		Help:      "Pages read by source: dirty_pages, pending_dirty_batch, cache, l0, l1, l2, zero.",
 	}, []string{"source"}))
 
+	// Pre-registered page read source counters to avoid WithLabelValues
+	// allocation on the hot read path.
+	PageReadDirtyPages        = PageReadSource.WithLabelValues("dirty_pages")
+	PageReadPendingDirtyBatch = PageReadSource.WithLabelValues("pending_dirty_batch")
+	PageReadCache             = PageReadSource.WithLabelValues("cache")
+	PageReadL1                = PageReadSource.WithLabelValues("l1")
+	PageReadL2                = PageReadSource.WithLabelValues("l2")
+	PageReadZero              = PageReadSource.WithLabelValues("zero")
+
 	// --- Page cache daemon metrics ---
 
 	// Client-side: local lookup cache hits (zero IPC).
@@ -41,6 +50,22 @@ var (
 		Subsystem: "cached",
 		Name:      "ipc_lookups_total",
 		Help:      "Lookups that required IPC to the cache daemon.",
+	}))
+
+	// Client-side: IPC lookups that found the page in the daemon.
+	CacheIPCHits = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "cached",
+		Name:      "ipc_hits_total",
+		Help:      "IPC lookups that found the page in the cache daemon.",
+	}))
+
+	// Client-side: IPC lookups that did not find the page.
+	CacheIPCMisses = reg(prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "loophole",
+		Subsystem: "cached",
+		Name:      "ipc_misses_total",
+		Help:      "IPC lookups where the cache daemon did not have the page.",
 	}))
 
 	// Client-side: lookups skipped because the client was draining.

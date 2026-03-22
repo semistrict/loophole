@@ -148,10 +148,14 @@ func printLayer(fams map[string]*dto.MetricFamily) {
 func printCache(fams map[string]*dto.MetricFamily) {
 	hits := counterVal(fams, "loophole_cache_hits_total")
 	misses := counterVal(fams, "loophole_cache_misses_total")
-	if hits == 0 && misses == 0 {
+	localHits := counterVal(fams, "loophole_cached_local_hits_total")
+	ipcLookups := counterVal(fams, "loophole_cached_ipc_lookups_total")
+	ipcHits := counterVal(fams, "loophole_cached_ipc_hits_total")
+	ipcMisses := counterVal(fams, "loophole_cached_ipc_misses_total")
+	if hits == 0 && misses == 0 && ipcLookups == 0 {
 		return
 	}
-	_, _ = header.Println("Block Cache")
+	_, _ = header.Println("Page Cache")
 	total := hits + misses
 	rate := float64(0)
 	if total > 0 {
@@ -159,6 +163,12 @@ func printCache(fams map[string]*dto.MetricFamily) {
 	}
 	_, _ = label.Print("  hit rate   ")
 	fmt.Printf("%.1f%%  (%s hits, %s misses)\n", rate, humanCount(hits), humanCount(misses))
+	if localHits > 0 || ipcLookups > 0 {
+		_, _ = label.Print("  local      ")
+		fmt.Printf("%s hits (zero IPC)\n", humanCount(localHits))
+		_, _ = label.Print("  daemon     ")
+		fmt.Printf("%s lookups  %s hits  %s misses\n", humanCount(ipcLookups), humanCount(ipcHits), humanCount(ipcMisses))
+	}
 	printHistSummary(fams, "loophole_cache_fetch_duration_seconds", "fetch")
 	fmt.Println()
 }

@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -53,11 +52,33 @@ func encodeHeader(dst []byte, hdr blockHeader) {
 	binary.LittleEndian.PutUint64(dst[38:46], hdr.IdxOffset)
 }
 
+func decodeHeader(src []byte) blockHeader {
+	var hdr blockHeader
+	copy(hdr.Magic[:], src[0:4])
+	hdr.Version = binary.LittleEndian.Uint16(src[4:6])
+	hdr.BlockIdx = BlockIdx(binary.LittleEndian.Uint64(src[6:14]))
+	hdr.NumEntries = binary.LittleEndian.Uint32(src[14:18])
+	hdr.DictSize = binary.LittleEndian.Uint32(src[18:22])
+	hdr.DictOffset = binary.LittleEndian.Uint64(src[22:30])
+	hdr.DataOffset = binary.LittleEndian.Uint64(src[30:38])
+	hdr.IdxOffset = binary.LittleEndian.Uint64(src[38:46])
+	return hdr
+}
+
 func encodeIndexEntry(dst []byte, ie blockIndexEntry) {
 	binary.LittleEndian.PutUint16(dst[0:2], ie.PageOffset)
 	binary.LittleEndian.PutUint64(dst[2:10], ie.DataOffset)
 	binary.LittleEndian.PutUint32(dst[10:14], ie.DataLen)
 	binary.LittleEndian.PutUint32(dst[14:18], ie.CRC32)
+}
+
+func decodeIndexEntry(src []byte) blockIndexEntry {
+	return blockIndexEntry{
+		PageOffset: binary.LittleEndian.Uint16(src[0:2]),
+		DataOffset: binary.LittleEndian.Uint64(src[2:10]),
+		DataLen:    binary.LittleEndian.Uint32(src[10:14]),
+		CRC32:      binary.LittleEndian.Uint32(src[14:18]),
+	}
 }
 
 type blockIndexEntry struct {
@@ -215,10 +236,7 @@ func parseBlock(data []byte, compressed bool) (*parsedBlock, error) {
 		return nil, fmt.Errorf("block file too small: %d bytes", len(data))
 	}
 
-	var hdr blockHeader
-	if err := binary.Read(bytes.NewReader(data[:blockHeaderSize]), binary.LittleEndian, &hdr); err != nil {
-		return nil, fmt.Errorf("read header: %w", err)
-	}
+	hdr := decodeHeader(data[:blockHeaderSize])
 	if hdr.Magic != blockMagic {
 		return nil, fmt.Errorf("bad magic: %x", hdr.Magic)
 	}
@@ -240,11 +258,10 @@ func parseBlock(data []byte, compressed bool) (*parsedBlock, error) {
 		return nil, fmt.Errorf("index extends beyond data")
 	}
 	entries := make([]blockIndexEntry, hdr.NumEntries)
-	r := bytes.NewReader(data[hdr.IdxOffset:idxEnd])
+	idx := data[hdr.IdxOffset:idxEnd]
 	for i := range entries {
-		if err := binary.Read(r, binary.LittleEndian, &entries[i]); err != nil {
-			return nil, fmt.Errorf("read index entry %d: %w", i, err)
-		}
+		off := i * blockIndexEntrySize
+		entries[i] = decodeIndexEntry(idx[off : off+blockIndexEntrySize])
 	}
 
 	return &parsedBlock{
@@ -318,7 +335,10 @@ func (pb *parsedBlock) decompressPage(ctx context.Context, ie *blockIndexEntry, 
 	dec := getZstdDecoder()
 	defer putZstdDecoder(dec)
 
-	decompressed, err := dec.DecodeAll(compressed, nil)
+	// Pre-allocate exactly PageSize so DecodeAll reuses the backing array
+	// instead of guessing 2*compressed and over-allocating.
+	buf := make([]byte, 0, PageSize)
+	decompressed, err := dec.DecodeAll(compressed, buf)
 	if err != nil {
 		return nil, fmt.Errorf("decompress page %d: %w", pageIdx, err)
 	}

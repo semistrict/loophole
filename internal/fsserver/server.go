@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/semistrict/loophole/internal/env"
+	"github.com/semistrict/loophole/internal/httputil"
 	"github.com/semistrict/loophole/internal/metrics"
 	"github.com/semistrict/loophole/internal/storage"
 	"github.com/semistrict/loophole/internal/volserver"
@@ -208,7 +209,7 @@ func (d *server) mux(stop context.CancelFunc) *http.ServeMux {
 		volserver.WriteJSON(w, map[string]string{"status": "done"})
 	})
 
-	volserver.RegisterObservabilityRoutes(mux)
+	httputil.RegisterObservabilityRoutes(mux)
 	return mux
 }
 
