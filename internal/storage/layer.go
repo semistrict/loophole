@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -81,18 +80,15 @@ type layer struct {
 	// The drain worker always exists for writable layers. FlushInterval only
 	// controls whether the worker proactively rotates a stale active batch; it
 	// does not control whether draining exists.
-	flushStop         chan struct{}
-	retryStop         chan struct{}
-	flushDone         chan struct{}
-	flushNotify       chan struct{}
-	writeNotify       chan struct{} // poked on every write; triggers early flush if stale
-	flushCancel       context.CancelFunc
-	lastFlushAt       atomic.Int64 // UnixMilli of last successful flush
-	closeOnce         sync.Once
-	directL2DebugOnce atomic.Bool // log first canDirectL2 failure only once
+	flushStop   chan struct{}
+	retryStop   chan struct{}
+	flushDone   chan struct{}
+	flushNotify chan struct{}
+	writeNotify chan struct{} // poked on every write; triggers early flush if stale
+	flushCancel context.CancelFunc
+	lastFlushAt atomic.Int64 // UnixMilli of last successful flush
+	closeOnce   sync.Once
 }
-
-var errDirectL2Unavailable = errors.New("direct l2 unavailable")
 
 func (ly *layer) pageLock(idx PageIdx) *sync.Mutex {
 	return &ly.pageLocks[uint64(idx)%uint64(len(ly.pageLocks))]
@@ -378,7 +374,7 @@ func (ly *layer) loadIndex(ctx context.Context) error {
 	idx, _, err := blob.ReadJSON[layerIndex](ctx, ly.layerStore, "index.json")
 	if err != nil {
 		// No index.json yet — start fresh.
-		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1, DirectL2Eligible: true}
+		ly.index = layerIndex{NextSeq: 1, LayoutGen: 1}
 		ly.indexNew = true
 		ly.nextSeq.Store(1)
 		ly.l1Map = newBlockRangeMap(nil)
@@ -746,24 +742,8 @@ func (ly *layer) getParsedBlock(ctx context.Context, key string) (*parsedBlock, 
 // Write writes data to the layer at the given byte offset.
 func (ly *layer) Write(data []byte, offset uint64) error {
 	written := 0
-	allowDirectL2 := true
 	for written < len(data) {
 		remaining := len(data) - written
-
-		// Fast path: if this is a full block-aligned write on a fresh layer,
-		// write directly to L2 (skipping dirty pages → L1 → L2 pipeline).
-		if allowDirectL2 && remaining >= BlockSize && offset%BlockSize == 0 && ly.canDirectL2() {
-			if err := ly.writeBlockDirectL2(data[written:written+BlockSize], offset); err != nil {
-				if !errors.Is(err, errDirectL2Unavailable) {
-					return err
-				}
-			} else {
-				written += BlockSize
-				offset += BlockSize
-				continue
-			}
-		}
-		allowDirectL2 = false
 
 		pageIdx, pageOff := PageIdxOf(offset)
 		chunk := min(uint64(remaining), PageSize-pageOff)
@@ -775,135 +755,6 @@ func (ly *layer) Write(data []byte, offset uint64) error {
 		offset += chunk
 	}
 	return nil
-}
-
-// canDirectL2 returns true if the layer is fresh enough for direct L2 writes
-// (no L1 ranges, empty dirty pages).
-func (ly *layer) canDirectL2() bool {
-	ly.mu.RLock()
-	defer ly.mu.RUnlock()
-	return ly.canDirectL2Locked()
-}
-
-func (ly *layer) canDirectL2Locked() bool {
-	ok := ly.index.DirectL2Eligible &&
-		ly.l1Map.Len() == 0 &&
-		ly.pending == nil &&
-		(ly.active == nil || ly.active.isEmpty())
-	if !ok && ly.directL2DebugOnce.CompareAndSwap(false, true) {
-		slog.Warn("canDirectL2 first failure",
-			"layer", ly.id,
-			"eligible", ly.index.DirectL2Eligible,
-			"l1_len", ly.l1Map.Len(),
-			"has_pending", ly.pending != nil,
-			"active_nil", ly.active == nil,
-			"active_empty", ly.active == nil || ly.active.isEmpty(),
-		)
-	}
-	return ok
-}
-
-func (ly *layer) disableDirectL2() {
-	ly.mu.Lock()
-	ly.disableDirectL2Locked()
-	ly.mu.Unlock()
-}
-
-func (ly *layer) disableDirectL2Locked() {
-	if ly.index.DirectL2Eligible {
-		slog.Warn("disabling DirectL2Eligible",
-			"layer", ly.id,
-			"caller", callerName(2),
-		)
-	}
-	ly.index.DirectL2Eligible = false
-}
-
-func callerName(skip int) string {
-	pc, _, _, ok := runtime.Caller(skip)
-	if !ok {
-		return "unknown"
-	}
-	return runtime.FuncForPC(pc).Name()
-}
-
-// writeBlockDirectL2 writes a full BlockSize chunk directly as an L2 block,
-// bypassing the dirty pages/flush pipeline. The caller must ensure
-// offset is block-aligned and len(data) == BlockSize.
-func (ly *layer) writeBlockDirectL2(data []byte, offset uint64) error {
-	blockIdx := BlockIdx(offset / BlockSize)
-
-	// Skip all-zero blocks. This is safe because writeBlockDirectL2 is only
-	// reachable when DirectL2Eligible is true, which means this is a fresh
-	// layer with no parent — unwritten regions read back as zeros.
-	if isZeroBlock(data) {
-		return nil
-	}
-
-	// Split into pages.
-	pages := make([]blockPage, BlockPages)
-	for i := range BlockPages {
-		pages[i] = blockPage{
-			offset: uint16(i),
-			data:   data[i*PageSize : (i+1)*PageSize],
-		}
-	}
-
-	// Build the L2 block blob.
-	blob, err := buildBlock(blockIdx, pages, !ly.config.DisableCompression)
-	if err != nil {
-		return fmt.Errorf("build direct L2 block %d: %w", blockIdx, err)
-	}
-
-	ctx := context.Background()
-	for attempt := 0; ; attempt++ {
-		ly.mu.Lock()
-		if !ly.canDirectL2Locked() {
-			slog.Warn("direct L2 unavailable",
-				"block", blockIdx,
-				"eligible", ly.index.DirectL2Eligible,
-				"l1_len", ly.l1Map.Len(),
-				"has_pending", ly.pending != nil,
-				"active_empty", ly.active == nil || ly.active.isEmpty(),
-			)
-			ly.mu.Unlock()
-			return errDirectL2Unavailable
-		}
-
-		existingLayer, existingSeq := ly.l2Map.Find(blockIdx)
-		outputSeq := ly.outputSeq(existingLayer, existingSeq, ly.writeLeaseSeq)
-		key := blockKey(ly.id, "l2", outputSeq, blockIdx)
-		if err := ly.store.PutReader(ctx, key, bytes.NewReader(blob)); err != nil {
-			ly.mu.Unlock()
-			ly.sleepTransientRetry("upload direct l2 block", attempt, err)
-			continue
-		}
-
-		ly.l2Map = ly.l2Map.Set(blockIdx, ly.id, outputSeq)
-		ly.index.LayoutGen++
-
-		for saveAttempt := 0; ; saveAttempt++ {
-			if err := ly.saveIndexLocked(ctx); err == nil {
-				ly.mu.Unlock()
-				return nil
-			} else {
-				ly.mu.Unlock()
-				ly.sleepTransientRetry("save index after direct l2 block", saveAttempt, err)
-				ly.mu.Lock()
-				if !ly.canDirectL2Locked() {
-					slog.Warn("direct L2 unavailable after index save retry",
-						"block", blockIdx,
-						"eligible", ly.index.DirectL2Eligible,
-						"l1_len", ly.l1Map.Len(),
-						"has_pending", ly.pending != nil,
-						"active_empty", ly.active == nil || ly.active.isEmpty(),
-					)
-					ly.mu.Unlock()
-					return errDirectL2Unavailable
-				}
-			}
-		}
-	}
 }
 
 func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error {
@@ -932,7 +783,6 @@ func (ly *layer) writePage(pageIdx PageIdx, pageOff uint64, chunk []byte) error 
 
 	for {
 		ly.mu.Lock()
-		ly.disableDirectL2Locked()
 		active := ly.active
 		retired, err := active.stagePageDirect(pageIdx, page)
 		if traceLayerEnabled(ly.id) && tracePageEnabled(pageIdx) {
@@ -1043,8 +893,6 @@ func (ly *layer) readPageIntoLocked(ctx context.Context, pageIdx PageIdx, dst *P
 
 // PunchHole zeroes all pages fully or partially covered by the range.
 func (ly *layer) PunchHole(offset, length uint64) error {
-	ly.disableDirectL2()
-
 	end := offset + length
 
 	firstFullPage := PageIdx((offset + PageSize - 1) / PageSize)
@@ -1305,20 +1153,13 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 				)
 			}
 
-			blockData, err := patchBlock(blockAddr, existing, newPages, !ly.config.DisableCompression)
-			if err != nil {
-				return fmt.Errorf("build block %d: %w", blockAddr, err)
-			}
-
-			// Upload.
-			var key string
 			var outputSeq uint64
+			level := "l1"
 			if promote {
+				level = "l2"
 				outputSeq = ly.outputSeq(existingL2Layer, existingL2Seq, ly.writeLeaseSeq)
-				key = blockKey(ly.id, "l2", outputSeq, blockAddr)
 			} else {
 				outputSeq = ly.outputSeq(existingL1Layer, existingL1Seq, ly.writeLeaseSeq)
-				key = blockKey(ly.id, "l1", outputSeq, blockAddr)
 			}
 			if traceLayerEnabled(ly.id) && blockAddr == 0 {
 				slog.Info("trace block upload target",
@@ -1326,13 +1167,16 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 					"block", blockAddr,
 					"promote", promote,
 					"output_seq", outputSeq,
-					"key", key,
 				)
 			}
 
+			var key string
+			var blockData []byte
+			var err error
 			uploadStart := time.Now()
 			for attempt := range maxRetries {
-				err = ly.store.PutReader(gctx, key, bytes.NewReader(blockData))
+				key, blockData, err = buildAndUploadBlock(gctx, ly.store, ly.id, level, outputSeq,
+					blockAddr, existing, newPages, !ly.config.DisableCompression)
 				if err == nil {
 					metrics.FlushUploadDuration.Observe(time.Since(uploadStart).Seconds())
 					break
@@ -1342,7 +1186,7 @@ func (ly *layer) flushDirtyBatchDirectLocked(mt *dirtyBatch, maxRetries int) err
 				}
 				if attempt == maxRetries-1 {
 					metrics.FlushErrors.Inc()
-					return fmt.Errorf("upload block %d (after %d attempts): %w", blockAddr, maxRetries, err)
+					return fmt.Errorf("flush block %d (after %d attempts): %w", blockAddr, maxRetries, err)
 				}
 				slog.Warn("direct flush: retrying block upload", "layer", ly.id, "block", blockAddr, "attempt", attempt+1, "error", err)
 			}

@@ -55,9 +55,6 @@ func CreateFSAndServe(ctx context.Context, inst env.ResolvedStore, dir env.Dir, 
 	}
 
 	if !s.backend.SupportsFilesystem() {
-		if p.FromDir != "" || p.FromRaw != "" {
-			return shutdownAndReturn(nil)
-		}
 		return shutdownAndReturn(fmt.Errorf("filesystem backend is not available on this platform"))
 	}
 

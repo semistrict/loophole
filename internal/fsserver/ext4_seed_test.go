@@ -1,15 +1,9 @@
 package fsserver
 
 import (
-	"bytes"
-	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/semistrict/loophole/internal/blob"
-	"github.com/semistrict/loophole/internal/storage"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,69 +49,4 @@ func TestResolveMKE2FS(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "e2fsprogs")
 	})
-}
-
-func TestImportImageFileDirect(t *testing.T) {
-	ctx := context.Background()
-	store := blob.New(blob.NewMemDriver())
-	_, _, err := storage.FormatVolumeSet(ctx, store)
-	require.NoError(t, err)
-
-	vm := &storage.Manager{BlobStore: store}
-	t.Cleanup(func() { require.NoError(t, vm.Close()) })
-
-	vol, err := vm.NewVolume(storage.CreateParams{
-		Volume: "seeded",
-		Size:   2 * storage.BlockSize,
-		Type:   storage.VolumeTypeExt4,
-	})
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, vol.ReleaseRef())
-	}()
-
-	imagePath := filepath.Join(t.TempDir(), "image.ext4")
-	imageData := bytes.Repeat([]byte("abcd"), storage.BlockSize/4)
-	imageData = append(imageData, bytes.Repeat([]byte("wxyz"), storage.BlockSize/4)...)
-	require.NoError(t, os.WriteFile(imagePath, imageData, 0o644))
-
-	require.NoError(t, importImageFileDirect(vol, imagePath))
-
-	got, err := vol.ReadAt(ctx, 0, len(imageData))
-	require.NoError(t, err)
-	require.Equal(t, imageData, got)
-}
-
-func TestImportImageFileDirectPadsTailToPageSize(t *testing.T) {
-	ctx := context.Background()
-	store := blob.New(blob.NewMemDriver())
-	_, _, err := storage.FormatVolumeSet(ctx, store)
-	require.NoError(t, err)
-
-	vm := &storage.Manager{BlobStore: store}
-	t.Cleanup(func() { require.NoError(t, vm.Close()) })
-
-	vol, err := vm.NewVolume(storage.CreateParams{
-		Volume: "seeded-tail",
-		Size:   2 * storage.PageSize,
-		Type:   storage.VolumeTypeExt4,
-	})
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, vol.ReleaseRef())
-	}()
-
-	imagePath := filepath.Join(t.TempDir(), "tail.img")
-	imageData := bytes.Repeat([]byte("z"), storage.PageSize+123)
-	require.NoError(t, os.WriteFile(imagePath, imageData, 0o644))
-
-	require.NoError(t, importImageFileDirect(vol, imagePath))
-
-	got, err := vol.ReadAt(ctx, 0, len(imageData))
-	require.NoError(t, err)
-	require.Equal(t, imageData, got)
-
-	paddedTail, err := vol.ReadAt(ctx, uint64(len(imageData)), storage.PageSize-123)
-	require.NoError(t, err)
-	require.Equal(t, make([]byte, storage.PageSize-123), paddedTail)
 }

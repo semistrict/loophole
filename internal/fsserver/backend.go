@@ -80,16 +80,6 @@ func (b *Backend) Create(ctx context.Context, p storage.CreateParams) error {
 	}
 	p.Type = volType
 
-	if p.FromDir != "" || p.FromRaw != "" {
-		if p.NoFormat {
-			return fmt.Errorf("imported create requires formatting")
-		}
-		if p.FromDir != "" {
-			return b.createExt4FromDir(ctx, p)
-		}
-		return b.createFromRawImage(p)
-	}
-
 	if p.NoFormat {
 		// Block-level import (e.g. device dd): just allocate storage, then
 		// release the creator's ref so a later owner can attach it.

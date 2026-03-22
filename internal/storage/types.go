@@ -21,8 +21,6 @@ type CreateParams struct {
 	Volume   string            `json:"volume"`
 	Size     uint64            `json:"size,omitempty,string"`
 	NoFormat bool              `json:"no_format,omitempty"`
-	FromDir  string            `json:"from_dir,omitempty"`
-	FromRaw  string            `json:"from_raw,omitempty"`
 	Type     string            `json:"type,omitempty"`
 	Parent   string            `json:"parent,omitempty"`
 	Labels   map[string]string `json:"labels,omitempty"`
@@ -35,14 +33,6 @@ type VolumeInfo struct {
 	Type   string            `json:"type,omitempty"`
 	Parent string            `json:"parent,omitempty"`
 	Labels map[string]string `json:"labels,omitempty"`
-}
-
-// DirectPage is a contiguous range of full logical pages to persist through
-// the direct writeback path. Offset must be 4KB-aligned and len(Data) must
-// be a positive multiple of 4KB (i.e. one or more complete pages).
-type DirectPage struct {
-	Offset uint64
-	Data   []byte
 }
 
 // ValidateCheckpointID ensures checkpoint IDs remain a single safe path segment.

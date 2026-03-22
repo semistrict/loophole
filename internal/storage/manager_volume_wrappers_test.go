@@ -81,14 +81,6 @@ func TestVolumeHelpersAndMetadataWrappers(t *testing.T) {
 		t.Fatal("FlushLocal should preserve a pending notification")
 	}
 
-	v.directRefs = 1
-	require.NoError(t, v.FlushLocal())
-	select {
-	case <-v.layer.flushNotify:
-		t.Fatal("FlushLocal should be a no-op in direct mode")
-	default:
-	}
-	v.directRefs = 0
 	v.layer.flushNotify = nil
 	v.layer.writeNotify = nil
 	v.layer.startPeriodicFlush(context.Background())

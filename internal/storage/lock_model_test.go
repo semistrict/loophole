@@ -143,6 +143,7 @@ func TestLayerReadBlocksDirectL2Commit(t *testing.T) {
 
 	oldBlock := fillBlock(0x31)
 	require.NoError(t, ly.Write(oldBlock, 0))
+	require.NoError(t, ly.Flush())
 
 	ly.mu.RLock()
 	_, seq := ly.l2Map.Find(0)
@@ -472,6 +473,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 
 		oldBlock := fillBlock(0xA1)
 		require.NoError(t, ly.Write(oldBlock, 0))
+		require.NoError(t, ly.Flush())
 		ly.mu.RLock()
 		_, seq := ly.l2Map.Find(0)
 		ly.mu.RUnlock()
@@ -545,6 +547,7 @@ func TestLayerPartialWriteBlocksPublishCommit(t *testing.T) {
 
 		oldBlock := fillBlock(0xB1)
 		require.NoError(t, ly.Write(oldBlock, 0))
+		require.NoError(t, ly.Flush())
 		ly.mu.RLock()
 		_, seq := ly.l2Map.Find(0)
 		ly.mu.RUnlock()

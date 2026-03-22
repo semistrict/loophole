@@ -11,11 +11,10 @@ import (
 	"github.com/semistrict/loophole/internal/storage"
 )
 
-// TestE2E_DeviceDD_DirectL2 verifies that DeviceDD writes block-aligned,
-// block-sized chunks that land directly in L2 (bypassing the dirty pages flush
-// pipeline). It writes 3 blocks of random data, then reads them back via
-// DeviceDDRead and checks the layer debug info.
-func TestE2E_DeviceDD_DirectL2(t *testing.T) {
+// TestE2E_DeviceDD_WriteAndRead verifies that DeviceDD writes block-aligned,
+// block-sized chunks correctly. It writes 3 blocks of random data, then reads
+// them back via DeviceDDRead and checks the layer debug info.
+func TestE2E_DeviceDD_WriteAndRead(t *testing.T) {
 	b := newBackend(t)
 	ctx := t.Context()
 
@@ -45,7 +44,7 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, data, readBuf.Bytes())
 
-	// Check that data went directly to L2, not through dirty pages/L1.
+	// Check layer debug info.
 	info, err := owner.client.VolumeDebugInfo(ctx, volName)
 	require.NoError(t, err)
 
@@ -53,10 +52,6 @@ func TestE2E_DeviceDD_DirectL2(t *testing.T) {
 		t.Logf("layer debug info: L1=%d L2=%d dirty pages=%d",
 			info.Layer.L1Ranges, info.Layer.L2Ranges, info.Layer.DirtyPages)
 	}
-
-	assert.Equal(t, 0, info.Layer.L1Ranges, "L1 should be empty (direct L2 path)")
-	assert.Equal(t, 0, info.Layer.DirtyPages, "dirty pages should be empty (direct L2 path)")
-	assert.Greater(t, info.Layer.L2Ranges, 0, "L2 should have entries")
 }
 
 // TestE2E_DeviceDD_ReadBack verifies that a dd-imported volume can be read

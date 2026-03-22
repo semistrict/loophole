@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -546,4 +547,24 @@ func patchBlock(blockIdx BlockIdx, existing []compressedBlockPage, newPages []bl
 	})
 
 	return result, nil
+}
+
+// buildAndUploadBlock builds a block from new pages (optionally merging with
+// pre-compressed existing entries), uploads it to the store, and returns the
+// blob key and the serialized block data.
+//
+// The caller decides the level ("l1" or "l2") based on its own promote logic.
+func buildAndUploadBlock(ctx context.Context, st *blob.Store, layerID string, level string, seq uint64,
+	blockAddr BlockIdx, existing []compressedBlockPage, newPages []blockPage, compress bool,
+) (key string, blockData []byte, err error) {
+	blockData, err = patchBlock(blockAddr, existing, newPages, compress)
+	if err != nil {
+		return "", nil, fmt.Errorf("build block %d: %w", blockAddr, err)
+	}
+
+	key = blockKey(layerID, level, seq, blockAddr)
+	if err := st.PutReader(ctx, key, bytes.NewReader(blockData)); err != nil {
+		return "", nil, fmt.Errorf("upload block %d: %w", blockAddr, err)
+	}
+	return key, blockData, nil
 }

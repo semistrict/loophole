@@ -7,11 +7,17 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"github.com/semistrict/loophole/internal/blob"
 )
+
+// gcGracePeriod is the minimum age a layer must reach before GC will delete it.
+// This protects layers that are being created (e.g. by CreateVolumeFromImage)
+// but don't yet have a volume ref pointing at them.
+var gcGracePeriod = 8 * time.Hour
 
 // GCResult contains the results of a garbage collection run.
 type GCResult struct {
@@ -166,11 +172,51 @@ func GarbageCollect(ctx context.Context, store *blob.Store, dryRun bool, concurr
 		}
 	}
 
-	// 4. Find orphans.
-	var orphanIDs []string
+	// 4. Find orphans, excluding layers within the grace period.
+	var candidateIDs []string
 	for id := range allLayers {
 		if !reachable[id] {
-			orphanIDs = append(orphanIDs, id)
+			candidateIDs = append(candidateIDs, id)
+		}
+	}
+
+	// Check created_at metadata to skip recently created layers.
+	now := time.Now()
+	var orphanIDs []string
+	var skippedRecent int
+	{
+		var mu sync.Mutex
+		g, gctx = errgroup.WithContext(ctx)
+		g.SetLimit(concurrency)
+		for _, id := range candidateIDs {
+			g.Go(func() error {
+				meta, err := store.At("layers/"+id).HeadMeta(gctx, "index.json")
+				if err != nil {
+					// Can't read metadata — treat as eligible for deletion.
+					mu.Lock()
+					orphanIDs = append(orphanIDs, id)
+					mu.Unlock()
+					return nil
+				}
+				if createdStr, ok := meta["created_at"]; ok {
+					if created, parseErr := time.Parse(time.RFC3339, createdStr); parseErr == nil {
+						if now.Sub(created) < gcGracePeriod {
+							slog.Info("gc: skipping recent orphaned layer", "layer", id, "created_at", createdStr)
+							mu.Lock()
+							skippedRecent++
+							mu.Unlock()
+							return nil
+						}
+					}
+				}
+				mu.Lock()
+				orphanIDs = append(orphanIDs, id)
+				mu.Unlock()
+				return nil
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return GCResult{}, err
 		}
 	}
 

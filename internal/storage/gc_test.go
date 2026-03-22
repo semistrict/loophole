@@ -9,6 +9,11 @@ import (
 )
 
 func TestGarbageCollect(t *testing.T) {
+	// Disable grace period so freshly-created orphans are eligible for deletion.
+	old := gcGracePeriod
+	gcGracePeriod = 0
+	t.Cleanup(func() { gcGracePeriod = old })
+
 	ctx := t.Context()
 	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)
@@ -83,6 +88,10 @@ func TestGarbageCollectPreservesReachable(t *testing.T) {
 }
 
 func TestGarbageCollectWithCheckpoints(t *testing.T) {
+	old := gcGracePeriod
+	gcGracePeriod = 0
+	t.Cleanup(func() { gcGracePeriod = old })
+
 	ctx := t.Context()
 	store := blob.New(blob.NewMemDriver())
 	m := newTestManager(t, store, testConfig)

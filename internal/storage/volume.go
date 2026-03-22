@@ -27,7 +27,6 @@ type Volume struct {
 	closeErr  error
 	closeDone chan struct{}
 
-	directRefs      int
 	manager         *Manager
 	lease           *blob.LeaseSession
 	leaseCloseOnce  sync.Once
@@ -105,9 +104,6 @@ func (v *Volume) Write(data []byte, offset uint64) error {
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
 	}
-	if v.directRefs > 0 {
-		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
-	}
 	return v.layer.Write(data, offset)
 }
 
@@ -120,9 +116,6 @@ func (v *Volume) PunchHole(offset, length uint64) error {
 	}
 	if v.readOnly {
 		return fmt.Errorf("volume %q is read-only", v.name)
-	}
-	if v.directRefs > 0 {
-		return fmt.Errorf("volume %q is in direct writeback mode", v.name)
 	}
 	return v.layer.PunchHole(offset, length)
 }
@@ -150,9 +143,6 @@ func (v *Volume) FlushLocal() error {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if v.readOnly {
-		return nil
-	}
-	if v.directRefs > 0 {
 		return nil
 	}
 	if v.layer.flushNotify != nil {
@@ -425,62 +415,6 @@ func (v *Volume) handleLeaseRelease(ctx context.Context, params json.RawMessage)
 		return nil, err
 	}
 	return map[string]string{"status": "ok"}, nil
-}
-
-func (v *Volume) EnableDirectWriteback() error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.closing {
-		return fmt.Errorf("volume %q is closing", v.name)
-	}
-	if v.readOnly {
-		return fmt.Errorf("volume %q is read-only", v.name)
-	}
-
-	if v.directRefs == 0 {
-		if err := v.layer.Flush(); err != nil {
-			return fmt.Errorf("flush before direct mode: %w", err)
-		}
-	}
-	v.directRefs++
-	return nil
-}
-
-func (v *Volume) DisableDirectWriteback() error {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if v.closing {
-		return fmt.Errorf("volume %q is closing", v.name)
-	}
-
-	if v.directRefs == 0 {
-		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
-	}
-	v.directRefs--
-	return nil
-}
-
-func (v *Volume) WritePagesDirect(pages []DirectPage) error {
-	for _, p := range pages {
-		metrics.WriteSize.Observe(float64(len(p.Data)))
-	}
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	if v.closing {
-		return fmt.Errorf("volume %q is closing", v.name)
-	}
-	if v.readOnly {
-		return fmt.Errorf("volume %q is read-only", v.name)
-	}
-	if v.directRefs == 0 {
-		return fmt.Errorf("volume %q is not in direct writeback mode", v.name)
-	}
-	for _, p := range pages {
-		if err := v.layer.Write(p.Data, p.Offset); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // VolumeDebugInfo holds volume + layer structure details for the debug endpoint.

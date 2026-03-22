@@ -103,7 +103,7 @@ func (m *Manager) NewVolume(p CreateParams) (*Volume, error) {
 	layerID := newLayerID()
 
 	// Write initial index.json with created_at in object metadata.
-	idx := layerIndex{NextSeq: 1, LayoutGen: 1, DirectL2Eligible: true}
+	idx := layerIndex{NextSeq: 1, LayoutGen: 1}
 	idxData, err := json.Marshal(idx)
 	if err != nil {
 		return nil, err

@@ -242,7 +242,6 @@ func TestReadOnlyVolumeRejectsMutation(t *testing.T) {
 	require.EqualError(t, follower.Flush(), `volume "vol" is read-only`)
 	_, err = follower.CopyFrom(v, 0, 0, PageSize)
 	require.EqualError(t, err, `volume "vol" is read-only`)
-	require.EqualError(t, follower.EnableDirectWriteback(), `volume "vol" is read-only`)
 }
 
 func TestOpenVolumeReadOnlyRejectsSecondVolumeInSameManager(t *testing.T) {

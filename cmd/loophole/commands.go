@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -122,9 +121,6 @@ func createCmd() *cobra.Command {
 			if noFormat && (fromDir != "" || fromRaw != "") {
 				return fmt.Errorf("--from-dir/--from-raw cannot be combined with --no-format")
 			}
-			if runtime.GOOS != "linux" && (fromDir != "" || fromRaw != "") && mountpoint != "" {
-				return fmt.Errorf("--mount is not supported with --from-dir/--from-raw on %s", runtime.GOOS)
-			}
 			var size uint64
 			if sizeStr != "" {
 				var err error
@@ -133,29 +129,21 @@ func createCmd() *cobra.Command {
 					return err
 				}
 			}
+
+			// Image import: write directly to the blob store, no daemon needed.
+			if fromDir != "" || fromRaw != "" {
+				return createFromImage(cmd.Context(), args[0], args[1], fromDir, fromRaw, size, mountpoint)
+			}
+
 			inst, dir, opts, volume, err := resolveOwnerOpts(args[0], args[1])
 			if err != nil {
 				return err
 			}
-			err = fsserver.CreateFSAndServe(cmd.Context(), inst, dir, storage.CreateParams{
+			return fsserver.CreateFSAndServe(cmd.Context(), inst, dir, storage.CreateParams{
 				Volume:   volume,
 				Size:     size,
 				NoFormat: noFormat,
-				FromDir:  fromDir,
-				FromRaw:  fromRaw,
 			}, mountpoint, opts)
-			if err != nil {
-				return err
-			}
-			if runtime.GOOS != "linux" {
-				switch {
-				case fromDir != "":
-					fmt.Printf("created volume %s from directory %s\n", volume, fromDir)
-				case fromRaw != "":
-					fmt.Printf("created volume %s from raw image %s\n", volume, fromRaw)
-				}
-			}
-			return nil
 		},
 	}
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path (default: volume name)")
@@ -164,6 +152,86 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fromDir, "from-dir", "", "populate the new ext4 volume from this host directory using e2fsprogs")
 	cmd.Flags().StringVar(&fromRaw, "from-raw", "", "populate the new volume from this raw image file")
 	return cmd
+}
+
+// createFromImage imports a raw or ext4 image directly into the blob store,
+// then optionally mounts the volume via the daemon.
+func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw string, size uint64, mountpoint string) error {
+	inst, err := resolveStore(rawURL)
+	if err != nil {
+		return err
+	}
+	inst, blobStore, err := storage.ResolveFormattedStore(ctx, inst)
+	if err != nil {
+		return err
+	}
+
+	volType := storage.VolumeTypeExt4
+
+	var imagePath string
+	var tempImage bool
+	if fromDir != "" {
+		if size == 0 {
+			size = storage.DefaultVolumeSize
+		}
+		imgPath, err := fsserver.BuildExt4ImageFromDir(ctx, fromDir, size)
+		if err != nil {
+			return err
+		}
+		imagePath = imgPath
+		tempImage = true
+	} else {
+		info, err := os.Stat(fromRaw)
+		if err != nil {
+			return fmt.Errorf("stat raw image: %w", err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("raw image path %q is a directory", fromRaw)
+		}
+		imagePath = fromRaw
+	}
+
+	f, err := os.Open(imagePath)
+	if err != nil {
+		return fmt.Errorf("open image file: %w", err)
+	}
+
+	importErr := storage.CreateVolumeFromImage(ctx, blobStore, volumeName, volType, f)
+	_ = f.Close()
+	if tempImage {
+		_ = os.Remove(imagePath)
+	}
+	if importErr != nil {
+		return importErr
+	}
+
+	switch {
+	case fromDir != "":
+		fmt.Printf("created volume %s from directory %s\n", volumeName, fromDir)
+	case fromRaw != "":
+		fmt.Printf("created volume %s from raw image %s\n", volumeName, fromRaw)
+	}
+
+	// If mount was requested, start the daemon to mount the already-created volume.
+	if mountpoint != "" {
+		dir := env.DefaultDir()
+		consoleLogLevel := globalLogLevel
+		if consoleLogLevel == "" {
+			consoleLogLevel = os.Getenv("LOOPHOLE_LOG_LEVEL")
+		}
+		if consoleLogLevel == "" {
+			consoleLogLevel = "warn"
+		}
+		socketPath := dir.VolumeSocket(inst.VolsetID, volumeName)
+		opts := fsserver.ServerOptions{
+			Foreground:      true,
+			ConsoleLogLevel: consoleLogLevel,
+			SocketPath:      socketPath,
+		}
+		return fsserver.MountFSAndServe(ctx, inst, dir, volumeName, mountpoint, opts)
+	}
+
+	return nil
 }
 
 func deleteCmd() *cobra.Command {
