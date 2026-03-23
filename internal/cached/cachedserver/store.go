@@ -23,7 +23,6 @@ import (
 
 const (
 	pageSize       = pagegeom.PageSize
-	maxBudget      = 2 << 30 // 2 GiB
 	fallbackBudget = 256 << 20
 	budgetInterval = 30 * time.Second
 	minReserve     = 2 << 30 // 2 GiB
@@ -408,9 +407,6 @@ func computeBudget() int64 {
 	}
 	if b < 0 {
 		return 0
-	}
-	if b > maxBudget {
-		b = maxBudget
 	}
 	return b
 }
