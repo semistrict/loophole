@@ -9,6 +9,3 @@
 	path = third_party/gvisor
 	url = https://github.com/google/gvisor.git
 	branch = go
-[submodule "third_party/e2fsprogs"]
-	path = third_party/e2fsprogs
-	url = git@github.com:tytso/e2fsprogs.git

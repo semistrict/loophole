@@ -1,5 +1,3 @@
-//go:build cgo
-
 package fsserver
 
 import (
@@ -7,12 +5,12 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/semistrict/loophole/internal/e2fs"
+	"github.com/semistrict/go2fs"
 	"github.com/semistrict/loophole/internal/storage"
 )
 
 // BuildExt4ImageFromPath creates a temporary ext4 image file populated from a
-// host directory or tarball using the embedded libext2fs (no external mke2fs).
+// host directory or tarball using go2fs (pure Go, no external mke2fs needed).
 // The caller must remove the returned file when done.
 func BuildExt4ImageFromPath(_ context.Context, srcPath string, size uint64) (string, error) {
 	info, err := os.Stat(srcPath)
@@ -37,9 +35,9 @@ func BuildExt4ImageFromPath(_ context.Context, srcPath string, size uint64) (str
 	}
 
 	if info.IsDir() {
-		err = e2fs.BuildExt4FromDir(imgPath, srcPath, size)
+		err = go2fs.BuildExt4FromDir(imgPath, srcPath, size)
 	} else {
-		err = e2fs.BuildExt4FromTar(imgPath, srcPath, size)
+		err = go2fs.BuildExt4FromTar(imgPath, srcPath, size)
 	}
 	if err != nil {
 		_ = os.Remove(imgPath)
