@@ -123,4 +123,4 @@ require (
 
 replace github.com/hanwen/go-fuse/v2 => github.com/juicedata/go-fuse/v2 v2.1.1-0.20240920022208-0752e539a2f7
 
-replace github.com/Merovius/nbd => ./third_party/merovius-nbd
+replace github.com/Merovius/nbd => github.com/semistrict/merovius-nbd v0.0.0-20260323192716-262b2e2621ac
