@@ -1,52 +1,33 @@
+//go:build cgo
+
 package fsserver
 
 import (
-	"errors"
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-func TestResolveMKE2FS(t *testing.T) {
-	orig := mke2fsLookPath
-	t.Cleanup(func() { mke2fsLookPath = orig })
+func TestBuildExt4ImageFromPath_Dir(t *testing.T) {
+	srcDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "hello.txt"), []byte("hello\n"), 0644))
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "nested.txt"), []byte("nested\n"), 0644))
 
-	t.Run("prefers mke2fs", func(t *testing.T) {
-		mke2fsLookPath = func(name string) (string, error) {
-			switch name {
-			case "mke2fs":
-				return "/opt/homebrew/bin/mke2fs", nil
-			default:
-				return "", errors.New("not found")
-			}
-		}
-		path, err := resolveMKE2FS()
-		require.NoError(t, err)
-		require.Equal(t, "/opt/homebrew/bin/mke2fs", path)
-	})
+	imgPath, err := BuildExt4ImageFromPath(context.Background(), srcDir, 64*1024*1024)
+	require.NoError(t, err)
+	defer os.Remove(imgPath)
 
-	t.Run("falls back to mkfs.ext4", func(t *testing.T) {
-		mke2fsLookPath = func(name string) (string, error) {
-			switch name {
-			case "mke2fs":
-				return "", errors.New("not found")
-			case "mkfs.ext4":
-				return "/usr/local/bin/mkfs.ext4", nil
-			default:
-				return "", errors.New("not found")
-			}
-		}
-		path, err := resolveMKE2FS()
-		require.NoError(t, err)
-		require.Equal(t, "/usr/local/bin/mkfs.ext4", path)
-	})
+	info, err := os.Stat(imgPath)
+	require.NoError(t, err)
+	require.Equal(t, int64(64*1024*1024), info.Size())
+}
 
-	t.Run("returns helpful error", func(t *testing.T) {
-		mke2fsLookPath = func(string) (string, error) {
-			return "", errors.New("not found")
-		}
-		_, err := resolveMKE2FS()
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "e2fsprogs")
-	})
+func TestBuildExt4ImageFromPath_InvalidSource(t *testing.T) {
+	_, err := BuildExt4ImageFromPath(context.Background(), "/nonexistent", 0)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stat mkfs source")
 }

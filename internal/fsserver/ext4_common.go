@@ -1,3 +1,5 @@
+//go:build linux
+
 package fsserver
 
 const mkfsExt4Features = "has_journal,ext_attr,resize_inode,dir_index,filetype," +

@@ -109,18 +109,18 @@ func createCmd() *cobra.Command {
 	var mountpoint string
 	var sizeStr string
 	var noFormat bool
-	var fromDir string
-	var fromRaw string
+	var mkfsSource string
+	var imagePath string
 	cmd := &cobra.Command{
 		Use:   "create <store-url> <volume>",
 		Short: "Create and mount a new volume in the foreground",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if fromDir != "" && fromRaw != "" {
-				return fmt.Errorf("--from-dir and --from-raw are mutually exclusive")
+			if mkfsSource != "" && imagePath != "" {
+				return fmt.Errorf("--mkfs and --image are mutually exclusive")
 			}
-			if noFormat && (fromDir != "" || fromRaw != "") {
-				return fmt.Errorf("--from-dir/--from-raw cannot be combined with --no-format")
+			if noFormat && (mkfsSource != "" || imagePath != "") {
+				return fmt.Errorf("--mkfs/--image cannot be combined with --no-format")
 			}
 			var size uint64
 			if sizeStr != "" {
@@ -132,8 +132,8 @@ func createCmd() *cobra.Command {
 			}
 
 			// Image import: write directly to the blob store, no daemon needed.
-			if fromDir != "" || fromRaw != "" {
-				return createFromImage(cmd.Context(), args[0], args[1], fromDir, fromRaw, size, mountpoint)
+			if mkfsSource != "" || imagePath != "" {
+				return createFromImage(cmd.Context(), args[0], args[1], mkfsSource, imagePath, size, mountpoint)
 			}
 
 			inst, dir, opts, volume, err := resolveOwnerOpts(args[0], args[1])
@@ -150,14 +150,14 @@ func createCmd() *cobra.Command {
 	cmd.Flags().StringVarP(&mountpoint, "mount", "m", "", "mount the volume at this path (default: volume name)")
 	cmd.Flags().StringVarP(&sizeStr, "size", "s", "", "volume size (e.g. 100GB, 1TB, 512MB); default 100GB")
 	cmd.Flags().BoolVar(&noFormat, "no-format", false, "create the volume without formatting")
-	cmd.Flags().StringVar(&fromDir, "from-dir", "", "populate the new ext4 volume from this host directory using e2fsprogs")
-	cmd.Flags().StringVar(&fromRaw, "from-raw", "", "populate the new volume from this raw image file")
+	cmd.Flags().StringVar(&mkfsSource, "mkfs", "", "populate a new ext4 volume from a host directory or tarball")
+	cmd.Flags().StringVar(&imagePath, "image", "", "populate the new volume from this raw image file")
 	return cmd
 }
 
 // createFromImage imports a raw or ext4 image directly into the blob store,
 // then optionally mounts the volume via the daemon.
-func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw string, size uint64, mountpoint string) error {
+func createFromImage(ctx context.Context, rawURL, volumeName, mkfsSource, imagePath string, size uint64, mountpoint string) error {
 	inst, err := resolveStore(rawURL)
 	if err != nil {
 		return err
@@ -184,30 +184,30 @@ func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw s
 
 	volType := storage.VolumeTypeExt4
 
-	var imagePath string
+	var rawImagePath string
 	var tempImage bool
-	if fromDir != "" {
+	if mkfsSource != "" {
 		if size == 0 {
 			size = storage.DefaultVolumeSize
 		}
-		imgPath, err := fsserver.BuildExt4ImageFromDir(ctx, fromDir, size)
+		imgPath, err := fsserver.BuildExt4ImageFromPath(ctx, mkfsSource, size)
 		if err != nil {
 			return err
 		}
-		imagePath = imgPath
+		rawImagePath = imgPath
 		tempImage = true
 	} else {
-		info, err := os.Stat(fromRaw)
+		info, err := os.Stat(imagePath)
 		if err != nil {
 			return fmt.Errorf("stat raw image: %w", err)
 		}
 		if info.IsDir() {
-			return fmt.Errorf("raw image path %q is a directory", fromRaw)
+			return fmt.Errorf("raw image path %q is a directory", imagePath)
 		}
-		imagePath = fromRaw
+		rawImagePath = imagePath
 	}
 
-	f, err := os.Open(imagePath)
+	f, err := os.Open(rawImagePath)
 	if err != nil {
 		return fmt.Errorf("open image file: %w", err)
 	}
@@ -215,17 +215,17 @@ func createFromImage(ctx context.Context, rawURL, volumeName, fromDir, fromRaw s
 	importErr := storage.CreateVolumeFromImage(ctx, blobStore, volumeName, volType, f)
 	_ = f.Close()
 	if tempImage {
-		_ = os.Remove(imagePath)
+		_ = os.Remove(rawImagePath)
 	}
 	if importErr != nil {
 		return importErr
 	}
 
 	switch {
-	case fromDir != "":
-		fmt.Printf("created volume %s from directory %s\n", volumeName, fromDir)
-	case fromRaw != "":
-		fmt.Printf("created volume %s from raw image %s\n", volumeName, fromRaw)
+	case mkfsSource != "":
+		fmt.Printf("created volume %s from mkfs source %s\n", volumeName, mkfsSource)
+	case imagePath != "":
+		fmt.Printf("created volume %s from raw image %s\n", volumeName, imagePath)
 	}
 
 	// If mount was requested, start the daemon to mount the already-created volume.
